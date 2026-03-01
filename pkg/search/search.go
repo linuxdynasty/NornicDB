@@ -534,7 +534,6 @@ const (
 type strategyDeltaMutation struct {
 	seq uint64
 	id  string
-	vec []float32
 	add bool
 }
 
@@ -1794,6 +1793,9 @@ func (s *Service) IndexNode(node *storage.Node) error {
 	s.indexMu.Lock()
 	err := s.indexNodeLocked(node, false)
 	s.indexMu.Unlock()
+	if err == nil && !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
 	return err
 }
 
@@ -1810,7 +1812,7 @@ func (s *Service) addVectorLocked(id string, vec []float32) error {
 		err = s.vectorIndex.Add(id, vec)
 	}
 	if err == nil {
-		s.appendStrategyDelta(id, vec, true)
+		s.appendStrategyDelta(id, true)
 	}
 	return err
 }
@@ -1880,7 +1882,7 @@ func (s *Service) removeVectorLocked(id string) {
 	if s.vectorFileStore != nil {
 		s.vectorFileStore.Remove(id)
 	}
-	s.appendStrategyDelta(id, nil, false)
+	s.appendStrategyDelta(id, false)
 }
 
 // ensureBuildVectorFileStore creates vectorFileStore when building with vectorIndexPath so vectors go to disk.
@@ -2206,6 +2208,9 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	s.indexMu.Lock()
 	s.removeNodeLocked(string(nodeID))
 	s.indexMu.Unlock()
+	if !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
 
 	return nil
 }
@@ -3264,7 +3269,26 @@ func (s *Service) snapshotStrategyInputs() (int, *VectorIndex, *VectorFileStore)
 }
 
 func (s *Service) scheduleStrategyTransitionCheck() {
-	return
+	if s.buildInProgress.Load() {
+		return
+	}
+	vectorCount, _, _ := s.snapshotStrategyInputs()
+	current := s.currentPipelineStrategy()
+	if current == strategyModeUnknown {
+		return
+	}
+	desired := s.desiredRuntimeStrategy(vectorCount)
+	if desired == current {
+		return
+	}
+	if (current == strategyModeBruteCPU || current == strategyModeBruteGPU) &&
+		(desired == strategyModeBruteCPU || desired == strategyModeBruteGPU) {
+		if s.switchBruteStrategy(desired) {
+			log.Printf("🔍 Runtime strategy switch: %s -> %s (N=%d)", current.String(), desired.String(), vectorCount)
+		}
+		return
+	}
+	s.scheduleDebouncedStrategyTransition(desired)
 }
 
 func (s *Service) scheduleDebouncedStrategyTransition(target strategyMode) {
@@ -3329,12 +3353,12 @@ func (s *Service) runStrategyTransition(target strategyMode) {
 		}
 	}
 
-	s.replayTransitionDeltas(targetHNSW, target, 0)
+	s.replayTransitionDeltas(targetHNSW, target, vi, vfs, 0)
 	s.indexMu.Lock()
-	lastSeq := s.replayTransitionDeltas(targetHNSW, target, 0)
+	lastSeq := s.replayTransitionDeltas(targetHNSW, target, vi, vfs, 0)
 	s.applyTransitionSwapLocked(target, targetHNSW, vi, vfs)
 	for {
-		nextSeq := s.replayTransitionDeltas(targetHNSW, target, lastSeq)
+		nextSeq := s.replayTransitionDeltas(targetHNSW, target, vi, vfs, lastSeq)
 		if nextSeq == lastSeq {
 			break
 		}
@@ -3346,11 +3370,13 @@ func (s *Service) runStrategyTransition(target strategyMode) {
 }
 
 func (s *Service) applyTransitionSwapLocked(target strategyMode, targetHNSW *HNSWIndex, vi *VectorIndex, vfs *VectorFileStore) {
+	var hnswForPipeline *HNSWIndex
 	if target == strategyModeHNSW {
 		s.hnswMu.Lock()
 		old := s.hnswIndex
 		s.hnswIndex = targetHNSW
 		s.hnswMu.Unlock()
+		hnswForPipeline = targetHNSW
 		if old != nil && old != targetHNSW {
 			old.Clear()
 		}
@@ -3366,7 +3392,26 @@ func (s *Service) applyTransitionSwapLocked(target strategyMode, targetHNSW *HNS
 	if target == strategyModeBruteGPU {
 		_ = s.ensureGPUIndexSynced(vi, vfs)
 	}
-	p := s.buildPipelineForMode(target, vi, vfs)
+
+	var p *VectorSearchPipeline
+	switch target {
+	case strategyModeBruteGPU:
+		p = NewVectorSearchPipeline(NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex), &IdentityExactScorer{})
+	case strategyModeBruteCPU:
+		if vfs != nil {
+			p = NewVectorSearchPipeline(NewFileStoreBruteForceCandidateGen(vfs), NewCPUExactScorer(vfs))
+		} else {
+			p = NewVectorSearchPipeline(NewBruteForceCandidateGen(vi), NewCPUExactScorer(vi))
+		}
+	case strategyModeHNSW:
+		if hnswForPipeline != nil {
+			if vfs != nil {
+				p = NewVectorSearchPipeline(NewHNSWCandidateGen(hnswForPipeline), NewCPUExactScorer(vfs))
+			} else {
+				p = NewVectorSearchPipeline(NewHNSWCandidateGen(hnswForPipeline), NewCPUExactScorer(vi))
+			}
+		}
+	}
 	s.pipelineMu.Lock()
 	s.vectorPipeline = p
 	s.pipelineMu.Unlock()
@@ -3510,7 +3555,7 @@ func (s *Service) ensureGPUIndexSynced(vi *VectorIndex, vfs *VectorFileStore) er
 	return nil
 }
 
-func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMode, after uint64) uint64 {
+func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMode, vi *VectorIndex, vfs *VectorFileStore, after uint64) uint64 {
 	s.strategyTransitionMu.Lock()
 	deltas := make([]strategyDeltaMutation, 0, len(s.strategyTransitionDeltas))
 	for _, d := range s.strategyTransitionDeltas {
@@ -3523,7 +3568,9 @@ func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMod
 	for _, d := range deltas {
 		if mode == strategyModeHNSW && targetHNSW != nil {
 			if d.add {
-				_ = targetHNSW.Update(d.id, d.vec)
+				if vec, ok := getTransitionDeltaVector(d.id, vi, vfs); ok {
+					_ = targetHNSW.Update(d.id, vec)
+				}
 			} else {
 				targetHNSW.Remove(d.id)
 			}
@@ -3533,7 +3580,9 @@ func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMod
 			s.mu.RUnlock()
 			if gi != nil {
 				if d.add {
-					_ = gi.Add(d.id, d.vec)
+					if vec, ok := getTransitionDeltaVector(d.id, vi, vfs); ok {
+						_ = gi.Add(d.id, vec)
+					}
 				} else {
 					_ = gi.Remove(d.id)
 				}
@@ -3542,6 +3591,20 @@ func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMod
 		last = d.seq
 	}
 	return last
+}
+
+func getTransitionDeltaVector(id string, vi *VectorIndex, vfs *VectorFileStore) ([]float32, bool) {
+	if vfs != nil {
+		if vec, ok := vfs.GetVector(id); ok && len(vec) > 0 {
+			return vec, true
+		}
+	}
+	if vi != nil {
+		if vec, ok := vi.GetVector(id); ok && len(vec) > 0 {
+			return vec, true
+		}
+	}
+	return nil, false
 }
 
 func (s *Service) clearTransitionDeltaLogLocked(applied uint64) {
@@ -3561,7 +3624,7 @@ func (s *Service) clearTransitionDeltaLogLocked(applied uint64) {
 	s.strategyTransitionMu.Unlock()
 }
 
-func (s *Service) appendStrategyDelta(id string, vec []float32, add bool) {
+func (s *Service) appendStrategyDelta(id string, add bool) {
 	s.strategyTransitionMu.Lock()
 	defer s.strategyTransitionMu.Unlock()
 	if !s.strategyTransitionInProgress {
@@ -3572,10 +3635,6 @@ func (s *Service) appendStrategyDelta(id string, vec []float32, add bool) {
 		seq: s.strategyTransitionSeq,
 		id:  id,
 		add: add,
-	}
-	if add && len(vec) > 0 {
-		delta.vec = make([]float32, len(vec))
-		copy(delta.vec, vec)
 	}
 	s.strategyTransitionDeltas = append(s.strategyTransitionDeltas, delta)
 }
