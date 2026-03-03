@@ -4706,6 +4706,62 @@ func (s *Service) RerankerAvailable(ctx context.Context) bool {
 	return s.reranker != nil && s.reranker.IsAvailable(ctx)
 }
 
+// RerankCandidates applies the configured Stage-2 reranker to caller-provided candidates.
+// This is a seam-friendly API for adapters that need rerank semantics without running retrieval.
+func (s *Service) RerankCandidates(ctx context.Context, query string, candidates []RerankCandidate, opts *SearchOptions) ([]RerankResult, error) {
+	if s == nil {
+		return nil, fmt.Errorf("search service unavailable")
+	}
+	if opts == nil {
+		opts = DefaultSearchOptions()
+	}
+	if len(candidates) == 0 {
+		return []RerankResult{}, nil
+	}
+
+	s.mu.RLock()
+	reranker := s.reranker
+	s.mu.RUnlock()
+
+	// No configured reranker: return pass-through order/scores.
+	if reranker == nil || !reranker.Enabled() {
+		out := make([]RerankResult, len(candidates))
+		for i, c := range candidates {
+			out[i] = RerankResult{
+				ID:           c.ID,
+				Content:      c.Content,
+				OriginalRank: i + 1,
+				NewRank:      i + 1,
+				BiScore:      c.Score,
+				CrossScore:   c.Score,
+				FinalScore:   c.Score,
+			}
+		}
+		return out, nil
+	}
+
+	topK := opts.RerankTopK
+	if topK > 0 && len(candidates) > topK {
+		candidates = candidates[:topK]
+	}
+
+	reranked, err := reranker.Rerank(ctx, query, candidates)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.RerankMinScore > 0 {
+		filtered := make([]RerankResult, 0, len(reranked))
+		for _, r := range reranked {
+			if r.FinalScore >= opts.RerankMinScore {
+				filtered = append(filtered, r)
+			}
+		}
+		return filtered, nil
+	}
+	return reranked, nil
+}
+
 // vectorSearchOnly performs vector-only search.
 // We do not hold s.mu across getOrCreateVectorPipeline() because it takes s.mu.RLock() internally;
 // Go's RWMutex is not reentrant, so holding s.mu here would risk deadlock if a writer were waiting.

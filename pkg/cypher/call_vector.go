@@ -213,6 +213,73 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 	return result, nil
 }
 
+// callDbIndexVectorEmbed implements db.index.vector.embed
+// Syntax: CALL db.index.vector.embed('query text') YIELD embedding
+func (e *StorageExecutor) callDbIndexVectorEmbed(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.embedder == nil {
+		return nil, fmt.Errorf("no embedder configured")
+	}
+
+	upper := strings.ToUpper(cypher)
+	procIdx := strings.Index(upper, "DB.INDEX.VECTOR.EMBED")
+	if procIdx == -1 {
+		return nil, fmt.Errorf("invalid db.index.vector.embed syntax")
+	}
+	parenStart := strings.Index(cypher[procIdx:], "(")
+	if parenStart == -1 {
+		return nil, fmt.Errorf("db.index.vector.embed requires one argument")
+	}
+	parenStart += procIdx
+	parenEnd := e.findMatchingParen(cypher, parenStart)
+	if parenEnd == -1 {
+		return nil, fmt.Errorf("unmatched parenthesis in db.index.vector.embed")
+	}
+
+	arg := strings.TrimSpace(cypher[parenStart+1 : parenEnd])
+	if arg == "" {
+		return nil, fmt.Errorf("db.index.vector.embed requires non-empty text")
+	}
+
+	var text string
+	if strings.HasPrefix(arg, "$") {
+		name := strings.TrimPrefix(arg, "$")
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return nil, fmt.Errorf("parameter $%s not provided", name)
+		}
+		value, ok := params[name]
+		if !ok {
+			return nil, fmt.Errorf("parameter $%s not provided", name)
+		}
+		s, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("db.index.vector.embed parameter $%s must be STRING", name)
+		}
+		text = s
+	} else {
+		value := e.parseValue(arg)
+		s, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("db.index.vector.embed requires STRING text")
+		}
+		text = s
+	}
+
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("db.index.vector.embed requires non-empty text")
+	}
+
+	embedding, err := embedQueryChunked(ctx, e.embedder, text)
+	if err != nil {
+		return nil, fmt.Errorf("failed to embed query: %w", err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"embedding"},
+		Rows:    [][]interface{}{{embedding}},
+	}, nil
+}
+
 // vectorQueryInput represents either a vector or a string query for vector search
 type vectorQueryInput struct {
 	vector      []float32 // Pre-computed vector (from client)

@@ -763,6 +763,9 @@ func newTxScopedExecutor(db *nornicdb.DB, dbName string) (*cypher.StorageExecuto
 		if embedder := baseExec.GetEmbedder(); embedder != nil {
 			executor.SetEmbedder(embedder)
 		}
+		if inferMgr := baseExec.GetInferenceManager(); inferMgr != nil {
+			executor.SetInferenceManager(inferMgr)
+		}
 	}
 	if searchSvc, err := db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
 		executor.SetSearchService(searchSvc)

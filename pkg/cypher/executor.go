@@ -121,6 +121,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
+	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
@@ -211,6 +212,9 @@ type StorageExecutor struct {
 	// When set, db.index.vector.queryNodes delegates to search.Service.
 	searchService *search.Service
 
+	// inferenceManager optionally provides LLM inference for db.infer.
+	inferenceManager InferenceManager
+
 	// onNodeMutated is called when a node is created or mutated (CREATE, MERGE, SET, REMOVE).
 	// This allows the embed queue to be notified so embeddings are (re)generated.
 	onNodeMutated NodeMutatedCallback
@@ -266,6 +270,13 @@ type DatabaseInfoInterface interface {
 // This is a minimal interface to avoid import cycles with embed package.
 type QueryEmbedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// InferenceManager is the minimal LLM contract used by Cypher db.infer.
+// It mirrors Heimdall manager methods to keep adapters thin.
+type InferenceManager interface {
+	Generate(ctx context.Context, prompt string, params heimdall.GenerateParams) (string, error)
+	Chat(ctx context.Context, req heimdall.ChatRequest) (*heimdall.ChatResponse, error)
 }
 
 // NewStorageExecutor creates a new Cypher executor with the given storage backend.
@@ -333,6 +344,16 @@ func (e *StorageExecutor) SetEmbedder(embedder QueryEmbedder) {
 // When set, db.index.vector.queryNodes will delegate to search.Service.
 func (e *StorageExecutor) SetSearchService(svc *search.Service) {
 	e.searchService = svc
+}
+
+// SetInferenceManager sets the inference manager used by db.infer.
+func (e *StorageExecutor) SetInferenceManager(mgr InferenceManager) {
+	e.inferenceManager = mgr
+}
+
+// GetInferenceManager returns the configured inference manager.
+func (e *StorageExecutor) GetInferenceManager() InferenceManager {
+	return e.inferenceManager
 }
 
 // SetVectorRegistry allows wiring a shared index registry (e.g., per database).

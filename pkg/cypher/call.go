@@ -687,6 +687,15 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callNornicDbStats()
 	case strings.Contains(upper, "NORNICDB.DECAY.INFO"):
 		result, err = e.callNornicDbDecayInfo()
+	// Seam-aligned RAG procedures
+	case strings.Contains(upper, "DB.RETRIEVE"):
+		result, err = e.callDbRetrieve(ctx, cypher)
+	case strings.Contains(upper, "DB.RRETRIEVE"):
+		result, err = e.callDbRRetrieve(ctx, cypher)
+	case strings.Contains(upper, "DB.RERANK"):
+		result, err = e.callDbRerank(ctx, cypher)
+	case strings.Contains(upper, "DB.INFER"):
+		result, err = e.callDbInfer(ctx, cypher)
 	// Neo4j Schema/Metadata Procedures
 	case strings.Contains(upper, "DB.SCHEMA.VISUALIZATION"):
 		result, err = e.callDbSchemaVisualization()
@@ -741,6 +750,8 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callDbIndexFulltextQueryRelationships(cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.QUERYRELATIONSHIPS"):
 		result, err = e.callDbIndexVectorQueryRelationships(ctx, cypher)
+	case strings.Contains(upper, "DB.INDEX.VECTOR.EMBED"):
+		result, err = e.callDbIndexVectorEmbed(ctx, cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATENODEINDEX"):
 		result, err = e.callDbIndexVectorCreateNodeIndex(ctx, cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATERELATIONSHIPINDEX"):

@@ -153,6 +153,9 @@ func (s *Server) newExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 		if emb := baseExec.GetEmbedder(); emb != nil {
 			executor.SetEmbedder(emb)
 		}
+		if inferMgr := baseExec.GetInferenceManager(); inferMgr != nil {
+			executor.SetInferenceManager(inferMgr)
+		}
 	}
 
 	// Wire embed queue callback for per-database executor mutations.

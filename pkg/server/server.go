@@ -1005,6 +1005,9 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				log.Println("   → Check NORNICDB_HEIMDALL_MODEL and NORNICDB_MODELS_DIR")
 				return
 			}
+			if baseExec := db.GetCypherExecutor(); baseExec != nil {
+				baseExec.SetInferenceManager(manager)
+			}
 
 			// Create database router wrapper for Heimdall (multi-db aware)
 			dbRouter := newHeimdallDBRouter(db, dbManager, featuresConfig)
