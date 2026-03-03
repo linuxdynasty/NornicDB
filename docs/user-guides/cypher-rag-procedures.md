@@ -37,7 +37,7 @@ These procedures are read-only and designed to map directly to internal contract
 
 - `db.infer` caching behavior
   - Not cached by default.
-  - Opt in per-call with `cache: true` (or `cache_enabled: true`) in the request map when deterministic reuse is desired.
+  - Opt in per-call with `cache: true` in the request map when deterministic reuse is desired.
 
 ## Example
 

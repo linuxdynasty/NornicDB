@@ -8,8 +8,7 @@ import (
 var (
 	// inferCacheTrueRe enables db.infer cache only when the request explicitly opts in:
 	//   CALL db.infer({..., cache: true})
-	//   CALL db.infer({..., cache_enabled: true})
-	inferCacheTrueRe = regexp.MustCompile(`(?is)\bcache(?:_enabled)?\s*:\s*true\b`)
+	inferCacheTrueRe = regexp.MustCompile(`(?is)\bcache\s*:\s*true\b`)
 )
 
 // isCacheableReadQuery returns true if it's safe to cache a read-only query result.
