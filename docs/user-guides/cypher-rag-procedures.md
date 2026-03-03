@@ -35,6 +35,10 @@ These procedures are read-only and designed to map directly to internal contract
   - Returns a vector array via `YIELD embedding`.
   - This is useful for fully manual Cypher search pipelines.
 
+- `db.infer` caching behavior
+  - Not cached by default.
+  - Opt in per-call with `cache: true` (or `cache_enabled: true`) in the request map when deterministic reuse is desired.
+
 ## Example
 
 ```cypher
@@ -63,6 +67,11 @@ RETURN node, score
 
 If you use `db.index.vector.embed()`, pass the returned `embedding` array into
 `db.index.vector.queryNodes(..., embedding)` (or an inline array equivalent) for explicit pipeline control.
+
+```cypher
+CALL db.infer({prompt: 'Summarize: ...', cache: true, temperature: 0.0}) YIELD text
+RETURN text
+```
 
 ## Lightweight Risk Notes
 

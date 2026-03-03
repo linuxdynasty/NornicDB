@@ -649,8 +649,8 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	// TODO: Migrate handlers to use QueryInfo directly
 	upperQuery := strings.ToUpper(strings.TrimSpace(cypher))
 
-	// Try cache for read-only queries (using cached analysis)
-	if info.IsReadOnly && e.cache != nil {
+	// Try cache for read-only queries only when cache policy allows it.
+	if info.IsReadOnly && e.cache != nil && isCacheableReadQuery(cypher) {
 		if cached, found := e.cache.Get(cypher, params); found {
 			return cached, nil
 		}

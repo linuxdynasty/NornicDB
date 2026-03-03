@@ -1,6 +1,16 @@
 package cypher
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+var (
+	// inferCacheTrueRe enables db.infer cache only when the request explicitly opts in:
+	//   CALL db.infer({..., cache: true})
+	//   CALL db.infer({..., cache_enabled: true})
+	inferCacheTrueRe = regexp.MustCompile(`(?is)\bcache(?:_enabled)?\s*:\s*true\b`)
+)
 
 // isCacheableReadQuery returns true if it's safe to cache a read-only query result.
 //
@@ -21,6 +31,10 @@ func isCacheableReadQuery(cypher string) bool {
 		return false
 	}
 
+	// Inference is non-cacheable by default; allow explicit opt-in via request map.
+	if strings.Contains(upper, "CALL DB.INFER(") {
+		return inferCacheTrueRe.MatchString(cypher)
+	}
+
 	return true
 }
-
