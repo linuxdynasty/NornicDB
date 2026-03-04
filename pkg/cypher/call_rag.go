@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -293,90 +292,6 @@ func (e *StorageExecutor) parseRagProcedureRequest(ctx context.Context, cypher, 
 		return map[string]interface{}{"query": strings.Trim(rawArg, "\"'")}, nil
 	}
 	return nil, fmt.Errorf("%s request must be a map literal", strings.ToLower(procName))
-}
-
-func firstPresent(m map[string]interface{}, keys ...string) interface{} {
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			return v
-		}
-	}
-	return nil
-}
-
-func stringOr(v interface{}, fallback string) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fallback
-}
-
-func toBool(v interface{}) (bool, bool) {
-	switch t := v.(type) {
-	case bool:
-		return t, true
-	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(t))
-		return parsed, err == nil
-	default:
-		return false, false
-	}
-}
-
-func toInt(v interface{}) (int, bool) {
-	switch t := v.(type) {
-	case int:
-		return t, true
-	case int64:
-		return int(t), true
-	case float64:
-		return int(t), true
-	case string:
-		i, err := strconv.Atoi(strings.TrimSpace(t))
-		return i, err == nil
-	default:
-		return 0, false
-	}
-}
-
-func ragToFloat64(v interface{}) (float64, bool) {
-	switch t := v.(type) {
-	case float64:
-		return t, true
-	case float32:
-		return float64(t), true
-	case int:
-		return float64(t), true
-	case int64:
-		return float64(t), true
-	case string:
-		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
-		return f, err == nil
-	default:
-		return 0, false
-	}
-}
-
-func toFloat32(v interface{}) (float32, bool) {
-	f, ok := ragToFloat64(v)
-	return float32(f), ok
-}
-
-func toStringSlice(v interface{}) []string {
-	switch t := v.(type) {
-	case []string:
-		return t
-	case []interface{}:
-		out := make([]string, 0, len(t))
-		for _, item := range t {
-			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
 }
 
 func toChatMessages(v interface{}) []heimdall.ChatMessage {

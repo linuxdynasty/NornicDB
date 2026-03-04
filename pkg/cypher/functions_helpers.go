@@ -208,8 +208,8 @@ func (e *StorageExecutor) evaluateMapLiteralFull(expr string, nodes map[string]*
 		return result
 	}
 
-	// Split by commas, respecting nesting
-	pairs := e.splitMapPairsRespectingNesting(inner)
+	// Split by commas, respecting nesting and quoted values.
+	pairs := splitTopLevelComma(inner)
 
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
@@ -236,49 +236,3 @@ func (e *StorageExecutor) evaluateMapLiteralFull(expr string, nodes map[string]*
 	return result
 }
 
-// splitMapPairsRespectingNesting splits map literal pairs by commas, respecting brackets and quotes.
-func (e *StorageExecutor) splitMapPairsRespectingNesting(s string) []string {
-	var result []string
-	var current strings.Builder
-	depth := 0
-	inQuote := false
-	quoteChar := rune(0)
-
-	for _, c := range s {
-		if inQuote {
-			current.WriteRune(c)
-			if c == quoteChar {
-				inQuote = false
-			}
-			continue
-		}
-
-		switch c {
-		case '"', '\'':
-			inQuote = true
-			quoteChar = c
-			current.WriteRune(c)
-		case '{', '[', '(':
-			depth++
-			current.WriteRune(c)
-		case '}', ']', ')':
-			depth--
-			current.WriteRune(c)
-		case ',':
-			if depth == 0 {
-				result = append(result, current.String())
-				current.Reset()
-			} else {
-				current.WriteRune(c)
-			}
-		default:
-			current.WriteRune(c)
-		}
-	}
-
-	if current.Len() > 0 {
-		result = append(result, current.String())
-	}
-
-	return result
-}

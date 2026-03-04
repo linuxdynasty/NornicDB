@@ -578,22 +578,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert search results to our format
-	// SearchResult.NodeID is already unprefixed (NamespacedEngine.GetNode() unprefixes automatically)
-	results := make([]*nornicdb.SearchResult, len(searchResponse.Results))
-	for i, r := range searchResponse.Results {
-		results[i] = &nornicdb.SearchResult{
-			Node: &nornicdb.Node{
-				ID:         string(r.NodeID),
-				Labels:     r.Labels,
-				Properties: r.Properties,
-			},
-			Score:      r.Score,
-			RRFScore:   r.RRFScore,
-			VectorRank: r.VectorRank,
-			BM25Rank:   r.BM25Rank,
-		}
-	}
+	// Canonical mapping keeps DB and server adapters consistent.
+	results := nornicdb.MapSearchResponse(searchResponse)
 	if searchDiagEnabled {
 		log.Printf("🔎 Search timing db=%q status=ok total=%v svc_lookup=%v embed_total=%v embed_calls=%d embed_ok=%d search_total=%v search_calls=%d chunks=%d vector_chunks=%d chunk_loop=%v fallback_bm25=%d search_method=%q fallback=%t results=%d",
 			dbName, time.Since(reqStart), serviceLookupDur, embedTotalDur, embedCalls, embedSuccessCalls,

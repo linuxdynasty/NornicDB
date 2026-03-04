@@ -139,12 +139,6 @@ const (
 	walMaxEntrySize uint32 = 16 * 1024 * 1024
 )
 
-// alignUp rounds n up to the nearest multiple of walAlignment (8 bytes).
-// This ensures WAL records start at aligned offsets, preventing torn headers.
-func alignUp(n int64) int64 {
-	return (n + walAlignment - 1) &^ (walAlignment - 1)
-}
-
 // WALEntry represents a single write-ahead log entry.
 // Each mutating operation is recorded as an entry before execution.
 type WALEntry struct {

@@ -897,6 +897,33 @@ type SearchResult struct {
 	BM25Rank   int     `json:"bm25_rank"`
 }
 
+// MapSearchResponse converts search service responses into DB API result shapes.
+func MapSearchResponse(response *search.SearchResponse) []*SearchResult {
+	if response == nil || len(response.Results) == 0 {
+		return []*SearchResult{}
+	}
+
+	out := make([]*SearchResult, len(response.Results))
+	for i := range response.Results {
+		out[i] = mapSingleSearchResult(response.Results[i])
+	}
+	return out
+}
+
+func mapSingleSearchResult(r search.SearchResult) *SearchResult {
+	return &SearchResult{
+		Node: &Node{
+			ID:         r.ID,
+			Labels:     r.Labels,
+			Properties: r.Properties,
+		},
+		Score:      r.Score,
+		RRFScore:   r.RRFScore,
+		VectorRank: r.VectorRank,
+		BM25Rank:   r.BM25Rank,
+	}
+}
+
 // Search performs full-text BM25 search.
 // For hybrid vector+text search, use HybridSearch with pre-computed query embedding.
 func (db *DB) Search(ctx context.Context, query string, labels []string, limit int) ([]*SearchResult, error) {
@@ -935,23 +962,7 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 		return nil, err
 	}
 
-	// Convert search results to our format
-	results := make([]*SearchResult, len(response.Results))
-	for i, r := range response.Results {
-		results[i] = &SearchResult{
-			Node: &Node{
-				ID:         r.ID,
-				Labels:     r.Labels,
-				Properties: r.Properties,
-			},
-			Score:      r.Score,
-			RRFScore:   r.RRFScore,
-			VectorRank: r.VectorRank,
-			BM25Rank:   r.BM25Rank,
-		}
-	}
-
-	return results, nil
+	return MapSearchResponse(response), nil
 }
 
 // HybridSearch performs RRF hybrid search combining vector similarity and BM25 full-text.
@@ -991,23 +1002,7 @@ func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []f
 		return nil, err
 	}
 
-	// Convert search results to our format
-	results := make([]*SearchResult, len(response.Results))
-	for i, r := range response.Results {
-		results[i] = &SearchResult{
-			Node: &Node{
-				ID:         r.ID,
-				Labels:     r.Labels,
-				Properties: r.Properties,
-			},
-			Score:      r.Score,
-			RRFScore:   r.RRFScore,
-			VectorRank: r.VectorRank,
-			BM25Rank:   r.BM25Rank,
-		}
-	}
-
-	return results, nil
+	return MapSearchResponse(response), nil
 }
 
 // FindSimilar finds nodes similar to a given node by embedding.

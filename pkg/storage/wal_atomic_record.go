@@ -6,6 +6,12 @@ import (
 	"io"
 )
 
+// alignUp rounds n up to the nearest multiple of walAlignment (8 bytes).
+// This ensures WAL records start at aligned offsets, preventing torn headers.
+func alignUp(n int64) int64 {
+	return (n + walAlignment - 1) &^ (walAlignment - 1)
+}
+
 // buildAtomicRecordV2 builds a single WAL record in the v2 atomic format:
 //
 //	[magic:4][version:1][length:4][payload:N][crc:4][trailer:8][padding:0-7]

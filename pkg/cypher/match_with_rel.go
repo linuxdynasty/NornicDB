@@ -899,7 +899,7 @@ func (e *StorageExecutor) evaluateMapLiteralFromValues(expr string, values map[s
 	}
 
 	// Split by commas, respecting nesting
-	pairs := e.splitMapPairsRespectingNesting(inner)
+	pairs := splitTopLevelComma(inner)
 
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)

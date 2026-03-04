@@ -180,7 +180,7 @@ func parseTemporalCallArgs(ctx context.Context, cypher, callName string) ([]inte
 		return nil, fmt.Errorf("missing closing parenthesis in %s", strings.ToLower(callName))
 	}
 	rawArgs := strings.TrimSpace(cypher[start : start+endRel])
-	parts := splitCallArgs(rawArgs)
+	parts := splitTopLevelComma(rawArgs)
 
 	args := make([]interface{}, 0, len(parts))
 	for _, part := range parts {
@@ -188,50 +188,6 @@ func parseTemporalCallArgs(ctx context.Context, cypher, callName string) ([]inte
 		args = append(args, value)
 	}
 	return args, nil
-}
-
-func splitCallArgs(input string) []string {
-	if input == "" {
-		return nil
-	}
-	var args []string
-	var buf strings.Builder
-	inSingle := false
-	inDouble := false
-	depth := 0
-
-	for _, r := range input {
-		switch r {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-		case '(':
-			if !inSingle && !inDouble {
-				depth++
-			}
-		case ')':
-			if !inSingle && !inDouble && depth > 0 {
-				depth--
-			}
-		case ',':
-			if !inSingle && !inDouble && depth == 0 {
-				args = append(args, strings.TrimSpace(buf.String()))
-				buf.Reset()
-				continue
-			}
-		}
-		buf.WriteRune(r)
-	}
-
-	if buf.Len() > 0 {
-		args = append(args, strings.TrimSpace(buf.String()))
-	}
-	return args
 }
 
 func resolveTemporalArg(ctx context.Context, raw string) interface{} {

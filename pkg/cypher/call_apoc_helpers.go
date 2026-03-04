@@ -221,8 +221,8 @@ func (e *StorageExecutor) parseMapLiteral(s string) map[string]interface{} {
 		return result
 	}
 
-	// Simple key:value parsing (handles basic cases)
-	pairs := e.splitMapPairs(inner)
+	// Split map entries while respecting nested collections and quotes.
+	pairs := splitTopLevelComma(inner)
 	for _, pair := range pairs {
 		colonIdx := strings.Index(pair, ":")
 		if colonIdx == -1 {
@@ -234,53 +234,6 @@ func (e *StorageExecutor) parseMapLiteral(s string) map[string]interface{} {
 
 		// Parse value
 		result[key] = e.parseValue(value)
-	}
-
-	return result
-}
-
-// splitMapPairs splits a map literal's contents by commas, respecting nesting.
-func (e *StorageExecutor) splitMapPairs(s string) []string {
-	var result []string
-	var current strings.Builder
-	depth := 0
-	inQuote := false
-	quoteChar := rune(0)
-
-	for _, c := range s {
-		if inQuote {
-			current.WriteRune(c)
-			if c == quoteChar {
-				inQuote = false
-			}
-			continue
-		}
-
-		switch c {
-		case '\'', '"':
-			inQuote = true
-			quoteChar = c
-			current.WriteRune(c)
-		case '{', '[', '(':
-			depth++
-			current.WriteRune(c)
-		case '}', ']', ')':
-			depth--
-			current.WriteRune(c)
-		case ',':
-			if depth == 0 {
-				result = append(result, current.String())
-				current.Reset()
-			} else {
-				current.WriteRune(c)
-			}
-		default:
-			current.WriteRune(c)
-		}
-	}
-
-	if current.Len() > 0 {
-		result = append(result, current.String())
 	}
 
 	return result
