@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.13] - 2026-03-04
+
+### Added
+
+- **Cypher Graph-RAG procedures**: Added Cypher RAG primitives:
+  - `CALL db.retrieve({...})`
+  - `CALL db.rretrieve({...})`
+  - `CALL db.rerank({...})` (candidate-based rerank API)
+  - `CALL db.infer({...})`
+  - `CALL db.index.vector.embed(...)`
+- **Cypher cache policy extension**: Query planner/cache policy now supports the new primitives with explicit `db.infer({cache: true})` opt-in behavior.
+
+### Changed
+
+- **Search strategy stability**: Re-enabled auto strategy stitching/transitions with improved locking and safer coordination.
+- **Core maintainability refactor**: Rebalanced architecture by extracting shared Cypher parsing/coercion and splitting oversized core files into cohesive modules while preserving behavior.
+- **Syntax cleanup**: Minor syntax option cleanup to keep parser behavior aligned after refactors.
+
+### Fixed
+
+- **Async CREATE schema safety**: Excluded schema commands from async create-node batch handling to preserve expected execution semantics.
+- **Schema regression protection**: Added regression coverage for schema commands with `AsyncEngine` to prevent drift.
+
+### Technical Details
+
+- **Statistics**: 7 commits.
+- **Key areas touched**: `pkg/cypher/*`, `pkg/storage/*`, `pkg/nornicdb/*`, query cache policy.
+
+## [1.0.12-hotfix] - 2026-02-28
+
+### Added
+
+- **Runtime search strategy transition framework**: Added safe brute-force ↔ HNSW transition plumbing with cutover safeguards and transition tests.
+
+### Changed
+
+- **Hotfix safety posture**: Disabled automatic strategy switching by default in hotfix flow to prioritize runtime stability.
+- **Documentation refresh**: Updated README/docs for hotfix behavior and operational guidance.
+
+### Fixed
+
+- **Docker / llama.cpp crash**: Fixed header overwrite issue that could cause SIGSEGV in Docker builds.
+- **Windows build reliability**: Fixed Windows build path issues for the hotfix release.
+
 ## [1.0.12-preview] - 2026-02-20
 
 ### Added
@@ -832,6 +876,9 @@ See [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contr
 
 ---
 
+[1.0.13]: https://github.com/orneryd/NornicDB/compare/v1.0.12-hotfix...v1.0.13
+[1.0.12-hotfix]: https://github.com/orneryd/NornicDB/compare/v1.0.12...v1.0.12-hotfix
+[1.0.12]: https://github.com/orneryd/NornicDB/compare/v1.0.12-preview...v1.0.12
 [1.0.12-preview]: https://github.com/orneryd/NornicDB/compare/v1.0.11...v1.0.12-preview
 [1.0.11]: https://github.com/orneryd/NornicDB/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/orneryd/NornicDB/compare/v1.0.9...v1.0.10
