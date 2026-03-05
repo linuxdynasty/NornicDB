@@ -48,6 +48,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -401,7 +402,7 @@ type MemoryConfig struct {
 	// 0 = unlimited (Go manages automatically)
 	// Set to 80% of container memory for optimal performance
 	RuntimeLimit int64
-	// RuntimeLimitStr is the human-readable form (e.g., "2GB", "512MB")
+	// RuntimeLimitStr is the configured value in megabytes as a string (e.g., "500")
 	RuntimeLimitStr string
 	// GCPercent controls GC aggressiveness (GOGC)
 	// 100 = default, lower = more aggressive (less memory, more CPU)
@@ -874,7 +875,9 @@ func (f *FeatureFlagsConfig) GetHeimdallMCPTools() []string     { return f.Heimd
 func LoadFromEnv() *Config {
 	// Start with defaults, then apply env vars
 	config := LoadDefaults()
-	applyEnvVars(config)
+	if err := applyEnvVars(config); err != nil {
+		panic(fmt.Sprintf("invalid environment configuration: %v", err))
+	}
 	return config
 }
 
@@ -1359,7 +1362,7 @@ func LoadDefaults() *Config {
 
 // applyEnvVars applies environment variable overrides to an existing config.
 // Environment variables take precedence over config file values.
-func applyEnvVars(config *Config) {
+func applyEnvVars(config *Config) error {
 	// Authentication - supports both "username:password" and "username/password" formats
 	authStr := getEnv("NORNICDB_AUTH", "")
 	// Backward compatibility: allow Neo4j env var
@@ -1635,8 +1638,12 @@ func applyEnvVars(config *Config) {
 		config.Memory.AutoLinksSimilarityThreshold = v
 	}
 	if v := getEnv("NORNICDB_MEMORY_LIMIT", ""); v != "" {
+		runtimeLimit, err := ParseMemoryLimitMB(v)
+		if err != nil {
+			return fmt.Errorf("invalid NORNICDB_MEMORY_LIMIT value %q: %w", v, err)
+		}
 		config.Memory.RuntimeLimitStr = v
-		config.Memory.RuntimeLimit = parseMemorySize(v)
+		config.Memory.RuntimeLimit = runtimeLimit
 	}
 	if v := getEnvInt("NORNICDB_GC_PERCENT", 0); v != 0 {
 		config.Memory.GCPercent = v
@@ -1913,12 +1920,14 @@ func applyEnvVars(config *Config) {
 	if v := getEnvInt("NORNICDB_QDRANT_GRPC_MAX_TOP_K", 0); v > 0 {
 		config.Features.QdrantGRPCMaxTopK = v
 	}
+
+	return nil
 }
 
 // ApplyEnvVars applies environment variable overrides to an existing config.
 // This is the exported version for use in main.go.
-func ApplyEnvVars(config *Config) {
-	applyEnvVars(config)
+func ApplyEnvVars(config *Config) error {
+	return applyEnvVars(config)
 }
 
 // LoadFromFile loads configuration with proper precedence:
@@ -2179,8 +2188,12 @@ func LoadFromFile(configPath string) (*Config, error) {
 		config.Memory.AutoLinksSimilarityThreshold = yamlCfg.Memory.AutoLinksSimilarityThreshold
 	}
 	if yamlCfg.Memory.RuntimeLimit != "" {
+		runtimeLimit, err := ParseMemoryLimitMB(yamlCfg.Memory.RuntimeLimit)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory.runtime_limit value %q: %w", yamlCfg.Memory.RuntimeLimit, err)
+		}
 		config.Memory.RuntimeLimitStr = yamlCfg.Memory.RuntimeLimit
-		config.Memory.RuntimeLimit = parseMemorySize(yamlCfg.Memory.RuntimeLimit)
+		config.Memory.RuntimeLimit = runtimeLimit
 	}
 	if yamlCfg.Memory.GCPercent > 0 {
 		config.Memory.GCPercent = yamlCfg.Memory.GCPercent
@@ -2482,7 +2495,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 
 	// Step 3: Apply environment variable overrides (higher priority than config file)
-	applyEnvVars(config)
+	if err := applyEnvVars(config); err != nil {
+		return nil, err
+	}
 
 	return config, nil
 }
@@ -2594,37 +2609,29 @@ func generateDefaultSecret() string {
 	return "CHANGE_ME_IN_PRODUCTION_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
-// parseMemorySize parses a human-readable memory size string.
-// Supports: "1024", "1KB", "1MB", "1GB", "1TB", "0", "unlimited"
-func parseMemorySize(s string) int64 {
-	s = strings.TrimSpace(strings.ToUpper(s))
-	if s == "" || s == "0" || s == "UNLIMITED" {
-		return 0
+// ParseMemoryLimitMB parses a memory limit value expressed in megabytes.
+// Valid examples: "0" (unlimited), "500" (500 MB).
+// Invalid examples: "500MB", "1GB", "unlimited".
+func ParseMemoryLimitMB(s string) (int64, error) {
+	const bytesPerMB int64 = 1024 * 1024
+
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return 0, fmt.Errorf("must be a whole number of megabytes (e.g., 500) or 0 for unlimited")
 	}
 
-	s = strings.TrimSuffix(s, "B")
-
-	var multiplier int64 = 1
-	switch {
-	case strings.HasSuffix(s, "K"):
-		multiplier = 1024
-		s = strings.TrimSuffix(s, "K")
-	case strings.HasSuffix(s, "M"):
-		multiplier = 1024 * 1024
-		s = strings.TrimSuffix(s, "M")
-	case strings.HasSuffix(s, "G"):
-		multiplier = 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "G")
-	case strings.HasSuffix(s, "T"):
-		multiplier = 1024 * 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "T")
-	}
-
-	val, err := strconv.ParseInt(s, 10, 64)
+	mb, err := strconv.ParseInt(trimmed, 10, 64)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("must be a whole number of megabytes (e.g., 500) or 0 for unlimited")
 	}
-	return val * multiplier
+	if mb < 0 {
+		return 0, fmt.Errorf("must be non-negative")
+	}
+	if mb > math.MaxInt64/bytesPerMB {
+		return 0, fmt.Errorf("value is too large")
+	}
+
+	return mb * bytesPerMB, nil
 }
 
 // FormatMemorySize formats bytes as human-readable string.

@@ -39,39 +39,6 @@ var (
 	buildTime = "unknown" // Set via ldflags: -X main.buildTime=$(date +%Y%m%d-%H%M%S)
 )
 
-// parseMemorySize parses a human-readable memory size string.
-// Supports: "1024", "1KB", "1MB", "1GB", "1TB", "0", "unlimited"
-func parseMemorySize(s string) int64 {
-	s = strings.TrimSpace(strings.ToUpper(s))
-	if s == "" || s == "0" || s == "UNLIMITED" {
-		return 0
-	}
-
-	s = strings.TrimSuffix(s, "B")
-
-	var multiplier int64 = 1
-	switch {
-	case strings.HasSuffix(s, "K"):
-		multiplier = 1024
-		s = strings.TrimSuffix(s, "K")
-	case strings.HasSuffix(s, "M"):
-		multiplier = 1024 * 1024
-		s = strings.TrimSuffix(s, "M")
-	case strings.HasSuffix(s, "G"):
-		multiplier = 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "G")
-	case strings.HasSuffix(s, "T"):
-		multiplier = 1024 * 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "T")
-	}
-
-	val, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return val * multiplier
-}
-
 func main() {
 	// Route logs to stdout so container/system log collectors see them.
 	log.SetOutput(os.Stdout)
@@ -133,7 +100,7 @@ Features:
 	serveCmd.Flags().Int("parallel-workers", 0, "Max parallel workers (0 = auto, uses all CPUs)")
 	serveCmd.Flags().Int("parallel-batch-size", 1000, "Min batch size before parallelizing")
 	// Memory management flags
-	serveCmd.Flags().String("memory-limit", "", "Memory limit (e.g., 2GB, 512MB, 0 for unlimited)")
+	serveCmd.Flags().String("memory-limit", "", "Memory limit in MB as an integer (e.g., 500, 0 for unlimited)")
 	serveCmd.Flags().Int("gc-percent", 100, "GC aggressiveness (100=default, lower=more aggressive)")
 	serveCmd.Flags().Bool("pool-enabled", true, "Enable object pooling for reduced allocations")
 	serveCmd.Flags().Bool("low-memory", getEnvBool("NORNICDB_LOW_MEMORY", false), "Use minimal RAM (for resource constrained environments)")
@@ -341,8 +308,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Override with CLI flags if provided
 	if memoryLimit != "" {
+		runtimeLimit, err := config.ParseMemoryLimitMB(memoryLimit)
+		if err != nil {
+			return fmt.Errorf("invalid --memory-limit value %q: %w", memoryLimit, err)
+		}
 		cfg.Memory.RuntimeLimitStr = memoryLimit
-		cfg.Memory.RuntimeLimit = parseMemorySize(memoryLimit)
+		cfg.Memory.RuntimeLimit = runtimeLimit
 	}
 	if gcPercent != 100 {
 		cfg.Memory.GCPercent = gcPercent

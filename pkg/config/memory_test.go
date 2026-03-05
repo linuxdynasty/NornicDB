@@ -2,67 +2,46 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
 // =============================================================================
-// parseMemorySize Tests
+// ParseMemoryLimitMB Tests
 // =============================================================================
 
-func TestParseMemorySize(t *testing.T) {
+func TestParseMemoryLimitMB(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  int64
+		err   bool
 	}{
-		// Bytes
-		{"bytes numeric", "1024", 1024},
-		{"bytes with B suffix", "1024B", 1024},
-		{"bytes lowercase", "1024b", 1024},
-
-		// Kilobytes
-		{"kilobytes K", "1K", 1024},
-		{"kilobytes KB", "1KB", 1024},
-		{"kilobytes lowercase", "1kb", 1024},
-		{"kilobytes large", "512K", 512 * 1024},
-
-		// Megabytes
-		{"megabytes M", "1M", 1024 * 1024},
-		{"megabytes MB", "1MB", 1024 * 1024},
-		{"megabytes lowercase", "512mb", 512 * 1024 * 1024},
-		{"megabytes large", "256M", 256 * 1024 * 1024},
-
-		// Gigabytes
-		{"gigabytes G", "1G", 1024 * 1024 * 1024},
-		{"gigabytes GB", "1GB", 1024 * 1024 * 1024},
-		{"gigabytes lowercase", "2gb", 2 * 1024 * 1024 * 1024},
-		{"gigabytes large", "4G", 4 * 1024 * 1024 * 1024},
-
-		// Terabytes
-		{"terabytes T", "1T", 1024 * 1024 * 1024 * 1024},
-		{"terabytes TB", "1TB", 1024 * 1024 * 1024 * 1024},
-
-		// Unlimited/Zero
-		{"zero", "0", 0},
-		{"unlimited", "unlimited", 0},
-		{"unlimited caps", "UNLIMITED", 0},
-		{"empty string", "", 0},
-
-		// Whitespace handling
-		{"whitespace", "  2GB  ", 2 * 1024 * 1024 * 1024},
-
-		// Invalid returns 0
-		{"invalid chars", "abc", 0},
-		// Negative values parse but result in negative (caller should validate)
-		{"negative", "-1GB", -1 * 1024 * 1024 * 1024},
+		{"zero means unlimited", "0", 0, false},
+		{"megabytes integer", "500", 500 * 1024 * 1024, false},
+		{"whitespace trimmed", "  256  ", 256 * 1024 * 1024, false},
+		{"empty invalid", "", 0, true},
+		{"suffix invalid", "2GB", 0, true},
+		{"word invalid", "unlimited", 0, true},
+		{"negative invalid", "-1", 0, true},
+		{"nondigit invalid", "abc", 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseMemorySize(tt.input)
+			got, err := ParseMemoryLimitMB(tt.input)
+			if tt.err {
+				if err == nil {
+					t.Fatalf("ParseMemoryLimitMB(%q) expected error, got nil", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseMemoryLimitMB(%q) unexpected error: %v", tt.input, err)
+			}
 			if got != tt.want {
-				t.Errorf("parseMemorySize(%q) = %d, want %d", tt.input, got, tt.want)
+				t.Errorf("ParseMemoryLimitMB(%q) = %d, want %d", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -145,16 +124,16 @@ func TestLoadFromEnv_RuntimeMemory(t *testing.T) {
 	})
 
 	t.Run("memory limit from env", func(t *testing.T) {
-		os.Setenv("NORNICDB_MEMORY_LIMIT", "2GB")
+		os.Setenv("NORNICDB_MEMORY_LIMIT", "2048")
 		defer os.Unsetenv("NORNICDB_MEMORY_LIMIT")
 
 		cfg := LoadFromEnv()
-		want := int64(2 * 1024 * 1024 * 1024)
+		want := int64(2048 * 1024 * 1024)
 		if cfg.Memory.RuntimeLimit != want {
 			t.Errorf("RuntimeLimit = %d, want %d", cfg.Memory.RuntimeLimit, want)
 		}
-		if cfg.Memory.RuntimeLimitStr != "2GB" {
-			t.Errorf("RuntimeLimitStr = %q, want %q", cfg.Memory.RuntimeLimitStr, "2GB")
+		if cfg.Memory.RuntimeLimitStr != "2048" {
+			t.Errorf("RuntimeLimitStr = %q, want %q", cfg.Memory.RuntimeLimitStr, "2048")
 		}
 	})
 
@@ -207,6 +186,32 @@ func TestLoadFromEnv_RuntimeMemory(t *testing.T) {
 			t.Errorf("QueryCacheTTL = %v, want 10m", cfg.Memory.QueryCacheTTL)
 		}
 	})
+
+	t.Run("invalid memory limit from env fails fast", func(t *testing.T) {
+		os.Setenv("NORNICDB_MEMORY_LIMIT", "2GB")
+		defer os.Unsetenv("NORNICDB_MEMORY_LIMIT")
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("LoadFromEnv should panic for invalid NORNICDB_MEMORY_LIMIT")
+			}
+		}()
+		_ = LoadFromEnv()
+	})
+}
+
+func TestLoadFromFile_InvalidRuntimeLimitFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "memory:\n  runtime_limit: \"2GB\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	_, err := LoadFromFile(path)
+	if err == nil {
+		t.Fatal("LoadFromFile should fail for invalid memory.runtime_limit")
+	}
 }
 
 // =============================================================================
@@ -236,13 +241,13 @@ func TestMemoryConfig_ApplyRuntimeMemory(t *testing.T) {
 // Benchmarks
 // =============================================================================
 
-func BenchmarkParseMemorySize(b *testing.B) {
-	inputs := []string{"2GB", "512MB", "1024", "unlimited", "1TB"}
+func BenchmarkParseMemoryLimitMB(b *testing.B) {
+	inputs := []string{"0", "512", "1024", "4096", "16384"}
 
 	for _, input := range inputs {
 		b.Run(input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				parseMemorySize(input)
+				_, _ = ParseMemoryLimitMB(input)
 			}
 		})
 	}
