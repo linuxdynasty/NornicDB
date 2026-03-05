@@ -268,6 +268,107 @@ func TestCharLengthFunctions(t *testing.T) {
 	}
 }
 
+func TestFunctionEvaluator_ArrayIndexSliceAndMapLiteral(t *testing.T) {
+	e := setupTestExecutor(t)
+	node := createTestNode(t, e, "node-eval-1", []string{"Person", "Employee"}, map[string]interface{}{"nums": []interface{}{int64(10), int64(20), int64(30)}})
+	nodes := map[string]*storage.Node{"n": node}
+
+	// Array/string indexing paths
+	assertEqual(t, "labels(n)[0]", "Person", e.evaluateExpressionWithContext("labels(n)[0]", nodes, nil))
+	assertEqual(t, "labels(n)[-1]", "Employee", e.evaluateExpressionWithContext("labels(n)[-1]", nodes, nil))
+	assertEqual(t, "'abc'[1]", "b", e.evaluateExpressionWithContext("'abc'[1]", nodes, nil))
+
+	// Slice notation paths
+	s1 := e.evaluateExpressionWithContext("labels(n)[..1]", nodes, nil)
+	list1, ok := s1.([]interface{})
+	if !ok || len(list1) != 1 || list1[0] != "Person" {
+		t.Fatalf("labels(n)[..1] = %v, want [Person]", s1)
+	}
+
+	s2 := e.evaluateExpressionWithContext("labels(n)[1..]", nodes, nil)
+	list2, ok := s2.([]interface{})
+	if !ok || len(list2) != 1 || list2[0] != "Employee" {
+		t.Fatalf("labels(n)[1..] = %v, want [Employee]", s2)
+	}
+
+	// IN list must not be treated as indexing
+	assertEqual(t, "1 IN [1,2,3]", true, e.evaluateExpressionWithContext("1 IN [1,2,3]", nil, nil))
+
+	// Parenthesized expression and map literal
+	assertEqual(t, "(1 + 2)", int64(3), e.evaluateExpressionWithContext("(1 + 2)", nil, nil))
+	m := e.evaluateExpressionWithContext("{x: 1, y: 'z'}", nil, nil)
+	mm, ok := m.(map[string]interface{})
+	if !ok {
+		t.Fatalf("map literal should return map, got %T", m)
+	}
+	if mm["x"] != int64(1) || mm["y"] != "z" {
+		t.Fatalf("map literal mismatch: %v", mm)
+	}
+}
+
+func TestFunctionEvaluator_AdditionalBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	node := createTestNode(t, e, "node-eval-2", []string{"Person", "Employee"}, map[string]interface{}{
+		"name":   "Alice",
+		"values": []interface{}{int64(10), int64(20), int64(30), int64(40)},
+	})
+	rel := &storage.Edge{
+		ID:         storage.EdgeID("rel-eval-1"),
+		Type:       "KNOWS",
+		StartNode:  node.ID,
+		EndNode:    node.ID,
+		Properties: map[string]interface{}{"weight": int64(1)},
+	}
+	if err := e.storage.CreateEdge(rel); err != nil {
+		t.Fatalf("Failed to create test edge: %v", err)
+	}
+
+	nodes := map[string]*storage.Node{"n": node}
+	rels := map[string]*storage.Edge{"r": rel}
+
+	assertEqual(t, "type({type:'KNOWS'})", "KNOWS", e.evaluateExpressionWithContext("type({type:'KNOWS'})", nodes, rels))
+	assertEqual(t, "exists(n.missing)", false, e.evaluateExpressionWithContext("exists(n.missing)", nodes, rels))
+	assertEqual(t, "head([])", nil, e.evaluateExpressionWithContext("head([])", nodes, rels))
+	assertEqual(t, "last([])", nil, e.evaluateExpressionWithContext("last([])", nodes, rels))
+	assertEqual(t, "reverse('stressed')", "desserts", e.evaluateExpressionWithContext("reverse('stressed')", nodes, rels))
+	assertEqual(t, "indexOf([1,2,3], 9)", int64(-1), e.evaluateExpressionWithContext("indexOf([1,2,3], 9)", nodes, rels))
+	assertEqual(t, "hasLabels(n, ['Person', 'Employee'])", true, e.evaluateExpressionWithContext("hasLabels(n, ['Person', 'Employee'])", nodes, rels))
+	assertEqual(t, "hasLabels(n, ['Person', 'Missing'])", false, e.evaluateExpressionWithContext("hasLabels(n, ['Person', 'Missing'])", nodes, rels))
+
+	tail := e.evaluateExpressionWithContext("tail([1])", nodes, rels)
+	tailList, ok := tail.([]interface{})
+	if !ok || len(tailList) != 0 {
+		t.Fatalf("tail([1]) = %v, want []", tail)
+	}
+
+	sliced := e.evaluateExpressionWithContext("slice([1, 2, 3, 4], -3, -1)", nodes, rels)
+	sliceList, ok := sliced.([]interface{})
+	if !ok || len(sliceList) != 2 || sliceList[0] != int64(2) || sliceList[1] != int64(3) {
+		t.Fatalf("slice([1,2,3,4], -3, -1) = %v, want [2,3]", sliced)
+	}
+
+	gotLength := e.evaluateExpressionWithContextFullFunctions(
+		"length(p)",
+		nodes,
+		rels,
+		map[string]*PathResult{"p": {Length: 4}},
+		nil,
+		nil,
+		0,
+	)
+	assertEqual(t, "length(p)", int64(4), gotLength)
+
+	gotFallbackLength := e.evaluateExpressionWithContextFullFunctions("length(route)", nodes, rels, nil, nil, nil, 6)
+	assertEqual(t, "length(route)", int64(6), gotFallbackLength)
+}
+
+func assertEqual(t *testing.T, name string, expected interface{}, actual interface{}) {
+	t.Helper()
+	if actual != expected {
+		t.Fatalf("%s = %v, want %v", name, actual, expected)
+	}
+}
+
 // ========================================
 // List Functions Tests
 // ========================================

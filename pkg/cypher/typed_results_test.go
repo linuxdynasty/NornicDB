@@ -2,7 +2,9 @@ package cypher
 
 import (
 	"context"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -125,4 +127,67 @@ func TestTypedExecuteResult_Helpers(t *testing.T) {
 	assert.True(t, emptyResult.IsEmpty())
 	_, ok = emptyResult.First()
 	assert.False(t, ok)
+}
+
+func TestTypedDecodeRow_ValidationAndScalarPaths(t *testing.T) {
+	var scalar int
+	require.NoError(t, decodeRow([]string{"count"}, []interface{}{float64(7)}, &scalar))
+	assert.Equal(t, 7, scalar)
+
+	var badDest int
+	assert.Error(t, decodeRow([]string{"count"}, []interface{}{1}, badDest))
+
+	var unsupported map[string]interface{}
+	assert.Error(t, decodeRow([]string{"x", "y"}, []interface{}{1, 2}, &unsupported))
+}
+
+func TestTypedDecodeRow_MapAndConversions(t *testing.T) {
+	type row struct {
+		Name    string    `json:"name"`
+		Active  bool      `json:"active"`
+		Count   int64     `json:"count"`
+		Tags    []string  `json:"tags"`
+		Created time.Time `json:"created"`
+	}
+
+	var out row
+	err := decodeRow(
+		[]string{"payload"},
+		[]interface{}{map[string]interface{}{
+			"name":    "alice",
+			"active":  int64(1),
+			"count":   float64(3),
+			"tags":    []interface{}{"x", "y"},
+			"created": "2024-01-02 03:04:05",
+		}},
+		&out,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", out.Name)
+	assert.True(t, out.Active)
+	assert.Equal(t, int64(3), out.Count)
+	assert.Equal(t, []string{"x", "y"}, out.Tags)
+	assert.Equal(t, 2024, out.Created.Year())
+}
+
+func TestAssignValue_TimeAndErrorBranches(t *testing.T) {
+	var ts time.Time
+	v := reflect.ValueOf(&ts).Elem()
+	require.NoError(t, assignValue(v, int64(1700000000)))
+	assert.False(t, ts.IsZero())
+
+	require.NoError(t, assignValue(v, "2024-01-02T03:04:05Z"))
+	assert.Equal(t, 2024, ts.Year())
+
+	assert.Error(t, assignValue(v, "not-a-time"))
+
+	var b bool
+	bv := reflect.ValueOf(&b).Elem()
+	require.NoError(t, assignValue(bv, int(0)))
+	assert.False(t, b)
+
+	var f float64
+	fv := reflect.ValueOf(&f).Elem()
+	require.NoError(t, assignValue(fv, int64(9)))
+	assert.Equal(t, 9.0, f)
 }

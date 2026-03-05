@@ -1449,6 +1449,10 @@ func (e *ExpressionEvaluator) toFloat64(val interface{}) float64 {
 		return v
 	case float32:
 		return float64(v)
+	case string:
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
 	return 0
 }
@@ -2054,11 +2058,10 @@ func ExtractVariablesFromExpressionChain(chain IExpressionChainContext) []string
 		return nil
 	}
 
+	seen := make(map[string]struct{})
 	var vars []string
 	for _, expr := range chain.AllExpression() {
-		if varName := ExtractVariableFromExpression(expr); varName != "" {
-			vars = append(vars, varName)
-		}
+		collectVariablesFromTree(expr, seen, &vars)
 	}
 	return vars
 }
@@ -2145,4 +2148,130 @@ func ExtractVariableFromExpression(expr IExpressionContext) string {
 	}
 
 	return ""
+}
+
+func collectVariablesFromTree(tree antlr.Tree, seen map[string]struct{}, vars *[]string) {
+	if tree == nil {
+		return
+	}
+
+	switch n := tree.(type) {
+	case IExpressionContext:
+		for _, xor := range n.AllXorExpression() {
+			collectVariablesFromTree(xor, seen, vars)
+		}
+		return
+	case IXorExpressionContext:
+		for _, and := range n.AllAndExpression() {
+			collectVariablesFromTree(and, seen, vars)
+		}
+		return
+	case IAndExpressionContext:
+		for _, not := range n.AllNotExpression() {
+			collectVariablesFromTree(not, seen, vars)
+		}
+		return
+	case INotExpressionContext:
+		if comp := n.ComparisonExpression(); comp != nil {
+			collectVariablesFromTree(comp, seen, vars)
+		}
+		if exists := n.ExistsSubquery(); exists != nil {
+			collectVariablesFromTree(exists, seen, vars)
+		}
+		return
+	case IComparisonExpressionContext:
+		for _, add := range n.AllAddSubExpression() {
+			collectVariablesFromTree(add, seen, vars)
+		}
+		return
+	case IAddSubExpressionContext:
+		for _, mult := range n.AllMultDivExpression() {
+			collectVariablesFromTree(mult, seen, vars)
+		}
+		return
+	case IMultDivExpressionContext:
+		for _, power := range n.AllPowerExpression() {
+			collectVariablesFromTree(power, seen, vars)
+		}
+		return
+	case IPowerExpressionContext:
+		for _, unary := range n.AllUnaryAddSubExpression() {
+			collectVariablesFromTree(unary, seen, vars)
+		}
+		return
+	case IUnaryAddSubExpressionContext:
+		if atomic := n.AtomicExpression(); atomic != nil {
+			collectVariablesFromTree(atomic, seen, vars)
+		}
+		return
+	case IAtomicExpressionContext:
+		if prop := n.PropertyOrLabelExpression(); prop != nil {
+			collectVariablesFromTree(prop, seen, vars)
+		}
+		for _, str := range n.AllStringExpression() {
+			collectVariablesFromTree(str, seen, vars)
+		}
+		for _, list := range n.AllListExpression() {
+			collectVariablesFromTree(list, seen, vars)
+		}
+		return
+	case IStringExpressionContext:
+		if prop := n.PropertyOrLabelExpression(); prop != nil {
+			collectVariablesFromTree(prop, seen, vars)
+		}
+		return
+	case IListExpressionContext:
+		if prop := n.PropertyOrLabelExpression(); prop != nil {
+			collectVariablesFromTree(prop, seen, vars)
+		}
+		for _, child := range n.GetChildren() {
+			if expr, ok := child.(IExpressionContext); ok {
+				collectVariablesFromTree(expr, seen, vars)
+			}
+		}
+		return
+	case IPropertyOrLabelExpressionContext:
+		if prop := n.PropertyExpression(); prop != nil {
+			collectVariablesFromTree(prop, seen, vars)
+		}
+		return
+	case IPropertyExpressionContext:
+		if atom := n.Atom(); atom != nil {
+			if sym := atom.Symbol(); sym != nil {
+				name := sym.GetText()
+				if _, ok := seen[name]; !ok {
+					seen[name] = struct{}{}
+					*vars = append(*vars, name)
+				}
+				return
+			}
+			collectVariablesFromTree(atom, seen, vars)
+		}
+		return
+	case IAtomContext:
+		if fn := n.FunctionInvocation(); fn != nil {
+			collectVariablesFromTree(fn, seen, vars)
+			return
+		}
+		if paren := n.ParenthesizedExpression(); paren != nil && paren.Expression() != nil {
+			collectVariablesFromTree(paren.Expression(), seen, vars)
+			return
+		}
+		if subquery := n.SubqueryExist(); subquery != nil {
+			collectVariablesFromTree(subquery, seen, vars)
+			return
+		}
+		return
+	case IFunctionInvocationContext:
+		if chain := n.ExpressionChain(); chain != nil {
+			for _, expr := range chain.AllExpression() {
+				collectVariablesFromTree(expr, seen, vars)
+			}
+		}
+		return
+	}
+
+	for _, child := range tree.GetChildren() {
+		collectVariablesFromTree(child, seen, vars)
+	}
 }

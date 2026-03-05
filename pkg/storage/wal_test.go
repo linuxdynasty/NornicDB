@@ -101,6 +101,32 @@ func TestNewWAL(t *testing.T) {
 	})
 }
 
+func TestWAL_Config(t *testing.T) {
+	t.Run("nil wal returns nil config", func(t *testing.T) {
+		var wal *WAL
+		assert.Nil(t, wal.Config())
+	})
+
+	t.Run("returns configured wal config", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &WALConfig{
+			Dir:                  dir,
+			SyncMode:             "immediate",
+			BatchSyncInterval:    25 * time.Millisecond,
+			RetentionMaxSegments: 3,
+		}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		got := wal.Config()
+		require.NotNil(t, got)
+		assert.Equal(t, dir, got.Dir)
+		assert.Equal(t, "immediate", got.SyncMode)
+		assert.Equal(t, 3, got.RetentionMaxSegments)
+	})
+}
+
 func TestWAL_Append(t *testing.T) {
 	config.EnableWAL()
 	defer config.DisableWAL()
@@ -386,6 +412,107 @@ func TestWAL_ReadEntriesAfter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 5) // Entries 6-10
 	assert.Equal(t, uint64(6), entries[0].Sequence)
+}
+
+func TestCheckWALIntegrity(t *testing.T) {
+	t.Run("missing wal is healthy", func(t *testing.T) {
+		report, err := CheckWALIntegrity(filepath.Join(t.TempDir(), "missing.log"))
+		require.NoError(t, err)
+		require.NotNil(t, report)
+		assert.True(t, report.Healthy)
+		assert.Equal(t, "unknown", report.Format)
+	})
+
+	t.Run("empty wal is healthy", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		require.NoError(t, os.WriteFile(path, nil, 0644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotNil(t, report)
+		assert.True(t, report.Healthy)
+		assert.Equal(t, int64(0), report.FileSize)
+	})
+
+	t.Run("corrupted legacy wal is unhealthy", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		entry := WALEntry{
+			Sequence:  1,
+			Operation: OpCreateNode,
+			Data:      mustMarshal(WALNodeData{Node: &Node{ID: "bad-crc"}}),
+			Checksum:  123, // Deliberately wrong
+		}
+		payload, err := json.Marshal(entry)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, append(payload, '\n'), 0644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotNil(t, report)
+		assert.Equal(t, "legacy", report.Format)
+		assert.False(t, report.Healthy)
+		assert.Equal(t, 1, report.CorruptedEntries)
+	})
+}
+
+func TestWAL_ApplyRetention(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("closed wal returns error", func(t *testing.T) {
+		wal, err := NewWAL(t.TempDir(), DefaultWALConfig())
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+		assert.Equal(t, ErrWALClosed, wal.ApplyRetention(1))
+	})
+
+	t.Run("removes old segments after snapshot", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultWALConfig()
+		cfg.Dir = dir
+		cfg.RetentionMaxSegments = 1
+		cfg.RetentionMaxAge = 0
+
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		segDir := walSegmentsDir(dir)
+		oldSeg := WALSegment{
+			FirstSeq:  1,
+			LastSeq:   5,
+			SizeBytes: 10,
+			CreatedAt: time.Now().Add(-time.Hour),
+			Path:      "seg-00000000000000000001-00000000000000000005.wal",
+		}
+		newerSeg := WALSegment{
+			FirstSeq:  6,
+			LastSeq:   10,
+			SizeBytes: 10,
+			CreatedAt: time.Now(),
+			Path:      "seg-00000000000000000006-00000000000000000010.wal",
+		}
+		for _, seg := range []WALSegment{oldSeg, newerSeg} {
+			require.NoError(t, os.WriteFile(filepath.Join(segDir, seg.Path), []byte("segment"), 0644))
+		}
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version:  walManifestVersion,
+			Segments: []WALSegment{oldSeg, newerSeg},
+		}))
+
+		require.NoError(t, wal.ApplyRetention(10))
+
+		_, err = os.Stat(filepath.Join(segDir, oldSeg.Path))
+		assert.True(t, os.IsNotExist(err), "oldest segment should be pruned")
+
+		_, err = os.Stat(filepath.Join(segDir, newerSeg.Path))
+		assert.NoError(t, err, "newest retained segment should remain")
+
+		manifest, err := loadWALManifest(dir)
+		require.NoError(t, err)
+		require.Len(t, manifest.Segments, 1)
+		assert.Equal(t, newerSeg.Path, manifest.Segments[0].Path)
+	})
 }
 
 func TestSnapshot_CreateAndLoad(t *testing.T) {

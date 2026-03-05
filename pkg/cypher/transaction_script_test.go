@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,4 +116,44 @@ COMMIT
 	require.NoError(t, err)
 	require.Len(t, check.Rows, 1)
 	require.Nil(t, check.Rows[0][0])
+}
+
+func TestTransactionScriptHelpers_ParseAndMapBuilders(t *testing.T) {
+	body, ok := stripBeginTransactionPrefix("BEGIN TRANSACTION RETURN 1 COMMIT")
+	require.True(t, ok)
+	assert.Equal(t, "RETURN 1 COMMIT", body)
+
+	body, ok = stripBeginTransactionPrefix("BEGIN RETURN 1 COMMIT")
+	require.True(t, ok)
+	assert.Equal(t, "RETURN 1 COMMIT", body)
+
+	_, ok = stripBeginTransactionPrefix("MATCH (n) RETURN n")
+	assert.False(t, ok)
+
+	q, action, ok := splitTransactionScriptTailAction("RETURN 1 COMMIT")
+	require.True(t, ok)
+	assert.Equal(t, "RETURN 1", q)
+	assert.Equal(t, "COMMIT", action)
+
+	q, action, ok = splitTransactionScriptTailAction("RETURN 1 ROLLBACK")
+	require.True(t, ok)
+	assert.Equal(t, "RETURN 1", q)
+	assert.Equal(t, "ROLLBACK", action)
+
+	_, _, ok = splitTransactionScriptTailAction("COMMIT")
+	assert.False(t, ok)
+
+	n := &storage.Node{ID: "n1", Labels: []string{"Node"}, Properties: map[string]interface{}{"x": 1}}
+	e := &storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "LOOP"}
+	nodes, rels := buildRowGraphContext([]string{"n", "r", "value"}, []interface{}{n, e, 42})
+	assert.Contains(t, nodes, "n")
+	assert.Contains(t, rels, "r")
+	assert.Equal(t, n, nodes["n"])
+	assert.Equal(t, e, rels["r"])
+
+	vals := buildRowValueMap([]string{"a", "b", "c"}, []interface{}{1, "two"})
+	assert.Equal(t, 1, vals["a"])
+	assert.Equal(t, "two", vals["b"])
+	_, exists := vals["c"]
+	assert.False(t, exists)
 }

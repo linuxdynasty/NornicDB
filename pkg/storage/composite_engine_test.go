@@ -1,11 +1,94 @@
 package storage
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCompositeEngine_RoutingSetters(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	engine2 := NewMemoryEngine()
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1, "db2": engine2},
+		map[string]string{"db1": "db1", "db2": "db2"},
+		map[string]string{"db1": "read_write", "db2": "read_write"},
+	)
+
+	composite.SetLabelRouting("Person", []string{"db2"})
+	composite.SetPropertyRouting("database_id", "tenant-a", "db1")
+	composite.SetPropertyDefault("database_id", "db2")
+
+	composite.mu.RLock()
+	defer composite.mu.RUnlock()
+	assert.Equal(t, []string{"db2"}, composite.labelRouting["person"])
+	assert.Equal(t, "db1", composite.propertyRouting["database_id"]["tenant-a"])
+	assert.Equal(t, "db2", composite.propertyDefaults["database_id"])
+}
+
+func TestCompositeEngine_StreamingAPIs(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	engine2 := NewMemoryEngine()
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1, "db2": engine2},
+		map[string]string{"db1": "db1", "db2": "db2"},
+		map[string]string{"db1": "read_write", "db2": "read_write"},
+	)
+
+	_, err := engine1.CreateNode(&Node{ID: NodeID(prefixTestID("n1")), Labels: []string{"A"}})
+	require.NoError(t, err)
+	_, err = engine2.CreateNode(&Node{ID: NodeID(prefixTestID("n2")), Labels: []string{"B"}})
+	require.NoError(t, err)
+	require.NoError(t, engine1.CreateEdge(&Edge{ID: EdgeID(prefixTestID("e1")), StartNode: NodeID(prefixTestID("n1")), EndNode: NodeID(prefixTestID("n1")), Type: "LOOP"}))
+	require.NoError(t, engine2.CreateEdge(&Edge{ID: EdgeID(prefixTestID("e2")), StartNode: NodeID(prefixTestID("n2")), EndNode: NodeID(prefixTestID("n2")), Type: "LOOP"}))
+
+	ctx := context.Background()
+	var nodeCount int
+	err = composite.StreamNodes(ctx, func(node *Node) error {
+		nodeCount++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, nodeCount)
+
+	var edgeCount int
+	err = composite.StreamEdges(ctx, func(edge *Edge) error {
+		edgeCount++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, edgeCount)
+
+	var chunkCount int
+	err = composite.StreamNodeChunks(ctx, 1, func(nodes []*Node) error {
+		chunkCount += len(nodes)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, chunkCount)
+}
+
+func TestCompositeEngine_ReadWriteSelectorsAndDeleteByPrefix(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	engine2 := NewMemoryEngine()
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1, "db2": engine2, "db3": nil},
+		map[string]string{"db1": "db1", "db2": "db2", "db3": "db3"},
+		map[string]string{"db1": "read", "db2": "read_write", "db3": "read_write"},
+	)
+
+	reads := composite.getConstituentsForRead()
+	assert.ElementsMatch(t, []string{"db1", "db2"}, reads)
+
+	writes := composite.getConstituentsForWrite()
+	assert.ElementsMatch(t, []string{"db2"}, writes)
+
+	_, _, err := composite.DeleteByPrefix("tenant:")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported on composite")
+}
 
 func TestCompositeEngine_CreateNode(t *testing.T) {
 	// Create constituent engines

@@ -221,125 +221,16 @@ skipArrayIndexing:
 	// ========================================
 	// Cypher Functions (Neo4j compatible)
 	// ========================================
-
-	// id(n) - return internal node/relationship ID
-	if matchFuncStartAndSuffix(expr, "id") {
-		inner := extractFuncArgs(expr, "id")
-		if node, ok := nodes[inner]; ok {
-			return string(node.ID)
-		}
-		if rel, ok := rels[inner]; ok {
-			return string(rel.ID)
-		}
-		return nil
-	}
-
-	// elementId(n) - same as id() for compatibility
-	if matchFuncStartAndSuffix(expr, "elementid") {
-		inner := extractFuncArgs(expr, "elementid")
-		if node, ok := nodes[inner]; ok {
-			return fmt.Sprintf("4:nornicdb:%s", node.ID)
-		}
-		if rel, ok := rels[inner]; ok {
-			return fmt.Sprintf("5:nornicdb:%s", rel.ID)
-		}
-		return nil
-	}
-
-	// labels(n) - return list of labels for a node
-	if matchFuncStartAndSuffix(expr, "labels") {
-		inner := extractFuncArgs(expr, "labels")
-		// fmt.Printf("DEBUG labels(): inner=%q, nodes=%+v\n", inner, nodes)
-		if node, ok := nodes[inner]; ok {
-			// Return labels as a list of strings
-			result := make([]interface{}, len(node.Labels))
-			for i, label := range node.Labels {
-				result[i] = label
-			}
-			return result
-		}
-		// Check if this is a nested expression like labels(f) where f is a value in nodes
-		// Try to get the node if inner is a variable reference
-		if innerVal := e.evaluateExpressionWithContext(inner, nodes, rels); innerVal != nil {
-			if node, ok := innerVal.(*storage.Node); ok {
-				result := make([]interface{}, len(node.Labels))
-				for i, label := range node.Labels {
-					result[i] = label
-				}
-				return result
-			}
-		}
-		return nil
-	}
-
-	// type(r) - return relationship type
-	if matchFuncStartAndSuffix(expr, "type") {
-		inner := extractFuncArgs(expr, "type")
-		if rel, ok := rels[inner]; ok {
-			return rel.Type
-		}
-		// Also handle the case where inner is a map representation (from list comprehension)
-		innerVal := e.evaluateExpressionWithContextFull(inner, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
-		if mapVal, ok := innerVal.(map[string]interface{}); ok {
-			if relType, ok := mapVal["type"]; ok {
-				return relType
-			}
-		}
-		return nil
-	}
-
-	// keys(n) - return list of property keys
-	if matchFuncStartAndSuffix(expr, "keys") {
-		inner := extractFuncArgs(expr, "keys")
-		if node, ok := nodes[inner]; ok {
-			keys := make([]interface{}, 0, len(node.Properties))
-			for k := range node.Properties {
-				keys = append(keys, k)
-			}
-			return keys
-		}
-		if rel, ok := rels[inner]; ok {
-			keys := make([]interface{}, 0, len(rel.Properties))
-			for k := range rel.Properties {
-				keys = append(keys, k)
-			}
-			return keys
-		}
-		return nil
-	}
-
-	// properties(n) - return all properties as a map
-	if matchFuncStartAndSuffix(expr, "properties") {
-		inner := extractFuncArgs(expr, "properties")
-		if node, ok := nodes[inner]; ok {
-			return node.Properties
-		}
-		if rel, ok := rels[inner]; ok {
-			return rel.Properties
-		}
-		return nil
-	}
+	// Core scalar functions like id(), labels(), type(), keys(), properties(),
+	// size(), coalesce(), toLower(), and toUpper() are dispatched above via
+	// pkg/cypher/fn. Keep only evaluator-specific behavior here to avoid
+	// duplicate implementations drifting apart.
 
 	// Note: count(), sum(), avg(), etc. are aggregation functions and should NOT be
 	// evaluated here. They must be handled by executeAggregation() in match.go or
 	// executeMatchWithRelationships() in traversal.go. If we reach here with count(),
 	// it means the query wasn't properly detected as an aggregation query - that's a bug
 	// in the query router, not something we should handle here.
-
-	// size(list) or size(string) - return length
-	if matchFuncStartAndSuffix(expr, "size") {
-		inner := extractFuncArgs(expr, "size")
-		innerVal := e.evaluateExpressionWithContext(inner, nodes, rels)
-		switch v := innerVal.(type) {
-		case string:
-			return int64(len(v))
-		case []interface{}:
-			return int64(len(v))
-		case []string:
-			return int64(len(v))
-		}
-		return int64(0)
-	}
 
 	// length(path) - same as size for compatibility, with special handling for paths
 	if matchFuncStartAndSuffix(expr, "length") {
@@ -384,19 +275,6 @@ skipArrayIndexing:
 			}
 		}
 		return false
-	}
-
-	// coalesce(val1, val2, ...) - return first non-null value
-	if matchFuncStartAndSuffix(expr, "coalesce") {
-		inner := extractFuncArgs(expr, "coalesce")
-		args := e.splitFunctionArgs(inner)
-		for _, arg := range args {
-			val := e.evaluateExpressionWithContext(strings.TrimSpace(arg), nodes, rels)
-			if val != nil {
-				return val
-			}
-		}
-		return nil
 	}
 
 	// head(list) - return first element
@@ -1067,32 +945,12 @@ skipArrayIndexing:
 		return []interface{}{val}
 	}
 
-	// toLower(string)
-	if matchFuncStartAndSuffix(expr, "tolower") {
-		inner := extractFuncArgs(expr, "tolower")
-		val := e.evaluateExpressionWithContext(inner, nodes, rels)
-		if str, ok := val.(string); ok {
-			return strings.ToLower(str)
-		}
-		return nil
-	}
-
 	// lower(string) - alias for toLower
 	if matchFuncStartAndSuffix(expr, "lower") {
 		inner := extractFuncArgs(expr, "lower")
 		val := e.evaluateExpressionWithContext(inner, nodes, rels)
 		if str, ok := val.(string); ok {
 			return strings.ToLower(str)
-		}
-		return nil
-	}
-
-	// toUpper(string)
-	if matchFuncStartAndSuffix(expr, "toupper") {
-		inner := extractFuncArgs(expr, "toupper")
-		val := e.evaluateExpressionWithContext(inner, nodes, rels)
-		if str, ok := val.(string); ok {
-			return strings.ToUpper(str)
 		}
 		return nil
 	}
@@ -1212,20 +1070,6 @@ skipArrayIndexing:
 				n = len(str)
 			}
 			return str[len(str)-n:]
-		}
-		return nil
-	}
-
-	// reverse(string) - reverse a string
-	if matchFuncStartAndSuffix(expr, "reverse") {
-		inner := extractFuncArgs(expr, "reverse")
-		val := e.evaluateExpressionWithContext(inner, nodes, rels)
-		if str, ok := val.(string); ok {
-			runes := []rune(str)
-			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-				runes[i], runes[j] = runes[j], runes[i]
-			}
-			return string(runes)
 		}
 		return nil
 	}

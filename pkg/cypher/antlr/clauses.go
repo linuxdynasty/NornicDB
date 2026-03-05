@@ -249,17 +249,26 @@ func (w *clauseWalker) EnterReturnSt(ctx *ReturnStContext) {
 		return
 	}
 
-	// ReturnSt has ProjectionBody() containing the return expressions
+	// ReturnSt has ProjectionBody() containing projection items plus optional
+	// ORDER BY / SKIP / LIMIT modifiers. ReturnItems should only capture the
+	// projection items, not trailing modifiers.
 	if projBody := ctx.ProjectionBody(); projBody != nil {
-		w.info.ReturnItems = getChildText(projBody)
+		if items := projBody.ProjectionItems(); items != nil {
+			w.info.ReturnItems = getChildText(items)
+		}
 	}
 }
 
 // EnterWithSt captures WITH clause - extracts items from ProjectionBody
 func (w *clauseWalker) EnterWithSt(ctx *WithStContext) {
-	// WithSt has ProjectionBody() containing the with expressions
+	// WithSt has ProjectionBody() containing projection items plus optional
+	// ORDER BY / SKIP / LIMIT modifiers. WithItems should only capture the
+	// projection items, not trailing modifiers.
 	if projBody := ctx.ProjectionBody(); projBody != nil {
-		itemsText := getChildText(projBody)
+		itemsText := ""
+		if items := projBody.ProjectionItems(); items != nil {
+			itemsText = getChildText(items)
+		}
 		w.info.WithItemsList = append(w.info.WithItemsList, itemsText)
 		if w.info.WithItems == "" {
 			w.info.WithItems = itemsText

@@ -92,3 +92,38 @@ func TestApocHelpers_ExtractProcedureName(t *testing.T) {
 	assert.Len(t, got, 63)
 	assert.Equal(t, long[:60]+"...", got)
 }
+
+func TestApocHelpers_SharedCallUtilities(t *testing.T) {
+	parts := splitTopLevelComma(`a, [1,2], {x: 'a,b'}, "c,d"`)
+	assert.Equal(t, []string{"a", "[1,2]", "{x: 'a,b'}", `"c,d"`}, parts)
+	assert.Nil(t, splitTopLevelComma("   "))
+
+	m := map[string]interface{}{"a": 1, "b": "x"}
+	assert.Equal(t, "x", firstPresent(m, "missing", "b"))
+	assert.Nil(t, firstPresent(m, "missing"))
+	assert.Equal(t, "fallback", stringOr(1, "fallback"))
+	assert.Equal(t, "ok", stringOr("ok", "fallback"))
+
+	b, ok := toBool("true")
+	assert.True(t, ok)
+	assert.True(t, b)
+	_, ok = toBool(123)
+	assert.False(t, ok)
+
+	i, ok := toInt("42")
+	assert.True(t, ok)
+	assert.Equal(t, 42, i)
+	i, ok = toInt(float64(7.9))
+	assert.True(t, ok)
+	assert.Equal(t, 7, i)
+
+	f, ok := ragToFloat64("1.25")
+	assert.True(t, ok)
+	assert.Equal(t, 1.25, f)
+	f32, ok := toFloat32(int64(5))
+	assert.True(t, ok)
+	assert.Equal(t, float32(5), f32)
+
+	assert.Equal(t, []string{"a", "b"}, toStringSlice([]interface{}{"a", " ", "b", 9}))
+	assert.Nil(t, toStringSlice(123))
+}

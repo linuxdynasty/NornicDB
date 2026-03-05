@@ -349,3 +349,120 @@ func TestAsyncEngine_GetEdgesByType_WithData(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(edges), 1)
 }
+
+// ============================================================================
+// Label lookup / iteration / prefix delete delegates
+// ============================================================================
+
+func TestAsyncEngine_ForEachNodeIDByLabel_MergesCacheAndEngine(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+
+	// Engine-backed node
+	engineNode := makeNode("label-engine")
+	_, err := ae.GetEngine().CreateNode(engineNode)
+	require.NoError(t, err)
+
+	// Cache-backed node (not flushed yet)
+	cacheNode := makeNode("label-cache")
+	_, err = ae.CreateNode(cacheNode)
+	require.NoError(t, err)
+
+	seen := map[NodeID]bool{}
+	err = ae.ForEachNodeIDByLabel("testlabel", func(id NodeID) bool {
+		seen[id] = true
+		return true
+	})
+	require.NoError(t, err)
+	assert.True(t, seen[engineNode.ID], "engine node should be visited")
+	assert.True(t, seen[cacheNode.ID], "cached node should be visited")
+
+	// Nil callback is a no-op path.
+	require.NoError(t, ae.ForEachNodeIDByLabel("testlabel", nil))
+}
+
+func TestAsyncEngine_GetFirstAndGetNodesByLabel_CaseInsensitive(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+
+	// Cached first-hit path.
+	cacheNode := &Node{
+		ID:         NodeID(prefixTestID("first-cache")),
+		Labels:     []string{"MiXeDCaSe"},
+		Properties: map[string]interface{}{"name": "cached"},
+	}
+	_, err := ae.CreateNode(cacheNode)
+	require.NoError(t, err)
+
+	first, err := ae.GetFirstNodeByLabel("mixedcase")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	assert.Equal(t, cacheNode.ID, first.ID)
+
+	// Engine fallback path.
+	require.NoError(t, ae.Flush())
+	engineOnly := &Node{
+		ID:         NodeID(prefixTestID("first-engine")),
+		Labels:     []string{"EngineOnly"},
+		Properties: map[string]interface{}{"name": "engine"},
+	}
+	_, err = ae.GetEngine().CreateNode(engineOnly)
+	require.NoError(t, err)
+
+	first, err = ae.GetFirstNodeByLabel("engineonly")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	assert.Equal(t, engineOnly.ID, first.ID)
+
+	nodes, err := ae.GetNodesByLabel("mixedcase")
+	require.NoError(t, err)
+	assert.NotEmpty(t, nodes)
+}
+
+func TestAsyncEngine_GetIncomingEdges_MergesCacheAndEngine(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+
+	_, _ = ae.CreateNode(makeNode("in-n1"))
+	_, _ = ae.CreateNode(makeNode("in-n2"))
+	_, _ = ae.CreateNode(makeNode("in-n3"))
+	require.NoError(t, ae.Flush())
+
+	// Engine edge.
+	require.NoError(t, ae.GetEngine().CreateEdge(makeEdge("in-engine", "in-n1", "in-n2")))
+	// Cache edge.
+	require.NoError(t, ae.CreateEdge(makeEdge("in-cache", "in-n3", "in-n2")))
+
+	incoming, err := ae.GetIncomingEdges(NodeID(prefixTestID("in-n2")))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(incoming), 2)
+}
+
+func TestAsyncEngine_IterateNodes_DeleteByPrefix_LastWriteTime(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+
+	_, err := ae.CreateNode(makeNode("iter-a1"))
+	require.NoError(t, err)
+	_, err = ae.CreateNode(makeNode("iter-a2"))
+	require.NoError(t, err)
+	require.NoError(t, ae.Flush())
+
+	visited := 0
+	err = ae.IterateNodes(func(node *Node) bool {
+		if node != nil {
+			visited++
+		}
+		return true
+	})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, visited, 2)
+
+	// Cover LastWriteTime() delegate/fallback path.
+	_ = ae.LastWriteTime()
+
+	// Delete all test nodes by prefix and verify they're gone.
+	nodesDeleted, _, err := ae.DeleteByPrefix(prefixTestID("iter-"))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, nodesDeleted, int64(2))
+
+	remaining, err := ae.NodeCountByPrefix(prefixTestID("iter-"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), remaining)
+}

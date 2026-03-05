@@ -93,6 +93,50 @@ func TestAsyncEngine_Flush(t *testing.T) {
 	assert.Equal(t, int64(10), underlyingCount)
 }
 
+func TestAsyncEngine_EdgeLifecyclePaths(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	async := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: time.Hour})
+	defer async.Close()
+
+	// Seed nodes for valid edge endpoints.
+	_, err := engine.CreateNode(&Node{ID: NodeID(prefixTestID("edge-lifecycle-n1")), Labels: []string{"N"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: NodeID(prefixTestID("edge-lifecycle-n2")), Labels: []string{"N"}})
+	require.NoError(t, err)
+
+	assert.ErrorIs(t, async.CreateEdge(nil), ErrInvalidData)
+	assert.ErrorIs(t, async.UpdateEdge(nil), ErrInvalidData)
+
+	edgeID := EdgeID(prefixTestID("edge-lifecycle-e1"))
+	err = async.CreateEdge(&Edge{ID: edgeID, StartNode: NodeID(prefixTestID("edge-lifecycle-n1")), EndNode: NodeID(prefixTestID("edge-lifecycle-n2")), Type: "KNOWS", Properties: map[string]any{"v": 1}})
+	require.NoError(t, err)
+
+	// Update while still in cache (pre-flush path).
+	err = async.UpdateEdge(&Edge{ID: edgeID, StartNode: NodeID(prefixTestID("edge-lifecycle-n1")), EndNode: NodeID(prefixTestID("edge-lifecycle-n2")), Type: "KNOWS", Properties: map[string]any{"v": 2}})
+	require.NoError(t, err)
+
+	// Delete cached edge before flush -> should disappear without touching underlying engine.
+	err = async.DeleteEdge(edgeID)
+	require.NoError(t, err)
+	_, err = async.GetEdge(edgeID)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// Non-existent edge delete should return not found.
+	err = async.DeleteEdge(EdgeID(prefixTestID("edge-lifecycle-missing")))
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// Underlying-delete path: create directly in engine, then delete via async.
+	underID := EdgeID(prefixTestID("edge-lifecycle-under"))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: underID, StartNode: NodeID(prefixTestID("edge-lifecycle-n1")), EndNode: NodeID(prefixTestID("edge-lifecycle-n2")), Type: "KNOWS"}))
+	err = async.DeleteEdge(underID)
+	require.NoError(t, err)
+	require.NoError(t, async.Flush())
+	_, err = engine.GetEdge(underID)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
 // TestAsyncEngine_NodeCount_RaceCondition is a regression test for a bug where
 // NodeCount() could return inconsistent values due to a race condition with Flush().
 //

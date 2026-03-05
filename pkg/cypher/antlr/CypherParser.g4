@@ -256,7 +256,6 @@ andExpression
 notExpression
     : NOT? comparisonExpression
     | NOT? existsSubquery
-    | countSubquery comparisonSigns expression
     ;
 
 comparisonExpression
@@ -353,6 +352,7 @@ atom
     | caseExpression
     | reduceExpression
     | countAll
+    | countSubquery
     | listComprehension
     | patternComprehension
     | filterWith
