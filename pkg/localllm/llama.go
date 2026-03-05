@@ -36,10 +36,10 @@ package localllm
 
 // Linux with CUDA (GPU primary) - includes CUDA driver (-lcuda), runtime (-lcudart), cuBLAS, and OpenMP (-lgomp)
 #cgo linux,amd64,cuda LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_amd64_cuda -L/usr/local/cuda/lib64 -lcudart -lcublas -lcuda -lgomp -lm -lstdc++ -lpthread
-// Linux CPU fallback
-#cgo linux,amd64,!cuda LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_amd64 -lm -lstdc++ -lpthread
+// Linux CPU fallback (ggml-cpu uses OpenMP => link libgomp)
+#cgo linux,amd64,!cuda LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_amd64 -lgomp -lm -lstdc++ -lpthread
 
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_arm64 -lm -lstdc++ -lpthread
+#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_arm64 -lgomp -lm -lstdc++ -lpthread
 
 // macOS with Metal (GPU primary on Apple Silicon)
 // Set deployment target to macOS 26.0 to match llama library build (eliminates linker warnings)

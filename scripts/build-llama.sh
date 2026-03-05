@@ -97,15 +97,19 @@ done
 if [[ "$OS" == "darwin" ]]; then
     libtool -static -o "$OUTDIR/$LIB_NAME" "${LIBS[@]}"
 else
-    # On Linux, use ar to combine
-    AR_TMPDIR=$(mktemp -d)
-    cd "$AR_TMPDIR"
-    for lib in "${LIBS[@]}"; do
-        ar x "$lib"
-    done
-    ar rcs "$OUTDIR/$LIB_NAME" *.o
-    cd - > /dev/null
-    rm -rf "$AR_TMPDIR"
+    # On Linux, use an MRI script to add full archives directly.
+    # This avoids object-name collisions that can happen with `ar x` + re-pack.
+    MRI_FILE=$(mktemp)
+    {
+        echo "CREATE $OUTDIR/$LIB_NAME"
+        for lib in "${LIBS[@]}"; do
+            echo "ADDLIB $lib"
+        done
+        echo "SAVE"
+        echo "END"
+    } > "$MRI_FILE"
+    ar -M < "$MRI_FILE"
+    rm -f "$MRI_FILE"
 fi
 
 # Copy all required headers
