@@ -137,8 +137,8 @@ func TestBug_CountDuringFlush(t *testing.T) {
 		_, err := db.ExecuteCypher(ctx, fmt.Sprintf("CREATE (n:FlushTest {id: %d})", i), nil)
 		require.NoError(t, err)
 
-		// Query count immediately after each create
-		result, err := db.ExecuteCypher(ctx, "MATCH (n) RETURN count(n) as cnt", nil)
+		// Query count immediately after each create (scope to test label only)
+		result, err := db.ExecuteCypher(ctx, "MATCH (n:FlushTest) RETURN count(n) as cnt", nil)
 		require.NoError(t, err)
 		count := result.Rows[0][0].(int64)
 
@@ -151,8 +151,8 @@ func TestBug_CountDuringFlush(t *testing.T) {
 	// Wait for final flush
 	time.Sleep(100 * time.Millisecond)
 
-	// Final verification
-	result, err := db.ExecuteCypher(ctx, "MATCH (n) RETURN count(n) as cnt", nil)
+	// Final verification (scope to test label only)
+	result, err := db.ExecuteCypher(ctx, "MATCH (n:FlushTest) RETURN count(n) as cnt", nil)
 	require.NoError(t, err)
 	finalCount := result.Rows[0][0].(int64)
 	t.Logf("Final count: %d", finalCount)
