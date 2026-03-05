@@ -730,7 +730,7 @@ ifeq ($(HOST_OS),windows)
 	@set CGO_ENABLED=1 && go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
 ifeq ($(HOST_OS),linux)
-	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl" go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
 	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 endif
