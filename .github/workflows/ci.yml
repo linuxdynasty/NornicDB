@@ -3,7 +3,14 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - "main"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch, tag, or commit SHA to run CI against"
+        required: true
+        default: "main"
+        type: string
 
 jobs:
   ci:
@@ -15,6 +22,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
