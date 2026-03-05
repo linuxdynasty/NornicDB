@@ -599,7 +599,9 @@ func (m *DatabaseManager) CreateAlias(alias, databaseName string) error {
 	}
 
 	// Validate alias doesn't conflict with existing database name
-	if m.Exists(alias) {
+	// NOTE: do NOT call m.Exists() here — we already hold m.mu.Lock() and
+	// Exists() acquires m.mu.RLock(), which deadlocks on a non-re-entrant RWMutex.
+	if m.databases[alias] != nil {
 		return ErrAliasConflict
 	}
 

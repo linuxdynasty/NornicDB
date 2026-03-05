@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -254,4 +256,103 @@ func TestNamespacedEngine_Close(t *testing.T) {
 	node := &Node{ID: NodeID("test:test"), Labels: []string{"Test"}}
 	_, err = inner.CreateNode(node)
 	require.NoError(t, err)
+}
+
+func TestNamespacedEngine_StreamingAPIs(t *testing.T) {
+	inner := NewMemoryEngine()
+	defer inner.Close()
+
+	tenantA := NewNamespacedEngine(inner, "tenant_a")
+	tenantB := NewNamespacedEngine(inner, "tenant_b")
+
+	_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"name": "a1"}})
+	require.NoError(t, err)
+	_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"name": "a2"}})
+	require.NoError(t, err)
+	_, err = tenantB.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"name": "b1"}})
+	require.NoError(t, err)
+
+	err = tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"})
+	require.NoError(t, err)
+	err = tenantB.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "KNOWS"})
+	require.NoError(t, err)
+
+	var nodeIDs []NodeID
+	err = tenantA.StreamNodes(context.Background(), func(node *Node) error {
+		nodeIDs = append(nodeIDs, node.ID)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []NodeID{"n1", "n2"}, nodeIDs)
+
+	var edgeIDs []EdgeID
+	err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error {
+		edgeIDs = append(edgeIDs, edge.ID)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []EdgeID{"e1"}, edgeIDs)
+
+	var chunkedCount int
+	err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error {
+		chunkedCount += len(nodes)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, chunkedCount)
+}
+
+func TestNamespacedEngine_EmbeddingWrappersAndLastWriteTime(t *testing.T) {
+	inner := NewMemoryEngine()
+	defer inner.Close()
+	tenantA := NewNamespacedEngine(inner, "tenant_a")
+
+	// Wrapper methods should prefix transparently and not panic.
+	tenantA.AddToPendingEmbeddings("n1")
+	tenantA.MarkNodeEmbedded("n1")
+
+	removed := tenantA.RefreshPendingEmbeddingsIndex()
+	assert.GreaterOrEqual(t, removed, 0)
+
+	_ = tenantA.FindNodeNeedingEmbedding()
+
+	// Namespaced LastWriteTime intentionally returns zero to avoid cross-db false positives.
+	assert.Equal(t, time.Time{}, tenantA.LastWriteTime())
+}
+
+func TestNamespacedEngine_QueryDelegateMethods(t *testing.T) {
+	inner := NewMemoryEngine()
+	defer inner.Close()
+	tenantA := NewNamespacedEngine(inner, "tenant_a")
+
+	_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"name": "A"}})
+	require.NoError(t, err)
+	_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"name": "B"}})
+	require.NoError(t, err)
+	err = tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]any{}})
+	require.NoError(t, err)
+
+	first, err := tenantA.GetFirstNodeByLabel("Person")
+	require.NoError(t, err)
+	assert.NotNil(t, first)
+
+	incoming, err := tenantA.GetIncomingEdges("n2")
+	require.NoError(t, err)
+	assert.Len(t, incoming, 1)
+
+	byType, err := tenantA.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	assert.Len(t, byType, 1)
+
+	edge := tenantA.GetEdgeBetween("n1", "n2", "KNOWS")
+	assert.NotNil(t, edge)
+
+	all := tenantA.GetAllNodes()
+	assert.Len(t, all, 2)
+	assert.GreaterOrEqual(t, tenantA.GetOutDegree("n1"), 1)
+	assert.GreaterOrEqual(t, tenantA.GetInDegree("n2"), 1)
+
+	batch, err := tenantA.BatchGetNodes([]NodeID{"n1", "n2"})
+	require.NoError(t, err)
+	assert.Len(t, batch, 2)
 }

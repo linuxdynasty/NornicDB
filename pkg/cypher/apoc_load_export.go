@@ -623,6 +623,34 @@ func (e *StorageExecutor) callApocLoadCsvParams(ctx context.Context, cypher stri
 // Syntax: CALL apoc.import.json(urlOrFile) YIELD nodes, relationships
 func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	store := e.getStorage(ctx)
+	prefixIDs := true
+	dbName := GetUseDatabaseFromContext(ctx)
+	if dbName == "" {
+		if ns, ok := store.(*storage.NamespacedEngine); ok {
+			dbName = ns.Namespace()
+			prefixIDs = false
+		} else {
+			dbName = "nornic"
+		}
+	}
+	ensureNodeID := func(id string) storage.NodeID {
+		if id == "" {
+			return ""
+		}
+		if !prefixIDs {
+			return storage.NodeID(id)
+		}
+		return storage.NodeID(storage.EnsureDatabasePrefix(dbName, id))
+	}
+	ensureEdgeID := func(id string) storage.EdgeID {
+		if id == "" {
+			return ""
+		}
+		if !prefixIDs {
+			return storage.EdgeID(id)
+		}
+		return storage.EdgeID(storage.EnsureDatabasePrefix(dbName, id))
+	}
 	urlOrFile := e.extractApocLoadArg(cypher, "JSON")
 	if urlOrFile == "" {
 		// Try IMPORT marker
@@ -675,7 +703,7 @@ func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string)
 					}
 
 					if id, ok := nodeMap["id"].(string); ok {
-						node.ID = storage.NodeID(id)
+						node.ID = ensureNodeID(id)
 					}
 					if labels, ok := nodeMap["labels"].([]interface{}); ok {
 						for _, l := range labels {
@@ -706,16 +734,16 @@ func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string)
 					}
 
 					if id, ok := relMap["id"].(string); ok {
-						edge.ID = storage.EdgeID(id)
+						edge.ID = ensureEdgeID(id)
 					}
 					if t, ok := relMap["type"].(string); ok {
 						edge.Type = t
 					}
 					if start, ok := relMap["startNode"].(string); ok {
-						edge.StartNode = storage.NodeID(start)
+						edge.StartNode = ensureNodeID(start)
 					}
 					if end, ok := relMap["endNode"].(string); ok {
-						edge.EndNode = storage.NodeID(end)
+						edge.EndNode = ensureNodeID(end)
 					}
 					if props, ok := relMap["properties"].(map[string]interface{}); ok {
 						edge.Properties = props
