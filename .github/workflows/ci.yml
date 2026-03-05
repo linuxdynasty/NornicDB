@@ -41,7 +41,9 @@ jobs:
         run: make test
 
       - name: Generate coverage report
-        run: go test ./pkg/... -coverprofile=coverage.out
+        run: |
+          PKGS=$(go list ./pkg/... | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/graphql/generated$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$')
+          go test $PKGS -coverprofile=coverage.out
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
