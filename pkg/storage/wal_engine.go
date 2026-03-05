@@ -167,8 +167,9 @@ func (w *WALEngine) createSnapshotAndCompact() error {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	// Save snapshot with timestamp
-	timestamp := time.Now().Format("20060102-150405")
+	// Save snapshot with high-resolution timestamp to avoid filename collisions
+	// when snapshots happen multiple times within the same second.
+	timestamp := time.Now().Format("20060102-150405.000000000")
 	snapshotPath := filepath.Join(w.snapshotDir, fmt.Sprintf("snapshot-%s.json", timestamp))
 
 	if err := SaveSnapshot(snapshot, snapshotPath); err != nil {
