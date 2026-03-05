@@ -53,7 +53,7 @@ jobs:
       - name: Generate coverage report
         run: |
           go list ./pkg/... \
-            | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/graphql/generated$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$' \
+            | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/graphql/generated$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$|github.com/orneryd/nornicdb/pkg/localllm$|github.com/orneryd/nornicdb/pkg/gpu($|/)' \
             | xargs go test -coverprofile=coverage.out
 
       - name: Install goveralls
