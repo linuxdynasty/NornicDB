@@ -340,10 +340,10 @@ tasks(status=["pending"], unblocked_only=true)
 
 ## 📚 Further Reading
 
-- **[MCP Tools Quick Reference](../MCP_TOOLS_QUICKREF.md)** - Tool cheat sheet
-- **[Vector Search Guide](vector-search.md)** - Semantic search details
-- **[Getting Started](getting-started.md)** - NornicDB basics
-- **[Agent Preamble](../../docs/agents/claudette-mimir-v2.md)** - Full chat mode config
+- **[MCP Tools Quick Reference](../features/mcp-integration.md)** - Tool cheat sheet
+- **[Vector Search Guide](../user-guides/vector-search.md)** - Semantic search details
+- **[Getting Started](../getting-started/README.md)** - NornicDB basics
+- **[Agent Preamble](../../AGENTS.md)** - Full chat mode config
 
 ---
 

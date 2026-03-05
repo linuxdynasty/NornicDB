@@ -135,15 +135,15 @@ Welcome to **NornicDB** - A high-performance graph database with GPU acceleratio
 - **Version:** 1.0.0 🎉
 - **Status:** Production Ready ✅
 - **Docker:** `timothyswt/nornicdb-arm64-metal:latest`
-- **[Changelog](CHANGELOG.md)** - Version history and release notes
+- **[Changelog](../CHANGELOG.md)** - Version history and release notes
 
 ## 🤝 Contributing
 
-Found an issue or want to improve documentation? Check out our [Contributing Guide](CONTRIBUTING.md).
+Found an issue or want to improve documentation? Check out our [Contributing Guide](../CONTRIBUTING.md).
 
 ## 📄 License
 
-NornicDB is MIT licensed. See [LICENSE](../LICENSE) for details.
+NornicDB is MIT licensed. See [LICENSE](../LICENSE.md) for details.
 
 ---
 

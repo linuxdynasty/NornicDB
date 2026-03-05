@@ -254,6 +254,36 @@ func TestGetEntryTxID(t *testing.T) {
 			data:     WALTxData{TxID: "tx-789"},
 			expected: "tx-789",
 		},
+		{
+			name:     "edge with tx",
+			op:       OpCreateEdge,
+			data:     WALEdgeData{Edge: &Edge{ID: "e1"}, TxID: "tx-edge"},
+			expected: "tx-edge",
+		},
+		{
+			name:     "bulk nodes with tx",
+			op:       OpBulkNodes,
+			data:     WALBulkNodesData{Nodes: []*Node{{ID: "n1"}}, TxID: "tx-bulk-nodes"},
+			expected: "tx-bulk-nodes",
+		},
+		{
+			name:     "bulk edges with tx",
+			op:       OpBulkEdges,
+			data:     WALBulkEdgesData{Edges: []*Edge{{ID: "e1"}}, TxID: "tx-bulk-edges"},
+			expected: "tx-bulk-edges",
+		},
+		{
+			name:     "bulk delete nodes with tx",
+			op:       OpBulkDeleteNodes,
+			data:     WALBulkDeleteNodesData{IDs: []string{"n1"}, TxID: "tx-bulk-delete-nodes"},
+			expected: "tx-bulk-delete-nodes",
+		},
+		{
+			name:     "bulk delete edges with tx",
+			op:       OpBulkDeleteEdges,
+			data:     WALBulkDeleteEdgesData{IDs: []string{"e1"}, TxID: "tx-bulk-delete-edges"},
+			expected: "tx-bulk-delete-edges",
+		},
 	}
 
 	for _, tc := range tests {
@@ -272,6 +302,11 @@ func TestGetEntryTxID(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("malformed payload returns empty txid", func(t *testing.T) {
+		entry := WALEntry{Operation: OpCreateNode, Data: []byte("{bad-json")}
+		require.Empty(t, GetEntryTxID(entry))
+	})
 }
 
 // =============================================================================
@@ -560,6 +595,156 @@ func TestUndoDeleteEdge(t *testing.T) {
 	if !ok || since != 2020 {
 		t.Errorf("Edge properties should be restored with since=2020, got %v", e.Properties)
 	}
+}
+
+func TestUndoUpdateEdge(t *testing.T) {
+	baseEngine := NewMemoryEngine()
+	engine := NewNamespacedEngine(baseEngine, "test")
+
+	_, err := engine.CreateNode(&Node{ID: "n1", Labels: []string{"Test"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "n2", Labels: []string{"Test"}})
+	require.NoError(t, err)
+
+	oldEdge := &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{"since": 2020}}
+	require.NoError(t, engine.CreateEdge(oldEdge))
+	newEdge := &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{"since": 2024}}
+
+	data, _ := json.Marshal(WALEdgeData{Edge: newEdge, OldEdge: oldEdge})
+	entry := WALEntry{Sequence: 3, Operation: OpUpdateEdge, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+
+	require.NoError(t, ReplayWALEntry(engine, entry))
+	updated, _ := engine.GetEdge("e1")
+	require.NotNil(t, updated)
+	require.Equal(t, float64(2024), updated.Properties["since"])
+
+	require.NoError(t, UndoWALEntry(engine, entry))
+	restored, _ := engine.GetEdge("e1")
+	require.NotNil(t, restored)
+	require.Equal(t, float64(2020), restored.Properties["since"])
+}
+
+func TestReplayAndUndoBulkWALEntries(t *testing.T) {
+	nodes := []*Node{
+		{ID: "n1", Labels: []string{"Test"}},
+		{ID: "n2", Labels: []string{"Test"}},
+	}
+	edges := []*Edge{
+		{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"},
+	}
+
+	t.Run("bulk create nodes then undo", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		data, _ := json.Marshal(WALBulkNodesData{Nodes: nodes})
+		entry := WALEntry{Operation: OpBulkNodes, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(engine, entry))
+		require.NotNil(t, mustGetNodeForWALTest(t, engine, "n1"))
+		require.NoError(t, UndoWALEntry(engine, entry))
+		n, _ := engine.GetNode("n1")
+		require.Nil(t, n)
+	})
+
+	t.Run("bulk create edges then undo", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		data, _ := json.Marshal(WALBulkEdgesData{Edges: edges})
+		entry := WALEntry{Operation: OpBulkEdges, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(engine, entry))
+		e, _ := engine.GetEdge("e1")
+		require.NotNil(t, e)
+		require.NoError(t, UndoWALEntry(engine, entry))
+		e, _ = engine.GetEdge("e1")
+		require.Nil(t, e)
+	})
+
+	t.Run("bulk delete nodes then undo", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		data, _ := json.Marshal(WALBulkDeleteNodesData{IDs: []string{"n1", "n2"}, OldNodes: nodes})
+		entry := WALEntry{Operation: OpBulkDeleteNodes, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(engine, entry))
+		n, _ := engine.GetNode("n1")
+		require.Nil(t, n)
+		require.NoError(t, UndoWALEntry(engine, entry))
+		require.NotNil(t, mustGetNodeForWALTest(t, engine, "n1"))
+	})
+
+	t.Run("bulk delete edges then undo", func(t *testing.T) {
+		baseEngine := NewMemoryEngine()
+		engine := NewNamespacedEngine(baseEngine, "test")
+		for _, n := range nodes {
+			_, err := engine.CreateNode(n)
+			require.NoError(t, err)
+		}
+		require.NoError(t, engine.CreateEdge(edges[0]))
+		data, _ := json.Marshal(WALBulkDeleteEdgesData{IDs: []string{"e1"}, OldEdges: edges})
+		entry := WALEntry{Operation: OpBulkDeleteEdges, Data: data, Checksum: crc32Checksum(data), Database: "test"}
+		require.NoError(t, ReplayWALEntry(engine, entry))
+		e, _ := engine.GetEdge("e1")
+		require.Nil(t, e)
+		require.NoError(t, UndoWALEntry(engine, entry))
+		e, _ = engine.GetEdge("e1")
+		require.NotNil(t, e)
+	})
+}
+
+func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
+	baseEngine := NewMemoryEngine()
+	engine := NewNamespacedEngine(baseEngine, "test")
+
+	t.Run("marker operations are noops", func(t *testing.T) {
+		for _, op := range []OperationType{OpCheckpoint, OpTxBegin, OpTxCommit, OpTxAbort} {
+			require.NoError(t, ReplayWALEntry(engine, WALEntry{Operation: op}))
+			require.NoError(t, UndoWALEntry(engine, WALEntry{Operation: op}))
+		}
+		require.NoError(t, UndoWALEntry(engine, WALEntry{Operation: OpUpdateEmbedding}))
+	})
+
+	t.Run("unknown operations return errors", func(t *testing.T) {
+		require.Error(t, ReplayWALEntry(engine, WALEntry{Operation: OperationType("UNKNOWN")}))
+		require.Error(t, UndoWALEntry(engine, WALEntry{Operation: OperationType("UNKNOWN")}))
+	})
+
+	t.Run("malformed payloads return errors", func(t *testing.T) {
+		for _, entry := range []WALEntry{
+			{Operation: OpCreateEdge, Data: []byte("{bad"), Database: "test"},
+			{Operation: OpDeleteEdge, Data: []byte("{bad"), Database: "test"},
+			{Operation: OpBulkNodes, Data: []byte("{bad"), Database: "test"},
+			{Operation: OpBulkEdges, Data: []byte("{bad"), Database: "test"},
+			{Operation: OpBulkDeleteNodes, Data: []byte("{bad"), Database: "test"},
+			{Operation: OpBulkDeleteEdges, Data: []byte("{bad"), Database: "test"},
+		} {
+			require.Error(t, ReplayWALEntry(engine, entry))
+			require.Error(t, UndoWALEntry(engine, entry))
+		}
+	})
+
+	t.Run("bulk delete undo requires before image", func(t *testing.T) {
+		data, _ := json.Marshal(WALBulkDeleteNodesData{IDs: []string{"n1"}})
+		err := UndoWALEntry(engine, WALEntry{Operation: OpBulkDeleteNodes, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+
+		data, _ = json.Marshal(WALBulkDeleteEdgesData{IDs: []string{"e1"}})
+		err = UndoWALEntry(engine, WALEntry{Operation: OpBulkDeleteEdges, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+	})
+}
+
+func mustGetNodeForWALTest(t *testing.T, engine *NamespacedEngine, id NodeID) *Node {
+	t.Helper()
+	n, err := engine.GetNode(id)
+	require.NoError(t, err)
+	require.NotNil(t, n)
+	return n
 }
 
 // =============================================================================

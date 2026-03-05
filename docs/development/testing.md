@@ -151,5 +151,5 @@ Tests run automatically on:
 
 - **[Setup](setup.md)** - Development setup
 - **[Code Style](code-style.md)** - Code conventions
-- **[Contributing](../CONTRIBUTING.md)** - Contribution process
+- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
 

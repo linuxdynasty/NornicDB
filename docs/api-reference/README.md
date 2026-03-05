@@ -16,12 +16,12 @@
 
 ### HTTP API
 
-- **[REST Endpoints](http-api.md)** - HTTP API documentation
+- **[REST Endpoints](OPENAPI.md)** - HTTP API documentation
 - **[OpenAPI/Swagger Spec](openapi.yaml)** - Interactive API documentation
 - **[OpenAPI Guide](OPENAPI.md)** - How to use the OpenAPI specification
-- **[Transaction API](http-api.md#transactions)** - ACID transactions
-- **[Search Endpoints](http-api.md#search)** - Vector and hybrid search
-- **[Admin Endpoints](http-api.md#admin)** - System management
+- **[Transaction API](OPENAPI.md)** - ACID transactions
+- **[Search Endpoints](OPENAPI.md)** - Vector and hybrid search
+- **[Admin Endpoints](OPENAPI.md)** - System management
 
 ### GraphQL API
 
@@ -32,7 +32,7 @@
 ### Protocols
 
 - **[Bolt Protocol](bolt-protocol.md)** - Binary protocol specification
-- **[Client Drivers](client-drivers.md)** - Compatible drivers
+- **[Client Drivers](../neo4j-migration/feature-parity.md)** - Compatible drivers
 
 ## 🚀 Quick Start
 
@@ -192,7 +192,7 @@ POST /mcp                        - MCP server endpoint
 POST /api/bifrost/chat/completions - Heimdall AI chat
 ```
 
-[See complete HTTP API documentation →](http-api.md)  
+[See complete HTTP API documentation →](OPENAPI.md)  
 [OpenAPI/Swagger Specification →](openapi.yaml)
 
 ## 🔌 Client Drivers
@@ -207,7 +207,7 @@ NornicDB is compatible with official Neo4j drivers:
 - **Go:** `neo4j-go-driver`
 - **.NET:** Neo4j.Driver
 
-[See driver compatibility →](client-drivers.md)
+[See driver compatibility →](../neo4j-migration/feature-parity.md)
 
 ### Example Usage
 
@@ -261,7 +261,7 @@ result.records.forEach((record) => {
 Looking for a specific function or endpoint?
 
 - **[Cypher Functions Index](cypher-functions/)** - Searchable function list
-- **[HTTP API Reference](http-api.md)** - All endpoints
+- **[HTTP API Reference](OPENAPI.md)** - All endpoints
 - **[OpenAPI/Swagger Spec](openapi.yaml)** - Interactive API documentation
 - **[Bolt Protocol Spec](bolt-protocol.md)** - Protocol details
 

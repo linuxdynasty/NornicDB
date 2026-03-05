@@ -7,9 +7,9 @@
 - **[Search Methodology](searching.md)** - Complete guide to vector, full-text, RRF, and reranking
 - **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** - Performance comparison
 - **[Test Results](test-results.md)** - Test suite results
-- **[Optimization Guide](optimization-guide.md)** - Performance tuning
-- **[GPU Acceleration](gpu-acceleration.md)** - GPU performance
-- **[Query Optimization](query-optimization.md)** - Query tuning
+- **[Optimization Guide](http-optimization-options.md)** - Performance tuning
+- **[GPU Acceleration](../features/gpu-acceleration.md)** - GPU performance
+- **[Query Optimization](searching.md)** - Query tuning
 
 ## ⚡ Performance Highlights
 
@@ -34,4 +34,4 @@ See **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** for detailed comparisons.
 
 ---
 
-**Optimize your database** → **[Optimization Guide](optimization-guide.md)**
+**Optimize your database** → **[Optimization Guide](http-optimization-options.md)**

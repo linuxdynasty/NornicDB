@@ -164,6 +164,6 @@ go build ./cmd/nornicdb-bolt
 
 ## 📚 Next Steps
 
-- Read [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for feature status
-- Check [PHASE2_COMPLETION_SUMMARY.md](./PHASE2_COMPLETION_SUMMARY.md) for schema management
-- Review [NEO4J_GAP_ANALYSIS.md](./NEO4J_GAP_ANALYSIS.md) for compatibility details
+- Read [Feature Parity](../neo4j-migration/feature-parity.md) for feature status
+- Check [Multi-Database Guide](../user-guides/multi-database.md) for schema/database management
+- Review [Cypher Compatibility](../neo4j-migration/cypher-compatibility.md) for compatibility details

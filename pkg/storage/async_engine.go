@@ -1843,6 +1843,9 @@ func (ae *AsyncEngine) validateBulkNodeConstraints(nodes []*Node) error {
 }
 
 func (ae *AsyncEngine) validateNodeConstraints(node *Node) error {
+	if node == nil {
+		return ErrInvalidData
+	}
 	namespace, prefixRequired, err := ae.resolveNamespace(node.ID)
 	if err != nil {
 		return err

@@ -582,7 +582,7 @@ RETURN city
 - **[Cypher Functions Reference](../api-reference/cypher-functions/)** - Complete function list
 - **[Graph Traversal](graph-traversal.md)** - Advanced pattern matching
 - **[Complete Examples](complete-examples.md)** - Full applications
-- **[Performance Guide](../performance/query-optimization.md)** - Query optimization
+- **[Performance Guide](../performance/searching.md)** - Query optimization
 
 ---
 

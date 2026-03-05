@@ -1107,7 +1107,7 @@ If you see ordering issues:
 ## See Also
 
 - [Heimdall Architecture](../architecture/COGNITIVE_SLM_PROPOSAL.md)
-- [Bifrost UI Guide](./BIFROST_UI_GUIDE.md)
+- [Bifrost UI Guide](./heimdall-ai-assistant.md)
 - [Example Plugin: Watcher](../../plugins/heimdall/plugin.go)
 
 ---

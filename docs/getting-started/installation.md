@@ -346,15 +346,15 @@ Add to `~/.cursor/mcp.json`:
 | `task` | Manage single task |
 | `tasks` | Query multiple tasks |
 
-See **[Cursor Chat Mode Guide](cursor-chatmode.md)** for detailed usage.
+See **[Cursor Chat Mode Guide](../ai-agents/chat-modes.md)** for detailed usage.
 
 ## Next Steps
 
-- **[Cursor Chat Mode Guide](cursor-chatmode.md)** - Use with Cursor IDE
-- **[MCP Tools Quick Reference](../MCP_TOOLS_QUICKREF.md)** - Tool cheat sheet
-- **[Vector Search Guide](vector-search.md)** - Learn semantic search
-- **[Cypher Queries](cypher-queries.md)** - Master Neo4j queries
-- **[API Reference](../api-reference.md)** - Complete API docs
+- **[Cursor Chat Mode Guide](../ai-agents/chat-modes.md)** - Use with Cursor IDE
+- **[MCP Tools Quick Reference](../features/mcp-integration.md)** - Tool cheat sheet
+- **[Vector Search Guide](../user-guides/vector-search.md)** - Learn semantic search
+- **[Cypher Queries](../user-guides/cypher-queries.md)** - Master Neo4j queries
+- **[API Reference](../api-reference/)** - Complete API docs
 
 ## Troubleshooting
 
@@ -384,6 +384,6 @@ config.DecayArchiveThreshold = 0.05
 
 ## Getting Help
 
-- **[Documentation](../index.md)** - Full documentation
+- **[Documentation](../README.md)** - Full documentation
 - **[GitHub Issues](https://github.com/orneryd/nornicdb/issues)** - Report bugs
 - **[Issues](https://github.com/orneryd/NornicDB/issues)** - Ask questions

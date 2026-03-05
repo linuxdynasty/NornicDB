@@ -533,9 +533,9 @@ curl http://localhost:8080/health
 
 ## Related Docs
 
-- [GPU K-Means](../GPU_KMEANS_IMPLEMENTATION_PLAN.md) - GPU clustering
-- [Functions Index](../FUNCTIONS_INDEX.md) - Vector similarity functions
-- [Search Implementation](../SEARCH_IMPLEMENTATION.md) - Hybrid search internals
+- [GPU K-Means](../advanced/k-means-clustering/gpu-implementation.md) - GPU clustering
+- [Functions Index](../api-reference/cypher-functions/) - Vector similarity functions
+- [Search Implementation](../performance/searching.md) - Hybrid search internals
 
 ---
 

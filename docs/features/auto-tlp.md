@@ -319,7 +319,7 @@ Mitigations:
 - Caching prevents redundant reviews
 - Size limits avoid slow large-context calls
 
-See [Heimdall TLP QC Proposal](../proposals/HEIMDALL_TLP_QC.md) for full details.
+See [Heimdall TLP QC Proposal](auto-tlp-heimdall.md) for full details.
 
 ## Summary
 

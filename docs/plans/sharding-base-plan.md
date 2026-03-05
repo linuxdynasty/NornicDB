@@ -226,7 +226,7 @@ Uses the existing `pkg/bolt/` client types. Each remote call is just `RUN query 
 
 ## Critical New File: `pkg/storage/remote_engine.go`
 
-Implements `storage.Engine` by forwarding all calls to a remote NornicDB node over Bolt. This directly fills the `ConstituentRef{Type:"remote"}` TODO in [`pkg/multidb/composite.go`](pkg/multidb/composite.go) and lets `CompositeEngine` span machines without any changes to CompositeEngine itself.
+Implements `storage.Engine` by forwarding all calls to a remote NornicDB node over Bolt. This directly fills the `ConstituentRef{Type:"remote"}` TODO in [`pkg/multidb/composite.go`](../../pkg/multidb/composite.go) and lets `CompositeEngine` span machines without any changes to CompositeEngine itself.
 
 ```go
 type RemoteEngine struct {
@@ -254,7 +254,7 @@ type ShardRouter struct {
 
 ## Distributed Vector Search
 
-No new packages needed. `IVFHNSWCandidateGen` in [`pkg/search/ivf_hnsw_candidate_gen.go`](pkg/search/ivf_hnsw_candidate_gen.go) already accepts a `clusterHNSWLookup` function. For remote shards, that function calls the shard's `/nornicdb/search` HTTP endpoint and returns candidates. The existing RRF fusion in `search.go` merges them.
+No new packages needed. `IVFHNSWCandidateGen` in [`pkg/search/ivf_hnsw_candidate_gen.go`](../../pkg/search/ivf_hnsw_candidate_gen.go) already accepts a `clusterHNSWLookup` function. For remote shards, that function calls the shard's `/nornicdb/search` HTTP endpoint and returns candidates. The existing RRF fusion in `search.go` merges them.
 
 ```go
 // In service setup, for each remote shard:
@@ -280,7 +280,7 @@ gen.SetClusterSelector(func(ctx context.Context, query []float32, n int) []int {
 
 ### Backend: `pkg/server/server_cluster.go`
 
-New file following the existing `server_dbconfig.go` pattern. All routes registered in [`pkg/server/server_router.go`](pkg/server/server_router.go) under `auth.PermAdmin`.
+New file following the existing `server_dbconfig.go` pattern. All routes registered in [`pkg/server/server_router.go`](../../pkg/server/server_router.go) under `auth.PermAdmin`.
 
 **Shard Registry**
 
@@ -380,7 +380,7 @@ export interface DatabaseInfo {
 
 ### UI: New Page `ui/src/pages/ClusterTopology.tsx`
 
-New route `/cluster` registered in [`ui/src/App.tsx`](ui/src/App.tsx). Follows the same `PageLayout` + `PageHeader` + `Modal` pattern as [`ui/src/pages/Databases.tsx`](ui/src/pages/Databases.tsx) and [`ui/src/pages/DatabaseAccess.tsx`](ui/src/pages/DatabaseAccess.tsx).
+New route `/cluster` registered in [`ui/src/App.tsx`](../../ui/src/App.tsx). Follows the same `PageLayout` + `PageHeader` + `Modal` pattern as [`ui/src/pages/Databases.tsx`](../../ui/src/pages/Databases.tsx) and [`ui/src/pages/DatabaseAccess.tsx`](../../ui/src/pages/DatabaseAccess.tsx).
 
 **Three sections on one page:**
 
@@ -414,14 +414,14 @@ New route `/cluster` registered in [`ui/src/App.tsx`](ui/src/App.tsx). Follows t
 
 ### Navigation
 
-Add `/cluster` to the side navigation in [`ui/src/components/common/PageLayout.tsx`](ui/src/components/common/PageLayout.tsx) under the existing admin-only section (alongside `/databases`, `/security`), visible only when the current user has the `admin` role. Icon: `Network` from lucide-react.
+Add `/cluster` to the side navigation in [`ui/src/components/common/PageLayout.tsx`](../../ui/src/components/common/PageLayout.tsx) under the existing admin-only section (alongside `/databases`, `/security`), visible only when the current user has the `admin` role. Icon: `Network` from lucide-react.
 
 ## Key Existing Files (no changes needed)
 
-- [`pkg/replication/raft.go`](pkg/replication/raft.go) — HA per shard, untouched
-- [`pkg/storage/composite_engine.go`](pkg/storage/composite_engine.go) — parallel fan-out reads already work; Phase 1 just feeds it a `RemoteEngine`
-- [`pkg/multidb/routing.go`](pkg/multidb/routing.go) — `RoutingStrategy` interface; `ShardRouter` implements it
-- [`pkg/search/ivf_hnsw_candidate_gen.go`](pkg/search/ivf_hnsw_candidate_gen.go) — cluster selector hook already exists
+- [`pkg/replication/raft.go`](../../pkg/replication/raft.go) — HA per shard, untouched
+- [`pkg/storage/composite_engine.go`](../../pkg/storage/composite_engine.go) — parallel fan-out reads already work; Phase 1 just feeds it a `RemoteEngine`
+- [`pkg/multidb/routing.go`](../../pkg/multidb/routing.go) — `RoutingStrategy` interface; `ShardRouter` implements it
+- [`pkg/search/ivf_hnsw_candidate_gen.go`](../../pkg/search/ivf_hnsw_candidate_gen.go) — cluster selector hook already exists
 
 ## Critical Constraint (matches Neo4j community Fabric)
 

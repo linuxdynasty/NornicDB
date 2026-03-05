@@ -8,6 +8,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/config"
+	"github.com/stretchr/testify/require"
 )
 
 // =============================================================================
@@ -77,6 +79,125 @@ func TestAtomicWALWriteFormat(t *testing.T) {
 	if entries[0].Operation != OpCreateNode {
 		t.Errorf("Expected OpCreateNode, got %s", entries[0].Operation)
 	}
+}
+
+func TestCheckAtomicWALIntegrity_DetectsCorruptionBranches(t *testing.T) {
+	makePayload := func(seq uint64) []byte {
+		entry := WALEntry{Sequence: seq, Timestamp: time.Now(), Operation: OpCreateNode, Data: mustMarshalRaw(WALNodeData{Node: &Node{ID: NodeID("n1"), Labels: []string{"Test"}}})}
+		payload, err := json.Marshal(entry)
+		require.NoError(t, err)
+		return payload
+	}
+
+	t.Run("crc mismatch after valid entry", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "wal.log")
+
+		var buf bytes.Buffer
+		_, err := writeAtomicRecordV2(&buf, makePayload(1))
+		require.NoError(t, err)
+		start := buf.Len()
+		payload2 := makePayload(2)
+		_, err = writeAtomicRecordV2(&buf, payload2)
+		require.NoError(t, err)
+		data := buf.Bytes()
+		crcOffset := start + 9 + len(payload2)
+		data[crcOffset] ^= 0xFF
+		require.NoError(t, os.WriteFile(path, data, 0644))
+
+		file, err := os.Open(path)
+		require.NoError(t, err)
+		defer file.Close()
+		report, err := checkAtomicWALIntegrity(file, &WALIntegrityReport{Healthy: true, Format: "atomic"})
+		require.NoError(t, err)
+		require.False(t, report.Healthy)
+		require.Equal(t, 1, report.CorruptedEntries)
+		require.NotEmpty(t, report.CorruptionDetails)
+	})
+
+	t.Run("invalid magic and oversized payload", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "wal.log")
+
+		var buf bytes.Buffer
+		_, err := writeAtomicRecordV2(&buf, makePayload(1))
+		require.NoError(t, err)
+		header := make([]byte, 9)
+		binary.LittleEndian.PutUint32(header[0:4], walMagic)
+		header[4] = walFormatVersion
+		binary.LittleEndian.PutUint32(header[5:9], walMaxEntrySize+1)
+		buf.Write(header)
+		require.NoError(t, os.WriteFile(path, buf.Bytes(), 0644))
+
+		file, err := os.Open(path)
+		require.NoError(t, err)
+		defer file.Close()
+		report, err := checkAtomicWALIntegrity(file, &WALIntegrityReport{Healthy: true, Format: "atomic"})
+		require.NoError(t, err)
+		require.False(t, report.Healthy)
+		require.NotEmpty(t, report.Errors)
+	})
+
+	t.Run("invalid trailer and partial header", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "wal.log")
+
+		payload := makePayload(1)
+		var buf bytes.Buffer
+		_, err := writeAtomicRecordV2(&buf, payload)
+		require.NoError(t, err)
+		data := buf.Bytes()
+		trailerOffset := 9 + len(payload) + 4
+		data[trailerOffset] ^= 0xAA
+		data = append(data, 0x57, 0x41)
+		require.NoError(t, os.WriteFile(path, data, 0644))
+
+		file, err := os.Open(path)
+		require.NoError(t, err)
+		defer file.Close()
+		report, err := checkAtomicWALIntegrity(file, &WALIntegrityReport{Healthy: true, Format: "atomic"})
+		require.NoError(t, err)
+		require.NotEmpty(t, report.Errors)
+	})
+}
+
+func TestReadWALEntriesForTruncation_Formats(t *testing.T) {
+	t.Run("legacy format reader", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		enc := json.NewEncoder(f)
+		require.NoError(t, enc.Encode(&WALEntry{Sequence: 1, Operation: OpCheckpoint}))
+		require.NoError(t, enc.Encode(&WALEntry{Sequence: 2, Operation: OpCreateNode}))
+		require.NoError(t, enc.Encode(&WALEntry{Sequence: 3, Operation: OpCreateNode}))
+		_, _ = f.WriteString("{bad-json")
+		require.NoError(t, f.Close())
+
+		entries, err := readWALEntriesForTruncation(path, 1)
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		require.Equal(t, uint64(2), entries[0].Sequence)
+	})
+
+	t.Run("atomic format reader", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		var buf bytes.Buffer
+		for _, seq := range []uint64{1, 2, 3} {
+			entry := WALEntry{Sequence: seq, Timestamp: time.Now(), Operation: OpCreateNode}
+			payload, err := json.Marshal(entry)
+			require.NoError(t, err)
+			_, err = writeAtomicRecordV2(&buf, payload)
+			require.NoError(t, err)
+		}
+		buf.Write([]byte{0x57, 0x41})
+		require.NoError(t, os.WriteFile(path, buf.Bytes(), 0644))
+
+		entries, err := readWALEntriesForTruncation(path, 1)
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		require.Equal(t, uint64(2), entries[0].Sequence)
+		require.Equal(t, uint64(3), getLastSeq(entries))
+	})
 }
 
 // TestAtomicWALMultipleEntries verifies multiple entries are written correctly.

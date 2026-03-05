@@ -487,7 +487,7 @@ services:
 ## ⏭️ Next Steps
 
 - **[Operations Guide](../operations/)** - Monitoring, backup, scaling
-- **[Performance Tuning](../performance/optimization-guide.md)** - Optimize for your workload
+- **[Performance Tuning](../performance/http-optimization-options.md)** - Optimize for your workload
 - **[Security Guide](../compliance/)** - GDPR, HIPAA, SOC2 compliance
 
 ---

@@ -133,7 +133,7 @@ MATCH (n) WHERE n.age IS NOT NULL RETURN n.age, apoc.meta.type(n.age)
 ## Questions?
 
 - Open an issue on GitHub
-- Check the [troubleshooting guide](./troubleshooting/)
+- Check the [troubleshooting guide](./operations/troubleshooting.md)
 
 ---
 

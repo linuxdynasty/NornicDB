@@ -415,4 +415,4 @@ func (ast *AST) ToPluginView() *PluginASTView {
 **See Also:**
 - [Query Cache Security](query-cache-security.md) - Cache-specific security
 - [HTTP Security](http-security.md) - Network-level protections
-- [Plugin Development Guide](../development/plugin-guide.md) - Building secure plugins
+- [Plugin Development Guide](../architecture/plugin-system.md) - Building secure plugins

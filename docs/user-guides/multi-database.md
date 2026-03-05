@@ -142,7 +142,7 @@ The system database (`"system"`) is a special database used for NornicDB's inter
 - User accounts are included in database backups automatically
 - Internal database IDs are never exposed in API responses for security
 
-See **[User Storage in System Database](../../plans/user-storage-in-system-db.md)** for details.
+See **[User Storage in System Database](#system-database)** for details.
 
 The system database is:
 - Automatically created

@@ -118,8 +118,8 @@ See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
 ### Advanced
 1. [Hybrid Search](hybrid-search.md)
 2. [Advanced Topics](../advanced/) - K-Means clustering, embeddings
-3. [Performance Tuning](../performance/optimization-guide.md)
-4. [Custom Functions](../advanced/custom-functions.md)
+3. [Performance Tuning](../performance/http-optimization-options.md)
+4. [Custom Functions](../features/plugin-system.md)
 
 ## 🔍 Search Features
 

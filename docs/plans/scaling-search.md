@@ -35,16 +35,16 @@ todos:
 
 ## Current Baseline (What we are changing)
 
-- Current RRF hybrid flow runs vector search first, BM25 second, then type filtering and RRF fusion in [pkg/search/search.go](/Users/c815719/src/NornicDB/pkg/search/search.go).
-- Vector strategy already has static N-based switching and candidate generators in [pkg/search/vector_pipeline.go](/Users/c815719/src/NornicDB/pkg/search/vector_pipeline.go) and [pkg/search/search.go](/Users/c815719/src/NornicDB/pkg/search/search.go).
-- BM25 v2 is local-index scoped with mutable IDF recomputation in [pkg/search/fulltext_index_v2.go](/Users/c815719/src/NornicDB/pkg/search/fulltext_index_v2.go).
-- HNSW quality profiles exist today (`fast|balanced|accurate`) in [pkg/search/hnsw_config.go](/Users/c815719/src/NornicDB/pkg/search/hnsw_config.go).
+- Current RRF hybrid flow runs vector search first, BM25 second, then type filtering and RRF fusion in [pkg/search/search.go](../../pkg/search/search.go).
+- Vector strategy already has static N-based switching and candidate generators in [pkg/search/vector_pipeline.go](../../pkg/search/vector_pipeline.go) and [pkg/search/search.go](../../pkg/search/search.go).
+- BM25 v2 is local-index scoped with mutable IDF recomputation in [pkg/search/fulltext_index_v2.go](../../pkg/search/fulltext_index_v2.go).
+- HNSW quality profiles exist today (`fast|balanced|accurate`) in [pkg/search/hnsw_config.go](../../pkg/search/hnsw_config.go).
 
 ## Phase 1: Fastest ROI (Execution Order, Adaptive Switch, Telemetry)
 
 ### 1) Hybrid planner ordering: filter -> keyword -> vector
 
-- Refactor `rrfHybridSearch` in [pkg/search/search.go](/Users/c815719/src/NornicDB/pkg/search/search.go) to execute:
+- Refactor `rrfHybridSearch` in [pkg/search/search.go](../../pkg/search/search.go) to execute:
 - type/metadata filter preselection (cheap filter set)
 - BM25 candidate generation on filtered domain
 - vector search restricted/reranked against candidate pool (or cluster subset)

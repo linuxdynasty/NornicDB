@@ -58,4 +58,4 @@ These apply **per database** and are configured via:
 ## See also
 
 - [Per-Database RBAC & Lockout Recovery](per-database-rbac.md) – Allowlist, privileges, and recovery
-- [Design: Per-Database RBAC (Neo4j-Style)](../plans/per-database-rbac-neo4j-style.md) – Design and alignment with Neo4j
+- [Design: Per-Database RBAC](per-database-rbac.md) – Design and alignment with Neo4j

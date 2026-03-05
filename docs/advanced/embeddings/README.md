@@ -5,8 +5,8 @@
 ## 📚 Documentation
 
 - **[Local GGUF Models](local-gguf.md)** - Run models locally
-- **[Ollama Integration](ollama-integration.md)** - Use Ollama for embeddings
-- **[OpenAI Integration](openai-integration.md)** - Use OpenAI API
+- **[Ollama Integration](../../features/vector-embeddings.md#ollama-recommended)** - Use Ollama for embeddings
+- **[OpenAI Integration](../../features/vector-embeddings.md#openai)** - Use OpenAI API
 
 ## 🎯 What are Embeddings?
 
@@ -41,9 +41,9 @@ export NORNICDB_EMBEDDING_MODEL=text-embedding-3-small
 ## 📖 Learn More
 
 - **[Local GGUF](local-gguf.md)** - Run models offline
-- **[Ollama Setup](ollama-integration.md)** - Easy local embeddings
-- **[OpenAI API](openai-integration.md)** - Cloud embeddings
+- **[Ollama Setup](../../features/vector-embeddings.md#ollama-recommended)** - Easy local embeddings
+- **[OpenAI API](../../features/vector-embeddings.md#openai)** - Cloud embeddings
 
 ---
 
-**Get started** → **[Ollama Integration](ollama-integration.md)**
+**Get started** → **[Ollama Integration](../../features/vector-embeddings.md#ollama-recommended)**

@@ -323,7 +323,7 @@ See **[Audit Logging](audit-logging.md)** for details.
 
 ## See Also
 
-- **[User Storage in System Database](../../plans/user-storage-in-system-db.md)** - User persistence architecture
+- **[User Storage in System Database](../user-guides/multi-database.md#system-database)** - User persistence architecture
 - **[Encryption](encryption.md)** - Data protection
 - **[Audit Logging](audit-logging.md)** - Compliance trails
 - **[HIPAA Compliance](hipaa-compliance.md)** - Healthcare requirements

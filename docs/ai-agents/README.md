@@ -5,9 +5,9 @@
 ## 📚 Documentation
 
 - **[Chat Modes](chat-modes.md)** - Use with Cursor IDE and AI assistants
-- **[MCP Tools Reference](mcp-tools-reference.md)** - Model Context Protocol tools
-- **[Cursor Integration](cursor-integration.md)** - Cursor IDE setup
-- **[Agent Examples](agent-examples.md)** - Agent patterns and examples
+- **[MCP Tools Reference](../features/mcp-integration.md)** - Model Context Protocol tools
+- **[Cursor Integration](chat-modes.md)** - Cursor IDE setup
+- **[Agent Examples](../user-guides/heimdall-agentic-loop.md)** - Agent patterns and examples
 
 ## 🤖 AI Integration Features
 
@@ -20,12 +20,12 @@ NornicDB provides 6 MCP tools for AI agents:
 - `path` - Find paths between nodes
 - `stats` - Get statistics
 
-[MCP Tools Reference →](mcp-tools-reference.md)
+[MCP Tools Reference →](../features/mcp-integration.md)
 
 ### Cursor IDE Integration
 Use NornicDB as a knowledge base for your codebase.
 
-[Cursor Setup Guide →](cursor-integration.md)
+[Cursor Setup Guide →](chat-modes.md)
 
 ### Chat Modes
 Three modes for different use cases:
@@ -43,7 +43,7 @@ Three modes for different use cases:
 2. Configure in Cursor settings
 3. Start chatting with your knowledge base
 
-[Complete setup →](cursor-integration.md)
+[Complete setup →](chat-modes.md)
 
 ### With Custom Agents
 
@@ -59,14 +59,14 @@ results = client.search("machine learning algorithms")
 data = client.cypher("MATCH (n:Concept) RETURN n LIMIT 10")
 ```
 
-[Agent examples →](agent-examples.md)
+[Agent examples →](../user-guides/heimdall-agentic-loop.md)
 
 ## 📖 Learn More
 
-- **[MCP Tools](mcp-tools-reference.md)** - Complete tool reference
+- **[MCP Tools](../features/mcp-integration.md)** - Complete tool reference
 - **[Chat Modes](chat-modes.md)** - Usage patterns
-- **[Examples](agent-examples.md)** - Real-world patterns
+- **[Examples](../user-guides/heimdall-agentic-loop.md)** - Real-world patterns
 
 ---
 
-**Get started** → **[Cursor Integration](cursor-integration.md)**
+**Get started** → **[Cursor Integration](chat-modes.md)**

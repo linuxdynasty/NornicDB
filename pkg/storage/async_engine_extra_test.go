@@ -466,3 +466,100 @@ func TestAsyncEngine_IterateNodes_DeleteByPrefix_LastWriteTime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), remaining)
 }
+
+func TestAsyncEngine_CountByPrefixHelpers(t *testing.T) {
+	t.Run("streaming engine path", func(t *testing.T) {
+		ae := newAsyncTestEngine(t)
+		_, err := ae.CreateNode(makeNode("prefix-a"))
+		require.NoError(t, err)
+		_, err = ae.CreateNode(makeNode("other-b"))
+		require.NoError(t, err)
+		require.NoError(t, ae.CreateEdge(makeEdge("prefix-e", "prefix-a", "other-b")))
+		require.NoError(t, ae.Flush())
+
+		nodes, err := countNodesInEngineByPrefix(ae, prefixTestID("prefix"))
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), nodes)
+
+		edges, err := countEdgesInEngineByPrefix(ae, prefixTestID("prefix"))
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), edges)
+	})
+
+	t.Run("allnodes fallback path", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Test"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "other:n2", Labels: []string{"Test"}})
+		require.NoError(t, err)
+		require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:n1", EndNode: "other:n2", Type: "REL"}))
+
+		nodes, err := countNodesInEngineByPrefix(engine, "test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), nodes)
+
+		edges, err := countEdgesInEngineByPrefix(engine, "test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), edges)
+	})
+}
+
+func TestAsyncEngine_ConstraintValidationHelpers(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+	schema := ae.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddUniqueConstraint("user_email", "User", "email"))
+	require.NoError(t, schema.AddConstraint(Constraint{Name: "user_key", Type: ConstraintNodeKey, Label: "User", Properties: []string{"tenant", "username"}}))
+	require.NoError(t, schema.AddConstraint(Constraint{Name: "user_name_exists", Type: ConstraintExists, Label: "User", Properties: []string{"name"}}))
+	require.NoError(t, schema.AddPropertyTypeConstraint("user_age_type", "User", "age", PropertyTypeInteger))
+
+	t.Run("bulk duplicate unique in batch", func(t *testing.T) {
+		err := ae.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u1")), Labels: []string{"User"}, Properties: map[string]interface{}{"email": "dup@example.com"}},
+			{ID: NodeID(prefixTestID("u2")), Labels: []string{"User"}, Properties: map[string]interface{}{"email": "dup@example.com"}},
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("bulk duplicate node key in batch", func(t *testing.T) {
+		err := ae.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u3")), Labels: []string{"User"}, Properties: map[string]interface{}{"tenant": "t1", "username": "alice"}},
+			{ID: NodeID(prefixTestID("u4")), Labels: []string{"User"}, Properties: map[string]interface{}{"tenant": "t1", "username": "alice"}},
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("bulk nil and missing node key property", func(t *testing.T) {
+		require.ErrorIs(t, ae.validateBulkNodeConstraints([]*Node{nil}), ErrInvalidData)
+		err := ae.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u5")), Labels: []string{"User"}, Properties: map[string]interface{}{"tenant": "t1"}},
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("unique constraint cache and engine paths", func(t *testing.T) {
+		cached := &Node{ID: NodeID(prefixTestID("cache-user")), Labels: []string{"User"}, Properties: map[string]interface{}{"email": "cache@example.com", "name": "Alice", "tenant": "t1", "username": "alice", "age": int64(30)}}
+		_, err := ae.CreateNode(cached)
+		require.NoError(t, err)
+		err = ae.validateNodeConstraints(&Node{ID: NodeID(prefixTestID("cache-user-2")), Labels: []string{"User"}, Properties: map[string]interface{}{"email": "cache@example.com", "name": "Bob", "tenant": "t2", "username": "bob", "age": int64(31)}})
+		require.Error(t, err)
+
+		require.NoError(t, ae.Flush())
+		err = ae.validateNodeConstraints(&Node{ID: NodeID(prefixTestID("engine-user")), Labels: []string{"User"}, Properties: map[string]interface{}{"email": "cache@example.com", "name": "Carol", "tenant": "t3", "username": "carol", "age": int64(32)}})
+		require.Error(t, err)
+	})
+
+	t.Run("node key, existence, property type and namespace errors", func(t *testing.T) {
+		err := ae.validateNodeConstraints(&Node{ID: NodeID(prefixTestID("nk1")), Labels: []string{"User"}, Properties: map[string]interface{}{"tenant": "t1"}})
+		require.Error(t, err)
+
+		err = ae.validateNodeConstraintsWithNamespace(&Node{ID: NodeID(prefixTestID("exists1")), Labels: []string{"User"}, Properties: map[string]interface{}{"tenant": "t1", "username": "bob"}}, "test", true)
+		require.Error(t, err)
+
+		err = ae.validateNodeConstraints(&Node{ID: NodeID(prefixTestID("ptype1")), Labels: []string{"User"}, Properties: map[string]interface{}{"name": "Alice", "tenant": "t1", "username": "alice", "age": "old"}})
+		require.Error(t, err)
+
+		_, _, err = ae.resolveNamespace("missing-prefix")
+		require.Error(t, err)
+		require.ErrorIs(t, ae.validateNodeConstraints(nil), ErrInvalidData)
+	})
+}

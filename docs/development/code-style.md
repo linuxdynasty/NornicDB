@@ -208,5 +208,5 @@ golangci-lint run
 
 - **[Testing](testing.md)** - Testing guidelines
 - **[Setup](setup.md)** - Development setup
-- **[Contributing](../CONTRIBUTING.md)** - Contribution process
+- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
 

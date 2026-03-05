@@ -72,7 +72,7 @@ If the server is unreachable or you have filesystem/DB access only, you can fix 
 - **Schema (conceptual):**  
   - Allowlist: nodes with label `_RoleDbAccess` (or equivalent), e.g. node ID `role_db_access:{roleName}`, property `databases` (array of strings). Empty or missing list = all databases.  
   - Per-DB privileges: nodes with label `_DbPrivilege`, e.g. node ID `db_priv:{roleName}:{dbName}`, properties `role`, `database`, `read` (bool), `write` (bool).  
-  - Users and roles: user nodes and role nodes as described in [user-storage-in-system-db](../plans/user-storage-in-system-db.md) and the main RBAC design.
+  - Users and roles: user nodes and role nodes as described in [system database docs](../user-guides/multi-database.md#system-database) and the main RBAC design.
 
 - **Steps (high level):**  
   1. Stop the server or ensure no one else is writing to the system DB.  
@@ -82,7 +82,7 @@ If the server is unreachable or you have filesystem/DB access only, you can fix 
   5. Ensure at least one user has the **admin** role (e.g. restore user node `roles` or fix role assignment).  
   6. Restart the server so it reloads from the system DB.
 
-Exact property names and node IDs are defined in the codebase (`pkg/auth`: allowlist, privileges, roles). Refer to the implementation and the design doc [per-database-rbac-neo4j-style](../plans/per-database-rbac-neo4j-style.md) for the single source of truth.
+Exact property names and node IDs are defined in the codebase (`pkg/auth`: allowlist, privileges, roles). Refer to the implementation and [Per-Database RBAC & Lockout Recovery](per-database-rbac.md) for the single source of truth.
 
 ---
 
@@ -94,6 +94,6 @@ The Database Access (or Access Control) management screen in the Security / Admi
 
 ## See Also
 
-- [Per-database RBAC design](../plans/per-database-rbac-neo4j-style.md) – Full design, storage layout, and API.
+- [Per-database RBAC design](per-database-rbac.md) – Full design, storage layout, and API.
 - [RBAC (compliance)](../compliance/rbac.md) – Roles, permissions, and user management.
-- [User storage in system DB](../plans/user-storage-in-system-db.md) – Where users and system data live.
+- [User storage in system DB](../user-guides/multi-database.md#system-database) – Where users and system data live.

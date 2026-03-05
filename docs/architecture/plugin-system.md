@@ -318,9 +318,9 @@ RETURN my.hello('World') AS greeting
 
 ## Related Documentation
 
-- [Functions Index](FUNCTIONS_INDEX.md) - Built-in functions
-- [APOC Compatibility](APOC_COMPATIBILITY.md) - APOC function status
-- [Contributing](CONTRIBUTING.md) - How to contribute plugins
+- [Functions Index](../api-reference/cypher-functions/) - Built-in functions
+- [APOC Compatibility](../features/apoc-functions.md) - APOC function status
+- [Contributing](../../CONTRIBUTING.md) - How to contribute plugins
 
 ---
 

@@ -256,5 +256,5 @@ See [Heimdall AI Assistant Guide](../user-guides/heimdall-ai-assistant.md) for d
 - **[Code Style](code-style.md)** - Code conventions
 - **[Heimdall Plugins](../user-guides/heimdall-plugins.md)** - Create custom AI actions
 - **[APOC Plugins](../features/plugin-system.md)** - Extend Cypher with custom functions
-- **[Contributing](../CONTRIBUTING.md)** - Contribution process
+- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
 

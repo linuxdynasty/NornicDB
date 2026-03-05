@@ -5,27 +5,27 @@
 ## 📚 Documentation
 
 ### K-Means Clustering
-- **[K-Means Algorithm](clustering/kmeans-algorithm.md)** - K-Means clustering basics
-- **[Real-Time K-Means](clustering/realtime-kmeans.md)** - Live cluster updates
-- **[GPU Implementation](clustering/gpu-implementation.md)** - GPU-accelerated K-Means
-- **[Metal Optimizations](clustering/metal-optimizations.md)** - Apple Silicon optimizations
+- **[K-Means Algorithm](k-means-clustering/kmeans-algorithm.md)** - K-Means clustering basics
+- **[Real-Time K-Means](k-means-clustering/realtime-kmeans.md)** - Live cluster updates
+- **[GPU Implementation](k-means-clustering/gpu-implementation.md)** - GPU-accelerated K-Means
+- **[Metal Optimizations](k-means-clustering/metal-optimizations.md)** - Apple Silicon optimizations
 
 ### Embeddings
 - **[Local GGUF Models](embeddings/local-gguf.md)** - Local embedding models
-- **[Ollama Integration](embeddings/ollama-integration.md)** - Ollama setup
-- **[OpenAI Integration](embeddings/openai-integration.md)** - OpenAI API
+- **[Ollama Integration](../features/vector-embeddings.md#ollama-recommended)** - Ollama setup
+- **[OpenAI Integration](../features/vector-embeddings.md#openai)** - OpenAI API
 
 ### Advanced Features
 - **[Search Evaluation](search-evaluation.md)** - Eval harness
-- **[Custom Functions](custom-functions.md)** - UDF development
-- **[Extending NornicDB](extending-nornicdb.md)** - Plugin development
+- **[Custom Functions](../features/plugin-system.md)** - UDF development
+- **[Extending NornicDB](../architecture/plugin-system.md)** - Plugin development
 
 ## 🎯 Topics
 
 ### K-Means Clustering
 Learn how to use K-Means clustering on embeddings for improved search and organization.
 
-[Explore K-Means clustering →](clustering/)
+[Explore K-Means clustering →](k-means-clustering/)
 
 ### Embeddings
 Generate and manage vector embeddings locally or via API.
@@ -39,4 +39,4 @@ Extend NornicDB with custom functions and plugins.
 
 ---
 
-**Start exploring** → **[K-Means Clustering](clustering/)**
+**Start exploring** → **[K-Means Clustering](k-means-clustering/)**

@@ -8,7 +8,7 @@ Last Updated: November 25, 2025
 
 ## Quick Navigation
 
-📁 **[Detailed Function Docs](functions/)** - Complete guides with examples  
+📁 **[Detailed Function Docs](./README.md#all-functions-by-category)** - Complete guides with examples  
 🧠 **[Memory Decay System](../../features/memory-decay.md)** - How memory fading works  
 📊 **Status:** 52 functions documented (100% coverage)
 

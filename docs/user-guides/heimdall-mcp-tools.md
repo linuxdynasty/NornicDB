@@ -21,7 +21,7 @@ export NORNICDB_HEIMDALL_MCP_ENABLE=true
 ```
 
 With this, the agentic loop sees all six MCP tools: `store`, `recall`, `discover`, `link`, `task`, `tasks`.  
-See [MCP Integration](../../features/mcp-integration.md) for tool semantics and parameters.
+See [MCP Integration](../features/mcp-integration.md) for tool semantics and parameters.
 
 ### YAML
 
@@ -94,5 +94,5 @@ So “enable MCP tools” here means: **add these tools to the agentic loop in B
 
 - [Heimdall AI Assistant](heimdall-ai-assistant.md) – Enable Heimdall, providers, Bifrost UI.
 - [Heimdall agentic loop](heimdall-agentic-loop.md) – How the loop works and how plugins interact.
-- [MCP Integration](../../features/mcp-integration.md) – Tool reference and patterns.
+- [MCP Integration](../features/mcp-integration.md) – Tool reference and patterns.
 - [Heimdall Plugins](heimdall-plugins.md) – Custom actions and lifecycle hooks.

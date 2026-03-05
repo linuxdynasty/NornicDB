@@ -6,8 +6,8 @@
 
 - **[Feature Parity](feature-parity.md)** - 96% Neo4j compatibility
 - **[Cypher Compatibility](cypher-compatibility.md)** - Cypher language support
-- **[Migration Guide](migration-guide.md)** - Step-by-step migration
-- **[Driver Compatibility](driver-compatibility.md)** - Client driver support
+- **[Migration Guide](../MIGRATION_NOTICE.md)** - Step-by-step migration
+- **[Driver Compatibility](../api-reference/bolt-protocol.md)** - Client driver support
 
 ## 🎯 Why Migrate?
 
@@ -50,7 +50,7 @@ driver = GraphDatabase.driver("bolt://neo4j-server:7687")
 driver = GraphDatabase.driver("bolt://nornicdb-server:7687")
 ```
 
-[Complete migration guide →](migration-guide.md)
+[Complete migration guide →](../MIGRATION_NOTICE.md)
 
 ## 📊 Feature Comparison
 
@@ -70,9 +70,9 @@ driver = GraphDatabase.driver("bolt://nornicdb-server:7687")
 ## 📖 Learn More
 
 - **[Feature Parity](feature-parity.md)** - Detailed comparison
-- **[Migration Guide](migration-guide.md)** - Step-by-step process
+- **[Migration Guide](../MIGRATION_NOTICE.md)** - Step-by-step process
 - **[Cypher Compatibility](cypher-compatibility.md)** - Language support
 
 ---
 
-**Start migrating** → **[Migration Guide](migration-guide.md)**
+**Start migrating** → **[Migration Guide](../MIGRATION_NOTICE.md)**

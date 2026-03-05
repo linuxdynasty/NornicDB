@@ -7,8 +7,8 @@
 - **[Development Setup](setup.md)** - Local development environment
 - **[Code Style](code-style.md)** - Coding standards and conventions
 - **[Testing](testing.md)** - Test guidelines and frameworks
-- **[Documentation](documentation.md)** - Documentation standards
-- **[Release Process](release-process.md)** - Release workflow
+- **[Documentation](../README.md)** - Documentation standards
+- **[Release Process](../release-notes-since-v1.0.11.md)** - Release workflow
 
 ## 🚀 Quick Start
 
