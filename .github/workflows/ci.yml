@@ -70,7 +70,7 @@ jobs:
             | xargs go test -coverprofile=coverage.raw.out
           {
             echo "mode: set"
-            rg -v 'github.com/orneryd/nornicdb/pkg/cypher/antlr/(cypher_parser|cypher_lexer|cypherparser_listener|cypherparser_base_listener)\.go:' coverage.raw.out | rg -v '^mode: '
+            grep -Ev '^mode: |github.com/orneryd/nornicdb/pkg/cypher/antlr/(cypher_parser|cypher_lexer|cypherparser_listener|cypherparser_base_listener)\.go:' coverage.raw.out
           } > coverage.out
 
       - name: Install goveralls
