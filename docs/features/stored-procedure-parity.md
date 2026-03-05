@@ -1,11 +1,29 @@
-# Stored Procedure Parity Matrix
+# Stored Procedure Runtime and Transaction Script Extensions
 
-This document tracks the current `CALL` parity contract in NornicDB.
+This document describes the current procedure runtime in NornicDB, including:
+
+- registry-backed `CALL` execution parity behavior
+- user-defined procedure DDL (`CREATE/DROP PROCEDURE`)
+- startup precompile/loading of persisted procedures
+- Nornic transaction script extensions (`BEGIN TRANSACTION`, `BEGIN` shorthand, conditional rollback scripts)
+
+## What Is Standard vs Extension
+
+- **Neo4j-compatible surface:**
+  - `CALL ...`
+  - `SHOW PROCEDURES`
+  - `CALL dbms.procedures()`
+  - existing built-in/APOC-style procedure behavior and `YIELD` semantics
+- **Nornic extensions:**
+  - `CREATE [OR REPLACE] PROCEDURE ... MODE ... AS ...`
+  - `DROP PROCEDURE ...`
+  - transaction script blocks using `BEGIN TRANSACTION` or `BEGIN` with inline `COMMIT`/`ROLLBACK`
+  - conditional transaction script pattern: `CASE WHEN ... THEN ROLLBACK ELSE RETURN ... COMMIT`
 
 ## Runtime Contract
 
 - A single registry-backed runtime resolves both built-in and user-defined procedures.
-- `SHOW PROCEDURES` and `CALL dbms.procedures()` are generated from the same registry.
+- `SHOW PROCEDURES` and `CALL dbms.procedures()` are generated from the same runtime state.
 - Procedure metadata includes:
   - canonical `name`
   - `signature`
@@ -14,39 +32,114 @@ This document tracks the current `CALL` parity contract in NornicDB.
   - `worksOnSystem`
   - argument cardinality (`minArgs`, `maxArgs`)
 
-## Compatibility Behavior
+## Procedure DDL Syntax (Nornic Extension)
 
-- Unknown procedure: `unknown procedure: <name> (try SHOW PROCEDURES for available procedures)`
+```cypher
+CREATE OR REPLACE PROCEDURE nornic.touchUser($id, $ts)
+MODE WRITE
+AS
+MATCH (u:User {id: $id})
+SET u.last_seen = $ts
+RETURN u
+```
+
+```cypher
+DROP PROCEDURE nornic.touchUser
+```
+
+### DDL constraints
+
+- `CREATE PROCEDURE` and `DROP PROCEDURE` are rejected inside an active explicit transaction.
+- Procedure mode validation is enforced at create/compile time (for example, `MODE READ` cannot contain write operations).
+
+## Startup Precompile and Persistence
+
+- User-defined procedures are persisted in the database metadata graph under catalog label `_ProcedureCatalog`.
+- Catalog payload is msgpack-encoded and stored as a base64 string property.
+- On executor startup:
+  - built-ins are registered
+  - persisted user-defined procedures are loaded
+  - each definition is compiled and registered before query execution
+
+This provides fast runtime dispatch without first-call compilation overhead.
+
+## Transaction Script Extensions (Nornic Extension)
+
+### Explicit form
+
+```cypher
+BEGIN TRANSACTION
+CALL nornic.touchUser('u-10', datetime())
+YIELD u
+RETURN u.id, u.last_seen
+COMMIT
+```
+
+### Shorthand form (equivalent)
+
+```cypher
+BEGIN
+CALL nornic.touchUser('u-10', datetime())
+YIELD u
+RETURN u.id, u.last_seen
+COMMIT
+```
+
+### Conditional rollback script
+
+```cypher
+BEGIN TRANSACTION
+CALL nornic.touchUser('u-10', datetime())
+YIELD u
+CASE
+  WHEN u.age < 18 THEN ROLLBACK
+  ELSE
+    RETURN u.id, u.last_seen
+COMMIT
+```
+
+Whitespace and casing variations are accepted for these script forms.
+
+## Compatibility Behavior and Errors
+
+- Unknown procedure:
+  - `unknown procedure: <name> (try SHOW PROCEDURES for available procedures)`
 - Argument arity mismatch:
   - minimum: `procedure <name> requires at least N arguments, got M`
   - maximum: `procedure <name> accepts at most N arguments, got M`
-- Unknown YIELD column: `unknown YIELD column: <column>`
+- Unknown YIELD column:
+  - `unknown YIELD column: <column>`
 
 ## Built-in Procedure Surface
 
-The built-in catalog is registered in `pkg/cypher/procedure_registry_builtin.go`.
-This includes:
+Built-ins are registered in `pkg/cypher/procedure_registry_builtin.go`, including:
 
-- Core schema/info procedures (`db.labels`, `db.relationshipTypes`, `db.propertyKeys`, `db.info`, `db.ping`)
-- Fulltext and vector procedures (`db.index.fulltext.*`, `db.index.vector.*`, `db.create.set*VectorProperty`)
-- DBMS procedures (`dbms.components`, `dbms.info`, `dbms.listConfig`, `dbms.clientConfig`, `dbms.listConnections`, `dbms.procedures`, `dbms.functions`)
-- Index/statistics/ops procedures (`db.await*`, `db.resampleIndex`, `db.stats.*`, `db.clearQueryCaches`, `tx.setMetaData`)
-- NornicDB procedures (`nornicdb.version`, `nornicdb.stats`, `nornicdb.decay.info`)
+- core schema/info (`db.labels`, `db.relationshipTypes`, `db.propertyKeys`, `db.info`, `db.ping`)
+- fulltext/vector (`db.index.fulltext.*`, `db.index.vector.*`, `db.create.set*VectorProperty`)
+- DBMS (`dbms.components`, `dbms.info`, `dbms.listConfig`, `dbms.clientConfig`, `dbms.listConnections`, `dbms.procedures`, `dbms.functions`)
+- index/stats/ops (`db.await*`, `db.resampleIndex`, `db.stats.*`, `db.clearQueryCaches`, `tx.setMetaData`)
+- NornicDB (`nornicdb.version`, `nornicdb.stats`, `nornicdb.decay.info`)
 
-## User-Defined Procedure Plugins
+## Plugin-based User Procedures
 
-Procedure plugins are loaded via the existing plugin system:
+Procedure plugins remain supported via the plugin system:
 
-- Plugin may expose `Procedures() map[string]...` in addition to functions.
-- Procedure handlers are registered into the same global runtime registry.
-- User procedures are visible in both `SHOW PROCEDURES` and `dbms.procedures()`.
+- plugin can expose `Procedures() map[string]...` in addition to function entries
+- procedure handlers are registered in the same global runtime registry
+- plugin procedures are visible in both `SHOW PROCEDURES` and `CALL dbms.procedures()`
 
-Supported user-procedure handler shape:
+Supported plugin handler shape:
 
 - `func(context.Context, string, []interface{}) (*cypher.ExecuteResult, error)`
 
+## Tests Covering This Feature
+
+- `pkg/cypher/procedure_ddl_test.go`
+- `pkg/cypher/transaction_script_test.go`
+- existing procedure compatibility tests under `pkg/cypher/*procedures*_test.go`
+
 ## Migration Guidance
 
-- Existing procedure callers do not need query changes.
-- Prefer exact procedure names (`CALL dbms.procedures()`) over broad pattern matching.
-- For plugin authors, provide `Signature`, `Mode`, `MinArgs`, and `MaxArgs` to enable strict runtime validation.
+- Existing `CALL` usage requires no query changes.
+- Use procedure DDL for Nornic-native persisted procedures.
+- For maximal compatibility with Neo4j clients, keep application logic based on `CALL` and avoid relying on Nornic-only DDL/transaction-script syntax in portable query sets.

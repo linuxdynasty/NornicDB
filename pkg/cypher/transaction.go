@@ -265,6 +265,7 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	// Also exclude ON CREATE SET / ON MATCH SET from MERGE
 	// IMPORTANT: Also exclude compound MATCH...MERGE...SET queries which are handled by executeCompoundMatchMerge
 	if strings.Contains(normalizedUpper, " SET ") &&
+		!isCreateProcedureCommand(cypher) &&
 		!strings.HasPrefix(upper, "MERGE") &&
 		!strings.Contains(normalizedUpper, "ON CREATE SET") &&
 		!strings.Contains(normalizedUpper, "ON MATCH SET") &&
@@ -278,6 +279,8 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	}
 
 	switch {
+	case isCreateProcedureCommand(cypher):
+		return e.executeCreateProcedure(ctx, cypher)
 	case strings.HasPrefix(upper, "CREATE CONSTRAINT"),
 		strings.HasPrefix(upper, "CREATE FULLTEXT INDEX"),
 		strings.HasPrefix(upper, "CREATE VECTOR INDEX"),
@@ -337,6 +340,9 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 			return nil, fmt.Errorf("unsupported SHOW command in transaction: %s", cypher)
 		}
 	case strings.HasPrefix(upper, "DROP"):
+		if isDropProcedureCommand(cypher) {
+			return e.executeDropProcedure(ctx, cypher)
+		}
 		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	case strings.HasPrefix(upper, "UNWIND"):

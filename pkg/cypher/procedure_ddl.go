@@ -1,0 +1,277 @@
+package cypher
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/vmihailenco/msgpack/v5"
+)
+
+const (
+	procedureCatalogLabel  = "_ProcedureCatalog"
+	procedureCatalogPrefix = "__proc__:"
+)
+
+var (
+	createProcedurePattern = regexp.MustCompile(`(?is)^CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\s+([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\((.*?)\)\s+MODE\s+(READ|WRITE|DBMS)\s+AS\s+(.+)$`)
+	dropProcedurePattern   = regexp.MustCompile(`(?is)^DROP\s+PROCEDURE\s+([a-zA-Z_][a-zA-Z0-9_\.]*)\s*$`)
+)
+
+type persistedProcedureRecord struct {
+	Name        string   `msgpack:"name"`
+	ArgNames    []string `msgpack:"args"`
+	Mode        string   `msgpack:"mode"`
+	Body        string   `msgpack:"body"`
+	Signature   string   `msgpack:"sig"`
+	Description string   `msgpack:"desc"`
+	MinArgs     int      `msgpack:"min"`
+	MaxArgs     int      `msgpack:"max"`
+	UpdatedAt   int64    `msgpack:"updated_at"`
+}
+
+func isCreateProcedureCommand(cypher string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	return strings.HasPrefix(upper, "CREATE PROCEDURE") || strings.HasPrefix(upper, "CREATE OR REPLACE PROCEDURE")
+}
+
+func isDropProcedureCommand(cypher string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(cypher)), "DROP PROCEDURE")
+}
+
+func (e *StorageExecutor) executeCreateProcedure(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.txContext != nil && e.txContext.active {
+		return nil, fmt.Errorf("CREATE PROCEDURE is not allowed inside an active transaction")
+	}
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+	m := createProcedurePattern.FindStringSubmatch(strings.TrimSpace(cypher))
+	if len(m) != 6 {
+		return nil, fmt.Errorf("invalid CREATE PROCEDURE syntax")
+	}
+
+	replace := strings.TrimSpace(m[1]) != ""
+	name := strings.TrimSpace(m[2])
+	argNames, err := parseProcedureArgNames(m[3])
+	if err != nil {
+		return nil, err
+	}
+	mode := strings.ToUpper(strings.TrimSpace(m[4]))
+	body := strings.TrimSpace(m[5])
+	if body == "" {
+		return nil, fmt.Errorf("procedure body cannot be empty")
+	}
+
+	spec, handler, record, err := e.compilePersistedProcedure(persistedProcedureRecord{
+		Name:      name,
+		ArgNames:  argNames,
+		Mode:      mode,
+		Body:      body,
+		Signature: buildProcedureSignature(name, argNames),
+		MinArgs:   len(argNames),
+		MaxArgs:   len(argNames),
+		UpdatedAt: time.Now().UTC().Unix(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	nodeID := procedureCatalogNodeID(name)
+	store := e.getStorage(ctx)
+	existing, getErr := store.GetNode(nodeID)
+	if getErr == nil && existing != nil && !replace {
+		return nil, fmt.Errorf("procedure %s already exists", name)
+	}
+
+	blob, err := msgpack.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode procedure record: %w", err)
+	}
+	props := map[string]interface{}{
+		"name":      record.Name,
+		"mode":      record.Mode,
+		"record":    base64.StdEncoding.EncodeToString(blob),
+		"updatedAt": record.UpdatedAt,
+	}
+
+	if existing != nil {
+		existing.Labels = ensureLabel(existing.Labels, procedureCatalogLabel)
+		existing.Properties = props
+		if err := store.UpdateNode(existing); err != nil {
+			return nil, fmt.Errorf("failed to update procedure catalog: %w", err)
+		}
+	} else {
+		node := &storage.Node{
+			ID:         nodeID,
+			Labels:     []string{procedureCatalogLabel},
+			Properties: props,
+		}
+		if _, err := store.CreateNode(node); err != nil {
+			return nil, fmt.Errorf("failed to persist procedure catalog: %w", err)
+		}
+	}
+
+	if err := RegisterUserProcedure(spec, handler); err != nil {
+		return nil, err
+	}
+	return &ExecuteResult{
+		Columns: []string{"name", "mode", "status"},
+		Rows:    [][]interface{}{{name, mode, "created"}},
+	}, nil
+}
+
+func (e *StorageExecutor) executeDropProcedure(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.txContext != nil && e.txContext.active {
+		return nil, fmt.Errorf("DROP PROCEDURE is not allowed inside an active transaction")
+	}
+	m := dropProcedurePattern.FindStringSubmatch(strings.TrimSpace(cypher))
+	if len(m) != 2 {
+		return nil, fmt.Errorf("invalid DROP PROCEDURE syntax")
+	}
+	name := strings.TrimSpace(m[1])
+	store := e.getStorage(ctx)
+	if err := store.DeleteNode(procedureCatalogNodeID(name)); err != nil {
+		return nil, fmt.Errorf("failed to drop procedure %s: %w", name, err)
+	}
+	// Keep implementation simple and deterministic: refresh user registry from persisted catalog.
+	ClearUserProcedures()
+	_ = e.loadPersistedProcedures()
+
+	return &ExecuteResult{
+		Columns: []string{"name", "status"},
+		Rows:    [][]interface{}{{name, "dropped"}},
+	}, nil
+}
+
+func parseProcedureArgNames(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}, nil
+	}
+	parts := splitProcedureTopLevelComma(raw)
+	args := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		arg := strings.TrimSpace(p)
+		if arg == "" {
+			continue
+		}
+		if strings.HasPrefix(arg, "$") {
+			arg = strings.TrimSpace(arg[1:])
+		}
+		if !isValidIdentifier(arg) {
+			return nil, fmt.Errorf("invalid procedure argument name: %s", arg)
+		}
+		if _, exists := seen[arg]; exists {
+			return nil, fmt.Errorf("duplicate procedure argument: %s", arg)
+		}
+		seen[arg] = struct{}{}
+		args = append(args, arg)
+	}
+	return args, nil
+}
+
+func (e *StorageExecutor) compilePersistedProcedure(record persistedProcedureRecord) (ProcedureSpec, ProcedureHandler, persistedProcedureRecord, error) {
+	mode := ProcedureMode(strings.ToUpper(record.Mode))
+	switch mode {
+	case ProcedureModeRead, ProcedureModeWrite, ProcedureModeDBMS:
+	default:
+		return ProcedureSpec{}, nil, record, fmt.Errorf("invalid procedure mode: %s", record.Mode)
+	}
+
+	info := e.analyzer.Analyze(record.Body)
+	if mode == ProcedureModeRead && info.IsWriteQuery {
+		return ProcedureSpec{}, nil, record, fmt.Errorf("READ procedure body contains write operations")
+	}
+
+	argNames := append([]string{}, record.ArgNames...)
+	spec := ProcedureSpec{
+		Name:        record.Name,
+		Signature:   record.Signature,
+		Description: record.Description,
+		Mode:        mode,
+		MinArgs:     len(argNames),
+		MaxArgs:     len(argNames),
+		Params:      make([]ProcedureParam, 0, len(argNames)),
+	}
+	for _, arg := range argNames {
+		spec.Params = append(spec.Params, ProcedureParam{Name: arg, Type: "ANY"})
+	}
+
+	handler := func(ctx context.Context, exec *StorageExecutor, cypher string, args []interface{}) (*ExecuteResult, error) {
+		if len(args) != len(argNames) {
+			return nil, fmt.Errorf("procedure %s requires %d arguments, got %d", record.Name, len(argNames), len(args))
+		}
+		params := make(map[string]interface{}, len(argNames))
+		for i, arg := range argNames {
+			params[arg] = args[i]
+		}
+		return exec.Execute(ctx, record.Body, params)
+	}
+	return spec, handler, record, nil
+}
+
+func buildProcedureSignature(name string, args []string) string {
+	if len(args) == 0 {
+		return fmt.Sprintf("%s() :: (value :: ANY)", name)
+	}
+	argSpec := make([]string, 0, len(args))
+	for _, a := range args {
+		argSpec = append(argSpec, fmt.Sprintf("$%s :: ANY", a))
+	}
+	return fmt.Sprintf("%s(%s) :: (value :: ANY)", name, strings.Join(argSpec, ", "))
+}
+
+func procedureCatalogNodeID(name string) storage.NodeID {
+	return storage.NodeID(procedureCatalogPrefix + strings.ToLower(strings.TrimSpace(name)))
+}
+
+func ensureLabel(labels []string, label string) []string {
+	for _, l := range labels {
+		if l == label {
+			return labels
+		}
+	}
+	return append(labels, label)
+}
+
+func (e *StorageExecutor) loadPersistedProcedures() error {
+	nodes, err := e.storage.GetNodesByLabel(procedureCatalogLabel)
+	if err != nil {
+		return nil
+	}
+	for _, node := range nodes {
+		raw, ok := node.Properties["record"]
+		if !ok {
+			continue
+		}
+		var payload []byte
+		switch v := raw.(type) {
+		case []byte:
+			payload = v
+		case string:
+			decoded, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				continue
+			}
+			payload = decoded
+		default:
+			continue
+		}
+		var record persistedProcedureRecord
+		if err := msgpack.Unmarshal(payload, &record); err != nil {
+			continue
+		}
+		spec, handler, _, err := e.compilePersistedProcedure(record)
+		if err != nil {
+			continue
+		}
+		_ = RegisterUserProcedure(spec, handler)
+	}
+	return nil
+}

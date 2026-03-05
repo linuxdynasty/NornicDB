@@ -299,7 +299,7 @@ type InferenceManager interface {
 //	// Executor is ready for queries
 //	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
 func NewStorageExecutor(store storage.Engine) *StorageExecutor {
-	return &StorageExecutor{
+	exec := &StorageExecutor{
 		parser:            NewParser(),
 		storage:           store,
 		cache:             NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
@@ -310,6 +310,9 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		vectorRegistry:    vectorspace.NewIndexRegistry(),
 		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
 	}
+	ensureBuiltInProceduresRegistered()
+	_ = exec.loadPersistedProcedures()
+	return exec
 }
 
 // SetDatabaseManager sets the database manager for system commands.
@@ -657,6 +660,9 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	}
 
 	// Check for transaction control statements FIRST
+	if result, err := e.executeTransactionScript(ctx, cypher); result != nil || err != nil {
+		return result, err
+	}
 	if result, err := e.parseTransactionStatement(cypher); result != nil || err != nil {
 		return result, err
 	}
@@ -1720,7 +1726,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 
 	// NEO4J COMPAT: Handle CREATE ... SET pattern (e.g., CREATE (n) SET n.x = 1)
 	// Neo4j allows SET immediately after CREATE without requiring MATCH
-	if startsWithCreate && hasSet && !hasOnCreateSet && !hasOnMatchSet {
+	if startsWithCreate && !isCreateProcedureCommand(cypher) && hasSet && !hasOnCreateSet && !hasOnMatchSet {
 		return e.executeCreateSet(ctx, cypher)
 	}
 
@@ -1730,7 +1736,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	}
 
 	// Only route to executeSet if it's a MATCH ... SET or standalone SET
-	if hasSet && !hasOnCreateSet && !hasOnMatchSet {
+	if hasSet && !isCreateProcedureCommand(cypher) && !hasOnCreateSet && !hasOnMatchSet {
 		if startsWithMatch || findKeywordIndex(cypher, "SET") == 0 {
 			return e.executeSet(ctx, cypher)
 		}
@@ -1785,6 +1791,8 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	}
 
 	switch {
+	case isCreateProcedureCommand(cypher):
+		return e.executeCreateProcedure(ctx, cypher)
 	case findMultiWordKeywordIndex(cypher, "OPTIONAL", "MATCH") == 0:
 		// OPTIONAL MATCH must be at start (position 0) to be a standalone clause
 		// Handles flexible whitespace: "OPTIONAL MATCH", "OPTIONAL\tMATCH", "OPTIONAL\nMATCH", etc.
@@ -1860,6 +1868,8 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Schema command: DROP CONSTRAINT (must not be treated as generic DROP no-op).
 		// Must be at start (position 0) to be a standalone clause.
 		return e.executeSchemaCommand(ctx, cypher)
+	case isDropProcedureCommand(cypher):
+		return e.executeDropProcedure(ctx, cypher)
 	case findKeywordIndex(cypher, "DROP") == 0:
 		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
 		// Must be at start (position 0) to be a standalone clause
