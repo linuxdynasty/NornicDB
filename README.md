@@ -12,13 +12,15 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-success" alt="Version 1.0.0">
   <a href="https://github.com/orneryd/NornicDB"><img src="https://img.shields.io/badge/github-orneryd%2FNornicDB-blue?logo=github" alt="GitHub"></a>
-  <a href="https://github.com/orneryd/NornicDB/stargazers"><img src="https://img.shields.io/github/stars/orneryd/NornicDB?style=flat&logo=github" alt="GitHub Stars"></a>
+  <a href="https://coveralls.io/github/orneryd/NornicDB?branch=main"><img src="https://coveralls.io/repos/github/orneryd/NornicDB/badge.svg?branch=main" alt="Coveralls Report"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.26-00ADD8?logo=go" alt="Go Version"></a>
   <a href="https://goreportcard.com/report/github.com/orneryd/nornicdb"><img src="https://goreportcard.com/badge/github.com/orneryd/nornicdb" alt="Go Report Card"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
+
+
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
