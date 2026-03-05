@@ -81,25 +81,25 @@ cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 
 LIB_NAME="libllama_${OS}_${ARCH}${GPU_SUFFIX}.a"
 echo "📦 Creating combined library: $OUTDIR/$LIB_NAME"
 
-# Find all static libraries
-LIBS=$(find build -name "*.a" -type f 2>/dev/null | grep -E "(libllama|libggml|libcommon)" | sort -u)
-if [[ -z "$LIBS" ]]; then
+# Find all static libraries (absolute paths so extraction works after cwd changes)
+mapfile -t LIBS < <(find "$TMPDIR/build" -name "*.a" -type f 2>/dev/null | grep -E "(libllama|libggml|libcommon)" | sort -u)
+if [[ ${#LIBS[@]} -eq 0 ]]; then
     echo "❌ Error: No static libraries found in build directory"
     exit 1
 fi
 echo "   Found libraries:"
-for lib in $LIBS; do
+for lib in "${LIBS[@]}"; do
     echo "      - $lib"
 done
 
 # Create combined library using libtool (macOS) or ar (Linux)
 if [[ "$OS" == "darwin" ]]; then
-    libtool -static -o "$OUTDIR/$LIB_NAME" $LIBS
+    libtool -static -o "$OUTDIR/$LIB_NAME" "${LIBS[@]}"
 else
     # On Linux, use ar to combine
     AR_TMPDIR=$(mktemp -d)
     cd "$AR_TMPDIR"
-    for lib in $LIBS; do
+    for lib in "${LIBS[@]}"; do
         ar x "$lib"
     done
     ar rcs "$OUTDIR/$LIB_NAME" *.o
