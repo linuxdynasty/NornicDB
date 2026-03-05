@@ -905,46 +905,36 @@ func TestDeleteNode_RemovesFromSearchIndex(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		// Wait for async callbacks to fire
-		time.Sleep(100 * time.Millisecond)
-
-		// Verify embedding count increased by 3
-		afterCreate := db.EmbeddingCount()
-		assert.Equal(t, initialCount+3, afterCreate,
-			"Embedding count should increase by 3 after creating nodes (was %d, now %d)",
-			initialCount, afterCreate)
+		// Wait for async callbacks to fire and indexing state to converge.
+		require.Eventually(t, func() bool {
+			return db.EmbeddingCount() == initialCount+3
+		}, 3*time.Second, 25*time.Millisecond,
+			"Embedding count should increase by 3 after creating nodes")
 
 		// Delete node1 via storage (this triggers OnNodeDeleted callback)
 		err = db.storage.DeleteNode("embed-callback-test-1")
 		require.NoError(t, err)
 
-		// Wait for async callback
-		time.Sleep(100 * time.Millisecond)
-
-		afterDelete1 := db.EmbeddingCount()
-		assert.Equal(t, initialCount+2, afterDelete1,
-			"Embedding count should decrease by 1 after deleting node1 (expected %d, got %d)",
-			initialCount+2, afterDelete1)
+		require.Eventually(t, func() bool {
+			return db.EmbeddingCount() == initialCount+2
+		}, 3*time.Second, 25*time.Millisecond,
+			"Embedding count should decrease by 1 after deleting node1")
 
 		// Delete node2
 		err = db.storage.DeleteNode("embed-callback-test-2")
 		require.NoError(t, err)
-		time.Sleep(100 * time.Millisecond)
-
-		afterDelete2 := db.EmbeddingCount()
-		assert.Equal(t, initialCount+1, afterDelete2,
-			"Embedding count should decrease by 2 after deleting node2 (expected %d, got %d)",
-			initialCount+1, afterDelete2)
+		require.Eventually(t, func() bool {
+			return db.EmbeddingCount() == initialCount+1
+		}, 3*time.Second, 25*time.Millisecond,
+			"Embedding count should decrease by 2 after deleting node2")
 
 		// Delete node3
 		err = db.storage.DeleteNode("embed-callback-test-3")
 		require.NoError(t, err)
-		time.Sleep(100 * time.Millisecond)
-
-		afterDelete3 := db.EmbeddingCount()
-		assert.Equal(t, initialCount, afterDelete3,
-			"Embedding count should return to initial after deleting all test nodes (expected %d, got %d)",
-			initialCount, afterDelete3)
+		require.Eventually(t, func() bool {
+			return db.EmbeddingCount() == initialCount
+		}, 3*time.Second, 25*time.Millisecond,
+			"Embedding count should return to initial after deleting all test nodes")
 	})
 }
 
