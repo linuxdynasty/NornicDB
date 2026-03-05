@@ -5,6 +5,7 @@
 package date
 
 import (
+	"strings"
 	"time"
 )
 
@@ -29,7 +30,7 @@ func Parse(dateStr, format string) int64 {
 //
 //	apoc.date.format(1705276800, 'yyyy-MM-dd') => '2024-01-15'
 func Format(timestamp int64, format string) string {
-	t := time.Unix(timestamp, 0)
+	t := time.Unix(timestamp, 0).UTC()
 	goFormat := convertFormat(format)
 	return t.Format(goFormat)
 }
@@ -49,7 +50,7 @@ func CurrentTimestamp() int64 {
 //
 //	apoc.date.field(timestamp, 'year') => 2024
 func Field(timestamp int64, field string) int {
-	t := time.Unix(timestamp, 0)
+	t := time.Unix(timestamp, 0).UTC()
 
 	switch field {
 	case "year":
@@ -83,7 +84,7 @@ func Field(timestamp int64, field string) int {
 //	apoc.date.fields(timestamp)
 //	=> {year:2024, month:1, day:15, ...}
 func Fields(timestamp int64) map[string]int {
-	t := time.Unix(timestamp, 0)
+	t := time.Unix(timestamp, 0).UTC()
 	_, week := t.ISOWeek()
 
 	return map[string]int{
@@ -105,7 +106,7 @@ func Fields(timestamp int64) map[string]int {
 //
 //	apoc.date.add(timestamp, 1, 'days') => timestamp + 1 day
 func Add(timestamp int64, amount int, unit string) int64 {
-	t := time.Unix(timestamp, 0)
+	t := time.Unix(timestamp, 0).UTC()
 	duration := getDuration(amount, unit)
 	return t.Add(duration).Unix()
 }
@@ -199,37 +200,34 @@ func ToUnixTime(t time.Time) int64 {
 //
 //	apoc.date.fromUnixTime(1705276800) => time object
 func FromUnixTime(timestamp int64) time.Time {
-	return time.Unix(timestamp, 0)
+	return time.Unix(timestamp, 0).UTC()
 }
 
 // Helper functions
 
 func convertFormat(javaFormat string) string {
-	// Convert common Java date format patterns to Go format
-	replacements := map[string]string{
-		"yyyy": "2006",
-		"yy":   "06",
-		"MM":   "01",
-		"M":    "1",
-		"dd":   "02",
-		"d":    "2",
-		"HH":   "15",
-		"H":    "15",
-		"mm":   "04",
-		"m":    "4",
-		"ss":   "05",
-		"s":    "5",
-		"SSS":  "000",
-		"Z":    "Z07:00",
-		"z":    "MST",
-	}
+	// Convert common Java date format patterns to Go format.
+	// Use deterministic longest-token-first replacement to avoid overlap bugs
+	// (e.g., replacing "M" before "MM" would corrupt formats).
+	replacer := strings.NewReplacer(
+		"yyyy", "2006",
+		"SSS", "000",
+		"yy", "06",
+		"MM", "01",
+		"dd", "02",
+		"HH", "15",
+		"mm", "04",
+		"ss", "05",
+		"Z", "Z07:00",
+		"z", "MST",
+		"M", "1",
+		"d", "2",
+		"H", "15",
+		"m", "4",
+		"s", "5",
+	)
 
-	result := javaFormat
-	for java, golang := range replacements {
-		result = replaceAll(result, java, golang)
-	}
-
-	return result
+	return replacer.Replace(javaFormat)
 }
 
 func replaceAll(s, old, new string) string {

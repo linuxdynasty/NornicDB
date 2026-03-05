@@ -6,12 +6,12 @@ package auth
 
 import "context"
 
-type requestRBACKey struct{}
+type requestRBACKey string
 
 var (
-	requestRBACKeyPrincipalRoles         = requestRBACKey{}
-	requestRBACKeyDatabaseAccessMode     = requestRBACKey{}
-	requestRBACKeyResolvedAccessResolver = requestRBACKey{}
+	requestRBACKeyPrincipalRoles         = requestRBACKey("principal_roles")
+	requestRBACKeyDatabaseAccessMode     = requestRBACKey("database_access_mode")
+	requestRBACKeyResolvedAccessResolver = requestRBACKey("resolved_access_resolver")
 )
 
 // WithRequestPrincipalRoles attaches the principal's role names to the context.

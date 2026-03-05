@@ -164,7 +164,7 @@ func boundaryScore(text string, boundary int) int {
 		return 0
 	}
 	prefix := text[:boundary]
-	trimmed := strings.TrimRight(prefix, " \t\r\n")
+	trimmed := strings.TrimRight(prefix, " \t\r")
 	if strings.HasSuffix(trimmed, "\n\n") {
 		return 4
 	}
