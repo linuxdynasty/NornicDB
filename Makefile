@@ -691,7 +691,11 @@ ifeq ($(HOST_OS),windows)
 		} \
 	"
 else
+ifeq ($(HOST_OS),linux)
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+endif
 endif
 
 # Build plugins only if platform supports Go plugins (Linux/macOS, not Windows)
@@ -708,7 +712,11 @@ ifeq ($(HOST_OS),windows)
 	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
 	@set CGO_ENABLED=1 && go build -tags "localllm" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
+ifeq ($(HOST_OS),linux)
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+endif
 endif
 
 # Build without UI (headless mode)
@@ -721,7 +729,11 @@ ifeq ($(HOST_OS),windows)
 	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
 	@set CGO_ENABLED=1 && go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
+ifeq ($(HOST_OS),linux)
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+else
 	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+endif
 endif
 
 test:
