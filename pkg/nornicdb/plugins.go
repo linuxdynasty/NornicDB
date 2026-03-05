@@ -6,14 +6,17 @@
 package nornicdb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"strings"
 	"sync"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 )
 
@@ -34,18 +37,33 @@ type PluginFunction struct {
 	Category    string
 }
 
+// PluginProcedure represents a Cypher procedure provided by a plugin.
+type PluginProcedure struct {
+	Name          string
+	Handler       interface{}
+	Signature     string
+	Description   string
+	Mode          string
+	WorksOnSystem bool
+	MinArgs       int
+	MaxArgs       int
+	Category      string
+}
+
 // LoadedPlugin represents a loaded plugin with its metadata.
 type LoadedPlugin struct {
-	Name      string
-	Version   string
-	Type      PluginType
-	Path      string
-	Functions []PluginFunction // Only for function plugins
+	Name       string
+	Version    string
+	Type       PluginType
+	Path       string
+	Functions  []PluginFunction // Only for function plugins
+	Procedures []PluginProcedure
 }
 
 var (
 	loadedPlugins      = make(map[string]*LoadedPlugin)
 	pluginFunctions    = make(map[string]PluginFunction)
+	pluginProcedures   = make(map[string]PluginProcedure)
 	pluginsMu          sync.RWMutex
 	pluginsInitialized bool
 )
@@ -138,6 +156,9 @@ func LoadPluginsFromDir(dir string, heimdallCtx *heimdall.SubsystemContext) erro
 			stats.functions += len(loaded.Functions)
 			for _, fn := range loaded.Functions {
 				pluginFunctions[fn.Name] = fn
+			}
+			for _, proc := range loaded.Procedures {
+				pluginProcedures[proc.Name] = proc
 			}
 			fmt.Printf("║ ✓ [FUNC] %-15s v%-8s %3d functions %12s ║\n",
 				loaded.Name, loaded.Version, len(loaded.Functions), "")
@@ -252,13 +273,21 @@ func loadFunctionPlugin(sym interface{}, path string) (*LoadedPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
+	procedures, err := extractProcedures(val, name)
+	if err != nil {
+		return nil, err
+	}
+	for _, proc := range procedures {
+		registerProcedureWithCypher(proc)
+	}
 
 	return &LoadedPlugin{
-		Name:      name,
-		Version:   version,
-		Type:      PluginTypeFunction,
-		Path:      path,
-		Functions: functions,
+		Name:       name,
+		Version:    version,
+		Type:       PluginTypeFunction,
+		Path:       path,
+		Functions:  functions,
+		Procedures: procedures,
 	}, nil
 }
 
@@ -383,6 +412,108 @@ func extractFunctions(val reflect.Value, pluginName string) ([]PluginFunction, e
 	}
 
 	return functions, nil
+}
+
+// extractProcedures parses the optional Procedures() map from a function plugin.
+func extractProcedures(val reflect.Value, pluginName string) ([]PluginProcedure, error) {
+	procsMethod := val.MethodByName("Procedures")
+	if !procsMethod.IsValid() {
+		return []PluginProcedure{}, nil
+	}
+
+	result := procsMethod.Call(nil)
+	if len(result) != 1 {
+		return nil, fmt.Errorf("Procedures() invalid return")
+	}
+
+	var procedures []PluginProcedure
+	mapVal := result[0]
+	if mapVal.Kind() != reflect.Map {
+		return procedures, nil
+	}
+
+	for _, key := range mapVal.MapKeys() {
+		procName := key.String()
+		procVal := mapVal.MapIndex(key)
+
+		var handler interface{}
+		var desc, signature, mode string
+		worksOnSystem := false
+		minArgs, maxArgs := 0, -1
+
+		if procVal.Kind() == reflect.Struct {
+			if field := procVal.FieldByName("Handler"); field.IsValid() {
+				handler = field.Interface()
+			}
+			if field := procVal.FieldByName("Description"); field.IsValid() && field.Kind() == reflect.String {
+				desc = field.String()
+			}
+			if field := procVal.FieldByName("Signature"); field.IsValid() && field.Kind() == reflect.String {
+				signature = field.String()
+			}
+			if field := procVal.FieldByName("Mode"); field.IsValid() && field.Kind() == reflect.String {
+				mode = field.String()
+			}
+			if field := procVal.FieldByName("WorksOnSystem"); field.IsValid() && field.Kind() == reflect.Bool {
+				worksOnSystem = field.Bool()
+			}
+			if field := procVal.FieldByName("MinArgs"); field.IsValid() && (field.Kind() == reflect.Int || field.Kind() == reflect.Int64) {
+				minArgs = int(field.Int())
+			}
+			if field := procVal.FieldByName("MaxArgs"); field.IsValid() && (field.Kind() == reflect.Int || field.Kind() == reflect.Int64) {
+				maxArgs = int(field.Int())
+			}
+		}
+
+		fullName := procName
+		if !strings.Contains(procName, ".") {
+			fullName = fmt.Sprintf("%s.%s", pluginName, procName)
+		}
+		if signature == "" {
+			signature = fmt.Sprintf("%s(...) :: (value :: ANY)", fullName)
+		}
+		if mode == "" {
+			mode = "READ"
+		}
+		procedures = append(procedures, PluginProcedure{
+			Name:          fullName,
+			Handler:       handler,
+			Signature:     signature,
+			Description:   desc,
+			Mode:          mode,
+			WorksOnSystem: worksOnSystem,
+			MinArgs:       minArgs,
+			MaxArgs:       maxArgs,
+			Category:      pluginName,
+		})
+	}
+
+	return procedures, nil
+}
+
+func registerProcedureWithCypher(proc PluginProcedure) {
+	handler, ok := proc.Handler.(func(context.Context, string, []interface{}) (*cypher.ExecuteResult, error))
+	if !ok {
+		return
+	}
+	mode := cypher.ProcedureModeRead
+	switch strings.ToUpper(proc.Mode) {
+	case "WRITE":
+		mode = cypher.ProcedureModeWrite
+	case "DBMS":
+		mode = cypher.ProcedureModeDBMS
+	}
+	_ = cypher.RegisterUserProcedure(cypher.ProcedureSpec{
+		Name:          proc.Name,
+		Signature:     proc.Signature,
+		Description:   proc.Description,
+		Mode:          mode,
+		WorksOnSystem: proc.WorksOnSystem,
+		MinArgs:       proc.MinArgs,
+		MaxArgs:       proc.MaxArgs,
+	}, func(ctx context.Context, _ *cypher.StorageExecutor, cypherQuery string, args []interface{}) (*cypher.ExecuteResult, error) {
+		return handler(ctx, cypherQuery, args)
+	})
 }
 
 // callStringMethod calls a method and returns its string result.
@@ -517,6 +648,25 @@ func ListPluginFunctions() []string {
 	defer pluginsMu.RUnlock()
 	names := make([]string, 0, len(pluginFunctions))
 	for name := range pluginFunctions {
+		names = append(names, name)
+	}
+	return names
+}
+
+// GetPluginProcedure returns a plugin procedure by name.
+func GetPluginProcedure(name string) (PluginProcedure, bool) {
+	pluginsMu.RLock()
+	defer pluginsMu.RUnlock()
+	p, ok := pluginProcedures[name]
+	return p, ok
+}
+
+// ListPluginProcedures returns all registered plugin procedure names.
+func ListPluginProcedures() []string {
+	pluginsMu.RLock()
+	defer pluginsMu.RUnlock()
+	names := make([]string, 0, len(pluginProcedures))
+	for name := range pluginProcedures {
 		names = append(names, name)
 	}
 	return names

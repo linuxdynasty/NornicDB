@@ -324,6 +324,9 @@ func (e *StorageExecutor) applyYieldFilter(result *ExecuteResult, yield *yieldCl
 	if yield == nil {
 		return result, nil
 	}
+	if err := validateYieldColumnsExist(result.Columns, yield); err != nil {
+		return nil, err
+	}
 
 	// Apply WHERE filter first
 	if yield.where != "" {
@@ -620,6 +623,27 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 
 	// Parse YIELD clause for post-processing
 	yield := parseYieldClause(cypher)
+
+	// Registry-first path: canonical procedure contract for built-ins and UDFs.
+	ensureBuiltInProceduresRegistered()
+	procName := extractProcedureName(cypher)
+	if proc, found := globalProcedureRegistry.Get(procName); found {
+		args, err := extractCallArguments(cypher)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateProcedureArgCount(proc.Spec, args); err != nil {
+			return nil, err
+		}
+		result, err := proc.Handler(ctx, e, cypher, args)
+		if err != nil {
+			return nil, err
+		}
+		if yield != nil {
+			return e.applyYieldFilter(result, yield)
+		}
+		return result, nil
+	}
 
 	var result *ExecuteResult
 	var err error
@@ -1206,25 +1230,15 @@ func (e *StorageExecutor) callDbPropertyKeys() (*ExecuteResult, error) {
 }
 
 func (e *StorageExecutor) callDbmsProcedures() (*ExecuteResult, error) {
-	procedures := [][]interface{}{
-		{"db.labels", "Lists all labels in the database", "READ"},
-		{"db.relationshipTypes", "Lists all relationship types", "READ"},
-		{"db.propertyKeys", "Lists all property keys", "READ"},
-		{"db.indexes", "Lists all indexes", "READ"},
-		{"db.constraints", "Lists all constraints", "READ"},
-		{"db.schema.visualization", "Visualizes the database schema", "READ"},
-		{"db.schema.nodeProperties", "Lists node properties by label", "READ"},
-		{"db.schema.relProperties", "Lists relationship properties by type", "READ"},
-		{"dbms.components", "Lists database components", "DBMS"},
-		{"dbms.procedures", "Lists available procedures", "DBMS"},
-		{"dbms.functions", "Lists available functions", "DBMS"},
-		{"nornicdb.version", "Returns NornicDB version", "READ"},
-		{"nornicdb.stats", "Returns database statistics", "READ"},
-		{"nornicdb.decay.info", "Returns memory decay configuration", "READ"},
+	ensureBuiltInProceduresRegistered()
+	registered := ListRegisteredProcedures()
+	procedures := make([][]interface{}, 0, len(registered))
+	for _, p := range registered {
+		procedures = append(procedures, []interface{}{p.Name, p.Description, string(p.Mode), p.Signature})
 	}
 
 	return &ExecuteResult{
-		Columns: []string{"name", "description", "mode"},
+		Columns: []string{"name", "description", "mode", "signature"},
 		Rows:    procedures,
 	}, nil
 }
