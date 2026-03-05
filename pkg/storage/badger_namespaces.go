@@ -32,4 +32,3 @@ func (b *BadgerEngine) ListNamespaces() []string {
 	}
 	return out
 }
-

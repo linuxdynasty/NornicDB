@@ -352,4 +352,3 @@ func parseLLMRerankResponse(raw string, n int) (order []int, scores map[int]floa
 	}
 	return order, nil
 }
-

@@ -421,10 +421,10 @@ const vectorIndexFormatVersion = "1.0.0"
 
 // vectorIndexSnapshot is the serializable form of the vector index (no mutex).
 type vectorIndexSnapshot struct {
-	Version     string
-	Dimensions  int
-	Vectors     map[string][]float32
-	RawVectors  map[string][]float32
+	Version    string
+	Dimensions int
+	Vectors    map[string][]float32
+	RawVectors map[string][]float32
 }
 
 // Save writes the vector index to path (msgpack format). Dir is created if needed.

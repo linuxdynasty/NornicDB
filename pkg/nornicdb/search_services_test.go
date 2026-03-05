@@ -32,9 +32,9 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	_, err = db.storage.CreateNode(alpha)
 	require.NoError(t, err)
 	db.indexNodeFromEvent(&storage.Node{
-		ID:             storage.NodeID("nornic:alpha"),
-		Labels:         alpha.Labels,
-		Properties:     alpha.Properties,
+		ID:              storage.NodeID("nornic:alpha"),
+		Labels:          alpha.Labels,
+		Properties:      alpha.Properties,
 		ChunkEmbeddings: alpha.ChunkEmbeddings,
 	})
 
@@ -51,9 +51,9 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	_, err = db2Storage.CreateNode(beta)
 	require.NoError(t, err)
 	db.indexNodeFromEvent(&storage.Node{
-		ID:             storage.NodeID("db2:beta"),
-		Labels:         beta.Labels,
-		Properties:     beta.Properties,
+		ID:              storage.NodeID("db2:beta"),
+		Labels:          beta.Labels,
+		Properties:      beta.Properties,
 		ChunkEmbeddings: beta.ChunkEmbeddings,
 	})
 

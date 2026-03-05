@@ -178,7 +178,7 @@ func (s *InMemoryStorage) CreateRelationship(startID, endID int64, relType strin
 	if _, err := s.GetNode(endID); err != nil {
 		return nil, err
 	}
-	
+
 	rel := &Relationship{
 		ID:         s.nextRelID,
 		Type:       relType,
@@ -209,11 +209,11 @@ func (s *InMemoryStorage) DeleteRelationship(id int64) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Remove from node relationships
 	s.nodeRels[rel.StartNode] = removeRel(s.nodeRels[rel.StartNode], id)
 	s.nodeRels[rel.EndNode] = removeRel(s.nodeRels[rel.EndNode], id)
-	
+
 	delete(s.relationships, id)
 	return nil
 }
@@ -256,16 +256,16 @@ func (s *InMemoryStorage) GetNodeRelationships(nodeID int64, relType string, dir
 	if _, err := s.GetNode(nodeID); err != nil {
 		return nil, err
 	}
-	
+
 	rels := s.nodeRels[nodeID]
 	result := make([]*Relationship, 0)
-	
+
 	for _, rel := range rels {
 		// Filter by type
 		if relType != "" && rel.Type != relType {
 			continue
 		}
-		
+
 		// Filter by direction
 		switch direction {
 		case DirectionOutgoing:
@@ -280,7 +280,7 @@ func (s *InMemoryStorage) GetNodeRelationships(nodeID int64, relType string, dir
 			result = append(result, rel)
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -289,10 +289,10 @@ func (s *InMemoryStorage) GetNodeNeighbors(nodeID int64, relType string, directi
 	if err != nil {
 		return nil, err
 	}
-	
+
 	neighbors := make([]*Node, 0)
 	seen := make(map[int64]bool)
-	
+
 	for _, rel := range rels {
 		var neighborID int64
 		if rel.StartNode == nodeID {
@@ -300,7 +300,7 @@ func (s *InMemoryStorage) GetNodeNeighbors(nodeID int64, relType string, directi
 		} else {
 			neighborID = rel.StartNode
 		}
-		
+
 		if !seen[neighborID] {
 			if neighbor, err := s.GetNode(neighborID); err == nil {
 				neighbors = append(neighbors, neighbor)
@@ -308,7 +308,7 @@ func (s *InMemoryStorage) GetNodeNeighbors(nodeID int64, relType string, directi
 			}
 		}
 	}
-	
+
 	return neighbors, nil
 }
 
@@ -332,34 +332,34 @@ func (s *InMemoryStorage) FindShortestPath(startID, endID int64, relType string,
 			Length:        0,
 		}, nil
 	}
-	
+
 	visited := make(map[int64]bool)
 	parent := make(map[int64]*pathParent)
 	queue := []int64{startID}
 	visited[startID] = true
-	
+
 	for len(queue) > 0 && len(parent) < maxHops*100 {
 		currentID := queue[0]
 		queue = queue[1:]
-		
+
 		if currentID == endID {
 			return s.reconstructPath(startID, endID, parent)
 		}
-		
+
 		depth := 0
 		if p, ok := parent[currentID]; ok {
 			depth = p.depth + 1
 		}
-		
+
 		if depth >= maxHops {
 			continue
 		}
-		
+
 		neighbors, _ := s.GetNodeNeighbors(currentID, relType, DirectionBoth)
 		for _, neighbor := range neighbors {
 			if !visited[neighbor.ID] {
 				visited[neighbor.ID] = true
-				
+
 				// Find the relationship
 				rels, _ := s.GetNodeRelationships(currentID, relType, DirectionBoth)
 				for _, rel := range rels {
@@ -373,19 +373,19 @@ func (s *InMemoryStorage) FindShortestPath(startID, endID int64, relType string,
 						break
 					}
 				}
-				
+
 				queue = append(queue, neighbor.ID)
 			}
 		}
 	}
-	
+
 	return nil, ErrPathNotFound
 }
 
 func (s *InMemoryStorage) FindAllPaths(startID, endID int64, relType string, maxHops int) ([]*Path, error) {
 	paths := make([]*Path, 0)
 	visited := make(map[int64]bool)
-	
+
 	var dfs func(currentID int64, path *Path, depth int)
 	dfs = func(currentID int64, path *Path, depth int) {
 		if currentID == endID {
@@ -398,13 +398,13 @@ func (s *InMemoryStorage) FindAllPaths(startID, endID int64, relType string, max
 			paths = append(paths, pathCopy)
 			return
 		}
-		
+
 		if depth >= maxHops {
 			return
 		}
-		
+
 		visited[currentID] = true
-		
+
 		neighbors, _ := s.GetNodeNeighbors(currentID, relType, DirectionBoth)
 		for _, neighbor := range neighbors {
 			if !visited[neighbor.ID] {
@@ -413,13 +413,13 @@ func (s *InMemoryStorage) FindAllPaths(startID, endID int64, relType string, max
 				for _, rel := range rels {
 					if (rel.StartNode == currentID && rel.EndNode == neighbor.ID) ||
 						(rel.EndNode == currentID && rel.StartNode == neighbor.ID) {
-						
+
 						path.Nodes = append(path.Nodes, neighbor)
 						path.Relationships = append(path.Relationships, rel)
 						path.Length++
-						
+
 						dfs(neighbor.ID, path, depth+1)
-						
+
 						path.Nodes = path.Nodes[:len(path.Nodes)-1]
 						path.Relationships = path.Relationships[:len(path.Relationships)-1]
 						path.Length--
@@ -428,23 +428,23 @@ func (s *InMemoryStorage) FindAllPaths(startID, endID int64, relType string, max
 				}
 			}
 		}
-		
+
 		visited[currentID] = false
 	}
-	
+
 	start, err := s.GetNode(startID)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	initialPath := &Path{
 		Nodes:         []*Node{start},
 		Relationships: []*Relationship{},
 		Length:        0,
 	}
-	
+
 	dfs(startID, initialPath, 0)
-	
+
 	return paths, nil
 }
 
@@ -452,24 +452,24 @@ func (s *InMemoryStorage) BFS(startID int64, relType string, maxDepth int, visit
 	visited := make(map[int64]bool)
 	queue := []nodeDepth{{nodeID: startID, depth: 0}}
 	visited[startID] = true
-	
+
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		
+
 		node, err := s.GetNode(current.nodeID)
 		if err != nil {
 			continue
 		}
-		
+
 		if !visitor(node) {
 			return nil
 		}
-		
+
 		if current.depth >= maxDepth {
 			continue
 		}
-		
+
 		neighbors, _ := s.GetNodeNeighbors(current.nodeID, relType, DirectionBoth)
 		for _, neighbor := range neighbors {
 			if !visited[neighbor.ID] {
@@ -478,30 +478,30 @@ func (s *InMemoryStorage) BFS(startID int64, relType string, maxDepth int, visit
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 func (s *InMemoryStorage) DFS(startID int64, relType string, maxDepth int, visitor func(*Node) bool) error {
 	visited := make(map[int64]bool)
-	
+
 	var dfs func(nodeID int64, depth int) bool
 	dfs = func(nodeID int64, depth int) bool {
 		visited[nodeID] = true
-		
+
 		node, err := s.GetNode(nodeID)
 		if err != nil {
 			return true
 		}
-		
+
 		if !visitor(node) {
 			return false
 		}
-		
+
 		if depth >= maxDepth {
 			return true
 		}
-		
+
 		neighbors, _ := s.GetNodeNeighbors(nodeID, relType, DirectionBoth)
 		for _, neighbor := range neighbors {
 			if !visited[neighbor.ID] {
@@ -510,10 +510,10 @@ func (s *InMemoryStorage) DFS(startID int64, relType string, maxDepth int, visit
 				}
 			}
 		}
-		
+
 		return true
 	}
-	
+
 	dfs(startID, 0)
 	return nil
 }
@@ -534,7 +534,7 @@ type nodeDepth struct {
 func (s *InMemoryStorage) reconstructPath(startID, endID int64, parent map[int64]*pathParent) (*Path, error) {
 	nodes := make([]*Node, 0)
 	rels := make([]*Relationship, 0)
-	
+
 	currentID := endID
 	for currentID != startID {
 		node, err := s.GetNode(currentID)
@@ -542,7 +542,7 @@ func (s *InMemoryStorage) reconstructPath(startID, endID int64, parent map[int64
 			return nil, err
 		}
 		nodes = append([]*Node{node}, nodes...)
-		
+
 		if p, ok := parent[currentID]; ok {
 			rels = append([]*Relationship{p.rel}, rels...)
 			currentID = p.nodeID
@@ -550,13 +550,13 @@ func (s *InMemoryStorage) reconstructPath(startID, endID int64, parent map[int64
 			return nil, ErrPathNotFound
 		}
 	}
-	
+
 	start, err := s.GetNode(startID)
 	if err != nil {
 		return nil, err
 	}
 	nodes = append([]*Node{start}, nodes...)
-	
+
 	return &Path{
 		Nodes:         nodes,
 		Relationships: rels,

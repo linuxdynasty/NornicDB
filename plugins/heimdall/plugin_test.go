@@ -76,12 +76,12 @@ func TestWatcherPlugin_Actions(t *testing.T) {
 	actions := p.Actions()
 
 	expectedActions := []string{
-		"help",               // List available actions
-		"status",             // Get status
+		"help",                 // List available actions
+		"status",               // Get status
 		"autocomplete_suggest", // Cypher schema suggestions
-		"discover",           // Semantic search (GRAPH-RAG)
-		"query",              // Read-only Cypher
-		"db_stats",           // Database statistics
+		"discover",             // Semantic search (GRAPH-RAG)
+		"query",                // Read-only Cypher
+		"db_stats",             // Database statistics
 	}
 
 	for _, name := range expectedActions {

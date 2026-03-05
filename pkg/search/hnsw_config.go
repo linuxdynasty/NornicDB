@@ -118,5 +118,3 @@ func presetDefaults(preset HNSWQualityPreset) HNSWConfig {
 		return DefaultHNSWConfig()
 	}
 }
-
-

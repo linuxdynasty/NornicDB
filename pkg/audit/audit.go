@@ -108,20 +108,20 @@
 //
 // Think of audit logging like a security camera system for your data:
 //
-// 1. **Every action is recorded**: Like how security cameras record everything
-//    that happens, we record every time someone reads, changes, or deletes data.
+//  1. **Every action is recorded**: Like how security cameras record everything
+//     that happens, we record every time someone reads, changes, or deletes data.
 //
-// 2. **Can't be erased**: Just like how security footage is stored safely where
-//    bad guys can't delete it, our audit logs can't be changed or deleted.
+//  2. **Can't be erased**: Just like how security footage is stored safely where
+//     bad guys can't delete it, our audit logs can't be changed or deleted.
 //
-// 3. **Shows who did what when**: If something goes wrong, we can look back and
-//    see exactly who did what and when, like reviewing security footage.
+//  3. **Shows who did what when**: If something goes wrong, we can look back and
+//     see exactly who did what and when, like reviewing security footage.
 //
-// 4. **Alerts for bad stuff**: If someone tries to break in or do something
-//    suspicious, the system sends an alert immediately, like a burglar alarm.
+//  4. **Alerts for bad stuff**: If someone tries to break in or do something
+//     suspicious, the system sends an alert immediately, like a burglar alarm.
 //
-// 5. **Required by law**: Just like buildings need fire exits, companies that
-//    handle personal data need audit logs to prove they're being careful.
+//  5. **Required by law**: Just like buildings need fire exits, companies that
+//     handle personal data need audit logs to prove they're being careful.
 //
 // The audit system helps keep everyone's data safe and proves we're following the rules!
 package audit
@@ -141,37 +141,37 @@ type EventType string
 
 const (
 	// Authentication events
-	EventLogin         EventType = "LOGIN"
-	EventLogout        EventType = "LOGOUT"
-	EventLoginFailed   EventType = "LOGIN_FAILED"
+	EventLogin          EventType = "LOGIN"
+	EventLogout         EventType = "LOGOUT"
+	EventLoginFailed    EventType = "LOGIN_FAILED"
 	EventPasswordChange EventType = "PASSWORD_CHANGE"
 
 	// Authorization events
-	EventAccessDenied  EventType = "ACCESS_DENIED"
-	EventRoleChange    EventType = "ROLE_CHANGE"
+	EventAccessDenied EventType = "ACCESS_DENIED"
+	EventRoleChange   EventType = "ROLE_CHANGE"
 
 	// Data access events (GDPR Art.15 - right of access)
-	EventDataRead      EventType = "DATA_READ"
-	EventDataCreate    EventType = "DATA_CREATE"
-	EventDataUpdate    EventType = "DATA_UPDATE"
-	EventDataDelete    EventType = "DATA_DELETE"
-	EventDataExport    EventType = "DATA_EXPORT"
+	EventDataRead   EventType = "DATA_READ"
+	EventDataCreate EventType = "DATA_CREATE"
+	EventDataUpdate EventType = "DATA_UPDATE"
+	EventDataDelete EventType = "DATA_DELETE"
+	EventDataExport EventType = "DATA_EXPORT"
 
 	// Data subject rights (GDPR)
-	EventErasureRequest EventType = "ERASURE_REQUEST"
+	EventErasureRequest  EventType = "ERASURE_REQUEST"
 	EventErasureComplete EventType = "ERASURE_COMPLETE"
-	EventConsentGiven   EventType = "CONSENT_GIVEN"
-	EventConsentRevoked EventType = "CONSENT_REVOKED"
+	EventConsentGiven    EventType = "CONSENT_GIVEN"
+	EventConsentRevoked  EventType = "CONSENT_REVOKED"
 
 	// System events
-	EventConfigChange   EventType = "CONFIG_CHANGE"
-	EventBackup         EventType = "BACKUP"
-	EventRestore        EventType = "RESTORE"
-	EventSchemaChange   EventType = "SCHEMA_CHANGE"
+	EventConfigChange EventType = "CONFIG_CHANGE"
+	EventBackup       EventType = "BACKUP"
+	EventRestore      EventType = "RESTORE"
+	EventSchemaChange EventType = "SCHEMA_CHANGE"
 
 	// Security events
-	EventSecurityAlert  EventType = "SECURITY_ALERT"
-	EventBreach         EventType = "BREACH_DETECTED"
+	EventSecurityAlert EventType = "SECURITY_ALERT"
+	EventBreach        EventType = "BREACH_DETECTED"
 )
 
 // Event represents an immutable audit log entry for compliance tracking.
@@ -214,8 +214,9 @@ const (
 //	}
 //
 // Immutability:
-//   Once logged, events cannot be modified. This ensures audit trail integrity
-//   required by HIPAA and SOC2.
+//
+//	Once logged, events cannot be modified. This ensures audit trail integrity
+//	required by HIPAA and SOC2.
 type Event struct {
 	// Unique event identifier
 	ID string `json:"id"`
@@ -233,9 +234,9 @@ type Event struct {
 	UserAgent string `json:"user_agent,omitempty"`
 
 	// Resource information
-	Resource   string `json:"resource,omitempty"`   // e.g., "node", "edge", "user"
+	Resource   string `json:"resource,omitempty"` // e.g., "node", "edge", "user"
 	ResourceID string `json:"resource_id,omitempty"`
-	Action     string `json:"action,omitempty"`     // e.g., "create", "read", "update", "delete"
+	Action     string `json:"action,omitempty"` // e.g., "create", "read", "update", "delete"
 
 	// Outcome
 	Success bool   `json:"success"`
@@ -288,8 +289,9 @@ type Event struct {
 //	})
 //
 // Thread Safety:
-//   All methods are thread-safe and can be called concurrently from
-//   multiple goroutines.
+//
+//	All methods are thread-safe and can be called concurrently from
+//	multiple goroutines.
 type Logger struct {
 	mu       sync.Mutex
 	writer   io.Writer
@@ -334,7 +336,7 @@ func DefaultConfig() Config {
 	return Config{
 		Enabled:          true,
 		LogPath:          "./logs/audit.log",
-		RetentionDays:    2555, // 7 years for SOC2
+		RetentionDays:    2555,              // 7 years for SOC2
 		RotationSize:     100 * 1024 * 1024, // 100MB
 		RotationInterval: 24 * time.Hour,
 		SyncWrites:       true,
@@ -395,13 +397,13 @@ func DefaultConfig() Config {
 //	config := audit.DefaultConfig()
 //	config.LogPath = "/var/log/nornicdb/audit.log"
 //	config.RetentionDays = 2555 // 7 years for SOC2
-//	
+//
 //	logger, err := audit.NewLogger(config)
 //	if err != nil {
 //		log.Fatal("Failed to initialize audit logging:", err)
 //	}
 //	defer logger.Close()
-//	
+//
 //	// Log every data access (GDPR Art.30 requirement)
 //	logger.LogDataAccess("user-123", "alice", "patient_record",
 //		"patient-456", "READ", true, "PHI")
@@ -411,12 +413,12 @@ func DefaultConfig() Config {
 //	config := audit.DefaultConfig()
 //	config.SyncWrites = true // Force fsync for durability
 //	config.LogPath = "/secure/logs/hipaa-audit.log"
-//	
+//
 //	logger, err := audit.NewLogger(config)
 //	if err != nil {
 //		return fmt.Errorf("HIPAA audit init failed: %w", err)
 //	}
-//	
+//
 //	// Set up real-time breach detection
 //	logger.SetAlertCallback(func(event audit.Event) {
 //		if event.Type == audit.EventBreach {
@@ -427,7 +429,7 @@ func DefaultConfig() Config {
 //			blockIP(event.IPAddress)
 //		}
 //	})
-//	
+//
 //	// Log all authentication attempts
 //	logger.LogAuth(audit.EventLogin, userID, username, ipAddr, userAgent, true, "")
 //
@@ -439,12 +441,12 @@ func DefaultConfig() Config {
 //		config.LogPath = fmt.Sprintf("/logs/tenants/%s/audit.log", tenantID)
 //		config.RetentionDays = 2555 // 7 years
 //		config.MaxFileSizeMB = 100   // Rotate at 100MB
-//		
+//
 //		logger, err := audit.NewLogger(config)
 //		if err != nil {
 //			return nil, err
 //		}
-//		
+//
 //		// Log tenant creation
 //		logger.Log(audit.Event{
 //			Type:     audit.EventSystemChange,
@@ -458,7 +460,7 @@ func DefaultConfig() Config {
 //				"timestamp": time.Now().Format(time.RFC3339),
 //			},
 //		})
-//		
+//
 //		return logger, nil
 //	}
 //
@@ -503,7 +505,8 @@ func DefaultConfig() Config {
 //   - Automatic log rotation when size limit reached
 //
 // Thread Safety:
-//   Safe for concurrent logging from multiple goroutines.
+//
+//	Safe for concurrent logging from multiple goroutines.
 func NewLogger(config Config) (*Logger, error) {
 	if !config.Enabled {
 		return &Logger{config: config}, nil
@@ -588,7 +591,8 @@ func (l *Logger) SetAlertCallback(fn func(Event)) {
 //   - ID: Generated if empty (format: audit-{nanoseconds}-{sequence})
 //
 // Thread Safety:
-//   This method is thread-safe and can be called concurrently.
+//
+//	This method is thread-safe and can be called concurrently.
 func (l *Logger) Log(event Event) error {
 	if !l.config.Enabled {
 		return nil
@@ -672,7 +676,8 @@ func (l *Logger) Log(event Event) error {
 //		"192.168.1.100", "Mozilla/5.0", true, "user initiated")
 //
 // Compliance:
-//   Satisfies HIPAA §164.312(b) audit control requirements.
+//
+//	Satisfies HIPAA §164.312(b) audit control requirements.
 func (l *Logger) LogAuth(eventType EventType, userID, username, ip, userAgent string, success bool, reason string) error {
 	return l.Log(Event{
 		Type:      eventType,
@@ -972,18 +977,18 @@ func containsEventType(types []EventType, t EventType) bool {
 
 // ComplianceReport generates a compliance report for a time period.
 type ComplianceReport struct {
-	Period           string            `json:"period"`
-	StartTime        time.Time         `json:"start_time"`
-	EndTime          time.Time         `json:"end_time"`
-	TotalEvents      int               `json:"total_events"`
-	EventsByType     map[EventType]int `json:"events_by_type"`
-	FailedLogins     int               `json:"failed_logins"`
-	AccessDenied     int               `json:"access_denied"`
-	DataAccesses     int               `json:"data_accesses"`
-	ErasureRequests  int               `json:"erasure_requests"`
-	SecurityAlerts   int               `json:"security_alerts"`
-	UniqueUsers      int               `json:"unique_users"`
-	GeneratedAt      time.Time         `json:"generated_at"`
+	Period          string            `json:"period"`
+	StartTime       time.Time         `json:"start_time"`
+	EndTime         time.Time         `json:"end_time"`
+	TotalEvents     int               `json:"total_events"`
+	EventsByType    map[EventType]int `json:"events_by_type"`
+	FailedLogins    int               `json:"failed_logins"`
+	AccessDenied    int               `json:"access_denied"`
+	DataAccesses    int               `json:"data_accesses"`
+	ErasureRequests int               `json:"erasure_requests"`
+	SecurityAlerts  int               `json:"security_alerts"`
+	UniqueUsers     int               `json:"unique_users"`
+	GeneratedAt     time.Time         `json:"generated_at"`
 }
 
 // GenerateComplianceReport creates a comprehensive compliance report for auditors.

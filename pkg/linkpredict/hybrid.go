@@ -147,11 +147,11 @@ func DefaultHybridConfig() HybridConfig {
 //	semanticScorer := func(ctx context.Context, source, target storage.NodeID) float64 {
 //		sourceNode, _ := engine.GetNode(ctx, source)
 //		targetNode, _ := engine.GetNode(ctx, target)
-//		
+//
 //		if len(sourceNode.Embedding) == 0 || len(targetNode.Embedding) == 0 {
 //			return 0.0
 //		}
-//		
+//
 //		return cosineSimilarity(sourceNode.Embedding, targetNode.Embedding)
 //	}
 type SemanticScorerFunc func(ctx context.Context, source, target storage.NodeID) float64
@@ -212,7 +212,7 @@ func (h *HybridScorer) SetSemanticScorer(fn SemanticScorerFunc) {
 // Example:
 //
 //	predictions := scorer.Predict(ctx, graph, "user-123", 10)
-//	
+//
 //	for _, pred := range predictions {
 //		fmt.Printf("→ %s: %.3f (topology: %.3f, semantic: %.3f)\n",
 //			pred.TargetID, pred.Score,

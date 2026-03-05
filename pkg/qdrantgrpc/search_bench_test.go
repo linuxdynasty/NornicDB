@@ -152,4 +152,3 @@ func TestBenchServer_Starts(t *testing.T) {
 	require.NoError(t, err)
 	_ = l.Close()
 }
-

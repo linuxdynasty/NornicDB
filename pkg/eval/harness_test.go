@@ -95,9 +95,9 @@ func TestMRR(t *testing.T) {
 func TestNDCG(t *testing.T) {
 	// Graded relevance: 3=highly relevant, 2=relevant, 1=marginal
 	grades := map[string]int{
-		"best":   3,
-		"good":   2,
-		"ok":     1,
+		"best": 3,
+		"good": 2,
+		"ok":   1,
 	}
 
 	t.Run("perfect_ranking", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestNDCG(t *testing.T) {
 		// Worst order (but still has relevant docs)
 		returned := []string{"ok", "good", "best"}
 		n := ndcg(returned, grades, 3)
-		assert.Less(t, n, 1.0) // Not perfect
+		assert.Less(t, n, 1.0)    // Not perfect
 		assert.Greater(t, n, 0.0) // Still has relevant docs
 	})
 

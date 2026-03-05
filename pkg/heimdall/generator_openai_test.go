@@ -36,7 +36,7 @@ func TestTrimMessagesForContext(t *testing.T) {
 	msgs = append(msgs, ToolRoundMessage{Role: "tool", ToolCallID: "1", Content: big})
 	msgs = append(msgs, ToolRoundMessage{Role: "assistant", Content: "ok", ToolCalls: []ParsedToolCall{{Id: "2", Name: "f", Arguments: "{}"}}})
 	msgs = append(msgs, ToolRoundMessage{Role: "tool", ToolCallID: "2", Content: big})
-	out = trimMessagesForContext(msgs, 30000) // ~30K budget
+	out = trimMessagesForContext(msgs, 30000)                          // ~30K budget
 	assert.LessOrEqual(t, EstimateToolRoundMessagesTokens(out), 35000) // allow some slack
 	assert.Equal(t, "system", out[0].Role)
 	assert.Equal(t, "user", out[1].Role)

@@ -39,4 +39,3 @@ func EnsureDatabasePrefix(dbName, id string) string {
 	}
 	return dbName + ":" + id
 }
-

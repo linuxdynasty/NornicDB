@@ -31,9 +31,9 @@ func TestNewDeviceStub(t *testing.T) {
 
 func TestDeviceMethodsStub(t *testing.T) {
 	var device Device
-	
+
 	device.Release()
-	
+
 	if device.ID() != 0 {
 		t.Error("ID() should return 0")
 	}
@@ -53,9 +53,9 @@ func TestDeviceMethodsStub(t *testing.T) {
 
 func TestBufferMethodsStub(t *testing.T) {
 	var buffer Buffer
-	
+
 	buffer.Release()
-	
+
 	if buffer.Size() != 0 {
 		t.Error("Size() should return 0")
 	}
@@ -66,12 +66,12 @@ func TestBufferMethodsStub(t *testing.T) {
 
 func TestDeviceBufferCreationStub(t *testing.T) {
 	var device Device
-	
+
 	_, err := device.NewBuffer([]float32{1.0})
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("NewBuffer() error = %v, want ErrOpenCLNotAvailable", err)
 	}
-	
+
 	_, err = device.NewEmptyBuffer(100)
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("NewEmptyBuffer() error = %v, want ErrOpenCLNotAvailable", err)
@@ -81,22 +81,22 @@ func TestDeviceBufferCreationStub(t *testing.T) {
 func TestDeviceOperationsStub(t *testing.T) {
 	var device Device
 	var buffer Buffer
-	
+
 	err := device.NormalizeVectors(&buffer, 10, 3)
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("NormalizeVectors() error = %v, want ErrOpenCLNotAvailable", err)
 	}
-	
+
 	err = device.CosineSimilarity(&buffer, &buffer, &buffer, 10, 3, true)
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("CosineSimilarity() error = %v, want ErrOpenCLNotAvailable", err)
 	}
-	
+
 	_, _, err = device.TopK(&buffer, 10, 5)
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("TopK() error = %v, want ErrOpenCLNotAvailable", err)
 	}
-	
+
 	_, err = device.Search(&buffer, []float32{1.0}, 10, 1, 5, true)
 	if err != ErrOpenCLNotAvailable {
 		t.Errorf("Search() error = %v, want ErrOpenCLNotAvailable", err)

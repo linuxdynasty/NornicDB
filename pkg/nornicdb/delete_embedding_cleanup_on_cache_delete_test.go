@@ -58,4 +58,3 @@ func TestDeleteNode_RemovesEmbeddings_WhenDeletedBeforeFlush(t *testing.T) {
 		require.NotEqual(t, string(localID), string(r.Node.ID))
 	}
 }
-

@@ -1,8 +1,8 @@
 package bolt
 
 import (
-	"context"
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"

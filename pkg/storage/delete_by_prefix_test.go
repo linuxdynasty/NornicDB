@@ -54,4 +54,3 @@ func TestBadgerEngine_DeleteByPrefix_DropsOnlyMatchingNamespace(t *testing.T) {
 	require.Len(t, edges, 1)
 	require.Equal(t, EdgeID("db2:e2"), edges[0].ID)
 }
-

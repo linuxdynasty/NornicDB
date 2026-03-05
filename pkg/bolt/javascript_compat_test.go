@@ -140,9 +140,10 @@ func TestJavaScriptDriverCompatibility(t *testing.T) {
 // TestMimirUsedCountScenario specifically tests the reported bug scenario.
 //
 // Mimir query:
-//   MATCH (n:Node {type: 'preamble'})
-//   WHERE n.roleHash = $roleHash
-//   RETURN n.content as content, n.id as id, n.usedCount as usedCount
+//
+//	MATCH (n:Node {type: 'preamble'})
+//	WHERE n.roleHash = $roleHash
+//	RETURN n.content as content, n.id as id, n.usedCount as usedCount
 //
 // Problem: usedCount (typically 0-100) was returned as BigInt
 // Cause: Incorrect PackStream encoding (INT64 instead of INT32/tiny)

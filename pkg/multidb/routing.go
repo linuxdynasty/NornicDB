@@ -114,10 +114,10 @@ func (r *LabelRouting) RouteWrite(operation string, labels []string, properties 
 // PropertyRouting routes queries based on property values.
 // Useful for database/shard-based routing (e.g., database_id property).
 type PropertyRouting struct {
-	propertyName string                    // Property to route on (e.g., "database_id")
-	valueMap     map[interface{}]string   // property value -> constituent alias
-	defaultConstituent string              // Default if property not found
-	mu          sync.RWMutex
+	propertyName       string                 // Property to route on (e.g., "database_id")
+	valueMap           map[interface{}]string // property value -> constituent alias
+	defaultConstituent string                 // Default if property not found
+	mu                 sync.RWMutex
 }
 
 // NewPropertyRouting creates a new property-based routing strategy.

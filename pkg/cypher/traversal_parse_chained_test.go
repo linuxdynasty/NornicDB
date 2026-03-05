@@ -22,4 +22,3 @@ func TestParseTraversalPattern_Chained_NorthwindSupplierCategory(t *testing.T) {
 	require.Equal(t, "outgoing", m.Segments[0].Relationship.Direction)
 	require.Equal(t, "outgoing", m.Segments[1].Relationship.Direction)
 }
-

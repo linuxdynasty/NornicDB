@@ -169,7 +169,7 @@ func TestCompositeEngine_GetSchema_MergesConstraints(t *testing.T) {
 	// GetConstraintsForLabels with specific labels
 	personConstraints := mergedSchema.GetConstraintsForLabels([]string{"Person"})
 	companyConstraints := mergedSchema.GetConstraintsForLabels([]string{"Company"})
-	
+
 	// At least one constraint should be found
 	foundPerson := false
 	foundCompany := false
@@ -183,7 +183,7 @@ func TestCompositeEngine_GetSchema_MergesConstraints(t *testing.T) {
 			foundCompany = true
 		}
 	}
-	
+
 	// Verify constraints from both constituents are present
 	assert.True(t, foundPerson || foundCompany, "At least one constraint should be merged")
 }
@@ -260,4 +260,3 @@ func TestCompositeEngine_GetSchema_AllIndexTypes(t *testing.T) {
 	assert.Equal(t, 1, typeCounts["VECTOR"], "Should have 1 vector index")
 	assert.Equal(t, 1, typeCounts["RANGE"], "Should have 1 range index")
 }
-

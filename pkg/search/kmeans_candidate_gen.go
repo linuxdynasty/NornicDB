@@ -41,7 +41,7 @@ import (
 type KMeansCandidateGen struct {
 	clusterIndex        *gpu.ClusterIndex
 	vectorIndex         *VectorIndex // For fallback and ID mapping
-	numClustersToSearch int           // Number of clusters to search (default: 3)
+	numClustersToSearch int          // Number of clusters to search (default: 3)
 	clusterSelector     func(ctx context.Context, query []float32, defaultN int) []int
 }
 
@@ -130,4 +130,3 @@ func (k *KMeansCandidateGen) SearchCandidates(ctx context.Context, query []float
 	}
 	return candidates, nil
 }
-

@@ -67,4 +67,3 @@ func TestAsyncEngine_UpdateNodeEmbedding_InFlight_DoesNotChangeNodeCount(t *test
 	require.NoError(t, err)
 	require.Equal(t, count1, count2, "embedding update must not affect NodeCount even when inFlight")
 }
-

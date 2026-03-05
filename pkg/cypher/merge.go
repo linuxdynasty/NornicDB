@@ -762,7 +762,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			}
 			setClause := strings.TrimSpace(cypher[onMatchIdx+13 : setEnd])
 			e.applySetToNodeWithContext(node, varName, setClause, nodeContext, relContext)
-		store.UpdateNode(node)
+			store.UpdateNode(node)
 			e.notifyNodeMutated(string(node.ID))
 		}
 	} else {

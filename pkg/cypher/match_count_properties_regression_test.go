@@ -31,4 +31,3 @@ func TestMatchCountRespectsAllPatternProperties(t *testing.T) {
 		t.Fatalf("expected count 1 for full property pattern, got %d", got)
 	}
 }
-

@@ -11,16 +11,16 @@ import (
 )
 
 type bm25V2Snapshot struct {
-	Version        string                     `msgpack:"v"`
-	Documents      map[string]string          `msgpack:"docs"`
-	DocIDToNum     map[string]uint32          `msgpack:"doc_id_to_num"`
-	DocNumToID     []string                   `msgpack:"doc_num_to_id"`
-	DocLengths     []uint32                   `msgpack:"doc_lengths"`
-	TermIndex      map[string]*bm25TermState  `msgpack:"terms"`
-	Lexicon        []string                   `msgpack:"lexicon"`
-	AvgDocLength   float64                    `msgpack:"avg_doc_len"`
-	DocCount       int                        `msgpack:"doc_count"`
-	TotalDocLength int64                      `msgpack:"total_doc_len"`
+	Version        string                    `msgpack:"v"`
+	Documents      map[string]string         `msgpack:"docs"`
+	DocIDToNum     map[string]uint32         `msgpack:"doc_id_to_num"`
+	DocNumToID     []string                  `msgpack:"doc_num_to_id"`
+	DocLengths     []uint32                  `msgpack:"doc_lengths"`
+	TermIndex      map[string]*bm25TermState `msgpack:"terms"`
+	Lexicon        []string                  `msgpack:"lexicon"`
+	AvgDocLength   float64                   `msgpack:"avg_doc_len"`
+	DocCount       int                       `msgpack:"doc_count"`
+	TotalDocLength int64                     `msgpack:"total_doc_len"`
 }
 
 type bm25V1Snapshot struct {

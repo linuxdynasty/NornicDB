@@ -242,7 +242,7 @@ func TestCaseExpressionSimple(t *testing.T) {
 		for _, row := range result.Rows {
 			value := row[0].(int64)
 			word := row[1].(string)
-			
+
 			expected := map[int64]string{1: "one", 2: "two", 3: "three"}
 			if expected[value] != word {
 				t.Errorf("For value %d: expected %s, got %s", value, expected[value], word)

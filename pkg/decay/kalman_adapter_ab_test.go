@@ -15,7 +15,7 @@ func TestAB_DecayScoreSmoothing(t *testing.T) {
 	defer config.DisableKalmanFiltering()
 
 	manager := New(DefaultConfig())
-	
+
 	// Create two adapters - one with smoothing, one without
 	cfgNoSmooth := DefaultKalmanAdapterConfig()
 	cfgNoSmooth.EnableKalmanSmoothing = false
@@ -50,7 +50,7 @@ func TestAB_DecayScoreSmoothing(t *testing.T) {
 		// Add noise to access time (±30 minutes)
 		noise := time.Duration(rng.NormFloat64()*30) * time.Minute
 		accessTime := baseTime.Add(noise)
-		
+
 		infoNoSmooth.LastAccessed = accessTime
 		infoSmooth.LastAccessed = accessTime
 
@@ -66,22 +66,22 @@ func TestAB_DecayScoreSmoothing(t *testing.T) {
 	t.Logf("Samples: %d", len(scoresNoSmooth))
 	t.Logf("\nNo Smoothing:")
 	t.Logf("  Mean: %.4f, Variance: %.6f, StdDev: %.4f", meanNoSmooth, varNoSmooth, math.Sqrt(varNoSmooth))
-	t.Logf("  First 5 scores: %.4f, %.4f, %.4f, %.4f, %.4f", 
+	t.Logf("  First 5 scores: %.4f, %.4f, %.4f, %.4f, %.4f",
 		scoresNoSmooth[0], scoresNoSmooth[1], scoresNoSmooth[2], scoresNoSmooth[3], scoresNoSmooth[4])
 	t.Logf("\nWith Kalman Smoothing:")
 	t.Logf("  Mean: %.4f, Variance: %.6f, StdDev: %.4f", meanSmooth, varSmooth, math.Sqrt(varSmooth))
-	t.Logf("  First 5 scores: %.4f, %.4f, %.4f, %.4f, %.4f", 
+	t.Logf("  First 5 scores: %.4f, %.4f, %.4f, %.4f, %.4f",
 		scoresSmooth[0], scoresSmooth[1], scoresSmooth[2], scoresSmooth[3], scoresSmooth[4])
 
 	// Compare variance - Kalman should reduce it (after warm-up period)
 	// Get variance of last 30 samples (after filter converges)
 	_, varNoSmoothLate := calcStats(scoresNoSmooth[20:])
 	_, varSmoothLate := calcStats(scoresSmooth[20:])
-	
+
 	t.Logf("\nLast 30 samples (after convergence):")
 	t.Logf("  No Smooth Variance: %.6f", varNoSmoothLate)
 	t.Logf("  Smoothed Variance: %.6f", varSmoothLate)
-	
+
 	if varNoSmoothLate > 0.000001 { // Only test if there's actual variance to reduce
 		reduction := (1 - varSmoothLate/varNoSmoothLate) * 100
 		t.Logf("  Variance Reduction: %.1f%%", reduction)
@@ -125,7 +125,7 @@ func TestAB_VelocityTracking(t *testing.T) {
 		cached := adapter.GetSmoothedScore(info.ID)
 		if cached != nil {
 			velocitiesDecreasing = append(velocitiesDecreasing, cached.Velocity)
-			t.Logf("  Step %d: Access age=%dh, Score=%.4f, Velocity=%.6f", 
+			t.Logf("  Step %d: Access age=%dh, Score=%.4f, Velocity=%.6f",
 				i+1, 2+i*2, cached.Smoothed, cached.Velocity)
 		}
 	}
@@ -133,7 +133,7 @@ func TestAB_VelocityTracking(t *testing.T) {
 	// After decreasing trend, velocity should be negative or near-zero
 	lastVelocity := velocitiesDecreasing[len(velocitiesDecreasing)-1]
 	t.Logf("\nFinal velocity after decrease: %.6f", lastVelocity)
-	
+
 	// Note: Kalman velocity can lag behind actual changes
 	// The important thing is it's not strongly POSITIVE when score is dropping
 
@@ -166,7 +166,7 @@ func TestAB_VelocityTracking(t *testing.T) {
 		cached := adapter.GetSmoothedScore(info2.ID)
 		if cached != nil {
 			velocitiesIncreasing = append(velocitiesIncreasing, cached.Velocity)
-			t.Logf("  Step %d: AccessCount=%d, Score=%.4f, Velocity=%.6f", 
+			t.Logf("  Step %d: AccessCount=%d, Score=%.4f, Velocity=%.6f",
 				i+1, info2.AccessCount, cached.Smoothed, cached.Velocity)
 		}
 	}
@@ -174,7 +174,7 @@ func TestAB_VelocityTracking(t *testing.T) {
 	// Velocity should be positive when score is increasing
 	lastVelocityInc := velocitiesIncreasing[len(velocitiesIncreasing)-1]
 	t.Logf("\nFinal velocity after increase: %.6f", lastVelocityInc)
-	
+
 	if lastVelocityInc <= 0 {
 		t.Log("Note: Velocity lags behind score changes - this is expected Kalman behavior")
 	}
@@ -190,11 +190,11 @@ func TestAB_ArchivalDecisions(t *testing.T) {
 
 	// Create memory that's below threshold but trending UP
 	recoveringMemory := &MemoryInfo{
-		ID:          "recovering",
-		Tier:        TierSemantic,
-		CreatedAt:   time.Now().Add(-60 * 24 * time.Hour),
+		ID:           "recovering",
+		Tier:         TierSemantic,
+		CreatedAt:    time.Now().Add(-60 * 24 * time.Hour),
 		LastAccessed: time.Now().Add(-30 * 24 * time.Hour), // Old last access
-		AccessCount: 2,
+		AccessCount:  2,
 	}
 
 	// First calculate score (it should be low)
@@ -217,11 +217,11 @@ func TestAB_ArchivalDecisions(t *testing.T) {
 
 	// Create truly dead memory (old, no recent access, negative trend)
 	deadMemory := &MemoryInfo{
-		ID:          "dead",
-		Tier:        TierEpisodic,
-		CreatedAt:   time.Now().Add(-90 * 24 * time.Hour),
+		ID:           "dead",
+		Tier:         TierEpisodic,
+		CreatedAt:    time.Now().Add(-90 * 24 * time.Hour),
 		LastAccessed: time.Now().Add(-60 * 24 * time.Hour),
-		AccessCount: 1,
+		AccessCount:  1,
 	}
 
 	// Calculate multiple times to establish negative velocity
@@ -413,7 +413,7 @@ func BenchmarkAB_DecayCalculation(b *testing.B) {
 		cfg := DefaultKalmanAdapterConfig()
 		cfg.EnableKalmanSmoothing = false
 		adapter := NewKalmanAdapter(manager, cfg)
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			adapter.CalculateScore(info)
@@ -423,7 +423,7 @@ func BenchmarkAB_DecayCalculation(b *testing.B) {
 	b.Run("KalmanOn", func(b *testing.B) {
 		config.EnableKalmanFiltering()
 		adapter := NewKalmanAdapter(manager, DefaultKalmanAdapterConfig())
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			adapter.CalculateScore(info)

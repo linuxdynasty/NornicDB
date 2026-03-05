@@ -145,10 +145,10 @@ type NodeStats struct {
 	NodeID string
 
 	// Access counts
-	TotalAccesses   int64
-	AccessesInHour  int
-	AccessesInDay   int
-	AccessesInWeek  int
+	TotalAccesses  int64
+	AccessesInHour int
+	AccessesInDay  int
+	AccessesInWeek int
 
 	// Timing
 	FirstAccess     time.Time
@@ -156,7 +156,7 @@ type NodeStats struct {
 	AverageInterval float64 // seconds between accesses
 
 	// Predictions
-	PredictedNextAccess time.Time
+	PredictedNextAccess  time.Time
 	PredictionConfidence float64
 
 	// Pattern detection
@@ -175,12 +175,12 @@ type NodeStats struct {
 
 // Prediction represents a predicted future access.
 type Prediction struct {
-	NodeID           string
-	PredictedTime    time.Time
-	SecondsUntil     float64
-	Confidence       float64
-	BasedOnAccesses  int
-	AccessRateTrend  string // "increasing", "stable", "decreasing"
+	NodeID          string
+	PredictedTime   time.Time
+	SecondsUntil    float64
+	Confidence      float64
+	BasedOnAccesses int
+	AccessRateTrend string // "increasing", "stable", "decreasing"
 }
 
 // nodeTracker tracks temporal data for a single node.
@@ -247,13 +247,13 @@ type Tracker struct {
 // Example 1 - Basic Access Tracking:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
-//	
+//
 //	// Simulate user accessing documents over time
 //	for i := 0; i < 10; i++ {
 //		tracker.RecordAccess("doc-123")
 //		time.Sleep(5 * time.Second)
 //	}
-//	
+//
 //	// Get statistics
 //	stats := tracker.GetNodeStats("doc-123")
 //	fmt.Printf("Accessed %d times, avg %.1f seconds between accesses\n",
@@ -262,13 +262,13 @@ type Tracker struct {
 // Example 2 - Predicting Next Access:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
-//	
+//
 //	// User accesses a file regularly
 //	for i := 0; i < 5; i++ {
 //		tracker.RecordAccess("project-file")
 //		time.Sleep(1 * time.Hour) // Every hour
 //	}
-//	
+//
 //	// Predict when they'll access it next
 //	prediction := tracker.PredictNextAccess("project-file")
 //	if prediction != nil {
@@ -279,16 +279,16 @@ type Tracker struct {
 // Example 3 - Session Boundary Detection:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
-//	
+//
 //	// User is actively working
 //	tracker.RecordAccess("doc-1")
 //	time.Sleep(30 * time.Second)
 //	tracker.RecordAccess("doc-1")
 //	time.Sleep(30 * time.Second)
-//	
+//
 //	// Long gap - user left for lunch
 //	time.Sleep(2 * time.Hour)
-//	
+//
 //	// Check if session changed
 //	if tracker.IsSessionBoundary("doc-1") {
 //		fmt.Println("New session detected - user returned!")
@@ -299,11 +299,11 @@ type Tracker struct {
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
 //	decayManager := decay.New(nil)
-//	
+//
 //	// Track accesses and update decay
 //	onAccess := func(nodeID string) {
 //		tracker.RecordAccess(nodeID)
-//		
+//
 //		// Predict if node will be accessed soon
 //		pred := tracker.PredictNextAccess(nodeID)
 //		if pred != nil && pred.SecondsUntil < 3600 { // Within 1 hour
@@ -323,10 +323,10 @@ type Tracker struct {
 //   - If she doesn't visit for a week, it notices: "Session ended, she forgot about us"
 //
 // The Kalman filter is the "smart brain" that:
-//   1. Notices patterns (daily visits, weekly visits, etc.)
-//   2. Handles noise (if she comes at 3:05pm once, don't panic)
-//   3. Detects trends (is she visiting MORE often or LESS often?)
-//   4. Makes predictions (when will she visit next?)
+//  1. Notices patterns (daily visits, weekly visits, etc.)
+//  2. Handles noise (if she comes at 3:05pm once, don't panic)
+//  3. Detects trends (is she visiting MORE often or LESS often?)
+//  4. Makes predictions (when will she visit next?)
 //
 // Real-world Uses:
 //   - Cache management: "This file will be accessed in 5 minutes, keep it warm!"
@@ -341,7 +341,8 @@ type Tracker struct {
 //   - MaxTrackedNodes uses LRU eviction (least recently used gets removed)
 //
 // Thread Safety:
-//   All methods are thread-safe for concurrent access from multiple goroutines.
+//
+//	All methods are thread-safe for concurrent access from multiple goroutines.
 func NewTracker(cfg Config) *Tracker {
 	return &Tracker{
 		config:      cfg,
@@ -364,19 +365,19 @@ func NewTracker(cfg Config) *Tracker {
 // Example 1 - Simple Access Tracking:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
-//	
+//
 //	// Record every time user opens a document
 //	tracker.RecordAccess("doc-readme")
 //	tracker.RecordAccess("doc-api")
 //	tracker.RecordAccess("doc-readme") // Accessed again
-//	
+//
 //	// Tracker now knows doc-readme is accessed more frequently
 //
 // Example 2 - Integration with Storage Engine:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
 //	engine := storage.NewBadgerEngine("./data")
-//	
+//
 //	// Hook into node retrieval
 //	originalGet := engine.GetNode
 //	engine.GetNode = func(id storage.NodeID) (*storage.Node, error) {
@@ -387,13 +388,13 @@ func NewTracker(cfg Config) *Tracker {
 // Example 3 - Real-time Recommendation System:
 //
 //	tracker := temporal.NewTracker(temporal.DefaultConfig())
-//	
+//
 //	func handleUserAction(userID, itemID string) {
 //		tracker.RecordAccess(itemID)
-//		
+//
 //		// Get all recently accessed items
 //		recentItems := tracker.GetRecentlyAccessed(10)
-//		
+//
 //		// Recommend similar items
 //		recommendations := findSimilarItems(recentItems)
 //		showRecommendations(userID, recommendations)
@@ -415,7 +416,8 @@ func NewTracker(cfg Config) *Tracker {
 //   - Automatic LRU eviction when MaxTrackedNodes exceeded
 //
 // Thread Safety:
-//   Safe to call concurrently from multiple goroutines.
+//
+//	Safe to call concurrently from multiple goroutines.
 func (t *Tracker) RecordAccess(nodeID string) {
 	t.RecordAccessAt(nodeID, time.Now())
 }
@@ -584,12 +586,12 @@ func (nt *nodeTracker) predictNextAccess(minAccesses int) *Prediction {
 	}
 
 	return &Prediction{
-		NodeID:           nt.nodeID,
-		PredictedTime:    predictedTime,
-		SecondsUntil:     time.Until(predictedTime).Seconds(),
-		Confidence:       confidence,
-		BasedOnAccesses:  int(nt.totalAccesses),
-		AccessRateTrend:  trend,
+		NodeID:          nt.nodeID,
+		PredictedTime:   predictedTime,
+		SecondsUntil:    time.Until(predictedTime).Seconds(),
+		Confidence:      confidence,
+		BasedOnAccesses: int(nt.totalAccesses),
+		AccessRateTrend: trend,
 	}
 }
 
@@ -831,10 +833,10 @@ func (t *Tracker) cleanup() {
 
 // GlobalStats returns global tracking statistics.
 type GlobalStats struct {
-	TotalAccesses   int64
-	TrackedNodes    int
-	UptimeSeconds   float64
-	AccessesPerSec  float64
+	TotalAccesses  int64
+	TrackedNodes   int
+	UptimeSeconds  float64
+	AccessesPerSec float64
 }
 
 // GetGlobalStats returns global statistics.

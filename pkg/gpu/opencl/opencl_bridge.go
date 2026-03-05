@@ -299,11 +299,11 @@ OpenCLDevice* opencl_create_device(int device_id) {
         char* log = (char*)malloc(log_size + 1);
         clGetProgramBuildInfo(dev->program, dev->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         log[log_size] = '\0';
-        
+
         char msg[256];
         snprintf(msg, sizeof(msg), "Failed to build program: %s", log);
         opencl_set_error(msg);
-        
+
         free(log);
         clReleaseProgram(dev->program);
         clReleaseCommandQueue(dev->queue);

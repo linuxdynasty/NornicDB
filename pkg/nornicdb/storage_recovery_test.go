@@ -50,4 +50,3 @@ func TestRecoverBadgerFromSnapshotAndWAL_AllowsWALOnlyWhenNoSnapshots(t *testing
 	require.NotNil(t, tx)
 	require.NoError(t, tx.Rollback())
 }
-

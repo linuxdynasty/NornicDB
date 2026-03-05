@@ -72,7 +72,7 @@ func TestCRC32MatchesStandardLibrary(t *testing.T) {
 		[]byte("hello world"),
 		[]byte(`{"id": "node1", "labels": ["Person"]}`),
 		make([]byte, 1024), // 1KB of zeros
-		[]byte{0xFF, 0xFE, 0xFD, 0xFC},
+		{0xFF, 0xFE, 0xFD, 0xFC},
 	}
 
 	// Use same table as our implementation

@@ -67,8 +67,8 @@ func (s *Server) handleGetDbConfig(w http.ResponseWriter, r *http.Request, dbNam
 		effective = resolved.Effective
 	}
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"overrides":  overrides,
-		"effective":  effective,
+		"overrides": overrides,
+		"effective": effective,
 	})
 }
 

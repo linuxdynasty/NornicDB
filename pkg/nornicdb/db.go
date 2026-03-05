@@ -2403,4 +2403,3 @@ func (db *DB) Forget(ctx context.Context, id string) error {
 
 	return nil
 }
-

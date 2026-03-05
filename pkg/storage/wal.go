@@ -260,14 +260,14 @@ type WALConfig struct {
 // DefaultWALConfig returns sensible defaults.
 func DefaultWALConfig() *WALConfig {
 	return &WALConfig{
-		Dir:                        "data/wal",
-		SyncMode:                   "batch",
-		BatchSyncInterval:          100 * time.Millisecond,
-		MaxFileSize:                100 * 1024 * 1024, // 100MB
-		MaxEntries:                 100000,
-		SnapshotInterval:           1 * time.Hour,
-		SnapshotRetentionMaxCount:  3, // Keep last 3 snapshots so disk doesn't grow unbounded
-		SnapshotRetentionMaxAge:    0, // No age limit by default
+		Dir:                       "data/wal",
+		SyncMode:                  "batch",
+		BatchSyncInterval:         100 * time.Millisecond,
+		MaxFileSize:               100 * 1024 * 1024, // 100MB
+		MaxEntries:                100000,
+		SnapshotInterval:          1 * time.Hour,
+		SnapshotRetentionMaxCount: 3, // Keep last 3 snapshots so disk doesn't grow unbounded
+		SnapshotRetentionMaxAge:   0, // No age limit by default
 	}
 }
 

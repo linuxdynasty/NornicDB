@@ -317,4 +317,3 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 
 	return nil
 }
-

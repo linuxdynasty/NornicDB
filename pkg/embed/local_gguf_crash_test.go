@@ -17,10 +17,10 @@ import (
 // mockModel implements a test double for localllm.Model
 // that can be configured to panic, error, or succeed.
 type mockModel struct {
-	embedFunc   func(ctx context.Context, text string) ([]float32, error)
-	dimensions  int
-	closeCount  atomic.Int32
-	embedCount  atomic.Int32
+	embedFunc  func(ctx context.Context, text string) ([]float32, error)
+	dimensions int
+	closeCount atomic.Int32
+	embedCount atomic.Int32
 }
 
 func (m *mockModel) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -50,17 +50,17 @@ type testableEmbedder struct {
 
 func newTestableEmbedder(dimensions int) *testableEmbedder {
 	mock := &mockModel{dimensions: dimensions}
-	
+
 	embedder := &LocalGGUFEmbedder{
 		modelName:     "test-model",
 		modelPath:     "/test/path/model.gguf",
 		stopWarmup:    make(chan struct{}),
 		warmupStopped: make(chan struct{}),
 	}
-	
+
 	// Close the warmupStopped channel since we're not running warmup in tests
 	close(embedder.warmupStopped)
-	
+
 	return &testableEmbedder{
 		LocalGGUFEmbedder: embedder,
 		mock:              mock,
@@ -76,14 +76,14 @@ func (t *testableEmbedder) embedWithMock(ctx context.Context, text string) (embe
 			err = &panicError{recovered: r}
 		}
 	}()
-	
+
 	t.mu.RLock()
 	if t.closed {
 		t.mu.RUnlock()
 		return nil, errClosed
 	}
 	t.mu.RUnlock()
-	
+
 	embedding, err = t.mock.Embed(ctx, text)
 	if err != nil {
 		t.errorCount.Add(1)
@@ -227,15 +227,15 @@ func TestPanicRecovery(t *testing.T) {
 
 	// Embed should recover from panic and return error
 	_, err := embedder.embedWithMock(context.Background(), "test input")
-	
+
 	if err == nil {
 		t.Fatal("expected error from panic recovery, got nil")
 	}
-	
+
 	if _, ok := err.(*panicError); !ok {
 		t.Errorf("expected panicError, got %T: %v", err, err)
 	}
-	
+
 	// Panic count should be incremented
 	if embedder.panicCount.Load() != 1 {
 		t.Errorf("panicCount = %d, want 1", embedder.panicCount.Load())
@@ -295,7 +295,7 @@ func TestErrorCounting(t *testing.T) {
 	if embedder.errorCount.Load() != 1 {
 		t.Errorf("errorCount = %d, want 1", embedder.errorCount.Load())
 	}
-	
+
 	// Panic count should not be affected
 	if embedder.panicCount.Load() != 0 {
 		t.Errorf("panicCount = %d, want 0", embedder.panicCount.Load())
@@ -312,7 +312,7 @@ func (e *testError) Error() string {
 
 func TestClosedEmbedder(t *testing.T) {
 	embedder := newTestableEmbedder(1024)
-	
+
 	// Close the embedder
 	embedder.mu.Lock()
 	embedder.closed = true
@@ -341,9 +341,9 @@ func TestConcurrentEmbedding(t *testing.T) {
 	const goroutines = 10
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	
+
 	errors := make(chan error, goroutines)
-	
+
 	for i := 0; i < goroutines; i++ {
 		go func(id int) {
 			defer wg.Done()
@@ -384,7 +384,7 @@ func TestConcurrentPanicRecovery(t *testing.T) {
 	const goroutines = 30
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	
+
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -423,7 +423,7 @@ func TestGPUErrorDetection(t *testing.T) {
 			if err == nil {
 				t.Error("expected error")
 			}
-			
+
 			// Verify the error contains the GPU-related message
 			if !strings.Contains(err.Error(), errMsg[:4]) {
 				t.Errorf("error should contain GPU message, got: %v", err)
@@ -467,10 +467,10 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 		// All embeddings should succeed
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.NoError(t, err, "Should not return error when all succeed")
 		require.Equal(t, len(texts), len(results), "Should return results for all texts")
-		
+
 		for i, result := range results {
 			require.NotNil(t, result, "Result %d should not be nil", i)
 			require.Equal(t, 1024, len(result), "Result %d should have 1024 dimensions", i)
@@ -491,11 +491,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when first fails")
 		require.Contains(t, err.Error(), "text 0", "Error should mention failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.Nil(t, results[0], "First result should be nil (failed)")
 		require.NotNil(t, results[1], "Second result should not be nil")
 		require.NotNil(t, results[2], "Third result should not be nil")
@@ -517,11 +517,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when middle fails")
 		require.Contains(t, err.Error(), "text 1", "Error should mention failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.NotNil(t, results[0], "First result should not be nil")
 		require.Nil(t, results[1], "Second result should be nil (failed)")
 		require.NotNil(t, results[2], "Third result should not be nil")
@@ -543,11 +543,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when last fails")
 		require.Contains(t, err.Error(), "text 2", "Error should mention failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.NotNil(t, results[0], "First result should not be nil")
 		require.NotNil(t, results[1], "Second result should not be nil")
 		require.Nil(t, results[2], "Third result should be nil (failed)")
@@ -569,11 +569,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3", "text4"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when some fail")
 		require.Contains(t, err.Error(), "text 0", "Error should mention first failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.Nil(t, results[0], "First result should be nil (failed)")
 		require.NotNil(t, results[1], "Second result should not be nil")
 		require.Nil(t, results[2], "Third result should be nil (failed)")
@@ -591,11 +591,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when all fail")
 		require.Contains(t, err.Error(), "text 0", "Error should mention first failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.Nil(t, results[0], "All results should be nil")
 		require.Nil(t, results[1], "All results should be nil")
 		require.Nil(t, results[2], "All results should be nil")
@@ -614,11 +614,11 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.Error(t, err, "Should return error when panic occurs")
 		require.Contains(t, err.Error(), "text 1", "Error should mention failed text index")
 		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
-		
+
 		require.NotNil(t, results[0], "First result should not be nil")
 		require.Nil(t, results[1], "Second result should be nil (panic)")
 		require.NotNil(t, results[2], "Third result should not be nil")
@@ -632,7 +632,7 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 		texts := []string{"text1", "text2", "text3"}
 		results, err := embedder.EmbedBatchWithMock(ctx, texts)
-		
+
 		require.Error(t, err, "Should return error on context cancellation")
 		require.Equal(t, context.Canceled, err, "Error should be context.Canceled")
 		require.Nil(t, results, "Results should be nil on context cancellation")
@@ -642,7 +642,7 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 		// Empty batch should return empty results
 		texts := []string{}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.NoError(t, err, "Should not return error for empty batch")
 		require.Equal(t, 0, len(results), "Should return empty results")
 	})
@@ -651,7 +651,7 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 		// Single text should work correctly
 		texts := []string{"single text"}
 		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
-		
+
 		require.NoError(t, err, "Should not return error for single text")
 		require.Equal(t, 1, len(results), "Should return one result")
 		require.NotNil(t, results[0], "Result should not be nil")
@@ -661,18 +661,18 @@ func TestEmbedBatchPartialFailure(t *testing.T) {
 
 func TestWarmupSkipsRecentActivity(t *testing.T) {
 	embedder := newTestableEmbedder(1024)
-	
+
 	// Set recent activity
 	embedder.lastEmbedTime.Store(time.Now().Unix())
-	
+
 	// Verify the warmup logic would skip (we can't easily test the goroutine)
 	lastEmbed := time.Unix(embedder.lastEmbedTime.Load(), 0)
 	interval := 5 * time.Minute
-	
+
 	if time.Since(lastEmbed) >= interval/2 {
 		t.Error("lastEmbed should be recent, warmup should skip")
 	}
-	
+
 	embedder.Close()
 }
 
@@ -727,7 +727,7 @@ func TestStatsConcurrentAccess(t *testing.T) {
 	defer embedder.Close()
 
 	var wg sync.WaitGroup
-	
+
 	// Writers
 	for i := 0; i < 5; i++ {
 		wg.Add(1)

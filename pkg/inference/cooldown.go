@@ -82,9 +82,9 @@ type CooldownTable struct {
 	defaults map[string]time.Duration  // per-label defaults
 
 	// Stats
-	totalChecks    int64
-	totalBlocked   int64
-	totalAllowed   int64
+	totalChecks  int64
+	totalBlocked int64
+	totalAllowed int64
 }
 
 // CooldownStats provides observability into cooldown behavior.

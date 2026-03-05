@@ -51,9 +51,9 @@ func TestHNSWConfigFromEnv(t *testing.T) {
 		}()
 
 		config := HNSWConfigFromEnv()
-		assert.Equal(t, 24, config.M)              // Overridden
+		assert.Equal(t, 24, config.M)               // Overridden
 		assert.Equal(t, 200, config.EfConstruction) // From preset
-		assert.Equal(t, 150, config.EfSearch)      // Overridden
+		assert.Equal(t, 150, config.EfSearch)       // Overridden
 	})
 
 	t.Run("invalid preset defaults to fast", func(t *testing.T) {

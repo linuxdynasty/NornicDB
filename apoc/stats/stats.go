@@ -327,8 +327,8 @@ func Kurtosis(values []float64) float64 {
 	}
 
 	n := float64(len(values))
-	return ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * sum -
-		(3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3))
+	return ((n*(n+1))/((n-1)*(n-2)*(n-3)))*sum -
+		(3*(n-1)*(n-1))/((n-2)*(n-3))
 }
 
 // Correlation calculates Pearson correlation coefficient.

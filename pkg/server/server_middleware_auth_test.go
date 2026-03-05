@@ -54,4 +54,3 @@ func TestWithAuth_BasicAuthSetsJWTTokenCookie(t *testing.T) {
 		t.Fatalf("expected nornicdb_token cookie to be set")
 	}
 }
-

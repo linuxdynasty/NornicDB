@@ -20,7 +20,7 @@
 //	userConfig.DenyList = []string{"user-spammer", "user-troll"}  // Blocked users
 //	userConfig.PinList = []string{"user-bestfriend"}  // Never decay this friendship
 //	store.Set(userConfig)
-//	
+//
 //	// Later, inference engine checks before creating edge
 //	if allowed, _ := store.IsEdgeAllowedWithReason("user-alice", "user-bob", "friend"); allowed {
 //	    db.CreateEdge("user-alice", "user-bob", "friend")
@@ -37,7 +37,7 @@
 //	    "deprecated": {Disabled: true},   // Never create deprecated edges
 //	}
 //	store.Set(docConfig)
-//	
+//
 //	// Try to add 6th category - denied!
 //	allowed, reason := store.IsEdgeAllowedWithReason("doc-123", "category-ai", "category")
 //	// → (false, "label 'category' at max capacity (5/5)")
@@ -49,7 +49,7 @@
 //	newUserConfig.TrustLevel = storage.TrustLevelLow  // Requires +20% confidence
 //	newUserConfig.MaxOutEdges = 10  // Limited connections until trust increases
 //	store.Set(newUserConfig)
-//	
+//
 //	// After user proves trustworthy, upgrade trust
 //	if userIsActive && userNotSpamming {
 //	    newUserConfig.TrustLevel = storage.TrustLevelDefault
@@ -137,11 +137,11 @@ func (t TrustLevel) ConfidenceAdjustment() float64 {
 
 // LabelConfig defines per-label edge limits.
 type LabelConfig struct {
-	Label       string        `json:"label"`
-	MaxEdges    int           `json:"max_edges"`     // 0 = unlimited
-	MinConfidence float64     `json:"min_confidence"` // Override default threshold
-	Cooldown    time.Duration `json:"cooldown"`      // Override default cooldown
-	Disabled    bool          `json:"disabled"`      // Completely disable this label
+	Label         string        `json:"label"`
+	MaxEdges      int           `json:"max_edges"`      // 0 = unlimited
+	MinConfidence float64       `json:"min_confidence"` // Override default threshold
+	Cooldown      time.Duration `json:"cooldown"`       // Override default cooldown
+	Disabled      bool          `json:"disabled"`       // Completely disable this label
 }
 
 // NodeConfig stores per-node edge materialization settings.

@@ -12,7 +12,8 @@ import (
 // MaxLong returns the maximum of multiple integers.
 //
 // Example:
-//   apoc.math.maxLong(5, 2, 8, 1, 9) => 9
+//
+//	apoc.math.maxLong(5, 2, 8, 1, 9) => 9
 func MaxLong(values ...int64) int64 {
 	if len(values) == 0 {
 		return 0
@@ -29,7 +30,8 @@ func MaxLong(values ...int64) int64 {
 // MinLong returns the minimum of multiple integers.
 //
 // Example:
-//   apoc.math.minLong(5, 2, 8, 1, 9) => 1
+//
+//	apoc.math.minLong(5, 2, 8, 1, 9) => 1
 func MinLong(values ...int64) int64 {
 	if len(values) == 0 {
 		return 0
@@ -46,7 +48,8 @@ func MinLong(values ...int64) int64 {
 // MaxDouble returns the maximum of multiple floats.
 //
 // Example:
-//   apoc.math.maxDouble(5.5, 2.3, 8.1, 1.9) => 8.1
+//
+//	apoc.math.maxDouble(5.5, 2.3, 8.1, 1.9) => 8.1
 func MaxDouble(values ...float64) float64 {
 	if len(values) == 0 {
 		return 0
@@ -63,7 +66,8 @@ func MaxDouble(values ...float64) float64 {
 // MinDouble returns the minimum of multiple floats.
 //
 // Example:
-//   apoc.math.minDouble(5.5, 2.3, 8.1, 1.9) => 1.9
+//
+//	apoc.math.minDouble(5.5, 2.3, 8.1, 1.9) => 1.9
 func MinDouble(values ...float64) float64 {
 	if len(values) == 0 {
 		return 0
@@ -80,8 +84,9 @@ func MinDouble(values ...float64) float64 {
 // Round rounds a number to a given precision.
 //
 // Example:
-//   apoc.math.round(3.14159, 2) => 3.14
-//   apoc.math.round(1234.5, -2) => 1200.0
+//
+//	apoc.math.round(3.14159, 2) => 3.14
+//	apoc.math.round(1234.5, -2) => 1200.0
 func Round(value float64, precision int) float64 {
 	multiplier := math.Pow(10, float64(precision))
 	return math.Round(value*multiplier) / multiplier
@@ -90,7 +95,8 @@ func Round(value float64, precision int) float64 {
 // Ceil rounds up to the nearest integer.
 //
 // Example:
-//   apoc.math.ceil(3.14) => 4.0
+//
+//	apoc.math.ceil(3.14) => 4.0
 func Ceil(value float64) float64 {
 	return math.Ceil(value)
 }
@@ -98,7 +104,8 @@ func Ceil(value float64) float64 {
 // Floor rounds down to the nearest integer.
 //
 // Example:
-//   apoc.math.floor(3.14) => 3.0
+//
+//	apoc.math.floor(3.14) => 3.0
 func Floor(value float64) float64 {
 	return math.Floor(value)
 }
@@ -106,7 +113,8 @@ func Floor(value float64) float64 {
 // Abs returns the absolute value.
 //
 // Example:
-//   apoc.math.abs(-5.5) => 5.5
+//
+//	apoc.math.abs(-5.5) => 5.5
 func Abs(value float64) float64 {
 	return math.Abs(value)
 }
@@ -114,7 +122,8 @@ func Abs(value float64) float64 {
 // Pow raises a number to a power.
 //
 // Example:
-//   apoc.math.pow(2, 8) => 256.0
+//
+//	apoc.math.pow(2, 8) => 256.0
 func Pow(base, exponent float64) float64 {
 	return math.Pow(base, exponent)
 }
@@ -122,7 +131,8 @@ func Pow(base, exponent float64) float64 {
 // Sqrt returns the square root.
 //
 // Example:
-//   apoc.math.sqrt(16) => 4.0
+//
+//	apoc.math.sqrt(16) => 4.0
 func Sqrt(value float64) float64 {
 	return math.Sqrt(value)
 }
@@ -130,7 +140,8 @@ func Sqrt(value float64) float64 {
 // Log returns the natural logarithm.
 //
 // Example:
-//   apoc.math.log(math.E) => 1.0
+//
+//	apoc.math.log(math.E) => 1.0
 func Log(value float64) float64 {
 	return math.Log(value)
 }
@@ -138,7 +149,8 @@ func Log(value float64) float64 {
 // Log10 returns the base-10 logarithm.
 //
 // Example:
-//   apoc.math.log10(100) => 2.0
+//
+//	apoc.math.log10(100) => 2.0
 func Log10(value float64) float64 {
 	return math.Log10(value)
 }
@@ -146,7 +158,8 @@ func Log10(value float64) float64 {
 // Exp returns e raised to the power of x.
 //
 // Example:
-//   apoc.math.exp(1) => 2.718281828...
+//
+//	apoc.math.exp(1) => 2.718281828...
 func Exp(value float64) float64 {
 	return math.Exp(value)
 }
@@ -154,7 +167,8 @@ func Exp(value float64) float64 {
 // Sin returns the sine of an angle (in radians).
 //
 // Example:
-//   apoc.math.sin(math.Pi / 2) => 1.0
+//
+//	apoc.math.sin(math.Pi / 2) => 1.0
 func Sin(angle float64) float64 {
 	return math.Sin(angle)
 }
@@ -162,7 +176,8 @@ func Sin(angle float64) float64 {
 // Cos returns the cosine of an angle (in radians).
 //
 // Example:
-//   apoc.math.cos(0) => 1.0
+//
+//	apoc.math.cos(0) => 1.0
 func Cos(angle float64) float64 {
 	return math.Cos(angle)
 }
@@ -170,7 +185,8 @@ func Cos(angle float64) float64 {
 // Tan returns the tangent of an angle (in radians).
 //
 // Example:
-//   apoc.math.tan(math.Pi / 4) => 1.0
+//
+//	apoc.math.tan(math.Pi / 4) => 1.0
 func Tan(angle float64) float64 {
 	return math.Tan(angle)
 }
@@ -178,7 +194,8 @@ func Tan(angle float64) float64 {
 // Asin returns the arcsine (in radians).
 //
 // Example:
-//   apoc.math.asin(1) => math.Pi / 2
+//
+//	apoc.math.asin(1) => math.Pi / 2
 func Asin(value float64) float64 {
 	return math.Asin(value)
 }
@@ -186,7 +203,8 @@ func Asin(value float64) float64 {
 // Acos returns the arccosine (in radians).
 //
 // Example:
-//   apoc.math.acos(1) => 0.0
+//
+//	apoc.math.acos(1) => 0.0
 func Acos(value float64) float64 {
 	return math.Acos(value)
 }
@@ -194,7 +212,8 @@ func Acos(value float64) float64 {
 // Atan returns the arctangent (in radians).
 //
 // Example:
-//   apoc.math.atan(1) => math.Pi / 4
+//
+//	apoc.math.atan(1) => math.Pi / 4
 func Atan(value float64) float64 {
 	return math.Atan(value)
 }
@@ -202,7 +221,8 @@ func Atan(value float64) float64 {
 // Atan2 returns the arctangent of y/x (in radians).
 //
 // Example:
-//   apoc.math.atan2(1, 1) => math.Pi / 4
+//
+//	apoc.math.atan2(1, 1) => math.Pi / 4
 func Atan2(y, x float64) float64 {
 	return math.Atan2(y, x)
 }
@@ -210,7 +230,8 @@ func Atan2(y, x float64) float64 {
 // Sinh returns the hyperbolic sine.
 //
 // Example:
-//   apoc.math.sinh(0) => 0.0
+//
+//	apoc.math.sinh(0) => 0.0
 func Sinh(value float64) float64 {
 	return math.Sinh(value)
 }
@@ -218,7 +239,8 @@ func Sinh(value float64) float64 {
 // Cosh returns the hyperbolic cosine.
 //
 // Example:
-//   apoc.math.cosh(0) => 1.0
+//
+//	apoc.math.cosh(0) => 1.0
 func Cosh(value float64) float64 {
 	return math.Cosh(value)
 }
@@ -226,7 +248,8 @@ func Cosh(value float64) float64 {
 // Tanh returns the hyperbolic tangent.
 //
 // Example:
-//   apoc.math.tanh(0) => 0.0
+//
+//	apoc.math.tanh(0) => 0.0
 func Tanh(value float64) float64 {
 	return math.Tanh(value)
 }
@@ -234,7 +257,8 @@ func Tanh(value float64) float64 {
 // Sigmoid returns the sigmoid function value.
 //
 // Example:
-//   apoc.math.sigmoid(0) => 0.5
+//
+//	apoc.math.sigmoid(0) => 0.5
 func Sigmoid(value float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-value))
 }
@@ -242,7 +266,8 @@ func Sigmoid(value float64) float64 {
 // Logit returns the logit function (inverse of sigmoid).
 //
 // Example:
-//   apoc.math.logit(0.5) => 0.0
+//
+//	apoc.math.logit(0.5) => 0.0
 func Logit(value float64) float64 {
 	if value <= 0 || value >= 1 {
 		return math.NaN()
@@ -253,9 +278,10 @@ func Logit(value float64) float64 {
 // Clamp restricts a value to a range.
 //
 // Example:
-//   apoc.math.clamp(15, 0, 10) => 10
-//   apoc.math.clamp(-5, 0, 10) => 0
-//   apoc.math.clamp(5, 0, 10) => 5
+//
+//	apoc.math.clamp(15, 0, 10) => 10
+//	apoc.math.clamp(-5, 0, 10) => 0
+//	apoc.math.clamp(5, 0, 10) => 5
 func Clamp(value, min, max float64) float64 {
 	if value < min {
 		return min
@@ -269,8 +295,9 @@ func Clamp(value, min, max float64) float64 {
 // Lerp performs linear interpolation between two values.
 //
 // Example:
-//   apoc.math.lerp(0, 10, 0.5) => 5.0
-//   apoc.math.lerp(0, 10, 0.25) => 2.5
+//
+//	apoc.math.lerp(0, 10, 0.5) => 5.0
+//	apoc.math.lerp(0, 10, 0.25) => 2.5
 func Lerp(start, end, t float64) float64 {
 	return start + t*(end-start)
 }
@@ -278,7 +305,8 @@ func Lerp(start, end, t float64) float64 {
 // Normalize normalizes a value from one range to another.
 //
 // Example:
-//   apoc.math.normalize(5, 0, 10, 0, 1) => 0.5
+//
+//	apoc.math.normalize(5, 0, 10, 0, 1) => 0.5
 func Normalize(value, oldMin, oldMax, newMin, newMax float64) float64 {
 	if oldMax == oldMin {
 		return newMin
@@ -290,7 +318,8 @@ func Normalize(value, oldMin, oldMax, newMin, newMax float64) float64 {
 // Gcd returns the greatest common divisor.
 //
 // Example:
-//   apoc.math.gcd(48, 18) => 6
+//
+//	apoc.math.gcd(48, 18) => 6
 func Gcd(a, b int64) int64 {
 	for b != 0 {
 		a, b = b, a%b
@@ -301,7 +330,8 @@ func Gcd(a, b int64) int64 {
 // Lcm returns the least common multiple.
 //
 // Example:
-//   apoc.math.lcm(12, 18) => 36
+//
+//	apoc.math.lcm(12, 18) => 36
 func Lcm(a, b int64) int64 {
 	return (a * b) / Gcd(a, b)
 }
@@ -309,7 +339,8 @@ func Lcm(a, b int64) int64 {
 // Factorial returns the factorial of n.
 //
 // Example:
-//   apoc.math.factorial(5) => 120
+//
+//	apoc.math.factorial(5) => 120
 func Factorial(n int64) int64 {
 	if n <= 1 {
 		return 1
@@ -324,7 +355,8 @@ func Factorial(n int64) int64 {
 // Fibonacci returns the nth Fibonacci number.
 //
 // Example:
-//   apoc.math.fibonacci(10) => 55
+//
+//	apoc.math.fibonacci(10) => 55
 func Fibonacci(n int64) int64 {
 	if n <= 1 {
 		return n
@@ -339,8 +371,9 @@ func Fibonacci(n int64) int64 {
 // IsPrime checks if a number is prime.
 //
 // Example:
-//   apoc.math.isPrime(17) => true
-//   apoc.math.isPrime(18) => false
+//
+//	apoc.math.isPrime(17) => true
+//	apoc.math.isPrime(18) => false
 func IsPrime(n int64) bool {
 	if n <= 1 {
 		return false
@@ -351,7 +384,7 @@ func IsPrime(n int64) bool {
 	if n%2 == 0 || n%3 == 0 {
 		return false
 	}
-	
+
 	i := int64(5)
 	for i*i <= n {
 		if n%i == 0 || n%(i+2) == 0 {
@@ -365,7 +398,8 @@ func IsPrime(n int64) bool {
 // NextPrime returns the next prime number after n.
 //
 // Example:
-//   apoc.math.nextPrime(10) => 11
+//
+//	apoc.math.nextPrime(10) => 11
 func NextPrime(n int64) int64 {
 	candidate := n + 1
 	for !IsPrime(candidate) {
@@ -377,7 +411,8 @@ func NextPrime(n int64) int64 {
 // Random returns a random float between 0 and 1.
 //
 // Example:
-//   apoc.math.random() => 0.7234... (random)
+//
+//	apoc.math.random() => 0.7234... (random)
 func Random() float64 {
 	return rand.Float64()
 }
@@ -385,7 +420,8 @@ func Random() float64 {
 // RandomInt returns a random integer in a range [min, max].
 //
 // Example:
-//   apoc.math.randomInt(1, 10) => 7 (random)
+//
+//	apoc.math.randomInt(1, 10) => 7 (random)
 func RandomInt(min, max int64) int64 {
 	if min >= max {
 		return min
@@ -396,12 +432,13 @@ func RandomInt(min, max int64) int64 {
 // Percentile calculates the nth percentile of a list.
 //
 // Example:
-//   apoc.math.percentile([1,2,3,4,5,6,7,8,9,10], 50) => 5.5
+//
+//	apoc.math.percentile([1,2,3,4,5,6,7,8,9,10], 50) => 5.5
 func Percentile(values []float64, percentile float64) float64 {
 	if len(values) == 0 {
 		return 0
 	}
-	
+
 	// Sort values
 	sorted := make([]float64, len(values))
 	copy(sorted, values)
@@ -412,16 +449,16 @@ func Percentile(values []float64, percentile float64) float64 {
 			}
 		}
 	}
-	
+
 	// Calculate percentile
 	index := (percentile / 100.0) * float64(len(sorted)-1)
 	lower := int(math.Floor(index))
 	upper := int(math.Ceil(index))
-	
+
 	if lower == upper {
 		return sorted[lower]
 	}
-	
+
 	weight := index - float64(lower)
 	return sorted[lower]*(1-weight) + sorted[upper]*weight
 }
@@ -429,7 +466,8 @@ func Percentile(values []float64, percentile float64) float64 {
 // Median returns the median value of a list.
 //
 // Example:
-//   apoc.math.median([1,2,3,4,5]) => 3.0
+//
+//	apoc.math.median([1,2,3,4,5]) => 3.0
 func Median(values []float64) float64 {
 	return Percentile(values, 50)
 }
@@ -437,7 +475,8 @@ func Median(values []float64) float64 {
 // Mean returns the arithmetic mean of a list.
 //
 // Example:
-//   apoc.math.mean([1,2,3,4,5]) => 3.0
+//
+//	apoc.math.mean([1,2,3,4,5]) => 3.0
 func Mean(values []float64) float64 {
 	if len(values) == 0 {
 		return 0
@@ -452,26 +491,28 @@ func Mean(values []float64) float64 {
 // StdDev returns the standard deviation of a list.
 //
 // Example:
-//   apoc.math.stdDev([2,4,4,4,5,5,7,9]) => 2.0
+//
+//	apoc.math.stdDev([2,4,4,4,5,5,7,9]) => 2.0
 func StdDev(values []float64) float64 {
 	if len(values) == 0 {
 		return 0
 	}
-	
+
 	mean := Mean(values)
 	sumSquares := 0.0
 	for _, v := range values {
 		diff := v - mean
 		sumSquares += diff * diff
 	}
-	
+
 	return math.Sqrt(sumSquares / float64(len(values)))
 }
 
 // Variance returns the variance of a list.
 //
 // Example:
-//   apoc.math.variance([2,4,4,4,5,5,7,9]) => 4.0
+//
+//	apoc.math.variance([2,4,4,4,5,5,7,9]) => 4.0
 func Variance(values []float64) float64 {
 	stdDev := StdDev(values)
 	return stdDev * stdDev
@@ -480,17 +521,18 @@ func Variance(values []float64) float64 {
 // Mode returns the most frequent value in a list.
 //
 // Example:
-//   apoc.math.mode([1,2,2,3,3,3,4]) => 3.0
+//
+//	apoc.math.mode([1,2,2,3,3,3,4]) => 3.0
 func Mode(values []float64) float64 {
 	if len(values) == 0 {
 		return 0
 	}
-	
+
 	frequencies := make(map[float64]int)
 	for _, v := range values {
 		frequencies[v]++
 	}
-	
+
 	maxFreq := 0
 	mode := values[0]
 	for value, freq := range frequencies {
@@ -499,19 +541,20 @@ func Mode(values []float64) float64 {
 			mode = value
 		}
 	}
-	
+
 	return mode
 }
 
 // Range returns a list of numbers from start to end.
 //
 // Example:
-//   apoc.math.range(1, 5) => [1,2,3,4,5]
+//
+//	apoc.math.range(1, 5) => [1,2,3,4,5]
 func Range(start, end, step int64) []int64 {
 	if step == 0 {
 		step = 1
 	}
-	
+
 	result := make([]int64, 0)
 	if step > 0 {
 		for i := start; i <= end; i += step {
@@ -522,14 +565,15 @@ func Range(start, end, step int64) []int64 {
 			result = append(result, i)
 		}
 	}
-	
+
 	return result
 }
 
 // Sum returns the sum of a list of numbers.
 //
 // Example:
-//   apoc.math.sum([1,2,3,4,5]) => 15.0
+//
+//	apoc.math.sum([1,2,3,4,5]) => 15.0
 func Sum(values []float64) float64 {
 	sum := 0.0
 	for _, v := range values {
@@ -541,7 +585,8 @@ func Sum(values []float64) float64 {
 // Product returns the product of a list of numbers.
 //
 // Example:
-//   apoc.math.product([2,3,4]) => 24.0
+//
+//	apoc.math.product([2,3,4]) => 24.0
 func Product(values []float64) float64 {
 	if len(values) == 0 {
 		return 0

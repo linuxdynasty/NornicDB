@@ -24,7 +24,7 @@ func TestContentWithCypherLikeSyntax(t *testing.T) {
 		content string
 	}{
 		{
-			name: "JSON with arrows",
+			name:    "JSON with arrows",
 			content: `{"overview": {"goal": "Build a blog API"}, "tasks": [{"id": "task-1", "deps": ["task-0"]}]}`,
 		},
 		{
@@ -35,23 +35,23 @@ Data -> Processing -> Output
 User <- Response <- Server`,
 		},
 		{
-			name: "Cypher query in string",
+			name:    "Cypher query in string",
 			content: `Example query: MATCH (n:User)-[:KNOWS]->(m) RETURN n, m`,
 		},
 		{
-			name: "CREATE statement in content",
+			name:    "CREATE statement in content",
 			content: `To create a node, use: CREATE (n:Person {name: "Alice"})`,
 		},
 		{
-			name: "MATCH and SET in content",
+			name:    "MATCH and SET in content",
 			content: `Update pattern: MATCH (n) WHERE n.id = 1 SET n.updated = true`,
 		},
 		{
-			name: "REMOVE in content",
+			name:    "REMOVE in content",
 			content: `To remove property: MATCH (n) REMOVE n.deprecated`,
 		},
 		{
-			name: "DELETE in content",
+			name:    "DELETE in content",
 			content: `Cleanup: MATCH (n:Temp) DELETE n`,
 		},
 		{
@@ -62,15 +62,15 @@ User <- Response <- Server`,
 - (a)-[r]->(b)`,
 		},
 		{
-			name: "Curly braces in JSON",
+			name:    "Curly braces in JSON",
 			content: `{"props": {"nested": {"key": "value"}}, "array": [1, 2, 3]}`,
 		},
 		{
-			name: "Parentheses in content",
+			name:    "Parentheses in content",
 			content: `Function call: processData(input) returns (output, error)`,
 		},
 		{
-			name: "Mixed special chars",
+			name:    "Mixed special chars",
 			content: `Pattern: (a)->[:REL]->(b)<-[:REL2]-(c) with props {x: 1}`,
 		},
 		{
@@ -110,23 +110,23 @@ tools: ['run_terminal_cmd', 'read_file']
 // 3. MATCH (a)-[r:REL]->(b) DELETE r`,
 		},
 		{
-			name: "SQL-like content",
+			name:    "SQL-like content",
 			content: `SELECT * FROM users WHERE id = 1; INSERT INTO logs VALUES (1, 'test');`,
 		},
 		{
-			name: "Escaped quotes",
+			name:    "Escaped quotes",
 			content: `He said "Hello \"World\"" and then 'it\'s fine'`,
 		},
 		{
-			name: "Newlines and tabs",
+			name:    "Newlines and tabs",
 			content: "Line1\nLine2\tTabbed\rCarriage\r\nWindows",
 		},
 		{
-			name: "Unicode content",
+			name:    "Unicode content",
 			content: `Unicode: 你好世界 🚀 émojis →�ñ`,
 		},
 		{
-			name: "Backticks",
+			name:    "Backticks",
 			content: "Code: `MATCH (n) RETURN n` in markdown",
 		},
 	}

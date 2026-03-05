@@ -11,4 +11,3 @@ type LabelIndexEngine interface {
 	// Missing nodes are treated as not having the label.
 	HasLabelBatch(ids []NodeID, label string) (map[NodeID]bool, error)
 }
-

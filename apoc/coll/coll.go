@@ -16,8 +16,9 @@ import (
 // Non-numeric values are ignored.
 //
 // Example:
-//   apoc.coll.sum([1, 2, 3, 4, 5]) => 15
-//   apoc.coll.sum([1.5, 2.5, 3.0]) => 7.0
+//
+//	apoc.coll.sum([1, 2, 3, 4, 5]) => 15
+//	apoc.coll.sum([1.5, 2.5, 3.0]) => 7.0
 func Sum(list []interface{}) float64 {
 	var sum float64
 	for _, item := range list {
@@ -32,8 +33,9 @@ func Sum(list []interface{}) float64 {
 // Non-numeric values are ignored.
 //
 // Example:
-//   apoc.coll.avg([1, 2, 3, 4, 5]) => 3.0
-//   apoc.coll.avg([10, 20, 30]) => 20.0
+//
+//	apoc.coll.avg([1, 2, 3, 4, 5]) => 3.0
+//	apoc.coll.avg([10, 20, 30]) => 20.0
 func Avg(list []interface{}) float64 {
 	var sum float64
 	var count int
@@ -53,13 +55,14 @@ func Avg(list []interface{}) float64 {
 // Works with numbers and strings.
 //
 // Example:
-//   apoc.coll.min([5, 2, 8, 1, 9]) => 1
-//   apoc.coll.min(['zebra', 'apple', 'banana']) => 'apple'
+//
+//	apoc.coll.min([5, 2, 8, 1, 9]) => 1
+//	apoc.coll.min(['zebra', 'apple', 'banana']) => 'apple'
 func Min(list []interface{}) interface{} {
 	if len(list) == 0 {
 		return nil
 	}
-	
+
 	min := list[0]
 	for i := 1; i < len(list); i++ {
 		if compare(list[i], min) < 0 {
@@ -73,13 +76,14 @@ func Min(list []interface{}) interface{} {
 // Works with numbers and strings.
 //
 // Example:
-//   apoc.coll.max([5, 2, 8, 1, 9]) => 9
-//   apoc.coll.max(['zebra', 'apple', 'banana']) => 'zebra'
+//
+//	apoc.coll.max([5, 2, 8, 1, 9]) => 9
+//	apoc.coll.max(['zebra', 'apple', 'banana']) => 'zebra'
 func Max(list []interface{}) interface{} {
 	if len(list) == 0 {
 		return nil
 	}
-	
+
 	max := list[0]
 	for i := 1; i < len(list); i++ {
 		if compare(list[i], max) > 0 {
@@ -93,11 +97,12 @@ func Max(list []interface{}) interface{} {
 // Returns [matching, notMatching].
 //
 // Example:
-//   apoc.coll.partition([1,2,3,4,5], 'x', 'x > 3') => [[4,5], [1,2,3]]
+//
+//	apoc.coll.partition([1,2,3,4,5], 'x', 'x > 3') => [[4,5], [1,2,3]]
 func Partition(list []interface{}, predicate func(interface{}) bool) [][]interface{} {
 	matching := make([]interface{}, 0)
 	notMatching := make([]interface{}, 0)
-	
+
 	for _, item := range list {
 		if predicate(item) {
 			matching = append(matching, item)
@@ -105,26 +110,27 @@ func Partition(list []interface{}, predicate func(interface{}) bool) [][]interfa
 			notMatching = append(notMatching, item)
 		}
 	}
-	
+
 	return [][]interface{}{matching, notMatching}
 }
 
 // Zip combines multiple lists into a list of lists.
 //
 // Example:
-//   apoc.coll.zip([1,2,3], ['a','b','c']) => [[1,'a'], [2,'b'], [3,'c']]
+//
+//	apoc.coll.zip([1,2,3], ['a','b','c']) => [[1,'a'], [2,'b'], [3,'c']]
 func Zip(lists ...[]interface{}) [][]interface{} {
 	if len(lists) == 0 {
 		return [][]interface{}{}
 	}
-	
+
 	minLen := len(lists[0])
 	for _, list := range lists[1:] {
 		if len(list) < minLen {
 			minLen = len(list)
 		}
 	}
-	
+
 	result := make([][]interface{}, minLen)
 	for i := 0; i < minLen; i++ {
 		row := make([]interface{}, len(lists))
@@ -133,19 +139,20 @@ func Zip(lists ...[]interface{}) [][]interface{} {
 		}
 		result[i] = row
 	}
-	
+
 	return result
 }
 
 // Pairs returns consecutive pairs from a list.
 //
 // Example:
-//   apoc.coll.pairs([1,2,3,4]) => [[1,2], [2,3], [3,4]]
+//
+//	apoc.coll.pairs([1,2,3,4]) => [[1,2], [2,3], [3,4]]
 func Pairs(list []interface{}) [][]interface{} {
 	if len(list) < 2 {
 		return [][]interface{}{}
 	}
-	
+
 	result := make([][]interface{}, len(list)-1)
 	for i := 0; i < len(list)-1; i++ {
 		result[i] = []interface{}{list[i], list[i+1]}
@@ -156,7 +163,8 @@ func Pairs(list []interface{}) [][]interface{} {
 // PairsMin returns non-overlapping pairs from a list.
 //
 // Example:
-//   apoc.coll.pairsMin([1,2,3,4,5]) => [[1,2], [3,4]]
+//
+//	apoc.coll.pairsMin([1,2,3,4,5]) => [[1,2], [3,4]]
 func PairsMin(list []interface{}) [][]interface{} {
 	result := make([][]interface{}, 0)
 	for i := 0; i < len(list)-1; i += 2 {
@@ -168,11 +176,12 @@ func PairsMin(list []interface{}) [][]interface{} {
 // ToSet removes duplicates from a list, preserving order.
 //
 // Example:
-//   apoc.coll.toSet([1,2,1,3,2,4]) => [1,2,3,4]
+//
+//	apoc.coll.toSet([1,2,1,3,2,4]) => [1,2,3,4]
 func ToSet(list []interface{}) []interface{} {
 	seen := make(map[string]bool)
 	result := make([]interface{}, 0)
-	
+
 	for _, item := range list {
 		key := fmt.Sprintf("%v", item)
 		if !seen[key] {
@@ -180,34 +189,36 @@ func ToSet(list []interface{}) []interface{} {
 			result = append(result, item)
 		}
 	}
-	
+
 	return result
 }
 
 // Sort sorts a list in ascending order.
 //
 // Example:
-//   apoc.coll.sort([3,1,4,1,5,9,2,6]) => [1,1,2,3,4,5,6,9]
+//
+//	apoc.coll.sort([3,1,4,1,5,9,2,6]) => [1,1,2,3,4,5,6,9]
 func Sort(list []interface{}) []interface{} {
 	result := make([]interface{}, len(list))
 	copy(result, list)
-	
+
 	sort.Slice(result, func(i, j int) bool {
 		return compare(result[i], result[j]) < 0
 	})
-	
+
 	return result
 }
 
 // SortMaps sorts a list of maps by a given key.
 //
 // Example:
-//   apoc.coll.sortMaps([{age:30},{age:20},{age:25}], 'age') 
-//   => [{age:20},{age:25},{age:30}]
+//
+//	apoc.coll.sortMaps([{age:30},{age:20},{age:25}], 'age')
+//	=> [{age:20},{age:25},{age:30}]
 func SortMaps(list []interface{}, key string) []interface{} {
 	result := make([]interface{}, len(list))
 	copy(result, list)
-	
+
 	sort.Slice(result, func(i, j int) bool {
 		mi, oki := result[i].(map[string]interface{})
 		mj, okj := result[j].(map[string]interface{})
@@ -216,14 +227,15 @@ func SortMaps(list []interface{}, key string) []interface{} {
 		}
 		return compare(mi[key], mj[key]) < 0
 	})
-	
+
 	return result
 }
 
 // Reverse reverses a list.
 //
 // Example:
-//   apoc.coll.reverse([1,2,3,4,5]) => [5,4,3,2,1]
+//
+//	apoc.coll.reverse([1,2,3,4,5]) => [5,4,3,2,1]
 func Reverse(list []interface{}) []interface{} {
 	result := make([]interface{}, len(list))
 	for i, item := range list {
@@ -235,8 +247,9 @@ func Reverse(list []interface{}) []interface{} {
 // Contains checks if a list contains a value.
 //
 // Example:
-//   apoc.coll.contains([1,2,3,4,5], 3) => true
-//   apoc.coll.contains([1,2,3,4,5], 6) => false
+//
+//	apoc.coll.contains([1,2,3,4,5], 3) => true
+//	apoc.coll.contains([1,2,3,4,5], 6) => false
 func Contains(list []interface{}, value interface{}) bool {
 	for _, item := range list {
 		if reflect.DeepEqual(item, value) {
@@ -249,8 +262,9 @@ func Contains(list []interface{}, value interface{}) bool {
 // ContainsAll checks if a list contains all values from another list.
 //
 // Example:
-//   apoc.coll.containsAll([1,2,3,4,5], [2,4]) => true
-//   apoc.coll.containsAll([1,2,3], [2,6]) => false
+//
+//	apoc.coll.containsAll([1,2,3,4,5], [2,4]) => true
+//	apoc.coll.containsAll([1,2,3], [2,6]) => false
 func ContainsAll(list []interface{}, values []interface{}) bool {
 	for _, value := range values {
 		if !Contains(list, value) {
@@ -263,8 +277,9 @@ func ContainsAll(list []interface{}, values []interface{}) bool {
 // ContainsAny checks if a list contains any value from another list.
 //
 // Example:
-//   apoc.coll.containsAny([1,2,3], [3,4,5]) => true
-//   apoc.coll.containsAny([1,2,3], [4,5,6]) => false
+//
+//	apoc.coll.containsAny([1,2,3], [3,4,5]) => true
+//	apoc.coll.containsAny([1,2,3], [4,5,6]) => false
 func ContainsAny(list []interface{}, values []interface{}) bool {
 	for _, value := range values {
 		if Contains(list, value) {
@@ -277,8 +292,9 @@ func ContainsAny(list []interface{}, values []interface{}) bool {
 // ContainsDuplicates checks if a list has any duplicate values.
 //
 // Example:
-//   apoc.coll.containsDuplicates([1,2,3,2,4]) => true
-//   apoc.coll.containsDuplicates([1,2,3,4,5]) => false
+//
+//	apoc.coll.containsDuplicates([1,2,3,2,4]) => true
+//	apoc.coll.containsDuplicates([1,2,3,4,5]) => false
 func ContainsDuplicates(list []interface{}) bool {
 	seen := make(map[string]bool)
 	for _, item := range list {
@@ -294,14 +310,15 @@ func ContainsDuplicates(list []interface{}) bool {
 // ContainsSorted checks if a value exists in a sorted list (binary search).
 //
 // Example:
-//   apoc.coll.containsSorted([1,2,3,4,5], 3) => true
+//
+//	apoc.coll.containsSorted([1,2,3,4,5], 3) => true
 func ContainsSorted(list []interface{}, value interface{}) bool {
 	left, right := 0, len(list)-1
-	
+
 	for left <= right {
 		mid := (left + right) / 2
 		cmp := compare(list[mid], value)
-		
+
 		if cmp == 0 {
 			return true
 		} else if cmp < 0 {
@@ -310,45 +327,47 @@ func ContainsSorted(list []interface{}, value interface{}) bool {
 			right = mid - 1
 		}
 	}
-	
+
 	return false
 }
 
 // Different returns elements in list1 that are not in list2.
 //
 // Example:
-//   apoc.coll.different([1,2,3,4], [2,4,6]) => [1,3]
+//
+//	apoc.coll.different([1,2,3,4], [2,4,6]) => [1,3]
 func Different(list1, list2 []interface{}) []interface{} {
 	set2 := make(map[string]bool)
 	for _, item := range list2 {
 		set2[fmt.Sprintf("%v", item)] = true
 	}
-	
+
 	result := make([]interface{}, 0)
 	for _, item := range list1 {
 		if !set2[fmt.Sprintf("%v", item)] {
 			result = append(result, item)
 		}
 	}
-	
+
 	return result
 }
 
 // Disjunction returns elements that are in either list but not both.
 //
 // Example:
-//   apoc.coll.disjunction([1,2,3], [2,3,4]) => [1,4]
+//
+//	apoc.coll.disjunction([1,2,3], [2,3,4]) => [1,4]
 func Disjunction(list1, list2 []interface{}) []interface{} {
 	set1 := make(map[string]bool)
 	set2 := make(map[string]bool)
-	
+
 	for _, item := range list1 {
 		set1[fmt.Sprintf("%v", item)] = true
 	}
 	for _, item := range list2 {
 		set2[fmt.Sprintf("%v", item)] = true
 	}
-	
+
 	result := make([]interface{}, 0)
 	for _, item := range list1 {
 		key := fmt.Sprintf("%v", item)
@@ -362,37 +381,39 @@ func Disjunction(list1, list2 []interface{}) []interface{} {
 			result = append(result, item)
 		}
 	}
-	
+
 	return ToSet(result)
 }
 
 // DropDuplicateNeighbors removes consecutive duplicate values.
 //
 // Example:
-//   apoc.coll.dropDuplicateNeighbors([1,1,2,2,3,3,2,2]) => [1,2,3,2]
+//
+//	apoc.coll.dropDuplicateNeighbors([1,1,2,2,3,3,2,2]) => [1,2,3,2]
 func DropDuplicateNeighbors(list []interface{}) []interface{} {
 	if len(list) == 0 {
 		return []interface{}{}
 	}
-	
+
 	result := []interface{}{list[0]}
 	for i := 1; i < len(list); i++ {
 		if !reflect.DeepEqual(list[i], list[i-1]) {
 			result = append(result, list[i])
 		}
 	}
-	
+
 	return result
 }
 
 // Duplicates returns all duplicate values in a list.
 //
 // Example:
-//   apoc.coll.duplicates([1,2,3,2,4,3,5]) => [2,3]
+//
+//	apoc.coll.duplicates([1,2,3,2,4,3,5]) => [2,3]
 func Duplicates(list []interface{}) []interface{} {
 	counts := make(map[string]int)
 	order := make(map[string]interface{})
-	
+
 	for _, item := range list {
 		key := fmt.Sprintf("%v", item)
 		counts[key]++
@@ -400,26 +421,27 @@ func Duplicates(list []interface{}) []interface{} {
 			order[key] = item
 		}
 	}
-	
+
 	result := make([]interface{}, 0)
 	for key, count := range counts {
 		if count > 1 {
 			result = append(result, order[key])
 		}
 	}
-	
+
 	return result
 }
 
 // DuplicatesWithCount returns duplicate values with their counts.
 //
 // Example:
-//   apoc.coll.duplicatesWithCount([1,2,3,2,4,3,3]) 
-//   => [{item:2,count:2},{item:3,count:3}]
+//
+//	apoc.coll.duplicatesWithCount([1,2,3,2,4,3,3])
+//	=> [{item:2,count:2},{item:3,count:3}]
 func DuplicatesWithCount(list []interface{}) []map[string]interface{} {
 	counts := make(map[string]int)
 	order := make(map[string]interface{})
-	
+
 	for _, item := range list {
 		key := fmt.Sprintf("%v", item)
 		counts[key]++
@@ -427,7 +449,7 @@ func DuplicatesWithCount(list []interface{}) []map[string]interface{} {
 			order[key] = item
 		}
 	}
-	
+
 	result := make([]map[string]interface{}, 0)
 	for key, count := range counts {
 		if count > 1 {
@@ -437,14 +459,15 @@ func DuplicatesWithCount(list []interface{}) []map[string]interface{} {
 			})
 		}
 	}
-	
+
 	return result
 }
 
 // Fill creates a list with a value repeated n times.
 //
 // Example:
-//   apoc.coll.fill('x', 5) => ['x','x','x','x','x']
+//
+//	apoc.coll.fill('x', 5) => ['x','x','x','x','x']
 func Fill(item interface{}, count int) []interface{} {
 	result := make([]interface{}, count)
 	for i := 0; i < count; i++ {
@@ -456,11 +479,12 @@ func Fill(item interface{}, count int) []interface{} {
 // Flatten flattens nested lists into a single list.
 //
 // Example:
-//   apoc.coll.flatten([[1,2],[3,4],[5]]) => [1,2,3,4,5]
-//   apoc.coll.flatten([[1,[2,3]],4]) => [1,2,3,4]
+//
+//	apoc.coll.flatten([[1,2],[3,4],[5]]) => [1,2,3,4,5]
+//	apoc.coll.flatten([[1,[2,3]],4]) => [1,2,3,4]
 func Flatten(list []interface{}, recursive bool) []interface{} {
 	result := make([]interface{}, 0)
-	
+
 	for _, item := range list {
 		if sublist, ok := item.([]interface{}); ok {
 			if recursive {
@@ -472,15 +496,16 @@ func Flatten(list []interface{}, recursive bool) []interface{} {
 			result = append(result, item)
 		}
 	}
-	
+
 	return result
 }
 
 // Frequencies returns a map of values to their occurrence counts.
 //
 // Example:
-//   apoc.coll.frequencies([1,2,2,3,3,3]) 
-//   => {1:1, 2:2, 3:3}
+//
+//	apoc.coll.frequencies([1,2,2,3,3,3])
+//	=> {1:1, 2:2, 3:3}
 func Frequencies(list []interface{}) map[string]int {
 	result := make(map[string]int)
 	for _, item := range list {
@@ -493,13 +518,14 @@ func Frequencies(list []interface{}) map[string]int {
 // FrequenciesAsMap returns frequency data as a list of maps.
 //
 // Example:
-//   apoc.coll.frequenciesAsMap([1,2,2,3,3,3])
-//   => [{item:1,count:1},{item:2,count:2},{item:3,count:3}]
+//
+//	apoc.coll.frequenciesAsMap([1,2,2,3,3,3])
+//	=> [{item:1,count:1},{item:2,count:2},{item:3,count:3}]
 func FrequenciesAsMap(list []interface{}) []map[string]interface{} {
 	counts := make(map[string]int)
 	order := make([]string, 0)
 	items := make(map[string]interface{})
-	
+
 	for _, item := range list {
 		key := fmt.Sprintf("%v", item)
 		if counts[key] == 0 {
@@ -508,7 +534,7 @@ func FrequenciesAsMap(list []interface{}) []map[string]interface{} {
 		}
 		counts[key]++
 	}
-	
+
 	result := make([]map[string]interface{}, 0)
 	for _, key := range order {
 		result = append(result, map[string]interface{}{
@@ -516,7 +542,7 @@ func FrequenciesAsMap(list []interface{}) []map[string]interface{} {
 			"count": counts[key],
 		})
 	}
-	
+
 	return result
 }
 
@@ -524,8 +550,9 @@ func FrequenciesAsMap(list []interface{}) []map[string]interface{} {
 // Returns -1 if not found.
 //
 // Example:
-//   apoc.coll.indexOf([1,2,3,4,5], 3) => 2
-//   apoc.coll.indexOf([1,2,3,4,5], 6) => -1
+//
+//	apoc.coll.indexOf([1,2,3,4,5], 3) => 2
+//	apoc.coll.indexOf([1,2,3,4,5], 6) => -1
 func IndexOf(list []interface{}, value interface{}) int {
 	for i, item := range list {
 		if reflect.DeepEqual(item, value) {
@@ -538,41 +565,44 @@ func IndexOf(list []interface{}, value interface{}) int {
 // Insert inserts a value at a specific index.
 //
 // Example:
-//   apoc.coll.insert([1,2,4,5], 2, 3) => [1,2,3,4,5]
+//
+//	apoc.coll.insert([1,2,4,5], 2, 3) => [1,2,3,4,5]
 func Insert(list []interface{}, index int, value interface{}) []interface{} {
 	if index < 0 || index > len(list) {
 		return list
 	}
-	
+
 	result := make([]interface{}, len(list)+1)
 	copy(result[:index], list[:index])
 	result[index] = value
 	copy(result[index+1:], list[index:])
-	
+
 	return result
 }
 
 // InsertAll inserts multiple values at a specific index.
 //
 // Example:
-//   apoc.coll.insertAll([1,2,5,6], 2, [3,4]) => [1,2,3,4,5,6]
+//
+//	apoc.coll.insertAll([1,2,5,6], 2, [3,4]) => [1,2,3,4,5,6]
 func InsertAll(list []interface{}, index int, values []interface{}) []interface{} {
 	if index < 0 || index > len(list) {
 		return list
 	}
-	
+
 	result := make([]interface{}, len(list)+len(values))
 	copy(result[:index], list[:index])
 	copy(result[index:index+len(values)], values)
 	copy(result[index+len(values):], list[index:])
-	
+
 	return result
 }
 
 // Intersection returns elements that exist in all lists.
 //
 // Example:
-//   apoc.coll.intersection([1,2,3,4], [2,3,4,5], [3,4,5,6]) => [3,4]
+//
+//	apoc.coll.intersection([1,2,3,4], [2,3,4,5], [3,4,5,6]) => [3,4]
 func Intersection(lists ...[]interface{}) []interface{} {
 	if len(lists) == 0 {
 		return []interface{}{}
@@ -580,11 +610,11 @@ func Intersection(lists ...[]interface{}) []interface{} {
 	if len(lists) == 1 {
 		return lists[0]
 	}
-	
+
 	// Count occurrences across all lists
 	counts := make(map[string]int)
 	items := make(map[string]interface{})
-	
+
 	for _, list := range lists {
 		seen := make(map[string]bool)
 		for _, item := range list {
@@ -596,7 +626,7 @@ func Intersection(lists ...[]interface{}) []interface{} {
 			}
 		}
 	}
-	
+
 	// Keep items that appear in all lists
 	result := make([]interface{}, 0)
 	for key, count := range counts {
@@ -604,15 +634,16 @@ func Intersection(lists ...[]interface{}) []interface{} {
 			result = append(result, items[key])
 		}
 	}
-	
+
 	return result
 }
 
 // IsEmpty checks if a list is empty.
 //
 // Example:
-//   apoc.coll.isEmpty([]) => true
-//   apoc.coll.isEmpty([1,2,3]) => false
+//
+//	apoc.coll.isEmpty([]) => true
+//	apoc.coll.isEmpty([1,2,3]) => false
 func IsEmpty(list []interface{}) bool {
 	return len(list) == 0
 }
@@ -620,8 +651,9 @@ func IsEmpty(list []interface{}) bool {
 // IsNotEmpty checks if a list is not empty.
 //
 // Example:
-//   apoc.coll.isNotEmpty([1,2,3]) => true
-//   apoc.coll.isNotEmpty([]) => false
+//
+//	apoc.coll.isNotEmpty([1,2,3]) => true
+//	apoc.coll.isNotEmpty([]) => false
 func IsNotEmpty(list []interface{}) bool {
 	return len(list) > 0
 }
@@ -629,7 +661,8 @@ func IsNotEmpty(list []interface{}) bool {
 // Occurrences counts how many times a value appears in a list.
 //
 // Example:
-//   apoc.coll.occurrences([1,2,3,2,4,2,5], 2) => 3
+//
+//	apoc.coll.occurrences([1,2,3,2,4,2,5], 2) => 3
 func Occurrences(list []interface{}, value interface{}) int {
 	count := 0
 	for _, item := range list {
@@ -643,7 +676,8 @@ func Occurrences(list []interface{}, value interface{}) int {
 // RandomItem returns a random item from a list.
 //
 // Example:
-//   apoc.coll.randomItem([1,2,3,4,5]) => 3 (random)
+//
+//	apoc.coll.randomItem([1,2,3,4,5]) => 3 (random)
 func RandomItem(list []interface{}) interface{} {
 	if len(list) == 0 {
 		return nil
@@ -655,7 +689,8 @@ func RandomItem(list []interface{}) interface{} {
 // RandomItems returns n random items from a list.
 //
 // Example:
-//   apoc.coll.randomItems([1,2,3,4,5], 3) => [2,4,5] (random)
+//
+//	apoc.coll.randomItems([1,2,3,4,5], 3) => [2,4,5] (random)
 func RandomItems(list []interface{}, count int) []interface{} {
 	if count >= len(list) {
 		return list
@@ -667,23 +702,25 @@ func RandomItems(list []interface{}, count int) []interface{} {
 // Remove removes a value at a specific index.
 //
 // Example:
-//   apoc.coll.remove([1,2,3,4,5], 2) => [1,2,4,5]
+//
+//	apoc.coll.remove([1,2,3,4,5], 2) => [1,2,4,5]
 func Remove(list []interface{}, index int) []interface{} {
 	if index < 0 || index >= len(list) {
 		return list
 	}
-	
+
 	result := make([]interface{}, len(list)-1)
 	copy(result[:index], list[:index])
 	copy(result[index:], list[index+1:])
-	
+
 	return result
 }
 
 // RemoveAll removes all occurrences of a value.
 //
 // Example:
-//   apoc.coll.removeAll([1,2,3,2,4,2,5], 2) => [1,3,4,5]
+//
+//	apoc.coll.removeAll([1,2,3,2,4,2,5], 2) => [1,3,4,5]
 func RemoveAll(list []interface{}, value interface{}) []interface{} {
 	result := make([]interface{}, 0)
 	for _, item := range list {
@@ -697,23 +734,25 @@ func RemoveAll(list []interface{}, value interface{}) []interface{} {
 // Set replaces a value at a specific index.
 //
 // Example:
-//   apoc.coll.set([1,2,3,4,5], 2, 99) => [1,2,99,4,5]
+//
+//	apoc.coll.set([1,2,3,4,5], 2, 99) => [1,2,99,4,5]
 func Set(list []interface{}, index int, value interface{}) []interface{} {
 	if index < 0 || index >= len(list) {
 		return list
 	}
-	
+
 	result := make([]interface{}, len(list))
 	copy(result, list)
 	result[index] = value
-	
+
 	return result
 }
 
 // Shuffle randomly shuffles a list.
 //
 // Example:
-//   apoc.coll.shuffle([1,2,3,4,5]) => [3,1,5,2,4] (random)
+//
+//	apoc.coll.shuffle([1,2,3,4,5]) => [3,1,5,2,4] (random)
 func Shuffle(list []interface{}) []interface{} {
 	result := make([]interface{}, len(list))
 	copy(result, list)
@@ -724,7 +763,8 @@ func Shuffle(list []interface{}) []interface{} {
 // Slice returns a sublist from start to end index.
 //
 // Example:
-//   apoc.coll.slice([1,2,3,4,5], 1, 4) => [2,3,4]
+//
+//	apoc.coll.slice([1,2,3,4,5], 1, 4) => [2,3,4]
 func Slice(list []interface{}, start, end int) []interface{} {
 	if start < 0 {
 		start = 0
@@ -735,22 +775,23 @@ func Slice(list []interface{}, start, end int) []interface{} {
 	if start >= end {
 		return []interface{}{}
 	}
-	
+
 	result := make([]interface{}, end-start)
 	copy(result, list[start:end])
-	
+
 	return result
 }
 
 // Split splits a list into chunks of a given size.
 //
 // Example:
-//   apoc.coll.split([1,2,3,4,5,6,7], 3) => [[1,2,3],[4,5,6],[7]]
+//
+//	apoc.coll.split([1,2,3,4,5,6,7], 3) => [[1,2,3],[4,5,6],[7]]
 func Split(list []interface{}, size int) [][]interface{} {
 	if size <= 0 {
 		return [][]interface{}{list}
 	}
-	
+
 	result := make([][]interface{}, 0)
 	for i := 0; i < len(list); i += size {
 		end := i + size
@@ -761,14 +802,15 @@ func Split(list []interface{}, size int) [][]interface{} {
 		copy(chunk, list[i:end])
 		result = append(result, chunk)
 	}
-	
+
 	return result
 }
 
 // Subtract returns elements in list1 that are not in list2.
 //
 // Example:
-//   apoc.coll.subtract([1,2,3,4,5], [2,4,6]) => [1,3,5]
+//
+//	apoc.coll.subtract([1,2,3,4,5], [2,4,6]) => [1,3,5]
 func Subtract(list1, list2 []interface{}) []interface{} {
 	return Different(list1, list2)
 }
@@ -776,7 +818,8 @@ func Subtract(list1, list2 []interface{}) []interface{} {
 // SumLongs sums integer values in a list.
 //
 // Example:
-//   apoc.coll.sumLongs([1,2,3,4,5]) => 15
+//
+//	apoc.coll.sumLongs([1,2,3,4,5]) => 15
 func SumLongs(list []interface{}) int64 {
 	var sum int64
 	for _, item := range list {
@@ -790,11 +833,12 @@ func SumLongs(list []interface{}) int64 {
 // Union returns the union of multiple lists (unique values).
 //
 // Example:
-//   apoc.coll.union([1,2,3], [3,4,5], [5,6,7]) => [1,2,3,4,5,6,7]
+//
+//	apoc.coll.union([1,2,3], [3,4,5], [5,6,7]) => [1,2,3,4,5,6,7]
 func Union(lists ...[]interface{}) []interface{} {
 	seen := make(map[string]bool)
 	result := make([]interface{}, 0)
-	
+
 	for _, list := range lists {
 		for _, item := range list {
 			key := fmt.Sprintf("%v", item)
@@ -804,14 +848,15 @@ func Union(lists ...[]interface{}) []interface{} {
 			}
 		}
 	}
-	
+
 	return result
 }
 
 // UnionAll returns the union of multiple lists (with duplicates).
 //
 // Example:
-//   apoc.coll.unionAll([1,2], [2,3], [3,4]) => [1,2,2,3,3,4]
+//
+//	apoc.coll.unionAll([1,2], [2,3], [3,4]) => [1,2,2,3,3,4]
 func UnionAll(lists ...[]interface{}) []interface{} {
 	result := make([]interface{}, 0)
 	for _, list := range lists {
@@ -866,7 +911,7 @@ func compare(a, b interface{}) int {
 			return 0
 		}
 	}
-	
+
 	// Try string comparison
 	sa := fmt.Sprintf("%v", a)
 	sb := fmt.Sprintf("%v", b)

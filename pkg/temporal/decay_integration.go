@@ -128,36 +128,36 @@ type DecayIntegrationConfig struct {
 // DefaultDecayIntegrationConfig returns sensible defaults.
 func DefaultDecayIntegrationConfig() DecayIntegrationConfig {
 	return DecayIntegrationConfig{
-		BaseDecayRate:          0.01,  // 1% per hour base decay
-		FrequentAccessBoost:    0.1,   // 10x slower decay for frequent access
-		RareAccessPenalty:      2.0,   // 2x faster decay for rare access
-		DailyPatternBoost:      0.5,   // 2x slower for daily patterns
-		BurstBoostDuration:     300,   // 5 minute burst boost
-		BurstBoostMultiplier:   0.1,   // 10x slower during burst
-		SessionBoostMultiplier: 0.2,   // 5x slower for current session
-		MinDecayMultiplier:     0.05,  // Never slower than 20x base
-		MaxDecayMultiplier:     5.0,   // Never faster than 5x base
-		VelocityWeight:         0.4,   // 40% weight for velocity
-		PatternWeight:          0.3,   // 30% weight for patterns
-		RecencyWeight:          0.3,   // 30% weight for recency
+		BaseDecayRate:          0.01, // 1% per hour base decay
+		FrequentAccessBoost:    0.1,  // 10x slower decay for frequent access
+		RareAccessPenalty:      2.0,  // 2x faster decay for rare access
+		DailyPatternBoost:      0.5,  // 2x slower for daily patterns
+		BurstBoostDuration:     300,  // 5 minute burst boost
+		BurstBoostMultiplier:   0.1,  // 10x slower during burst
+		SessionBoostMultiplier: 0.2,  // 5x slower for current session
+		MinDecayMultiplier:     0.05, // Never slower than 20x base
+		MaxDecayMultiplier:     5.0,  // Never faster than 5x base
+		VelocityWeight:         0.4,  // 40% weight for velocity
+		PatternWeight:          0.3,  // 30% weight for patterns
+		RecencyWeight:          0.3,  // 30% weight for recency
 	}
 }
 
 // ConservativeDecayConfig returns config that preserves more memories.
 func ConservativeDecayConfig() DecayIntegrationConfig {
 	cfg := DefaultDecayIntegrationConfig()
-	cfg.FrequentAccessBoost = 0.05  // 20x slower for frequent
-	cfg.MinDecayMultiplier = 0.02   // Can be 50x slower
-	cfg.MaxDecayMultiplier = 2.0    // Never faster than 2x
+	cfg.FrequentAccessBoost = 0.05 // 20x slower for frequent
+	cfg.MinDecayMultiplier = 0.02  // Can be 50x slower
+	cfg.MaxDecayMultiplier = 2.0   // Never faster than 2x
 	return cfg
 }
 
 // AggressiveDecayConfig returns config that forgets faster.
 func AggressiveDecayConfig() DecayIntegrationConfig {
 	cfg := DefaultDecayIntegrationConfig()
-	cfg.RareAccessPenalty = 5.0    // 5x faster for rare
-	cfg.MinDecayMultiplier = 0.2   // Can only be 5x slower
-	cfg.MaxDecayMultiplier = 10.0  // Can be 10x faster
+	cfg.RareAccessPenalty = 5.0   // 5x faster for rare
+	cfg.MinDecayMultiplier = 0.2  // Can only be 5x slower
+	cfg.MaxDecayMultiplier = 10.0 // Can be 10x faster
 	return cfg
 }
 

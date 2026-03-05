@@ -43,16 +43,16 @@ func NewSecurityMiddlewareWithConfig(cfg SecurityConfig) *SecurityMiddleware {
 // ValidateRequest performs comprehensive security validation on incoming requests.
 func (m *SecurityMiddleware) ValidateRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// Validate all header values for injection attacks
-for name, values := range r.Header {
-for _, value := range values {
-if err := ValidateHeaderValue(value); err != nil {
+		// Validate all header values for injection attacks
+		for name, values := range r.Header {
+			for _, value := range values {
+				if err := ValidateHeaderValue(value); err != nil {
 					http.Error(w, fmt.Sprintf("Invalid header %s: %v", name, err), http.StatusBadRequest)
 					return
 				}
 			}
 		}
-		
+
 		// Validate Authorization header specifically
 		authHeader := r.Header.Get("Authorization")
 		if authHeader != "" {
@@ -65,7 +65,7 @@ if err := ValidateHeaderValue(value); err != nil {
 				}
 			}
 		}
-		
+
 		// Validate query parameter tokens (for SSE/WebSocket)
 		if tokenParam := r.URL.Query().Get("token"); tokenParam != "" {
 			if err := ValidateToken(tokenParam); err != nil {
@@ -73,7 +73,7 @@ if err := ValidateHeaderValue(value); err != nil {
 				return
 			}
 		}
-		
+
 		// Validate URL parameters
 		urlParams := []string{"callback", "redirect", "redirect_uri", "url", "webhook"}
 		for _, param := range urlParams {
@@ -84,7 +84,7 @@ if err := ValidateHeaderValue(value); err != nil {
 				}
 			}
 		}
-		
+
 		next.ServeHTTP(w, r)
 	})
 }

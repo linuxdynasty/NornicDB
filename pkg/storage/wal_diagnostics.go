@@ -73,15 +73,15 @@ func (w *WAL) reportCorruption(diag *CorruptionDiagnostics, cause error) {
 	w.lastCorruption.Store(diag)
 
 	fields := map[string]any{
-		"wal_path":         diag.WALPath,
-		"file_size":        diag.FileSize,
-		"corrupted_seq":    diag.CorruptedSeq,
-		"last_good_seq":    diag.LastGoodSeq,
-		"expected_crc":     diag.ExpectedCRC,
-		"actual_crc":       diag.ActualCRC,
-		"recovery_action":  diag.RecoveryAction,
-		"backup_path":      diag.BackupPath,
-		"suspected_cause":  diag.SuspectedCause,
+		"wal_path":          diag.WALPath,
+		"file_size":         diag.FileSize,
+		"corrupted_seq":     diag.CorruptedSeq,
+		"last_good_seq":     diag.LastGoodSeq,
+		"expected_crc":      diag.ExpectedCRC,
+		"actual_crc":        diag.ActualCRC,
+		"recovery_action":   diag.RecoveryAction,
+		"backup_path":       diag.BackupPath,
+		"suspected_cause":   diag.SuspectedCause,
 		"timestamp_rfc3339": diag.Timestamp.Format(time.RFC3339),
 	}
 	if cause != nil {
@@ -103,4 +103,3 @@ func (w *WAL) reportCorruption(diag *CorruptionDiagnostics, cause error) {
 		w.config.OnCorruption(diag, cause)
 	}
 }
-

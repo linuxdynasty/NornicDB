@@ -45,8 +45,8 @@ type SchemaManager struct {
 	mu sync.RWMutex
 
 	// Constraints
-	uniqueConstraints       map[string]*UniqueConstraint    // key: "Label:property"
-	constraints             map[string]Constraint           // key: constraint name, stores all constraint types
+	uniqueConstraints       map[string]*UniqueConstraint      // key: "Label:property"
+	constraints             map[string]Constraint             // key: constraint name, stores all constraint types
 	propertyTypeConstraints map[string]PropertyTypeConstraint // key: constraint name
 
 	// Indexes
@@ -331,12 +331,12 @@ type VectorIndex struct {
 // RangeIndex represents an index for range queries on a single property.
 // It maintains a sorted list of entries for efficient O(log n) range queries.
 type RangeIndex struct {
-	Name     string
-	Label    string
-	Property string
-	entries  []rangeEntry   // Sorted by value for binary search
+	Name      string
+	Label     string
+	Property  string
+	entries   []rangeEntry       // Sorted by value for binary search
 	nodeValue map[NodeID]float64 // NodeID -> current numeric value (for delete/update)
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 }
 
 // AddUniqueConstraint adds a unique constraint.
@@ -806,10 +806,10 @@ func (sm *SchemaManager) AddRangeIndex(name, label, property string) error {
 	}
 
 	sm.rangeIndexes[name] = &RangeIndex{
-		Name:     name,
-		Label:    label,
-		Property: property,
-		entries:  make([]rangeEntry, 0),
+		Name:      name,
+		Label:     label,
+		Property:  property,
+		entries:   make([]rangeEntry, 0),
 		nodeValue: make(map[NodeID]float64), // NodeID -> value
 	}
 

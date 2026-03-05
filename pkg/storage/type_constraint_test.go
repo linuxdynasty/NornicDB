@@ -17,22 +17,22 @@ func TestValidatePropertyType(t *testing.T) {
 		// STRING tests
 		{"string valid", "hello", PropertyTypeString, false},
 		{"string invalid int", 42, PropertyTypeString, true},
-		
+
 		// INTEGER tests
 		{"int valid", 42, PropertyTypeInteger, false},
 		{"int64 valid", int64(42), PropertyTypeInteger, false},
 		{"int invalid string", "42", PropertyTypeInteger, true},
-		
+
 		// FLOAT tests
 		{"float64 valid", 3.14, PropertyTypeFloat, false},
 		{"float32 valid", float32(3.14), PropertyTypeFloat, false},
 		{"float invalid int", 42, PropertyTypeFloat, true},
-		
+
 		// BOOLEAN tests
 		{"bool true valid", true, PropertyTypeBoolean, false},
 		{"bool false valid", false, PropertyTypeBoolean, false},
 		{"bool invalid int", 1, PropertyTypeBoolean, true},
-		
+
 		// NULL tests
 		{"null string", nil, PropertyTypeString, false},
 		{"null integer", nil, PropertyTypeInteger, false},
@@ -51,11 +51,11 @@ func TestValidatePropertyType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidatePropertyType(tt.value, tt.expectedType)
-			
+
 			if tt.shouldFail && err == nil {
 				t.Errorf("Expected error for %v as %s, got nil", tt.value, tt.expectedType)
 			}
-			
+
 			if !tt.shouldFail && err != nil {
 				t.Errorf("Expected no error for %v as %s, got %v", tt.value, tt.expectedType, err)
 			}
@@ -198,8 +198,8 @@ func TestBadgerEngine_PropertyTypeConstraintWithNulls(t *testing.T) {
 		},
 	})
 	tx.CreateNode(&Node{
-		ID:     "person-2",
-		Labels: []string{"Person"},
+		ID:         "person-2",
+		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{
 			// nickname is NULL
 		},

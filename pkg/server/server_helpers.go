@@ -418,4 +418,3 @@ func (s *Server) logAudit(r *http.Request, userID, eventType string, success boo
 		RequestPath: r.URL.Path,
 	})
 }
-

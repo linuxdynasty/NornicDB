@@ -458,13 +458,13 @@ type CypherInput struct {
 
 // DatabaseStats represents database statistics.
 type DatabaseStats struct {
-	NodeCount          int                      `json:"nodeCount"`
-	RelationshipCount  int                      `json:"relationshipCount"`
-	Labels             []*LabelStats            `json:"labels"`
-	RelationshipTypes  []*RelationshipTypeStats `json:"relationshipTypes"`
-	EmbeddedNodeCount  int                      `json:"embeddedNodeCount"`
-	UptimeSeconds      float64                  `json:"uptimeSeconds"`
-	MemoryUsageBytes   int                      `json:"memoryUsageBytes"`
+	NodeCount         int                      `json:"nodeCount"`
+	RelationshipCount int                      `json:"relationshipCount"`
+	Labels            []*LabelStats            `json:"labels"`
+	RelationshipTypes []*RelationshipTypeStats `json:"relationshipTypes"`
+	EmbeddedNodeCount int                      `json:"embeddedNodeCount"`
+	UptimeSeconds     float64                  `json:"uptimeSeconds"`
+	MemoryUsageBytes  int                      `json:"memoryUsageBytes"`
 }
 
 // LabelStats represents statistics for a label.

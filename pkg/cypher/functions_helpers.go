@@ -235,4 +235,3 @@ func (e *StorageExecutor) evaluateMapLiteralFull(expr string, nodes map[string]*
 
 	return result
 }
-

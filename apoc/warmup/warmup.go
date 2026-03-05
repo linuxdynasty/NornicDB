@@ -22,18 +22,18 @@ var Storage storage.Storage = storage.NewInMemoryStorage()
 
 // WarmupCache holds cached data for quick access.
 type WarmupCache struct {
-	mu              sync.RWMutex
-	nodes           map[int64]*Node
-	relationships   map[int64]*Relationship
-	nodesByLabel    map[string][]*Node
-	relsByType      map[string][]*Relationship
-	properties      map[string][]interface{}
-	queries         map[string]interface{}
-	stats           CacheStats
-	lastRun         *time.Time
-	nextRun         *time.Time
-	running         bool
-	scheduledCron   string
+	mu            sync.RWMutex
+	nodes         map[int64]*Node
+	relationships map[int64]*Relationship
+	nodesByLabel  map[string][]*Node
+	relsByType    map[string][]*Relationship
+	properties    map[string][]interface{}
+	queries       map[string]interface{}
+	stats         CacheStats
+	lastRun       *time.Time
+	nextRun       *time.Time
+	running       bool
+	scheduledCron string
 }
 
 // CacheStats tracks cache statistics.

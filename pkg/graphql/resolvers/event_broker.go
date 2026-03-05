@@ -9,10 +9,10 @@ import (
 
 // subscriptionInfo holds a channel and its filter parameters.
 type subscriptionInfo struct {
-	ch      interface{} // Channel (type varies by subscription type)
-	labels  []string
-	types   []string
-	id      *string
+	ch     interface{} // Channel (type varies by subscription type)
+	labels []string
+	types  []string
+	id     *string
 }
 
 // EventBroker is a thread-safe pub/sub system for GraphQL subscriptions.
@@ -60,10 +60,9 @@ func NewEventBroker() *EventBroker {
 		relationshipCreatedSubs: make([]subscriptionInfo, 0),
 		relationshipUpdatedSubs: make([]subscriptionInfo, 0),
 		relationshipDeletedSubs: make([]subscriptionInfo, 0),
-		searchStreamSubs:         make([]subscriptionInfo, 0),
+		searchStreamSubs:        make([]subscriptionInfo, 0),
 	}
 }
-
 
 // matchesFilter checks if an event matches the subscription filter.
 func matchesFilter(labels []string, types []string, id *string, eventLabels []string, eventType string, eventID string) bool {
@@ -506,4 +505,3 @@ func (b *EventBroker) Close() {
 	b.relationshipDeletedSubs = make([]subscriptionInfo, 0)
 	b.searchStreamSubs = make([]subscriptionInfo, 0)
 }
-

@@ -30,4 +30,3 @@ func TestHNSWPresetFromANNQuality(t *testing.T) {
 		t.Fatalf("expected compressed to map to %q, got %q", QualityFast, got)
 	}
 }
-

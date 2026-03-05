@@ -122,11 +122,11 @@ type smoothedScore struct {
 
 // AdapterStats holds statistics about the adapter's operation.
 type AdapterStats struct {
-	TotalCalculations    int64
-	KalmanSmoothed       int64
-	TemporalModified     int64
-	CacheHits            int64
-	ArchivePredictions   int64
+	TotalCalculations  int64
+	KalmanSmoothed     int64
+	TemporalModified   int64
+	CacheHits          int64
+	ArchivePredictions int64
 }
 
 // NewKalmanAdapter creates a new Kalman-enhanced decay adapter.
@@ -167,9 +167,9 @@ func (ka *KalmanAdapter) SetTemporal(t *temporal.DecayIntegration) {
 //
 // The final score is computed as:
 //
-//	1. Raw score from decay.Manager.CalculateScore()
-//	2. Apply temporal modifier (if enabled and temporal is set)
-//	3. Smooth with Kalman filter (if enabled)
+//  1. Raw score from decay.Manager.CalculateScore()
+//  2. Apply temporal modifier (if enabled and temporal is set)
+//  3. Smooth with Kalman filter (if enabled)
 //
 // Returns a score between 0.0 (forgotten) and 1.0 (fresh).
 func (ka *KalmanAdapter) CalculateScore(info *MemoryInfo) float64 {
@@ -188,7 +188,7 @@ func (ka *KalmanAdapter) CalculateScore(info *MemoryInfo) float64 {
 	if ka.config.EnableTemporalModifier && ka.temporal != nil {
 		decayMod := ka.temporal.GetDecayModifier(info.ID)
 		modifier = decayMod.Multiplier
-		
+
 		// Invert modifier for score: low decay multiplier = higher score retention
 		// Decay multiplier 0.5 = 2x slower decay = score decays to 50% slower
 		scoreModifier := 1.0 / modifier
@@ -198,7 +198,7 @@ func (ka *KalmanAdapter) CalculateScore(info *MemoryInfo) float64 {
 		if scoreModifier < 0.5 {
 			scoreModifier = 0.5 // Cap at 0.5x penalty
 		}
-		
+
 		// Blend: move score toward 1.0 for hot nodes, toward 0.0 for cold nodes
 		if scoreModifier > 1.0 {
 			// Hot node: score gets a boost toward 1.0
@@ -207,7 +207,7 @@ func (ka *KalmanAdapter) CalculateScore(info *MemoryInfo) float64 {
 			// Cold node: score gets a penalty toward 0.0
 			modifiedScore = rawScore * scoreModifier
 		}
-		
+
 		ka.stats.TemporalModified++
 	}
 
@@ -400,7 +400,7 @@ func (ka *KalmanAdapter) RecordAccess(nodeID string) {
 func (ka *KalmanAdapter) Reinforce(info *MemoryInfo) *MemoryInfo {
 	// Record access for temporal tracking
 	ka.RecordAccess(info.ID)
-	
+
 	// Reinforce via underlying manager
 	return ka.manager.Reinforce(info)
 }

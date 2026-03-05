@@ -566,7 +566,7 @@ func TestClusterIntegration_FeatureFlagIntegration(t *testing.T) {
 		// Note: By default, GPU clustering is disabled
 		// So DefaultClusterConfig().Enabled should be false
 		cfg := DefaultClusterConfig()
-		
+
 		// The Enabled field is based on config.IsGPUClusteringEnabled()
 		// which should be false by default (experimental feature)
 		// We can't easily test the feature flag integration here without

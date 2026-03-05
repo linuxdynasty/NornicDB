@@ -70,4 +70,3 @@ func TestForeach_ReplacesLoopVariable_NotMapKeys(t *testing.T) {
 	require.Len(t, got.Rows, 1)
 	require.Equal(t, int64(1), got.Rows[0][0])
 }
-

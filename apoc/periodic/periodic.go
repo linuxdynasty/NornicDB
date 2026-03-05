@@ -28,23 +28,23 @@ func Iterate(cypherIterate, cypherAction string, config map[string]interface{}) 
 
 	// Placeholder implementation
 	return map[string]interface{}{
-		"batches":      0,
-		"total":        0,
-		"timeTaken":    0,
+		"batches":             0,
+		"total":               0,
+		"timeTaken":           0,
 		"committedOperations": 0,
 		"failedOperations":    0,
 		"failedBatches":       0,
-		"retries":      0,
-		"errorMessages": map[string]interface{}{},
+		"retries":             0,
+		"errorMessages":       map[string]interface{}{},
 		"batch": map[string]interface{}{
-			"total":   0,
+			"total":     0,
 			"committed": 0,
-			"failed":  0,
+			"failed":    0,
 		},
 		"operations": map[string]interface{}{
-			"total":   0,
+			"total":     0,
 			"committed": 0,
-			"failed":  0,
+			"failed":    0,
 		},
 		"batchSize": batchSize,
 		"parallel":  parallel,
@@ -63,13 +63,13 @@ func Commit(statement string, params map[string]interface{}) map[string]interfac
 	}
 
 	return map[string]interface{}{
-		"updates":     0,
-		"executions":  0,
-		"runtime":     0,
-		"batches":     0,
+		"updates":       0,
+		"executions":    0,
+		"runtime":       0,
+		"batches":       0,
 		"failedBatches": 0,
-		"batchErrors": map[string]interface{}{},
-		"limit":       limit,
+		"batchErrors":   map[string]interface{}{},
+		"limit":         limit,
 	}
 }
 

@@ -13,14 +13,14 @@ import (
 func TestSPIRVShaderFileStructure(t *testing.T) {
 	// Find the shader file relative to the test
 	shaderPath := filepath.Join("shaders", "cosine_similarity.spv")
-	
+
 	// Try multiple possible paths
 	possiblePaths := []string{
 		shaderPath,
 		filepath.Join("pkg", "gpu", "vulkan", shaderPath),
 		filepath.Join("..", "..", "..", shaderPath),
 	}
-	
+
 	var data []byte
 	var err error
 	for _, path := range possiblePaths {
@@ -30,42 +30,42 @@ func TestSPIRVShaderFileStructure(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if err != nil {
 		t.Skipf("SPIR-V shader file not found (this is OK if shaders haven't been compiled): %v", err)
 		return
 	}
-	
+
 	// Verify minimum size (SPIR-V header is at least 5 words = 20 bytes)
 	if len(data) < 20 {
 		t.Fatalf("SPIR-V file too small: %d bytes, need at least 20", len(data))
 	}
-	
+
 	// Verify SPIR-V magic number (first 4 bytes should be 0x07230203)
 	magic := binary.LittleEndian.Uint32(data[0:4])
 	expectedMagic := uint32(0x07230203)
 	if magic != expectedMagic {
 		t.Errorf("SPIR-V magic number = 0x%08x, want 0x%08x", magic, expectedMagic)
 	}
-	
+
 	// Verify version (bytes 4-8 should be 0x00010000 for SPIR-V 1.0)
 	version := binary.LittleEndian.Uint32(data[4:8])
 	expectedVersion := uint32(0x00010000)
 	if version != expectedVersion {
 		t.Errorf("SPIR-V version = 0x%08x, want 0x%08x", version, expectedVersion)
 	}
-	
+
 	// Verify file size matches expected (2380 bytes = 595 words)
 	expectedSize := 2380
 	if len(data) != expectedSize {
 		t.Errorf("SPIR-V file size = %d bytes, want %d", len(data), expectedSize)
 	}
-	
+
 	// Verify size is a multiple of 4 (SPIR-V words are 32-bit)
 	if len(data)%4 != 0 {
 		t.Errorf("SPIR-V file size = %d is not a multiple of 4", len(data))
 	}
-	
+
 	// Verify bound field (word at index 3) is reasonable
 	if len(data) >= 16 {
 		bound := binary.LittleEndian.Uint32(data[12:16])
@@ -77,7 +77,7 @@ func TestSPIRVShaderFileStructure(t *testing.T) {
 		}
 		t.Logf("SPIR-V bound: %d", bound)
 	}
-	
+
 	// Check for OpEntryPoint instruction (0x0006000f) - should be present in compute shader
 	foundEntryPoint := false
 	for i := 0; i < len(data)-4; i += 4 {
@@ -88,11 +88,11 @@ func TestSPIRVShaderFileStructure(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !foundEntryPoint {
 		t.Error("SPIR-V shader does not contain OpEntryPoint instruction")
 	}
-	
+
 	// Check for OpExecutionMode instruction (0x00060010) - should be present for local size
 	foundExecutionMode := false
 	for i := 0; i < len(data)-4; i += 4 {
@@ -103,7 +103,7 @@ func TestSPIRVShaderFileStructure(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !foundExecutionMode {
 		t.Error("SPIR-V shader does not contain OpExecutionMode instruction")
 	}
@@ -257,4 +257,3 @@ func BenchmarkSPIRVShaderSize(b *testing.B) {
 		_ = uint64(len(cosine_similarity_spirv) * 4)
 	}
 }
-

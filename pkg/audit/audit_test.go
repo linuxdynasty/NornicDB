@@ -381,7 +381,7 @@ func TestGetUserActivity(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	logger, _ := NewLogger(Config{Enabled: true, LogPath: logPath})
-	
+
 	now := time.Now().UTC()
 	logger.Log(Event{Timestamp: now, Type: EventLogin, UserID: "user-1"})
 	logger.Log(Event{Timestamp: now, Type: EventDataRead, UserID: "user-1"})
@@ -404,7 +404,7 @@ func TestGetDataAccessReport(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	logger, _ := NewLogger(Config{Enabled: true, LogPath: logPath})
-	
+
 	now := time.Now().UTC()
 	logger.Log(Event{Timestamp: now, Type: EventLogin, UserID: "user-1"})
 	logger.Log(Event{Timestamp: now, Type: EventDataRead, UserID: "user-1"})
@@ -428,7 +428,7 @@ func TestGetSecurityReport(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	logger, _ := NewLogger(Config{Enabled: true, LogPath: logPath})
-	
+
 	now := time.Now().UTC()
 	logger.Log(Event{Timestamp: now, Type: EventLogin, Success: true})
 	logger.Log(Event{Timestamp: now, Type: EventLoginFailed, Success: false})
@@ -452,9 +452,9 @@ func TestGenerateComplianceReport(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	logger, _ := NewLogger(Config{Enabled: true, LogPath: logPath})
-	
+
 	now := time.Now().UTC()
-	
+
 	// Various event types
 	logger.Log(Event{Timestamp: now, Type: EventLogin, UserID: "user-1", Success: true})
 	logger.Log(Event{Timestamp: now, Type: EventLoginFailed, UserID: "user-2", Success: false})
@@ -521,7 +521,7 @@ func TestLoggerClose(t *testing.T) {
 	logger := NewLoggerWithWriter(&buf, Config{Enabled: true})
 
 	logger.Log(Event{Type: EventLogin})
-	
+
 	if err := logger.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -535,7 +535,7 @@ func TestLoggerClose(t *testing.T) {
 
 func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
-	
+
 	if !config.Enabled {
 		t.Error("default should be enabled")
 	}
@@ -636,7 +636,7 @@ func TestNewLoggerInvalidPath(t *testing.T) {
 	} else {
 		invalidPath = "/proc/self/nonexistent/audit.log"
 	}
-	
+
 	logger, err := NewLogger(Config{
 		Enabled: true,
 		LogPath: invalidPath,
@@ -681,7 +681,7 @@ func TestReaderQueryResourceID(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "audit.log")
 
 	logger, _ := NewLogger(Config{Enabled: true, LogPath: logPath})
-	
+
 	now := time.Now().UTC()
 	logger.Log(Event{Timestamp: now, Type: EventDataRead, ResourceID: "node-123"})
 	logger.Log(Event{Timestamp: now, Type: EventDataRead, ResourceID: "node-456"})

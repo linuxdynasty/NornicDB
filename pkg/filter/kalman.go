@@ -155,13 +155,13 @@ type Kalman struct {
 // Example 1 - Smoothing Noisy Sensor Data:
 //
 //	filter := filter.NewKalman(filter.DefaultConfig())
-//	
+//
 //	// Simulate noisy temperature readings
 //	trueTemp := 25.0
 //	for i := 0; i < 10; i++ {
 //		// Measurement with noise
 //		noisy := trueTemp + (rand.Float64()-0.5)*2.0 // ±1°C noise
-//		
+//
 //		filtered := filter.Process(noisy, trueTemp)
 //		fmt.Printf("Raw: %.2f°C, Filtered: %.2f°C\n", noisy, filtered)
 //	}
@@ -170,18 +170,18 @@ type Kalman struct {
 // Example 2 - Memory Decay Score Prediction:
 //
 //	filter := filter.NewKalman(filter.DecayPredictionConfig())
-//	
+//
 //	// Track memory decay over time
 //	for day := 0; day < 30; day++ {
 //		// Calculate current decay score
 //		score := calculateDecayScore(memory, day)
-//		
+//
 //		// Filter the score
 //		smoothed := filter.Process(score, 0.5) // Target: keep at 0.5
-//		
+//
 //		// Predict score 7 days ahead
 //		predicted := filter.Predict(7)
-//		
+//
 //		if predicted < 0.1 {
 //			fmt.Println("Memory will decay below threshold in a week!")
 //		}
@@ -190,16 +190,16 @@ type Kalman struct {
 // Example 3 - Query Latency Tracking:
 //
 //	filter := filter.NewKalman(filter.DefaultConfig())
-//	
+//
 //	// Track database query latency
 //	for {
 //		start := time.Now()
 //		executeQuery()
 //		latencyMs := time.Since(start).Milliseconds()
-//		
+//
 //		// Smooth latency measurements
 //		smoothed := filter.Process(float64(latencyMs), 0)
-//		
+//
 //		// Alert if smoothed latency exceeds threshold
 //		if smoothed > 100 {
 //			log.Printf("High latency detected: %.1fms", smoothed)
@@ -236,7 +236,8 @@ type Kalman struct {
 //   - Thread-safe with mutex protection
 //
 // Thread Safety:
-//   All methods are thread-safe for concurrent access.
+//
+//	All methods are thread-safe for concurrent access.
 func NewKalman(cfg Config) *Kalman {
 	return &Kalman{
 		x:             0,
@@ -277,7 +278,7 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 // Example 1 - Simple Smoothing:
 //
 //	filter := filter.NewKalman(filter.DefaultConfig())
-//	
+//
 //	measurements := []float64{10.2, 9.8, 10.5, 9.9, 10.1, 10.3}
 //	for _, m := range measurements {
 //		smoothed := filter.Process(m, 0)
@@ -288,13 +289,13 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 // Example 2 - With Target Setpoint:
 //
 //	filter := filter.NewKalman(filter.DefaultConfig())
-//	
+//
 //	// Try to maintain temperature at 25°C
 //	targetTemp := 25.0
 //	for {
 //		currentTemp := readSensor()
 //		filtered := filter.Process(currentTemp, targetTemp)
-//		
+//
 //		// When far from target, filter becomes more responsive
 //		error := targetTemp - filtered
 //		adjustHeater(error)
@@ -303,11 +304,11 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 // Example 3 - Real-time Anomaly Detection:
 //
 //	filter := filter.NewKalman(filter.DefaultConfig())
-//	
+//
 //	for {
 //		value := getMetric()
 //		expected := filter.Process(value, 0)
-//		
+//
 //		// Check if measurement deviates significantly from prediction
 //		deviation := math.Abs(value - expected)
 //		if deviation > 3*filter.Covariance() { // 3-sigma rule
@@ -319,11 +320,11 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 //
 //	filter := filter.NewKalman(filter.DecayPredictionConfig())
 //	targetScore := 0.6 // Want to maintain this decay score
-//	
+//
 //	for day := 0; day < 30; day++ {
 //		score := calculateDecayScore(memory)
 //		smoothed := filter.Process(score, targetScore)
-//		
+//
 //		// If smoothed score drops below target, reinforce the memory
 //		if smoothed < targetScore {
 //			reinforceMemory(memory)
@@ -334,10 +335,10 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 //
 // Think of Process like updating your guess about the weather:
 //
-//   1. You predicted: "It'll be 70°F"
-//   2. Thermometer says: "72°F"
-//   3. You think: "My prediction was close, but I'll adjust slightly"
-//   4. New guess: "71°F" (between prediction and measurement)
+//  1. You predicted: "It'll be 70°F"
+//  2. Thermometer says: "72°F"
+//  3. You think: "My prediction was close, but I'll adjust slightly"
+//  4. New guess: "71°F" (between prediction and measurement)
 //
 // The cool part: If you said "70°F" and the thermometer says "90°F", you don't
 // immediately believe it! You think: "That's weird, maybe the thermometer is broken.
@@ -362,7 +363,8 @@ func NewKalmanWithInitial(cfg Config, initialState float64) *Kalman {
 //   - Adaptive noise handling for changing conditions
 //
 // Thread Safety:
-//   Safe to call concurrently from multiple goroutines.
+//
+//	Safe to call concurrently from multiple goroutines.
 func (k *Kalman) Process(measurement, target float64) float64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()

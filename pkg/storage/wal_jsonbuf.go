@@ -27,4 +27,3 @@ func marshalJSONCompact(buf *bytes.Buffer, v any) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
-

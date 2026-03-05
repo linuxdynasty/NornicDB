@@ -21,4 +21,3 @@ func TestCreate_ReturnsCreatedRelationship(t *testing.T) {
 	_, ok := res.Rows[0][0].(*storage.Edge)
 	require.True(t, ok, "expected RETURN r to return *storage.Edge, got %T", res.Rows[0][0])
 }
-

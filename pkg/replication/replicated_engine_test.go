@@ -45,4 +45,3 @@ func TestReplicatedEngine_Standalone_ReplicatesWritesToInnerEngine(t *testing.T)
 	_, err = base.GetNode("db2:n2")
 	require.NoError(t, err)
 }
-

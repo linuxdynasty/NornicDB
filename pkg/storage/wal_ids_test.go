@@ -4,11 +4,11 @@ import "testing"
 
 func TestParseDatabasePrefix(t *testing.T) {
 	tests := []struct {
-		name       string
-		in         string
-		wantDB     string
-		wantID     string
-		wantOK     bool
+		name   string
+		in     string
+		wantDB string
+		wantID string
+		wantOK bool
 	}{
 		{name: "valid", in: "db:node-1", wantDB: "db", wantID: "node-1", wantOK: true},
 		{name: "multiple-colons", in: "db:n1:extra", wantDB: "db", wantID: "n1:extra", wantOK: true},
@@ -34,10 +34,10 @@ func TestParseDatabasePrefix(t *testing.T) {
 
 func TestStripDatabasePrefix(t *testing.T) {
 	tests := []struct {
-		name   string
-		db     string
-		in     string
-		want   string
+		name string
+		db   string
+		in   string
+		want string
 	}{
 		{name: "strip-matching", db: "db", in: "db:node-1", want: "node-1"},
 		{name: "no-strip-different-db", db: "db", in: "other:node-1", want: "other:node-1"},
@@ -80,4 +80,3 @@ func TestEnsureDatabasePrefix(t *testing.T) {
 		})
 	}
 }
-

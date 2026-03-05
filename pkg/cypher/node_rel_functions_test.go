@@ -118,12 +118,12 @@ func TestNodeRelationshipFunctions(t *testing.T) {
 		if len(result.Rows) == 0 {
 			t.Fatal("No rows returned")
 		}
-		
+
 		labels, ok := result.Rows[0][0].([]interface{})
 		if !ok {
 			t.Fatalf("labels() returned %T, want []interface{}", result.Rows[0][0])
 		}
-		
+
 		if len(labels) == 0 {
 			t.Error("labels() returned empty list")
 		}
@@ -143,7 +143,7 @@ func TestNodeRelationshipFunctions(t *testing.T) {
 		if len(result.Rows) == 0 {
 			t.Fatal("No rows returned")
 		}
-		
+
 		if result.Rows[0][0] != "KNOWS" {
 			t.Errorf("type() = %v, want 'KNOWS'", result.Rows[0][0])
 		}
@@ -160,12 +160,12 @@ func TestNodeRelationshipFunctions(t *testing.T) {
 		if len(result.Rows) == 0 {
 			t.Fatal("No rows returned")
 		}
-		
+
 		keys, ok := result.Rows[0][0].([]interface{})
 		if !ok {
 			t.Fatalf("keys() returned %T, want []interface{}", result.Rows[0][0])
 		}
-		
+
 		if len(keys) == 0 {
 			t.Error("keys() returned empty list")
 		}
@@ -196,12 +196,12 @@ func TestNodeRelationshipFunctions(t *testing.T) {
 		if len(result.Rows) == 0 {
 			t.Fatal("No rows returned")
 		}
-		
+
 		props, ok := result.Rows[0][0].(map[string]interface{})
 		if !ok {
 			t.Fatalf("properties() returned %T, want map[string]interface{}", result.Rows[0][0])
 		}
-		
+
 		if props["name"] != "Alice" {
 			t.Errorf("properties()['name'] = %v, want 'Alice'", props["name"])
 		}

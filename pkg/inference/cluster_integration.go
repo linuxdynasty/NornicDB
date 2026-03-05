@@ -101,16 +101,16 @@ func DefaultClusterConfig() *ClusterConfig {
 //
 //	// Create integration with GPU manager
 //	gpuManager, _ := gpu.NewManager(&gpu.Config{Enabled: true})
-//	
+//
 //	clusterConfig := inference.DefaultClusterConfig()
 //	clusterConfig.Enabled = true
-//	
+//
 //	ci := inference.NewClusterIntegration(gpuManager, clusterConfig, nil)
 //	engine.SetClusterIntegration(ci)
-//	
+//
 //	// After indexing complete, trigger clustering
 //	ci.OnIndexComplete()
-//	
+//
 //	// Searches now use cluster acceleration
 //	results, _ := engine.SimilaritySearch(ctx, embedding, 10)
 type ClusterIntegration struct {
@@ -138,11 +138,11 @@ type ClusterIntegration struct {
 //
 //	// Basic setup
 //	ci := inference.NewClusterIntegration(nil, nil, nil, nil)
-//	
+//
 //	// With GPU acceleration
 //	gpuMgr, _ := gpu.NewManager(&gpu.Config{Enabled: true})
 //	ci = inference.NewClusterIntegration(gpuMgr, nil, nil, nil)
-//	
+//
 //	// With custom config
 //	config := &inference.ClusterConfig{
 //		Enabled:           true,
@@ -209,12 +209,12 @@ func (ci *ClusterIntegration) AddEmbedding(nodeID string, embedding []float32) e
 //	for _, emb := range embeddings {
 //		ci.AddEmbedding(emb.ID, emb.Vector)
 //	}
-//	
+//
 //	// Trigger clustering
 //	if err := ci.OnIndexComplete(); err != nil {
 //		log.Printf("Clustering failed: %v", err)
 //	}
-//	
+//
 //	stats := ci.Stats()
 //	fmt.Printf("Created %d clusters in %v\n",
 //		stats.NumClusters, stats.ClusteringTime)
@@ -300,7 +300,7 @@ func (ci *ClusterIntegration) Search(ctx context.Context, query []float32, topK 
 //	if err := ci.OnNodeUpdate("node-123", newEmbedding); err != nil {
 //		log.Printf("Update failed: %v", err)
 //	}
-//	
+//
 //	// Check if reclustering is recommended
 //	if ci.ShouldRecluster() {
 //		ci.Recluster()

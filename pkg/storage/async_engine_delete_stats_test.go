@@ -261,7 +261,7 @@ func TestDetachDeleteStatsTracking(t *testing.T) {
 		}
 		asyncEngine := NewAsyncEngine(engine, asyncConfig)
 		defer asyncEngine.Close()
-		
+
 		// Initial count should be 0
 		count, err := asyncEngine.EdgeCount()
 		require.NoError(t, err)

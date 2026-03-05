@@ -35,4 +35,3 @@ func ANNQualityFromEnv() ANNQuality {
 		return ANNQualityFast
 	}
 }
-

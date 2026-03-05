@@ -57,8 +57,8 @@ func TestTraversalWhere_NotRelationshipPattern_FiltersOut(t *testing.T) {
 	ctx := context.Background()
 
 	o := &storage.Node{
-		ID:     "ord-2",
-		Labels: []string{"OrderStatus"},
+		ID:         "ord-2",
+		Labels:     []string{"OrderStatus"},
 		Properties: map[string]interface{}{"userId": "u1", "orderId": "ord-2"},
 	}
 	_, err := store.CreateNode(o)

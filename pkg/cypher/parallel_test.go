@@ -13,7 +13,7 @@ func TestParallelFilterNodes(t *testing.T) {
 	nodes := make([]*storage.Node, 2000)
 	for i := 0; i < 2000; i++ {
 		nodes[i] = &storage.Node{
-			ID:     storage.NodeID(string(rune('a' + i%26)) + string(rune(i))),
+			ID:     storage.NodeID(string(rune('a'+i%26)) + string(rune(i))),
 			Labels: []string{"Person"},
 			Properties: map[string]interface{}{
 				"age":  i % 100,
@@ -386,7 +386,7 @@ func TestSetParallelConfig(t *testing.T) {
 
 func TestParallelFilterNodesEmpty(t *testing.T) {
 	nodes := []*storage.Node{}
-	
+
 	result := parallelFilterNodes(nodes, func(node *storage.Node) bool {
 		return true
 	})
@@ -449,7 +449,7 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		pool.Submit(func() {
 			current := atomic.AddInt64(&currentConcurrent, 1)
-			
+
 			// Track max
 			for {
 				max := atomic.LoadInt64(&maxConcurrent)
@@ -463,7 +463,7 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 
 			// Simulate work
 			time.Sleep(10 * time.Millisecond)
-			
+
 			atomic.AddInt64(&currentConcurrent, -1)
 		})
 	}

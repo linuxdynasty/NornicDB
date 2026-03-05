@@ -206,4 +206,3 @@ func BenchmarkSearchProfile_RRFHybrid_FromDisk(b *testing.B) {
 		}
 	}
 }
-

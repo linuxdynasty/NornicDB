@@ -21,7 +21,7 @@ func TestStore_Load_Get_Set(t *testing.T) {
 
 	// Set overrides
 	err = store.SetOverrides(ctx, "mydb", map[string]string{
-		"NORNICDB_EMBEDDING_MODEL": "bge-m3",
+		"NORNICDB_EMBEDDING_MODEL":       "bge-m3",
 		"NORNICDB_SEARCH_MIN_SIMILARITY": "0.7",
 	})
 	require.NoError(t, err)

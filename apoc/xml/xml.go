@@ -410,7 +410,7 @@ func ToJson(xmlStr string) (string, error) {
 func FromJson(jsonStr string) (string, error) {
 	// Simple JSON to XML conversion
 	// In production, would use a proper JSON parser
-	
+
 	// For now, return a basic XML representation
 	return fmt.Sprintf("<json>%s</json>", Escape(jsonStr)), nil
 }

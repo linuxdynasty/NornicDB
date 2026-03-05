@@ -23,4 +23,3 @@ func NewConfigFromDefaultDatabase(defaultDatabase string) *Config {
 		AllowDropDefault: false,
 	}
 }
-

@@ -306,9 +306,9 @@ func Stats(graph *Graph) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"nodes":          len(graph.Nodes),
-		"relationships":  len(graph.Relationships),
-		"labels":         labelCounts,
+		"nodes":             len(graph.Nodes),
+		"relationships":     len(graph.Relationships),
+		"labels":            labelCounts,
 		"relationshipTypes": typeCounts,
 	}
 }

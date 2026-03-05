@@ -22,7 +22,7 @@ MTLDevice simd_metal_create_device(void);
 void simd_metal_release_device(MTLDevice device);
 bool simd_metal_is_available(void);
 
-// Buffer management  
+// Buffer management
 MTLBuffer simd_metal_create_buffer(MTLDevice device, void* data, unsigned long size);
 void simd_metal_release_buffer(MTLBuffer buffer);
 void* simd_metal_buffer_contents(MTLBuffer buffer);

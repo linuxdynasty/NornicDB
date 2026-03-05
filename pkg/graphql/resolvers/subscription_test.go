@@ -599,4 +599,3 @@ func TestSubscriptionResolver_NodeCreated_NoEventBroker(t *testing.T) {
 	assert.Nil(t, ch)
 	assert.Contains(t, err.Error(), "event broker not initialized")
 }
-

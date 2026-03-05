@@ -8,19 +8,19 @@
 // Usage Example 1: Basic evidence accumulation
 //
 //	buffer := NewEvidenceBuffer()
-//	
+//
 //	// First co-access (not enough evidence yet)
 //	shouldMat := buffer.AddEvidence("nodeA", "nodeB", "relates_to", 0.8, "coaccess", "session-1")
 //	// → false (need more evidence)
-//	
+//
 //	// Second co-access (still accumulating)
 //	shouldMat = buffer.AddEvidence("nodeA", "nodeB", "relates_to", 0.7, "coaccess", "session-2")
 //	// → false (need one more signal)
-//	
+//
 //	// Third co-access (threshold met!)
 //	shouldMat = buffer.AddEvidence("nodeA", "nodeB", "relates_to", 0.9, "similarity", "session-3")
 //	// → true (3 signals from 3 sessions, avg score 0.8)
-//	
+//
 //	if shouldMat {
 //	    db.CreateEdge("nodeA", "nodeB", "relates_to")
 //	}
@@ -55,7 +55,7 @@
 //
 // Like a detective collecting clues:
 //   - 1 fingerprint = suspicious
-//   - 2 fingerprints + 1 witness = very suspicious  
+//   - 2 fingerprints + 1 witness = very suspicious
 //   - 3 fingerprints + 2 witnesses + video = confident!
 //
 // Without evidence buffering, you'd create edges from random noise.
@@ -184,11 +184,11 @@ type EvidenceStats struct {
 // Example 1 - Basic Usage:
 //
 //	buffer := inference.NewEvidenceBuffer()
-//	
+//
 //	// Add signals as they occur
 //	buffer.AddEvidence("doc-1", "doc-2", "RELATED_TO", 0.8, "cosine_similarity", "session-123")
 //	buffer.AddEvidence("doc-1", "doc-2", "RELATED_TO", 0.7, "co_occurrence", "session-123")
-//	
+//
 //	// Third signal crosses threshold
 //	shouldCreate := buffer.AddEvidence("doc-1", "doc-2", "RELATED_TO", 0.9, "user_link", "session-456")
 //	if shouldCreate {
@@ -201,12 +201,12 @@ type EvidenceStats struct {
 //	buffer := inference.NewEvidenceBuffer()
 //	engine := inference.New(inference.DefaultConfig())
 //	engine.SetEvidenceBuffer(buffer)
-//	
+//
 //	// Engine automatically accumulates evidence
 //	engine.OnAccess("doc-1", "doc-2", 0.85, "access_pattern")
 //	engine.OnAccess("doc-1", "doc-2", 0.90, "semantic_similarity")
 //	engine.OnAccess("doc-1", "doc-2", 0.75, "temporal_proximity")
-//	
+//
 //	// Periodically check for materializable edges
 //	ready := buffer.GetReadyToMaterialize()
 //	for _, evidence := range ready {
@@ -246,7 +246,8 @@ type EvidenceStats struct {
 //   - Automatic cleanup of expired/materialized entries
 //
 // Thread Safety:
-//   All methods are thread-safe for concurrent access.
+//
+//	All methods are thread-safe for concurrent access.
 func NewEvidenceBuffer() *EvidenceBuffer {
 	return &EvidenceBuffer{
 		entries:    make(map[string]*Evidence),

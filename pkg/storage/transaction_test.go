@@ -33,7 +33,7 @@ func TestTransaction_CreateNode_Basic(t *testing.T) {
 	tx, _ := engine.BeginTransaction()
 
 	node := &Node{
-		ID: NodeID(prefixTestID("tx-node-1")),
+		ID:         NodeID(prefixTestID("tx-node-1")),
 		Labels:     []string{"Test"},
 		Properties: map[string]interface{}{"name": "Test Node"},
 	}
@@ -210,7 +210,7 @@ func TestTransaction_UpdateNode(t *testing.T) {
 
 	// Create a node first
 	node := &Node{
-		ID: NodeID(prefixTestID("update-me")),
+		ID:         NodeID(prefixTestID("update-me")),
 		Labels:     []string{"Update"},
 		Properties: map[string]interface{}{"version": 1},
 	}
@@ -222,7 +222,7 @@ func TestTransaction_UpdateNode(t *testing.T) {
 
 	// Update in transaction
 	updatedNode := &Node{
-		ID: NodeID(prefixTestID("update-me")),
+		ID:         NodeID(prefixTestID("update-me")),
 		Labels:     []string{"Updated"},
 		Properties: map[string]interface{}{"version": 2},
 	}
@@ -281,7 +281,7 @@ func TestTransaction_CreateEdge(t *testing.T) {
 
 	// Create edge in transaction
 	edge := &Edge{
-		ID: EdgeID(prefixTestID("tx-edge-1")),
+		ID:        EdgeID(prefixTestID("tx-edge-1")),
 		StartNode: NodeID(prefixTestID("edge-node-1")),
 		EndNode:   NodeID(prefixTestID("edge-node-2")),
 		Type:      "CONNECTS",
@@ -325,9 +325,9 @@ func TestTransaction_CreateEdgeWithNewNodes(t *testing.T) {
 
 	// Create edge between new nodes (should work!)
 	edge := &Edge{
-		ID: EdgeID(prefixTestID("new-edge-1")),
+		ID:        EdgeID(prefixTestID("new-edge-1")),
 		StartNode: NodeID(prefixTestID("new-edge-node-1")),
-		EndNode: NodeID(prefixTestID("new-edge-node-2")),
+		EndNode:   NodeID(prefixTestID("new-edge-node-2")),
 		Type:      "LINKS",
 	}
 	err := tx.CreateEdge(edge)
@@ -365,9 +365,9 @@ func TestTransaction_DeleteEdge(t *testing.T) {
 	engine.CreateNode(node1)
 	engine.CreateNode(node2)
 	edge := &Edge{
-		ID: EdgeID(prefixTestID("delete-edge-1")),
+		ID:        EdgeID(prefixTestID("delete-edge-1")),
 		StartNode: NodeID(prefixTestID("del-edge-node-1")),
-		EndNode: NodeID(prefixTestID("del-edge-node-2")),
+		EndNode:   NodeID(prefixTestID("del-edge-node-2")),
 		Type:      "DELETE_ME",
 	}
 	engine.CreateEdge(edge)

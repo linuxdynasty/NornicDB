@@ -184,7 +184,7 @@ func RelTypeProperties(relType string) map[string]interface{} {
 //	apoc.meta.data() => comprehensive metadata
 func Data() map[string]interface{} {
 	return map[string]interface{}{
-		"labels": []map[string]interface{}{},
+		"labels":   []map[string]interface{}{},
 		"relTypes": []map[string]interface{}{},
 	}
 }
@@ -487,11 +487,11 @@ func Restore(snapshot map[string]interface{}) error {
 //	apoc.meta.analyze() => analysis results
 func Analyze() map[string]interface{} {
 	return map[string]interface{}{
-		"density":       0.0,
-		"avgDegree":     0.0,
-		"maxDegree":     0,
-		"components":    0,
-		"diameter":      0,
+		"density":    0.0,
+		"avgDegree":  0.0,
+		"maxDegree":  0,
+		"components": 0,
+		"diameter":   0,
 	}
 }
 

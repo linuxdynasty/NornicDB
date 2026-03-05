@@ -24,7 +24,7 @@ func TestCompositeIndex(t *testing.T) {
 	// Verify index was created (via schema)
 	schema := store.GetSchema()
 	indexes := schema.GetIndexes()
-	
+
 	// Should have the composite index
 	found := false
 	for _, idxInterface := range indexes {
@@ -32,7 +32,7 @@ func TestCompositeIndex(t *testing.T) {
 			name, _ := idx["name"].(string)
 			label, _ := idx["label"].(string)
 			props, _ := idx["properties"].([]string)
-			
+
 			if name == "person_name_age" && label == "Person" {
 				if len(props) == 2 && props[0] == "firstName" && props[1] == "lastName" {
 					found = true
@@ -41,7 +41,7 @@ func TestCompositeIndex(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !found {
 		t.Error("Composite index not found in schema")
 	}
@@ -64,7 +64,7 @@ func TestCompositeIndexUnnamed(t *testing.T) {
 	// Verify index was created with auto-generated name
 	schema := store.GetSchema()
 	indexes := schema.GetIndexes()
-	
+
 	// Should have the composite index (name will be auto-generated)
 	found := false
 	for _, idxInterface := range indexes {
@@ -72,7 +72,7 @@ func TestCompositeIndexUnnamed(t *testing.T) {
 			name, _ := idx["name"].(string)
 			label, _ := idx["label"].(string)
 			props, _ := idx["properties"].([]string)
-			
+
 			if label == "Person" && len(props) == 2 {
 				if props[0] == "firstName" && props[1] == "lastName" {
 					found = true
@@ -85,7 +85,7 @@ func TestCompositeIndexUnnamed(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !found {
 		t.Error("Unnamed composite index not found in schema")
 	}
@@ -108,14 +108,14 @@ func TestCompositeIndexThreeProperties(t *testing.T) {
 	// Verify index
 	schema := store.GetSchema()
 	indexes := schema.GetIndexes()
-	
+
 	found := false
 	for _, idxInterface := range indexes {
 		if idx, ok := idxInterface.(map[string]interface{}); ok {
 			name, _ := idx["name"].(string)
 			label, _ := idx["label"].(string)
 			props, _ := idx["properties"].([]string)
-			
+
 			if name == "address_idx" && label == "Address" {
 				if len(props) == 3 {
 					if props[0] == "city" && props[1] == "state" && props[2] == "zipCode" {
@@ -126,7 +126,7 @@ func TestCompositeIndexThreeProperties(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !found {
 		t.Error("3-property composite index not found in schema")
 	}
@@ -197,14 +197,14 @@ func TestSinglePropertyIndexStillWorks(t *testing.T) {
 	// Verify
 	schema := store.GetSchema()
 	indexes := schema.GetIndexes()
-	
+
 	found := false
 	for _, idxInterface := range indexes {
 		if idx, ok := idxInterface.(map[string]interface{}); ok {
 			name, _ := idx["name"].(string)
 			label, _ := idx["label"].(string)
 			props, _ := idx["properties"].([]string)
-			
+
 			if name == "name_idx" && label == "Person" {
 				if len(props) == 1 && props[0] == "name" {
 					found = true
@@ -213,7 +213,7 @@ func TestSinglePropertyIndexStillWorks(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !found {
 		t.Error("Single-property index not found in schema")
 	}
@@ -257,7 +257,7 @@ func TestCompositeIndexQueryOptimization(t *testing.T) {
 	if len(result.Rows) != 1 {
 		t.Errorf("Expected 1 result, got %d", len(result.Rows))
 	}
-	
+
 	if result.Rows[0][0] != "John" || result.Rows[0][1] != "Doe" || result.Rows[0][2] != int64(30) {
 		t.Errorf("Unexpected result: %v", result.Rows[0])
 	}
@@ -285,12 +285,12 @@ func TestParseIndexProperties(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := exec.parseIndexProperties(tc.input)
-			
+
 			if len(result) != len(tc.expected) {
 				t.Errorf("Expected %d properties, got %d", len(tc.expected), len(result))
 				return
 			}
-			
+
 			for i, prop := range result {
 				if prop != tc.expected[i] {
 					t.Errorf("Property %d: expected %s, got %s", i, tc.expected[i], prop)

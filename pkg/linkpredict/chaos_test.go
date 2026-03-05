@@ -378,7 +378,7 @@ func TestComplexMultiLayerGraph(t *testing.T) {
 	}
 	for i, f := range friendships {
 		require.NoError(t, engine.CreateEdge(&storage.Edge{
-			ID: storage.EdgeID(fmt.Sprintf("friend-%d", i)),
+			ID:        storage.EdgeID(fmt.Sprintf("friend-%d", i)),
 			StartNode: storage.NodeID(f[0]),
 			EndNode:   storage.NodeID(f[1]),
 			Type:      "FRIENDS_WITH",
@@ -392,7 +392,7 @@ func TestComplexMultiLayerGraph(t *testing.T) {
 	}
 	for i, c := range colleagues {
 		require.NoError(t, engine.CreateEdge(&storage.Edge{
-			ID: storage.EdgeID(fmt.Sprintf("colleague-%d", i)),
+			ID:        storage.EdgeID(fmt.Sprintf("colleague-%d", i)),
 			StartNode: storage.NodeID(c[0]),
 			EndNode:   storage.NodeID(c[1]),
 			Type:      "WORKS_WITH",
@@ -537,8 +537,8 @@ func TestComplexEnsembleDisagreement(t *testing.T) {
 	// Hub-and-spoke favors PreferentialAttachment
 	// Dense cluster favors CommonNeighbors
 	graph := Graph{
-		"alice":   {"bob": {}, "charlie": {}},                          // Normal node
-		"hub":     {"a1": {}, "a2": {}, "a3": {}, "a4": {}, "a5": {}},   // Hub
+		"alice":   {"bob": {}, "charlie": {}},                         // Normal node
+		"hub":     {"a1": {}, "a2": {}, "a3": {}, "a4": {}, "a5": {}}, // Hub
 		"a1":      {"hub": {}},
 		"a2":      {"hub": {}},
 		"a3":      {"hub": {}, "a4": {}},

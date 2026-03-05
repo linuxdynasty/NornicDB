@@ -17,4 +17,3 @@ func (w *WAL) LastCorruptionDiagnostics() *CorruptionDiagnostics {
 	}
 	return nil
 }
-

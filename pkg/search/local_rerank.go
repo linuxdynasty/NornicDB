@@ -43,7 +43,7 @@ func DefaultLocalRerankerConfig() *LocalRerankerConfig {
 		Timeout:       15 * time.Second,
 		MaxCandidates: 50,
 		MaxDocChars:   512,
-		MinScore:     0.0,
+		MinScore:      0.0,
 	}
 }
 

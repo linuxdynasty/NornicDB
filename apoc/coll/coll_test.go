@@ -263,7 +263,7 @@ func TestSplit(t *testing.T) {
 	list := []interface{}{1, 2, 3, 4, 5, 6, 7}
 
 	result := Split(list, 3)
-	assert.Len(t, result, 3)            // [[1,2,3], [4,5,6], [7]]
+	assert.Len(t, result, 3) // [[1,2,3], [4,5,6], [7]]
 	assert.Len(t, result[0], 3)
 	assert.Len(t, result[1], 3)
 	assert.Len(t, result[2], 1)

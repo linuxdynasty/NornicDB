@@ -128,7 +128,7 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 	type raftAppendHandler interface {
 		HandleRaftAppendEntries(req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error)
 	}
-		if h, ok := r.(raftAppendHandler); ok {
+	if h, ok := r.(raftAppendHandler); ok {
 		t.RegisterHandler(ClusterMsgAppendEntries, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = ctx
 			_ = nodeID

@@ -117,10 +117,10 @@ func NewQueryCache(maxSize int, ttl time.Duration) *QueryCache {
 // Example 1 - Basic Usage:
 //
 //	cache := cache.NewQueryCache(1000, 5*time.Minute)
-//	
+//
 //	query := "MATCH (n:Person {name: $name}) RETURN n"
 //	params := map[string]interface{}{"name": "Alice"}
-//	
+//
 //	key := cache.Key(query, params)
 //	fmt.Printf("Cache key: %d\n", key)
 //
@@ -130,7 +130,7 @@ func NewQueryCache(maxSize int, ttl time.Duration) *QueryCache {
 //	key1 := cache.Key("MATCH (n {id: $id}) RETURN n", map[string]interface{}{"id": 1})
 //	key2 := cache.Key("MATCH (n {id: $id}) RETURN n", map[string]interface{}{"id": 2})
 //	// key1 == key2 (same query pattern)
-//	
+//
 //	// This produces a DIFFERENT key (different query)
 //	key3 := cache.Key("MATCH (n {name: $name}) RETURN n", map[string]interface{}{"name": "Bob"})
 //	// key3 != key1 (different query pattern)
@@ -140,19 +140,19 @@ func NewQueryCache(maxSize int, ttl time.Duration) *QueryCache {
 //	func executeQuery(query string, params map[string]interface{}) (*Result, error) {
 //		cache := cache.GlobalQueryCache()
 //		key := cache.Key(query, params)
-//		
+//
 //		// Try cache first
 //		if plan, ok := cache.Get(key); ok {
 //			return executePlan(plan.(*ParsedPlan), params)
 //		}
-//		
+//
 //		// Parse and cache
 //		plan, err := parseQuery(query)
 //		if err != nil {
 //			return nil, err
 //		}
 //		cache.Put(key, plan)
-//		
+//
 //		return executePlan(plan, params)
 //	}
 //
@@ -203,7 +203,7 @@ func (c *QueryCache) Key(query string, params map[string]interface{}) uint64 {
 //
 //	cache := cache.NewQueryCache(1000, 5*time.Minute)
 //	key := cache.Key(query, params)
-//	
+//
 //	if plan, ok := cache.Get(key); ok {
 //		fmt.Println("Cache hit!")
 //		return plan.(*ParsedPlan)
@@ -214,20 +214,20 @@ func (c *QueryCache) Key(query string, params map[string]interface{}) uint64 {
 //
 //	func (e *Executor) Execute(query string, params map[string]interface{}) (*Result, error) {
 //		key := e.cache.Key(query, params)
-//		
+//
 //		// Fast path: cached plan
 //		if cached, ok := e.cache.Get(key); ok {
 //			plan := cached.(*ParsedPlan)
 //			return e.executePlan(plan, params)
 //		}
-//		
+//
 //		// Slow path: parse and cache
 //		plan, err := e.parser.Parse(query)
 //		if err != nil {
 //			return nil, err
 //		}
 //		e.cache.Put(key, plan)
-//		
+//
 //		return e.executePlan(plan, params)
 //	}
 //
@@ -235,14 +235,14 @@ func (c *QueryCache) Key(query string, params map[string]interface{}) uint64 {
 //
 //	cache := cache.NewQueryCache(1000, 1*time.Second)
 //	key := cache.Key("MATCH (n) RETURN n", nil)
-//	
+//
 //	cache.Put(key, parsedPlan)
-//	
+//
 //	// Immediate access: cache hit
 //	if _, ok := cache.Get(key); ok {
 //		fmt.Println("Hit!") // Prints
 //	}
-//	
+//
 //	// After TTL: cache miss (auto-removed)
 //	time.Sleep(2 * time.Second)
 //	if _, ok := cache.Get(key); !ok {
@@ -333,13 +333,13 @@ func (c *QueryCache) Get(key uint64) (interface{}, bool) {
 // Example 1 - Basic Caching:
 //
 //	cache := cache.NewQueryCache(1000, 5*time.Minute)
-//	
+//
 //	query := "MATCH (n:Person) RETURN n"
 //	plan := parseQuery(query) // Your parser
-//	
+//
 //	key := cache.Key(query, nil)
 //	cache.Put(key, plan)
-//	
+//
 //	// Later: instant retrieval
 //	if cached, ok := cache.Get(key); ok {
 //		fmt.Println("Reusing cached plan!")
@@ -350,18 +350,18 @@ func (c *QueryCache) Get(key uint64) (interface{}, bool) {
 //	func getOrParsePlan(query string, params map[string]interface{}) (*ParsedPlan, error) {
 //		cache := cache.GlobalQueryCache()
 //		key := cache.Key(query, params)
-//		
+//
 //		// Try cache
 //		if cached, ok := cache.Get(key); ok {
 //			return cached.(*ParsedPlan), nil
 //		}
-//		
+//
 //		// Parse (expensive operation)
 //		plan, err := parser.Parse(query)
 //		if err != nil {
 //			return nil, err
 //		}
-//		
+//
 //		// Cache for next time
 //		cache.Put(key, plan)
 //		return plan, nil
@@ -372,7 +372,7 @@ func (c *QueryCache) Get(key uint64) (interface{}, bool) {
 //	// First put
 //	key := cache.Key(query, nil)
 //	cache.Put(key, plan1)
-//	
+//
 //	// Later: update with optimized plan
 //	optimizedPlan := optimizePlan(plan1)
 //	cache.Put(key, optimizedPlan) // Replaces old value
@@ -380,15 +380,15 @@ func (c *QueryCache) Get(key uint64) (interface{}, bool) {
 // Example 4 - LRU Eviction:
 //
 //	cache := cache.NewQueryCache(3, 0) // Only 3 entries, no TTL
-//	
+//
 //	cache.Put(1, "plan-A")
 //	cache.Put(2, "plan-B")
 //	cache.Put(3, "plan-C")
 //	// Cache: [C, B, A] (most recent first)
-//	
+//
 //	cache.Get(1) // Access A
 //	// Cache: [A, C, B]
-//	
+//
 //	cache.Put(4, "plan-D") // Cache full, evicts B (least recent)
 //	// Cache: [D, A, C]
 //
@@ -470,7 +470,7 @@ func (c *QueryCache) Put(key uint64, value interface{}) {
 //		if err := db.CreateIndex(label, property); err != nil {
 //			return err
 //		}
-//		
+//
 //		// Invalidate affected queries
 //		cache := cache.GlobalQueryCache()
 //		for _, query := range affectedQueries {
@@ -486,7 +486,7 @@ func (c *QueryCache) Put(key uint64, value interface{}) {
 //	query := "MATCH (n:Person) RETURN n"
 //	key := cache.Key(query, nil)
 //	cache.Remove(key)
-//	
+//
 //	// Next execution will re-parse
 //	result := executeQuery(query, nil) // Cache miss
 //
@@ -511,13 +511,13 @@ func (c *QueryCache) Remove(key uint64) {
 //
 //	func TestQueryExecution(t *testing.T) {
 //		cache := cache.NewQueryCache(100, 0)
-//		
+//
 //		// Test with cache
 //		result1 := executeQuery("MATCH (n) RETURN n", nil)
-//		
+//
 //		// Clear for next test
 //		cache.Clear()
-//		
+//
 //		// Test without cache
 //		result2 := executeQuery("MATCH (n) RETURN n", nil)
 //	}
@@ -529,7 +529,7 @@ func (c *QueryCache) Remove(key uint64) {
 //		if err := db.Migrate(); err != nil {
 //			return err
 //		}
-//		
+//
 //		// Invalidate all cached plans
 //		cache.GlobalQueryCache().Clear()
 //		return nil
@@ -572,7 +572,7 @@ func (c *QueryCache) Clear() {
 //	func collectMetrics() {
 //		cache := cache.GlobalQueryCache()
 //		stats := cache.Stats()
-//		
+//
 //		metrics.Gauge("cache.size", float64(cache.Len()))
 //		metrics.Gauge("cache.hit_rate", stats.HitRate)
 //	}
@@ -597,7 +597,7 @@ func (c *QueryCache) Len() int {
 //
 //	cache := cache.GlobalQueryCache()
 //	stats := cache.Stats()
-//	
+//
 //	fmt.Printf("Cache Performance:\n")
 //	fmt.Printf("  Size: %d/%d (%.1f%% full)\n",
 //		stats.Size, stats.MaxSize,
@@ -611,7 +611,7 @@ func (c *QueryCache) Len() int {
 //	func recordCacheMetrics() {
 //		cache := cache.GlobalQueryCache()
 //		stats := cache.Stats()
-//		
+//
 //		metrics.Gauge("query_cache.size", float64(stats.Size))
 //		metrics.Gauge("query_cache.hit_rate", stats.HitRate)
 //		metrics.Counter("query_cache.hits", float64(stats.Hits))
@@ -621,11 +621,11 @@ func (c *QueryCache) Len() int {
 // Example 3 - Tuning Decisions:
 //
 //	stats := cache.GlobalQueryCache().Stats()
-//	
+//
 //	if stats.HitRate < 50 {
 //		log.Println("Low hit rate - consider increasing cache size")
 //	}
-//	
+//
 //	if stats.Size == stats.MaxSize {
 //		log.Println("Cache full - consider increasing maxSize")
 //	}
@@ -701,15 +701,15 @@ func (c *QueryCache) Stats() CacheStats {
 //
 //	func checkCacheHealth() error {
 //		stats := cache.GlobalQueryCache().Stats()
-//		
+//
 //		if stats.HitRate < 50 {
 //			return fmt.Errorf("cache hit rate too low: %.1f%%", stats.HitRate)
 //		}
-//		
+//
 //		if stats.Size == stats.MaxSize {
 //			log.Warn("Cache is full - consider increasing size")
 //		}
-//		
+//
 //		return nil
 //	}
 //
@@ -772,13 +772,13 @@ type CacheStats struct {
 //	// Disable cache to test parsing performance
 //	cache := cache.GlobalQueryCache()
 //	cache.SetEnabled(false)
-//	
+//
 //	start := time.Now()
 //	for i := 0; i < 1000; i++ {
 //		executeQuery("MATCH (n) RETURN n", nil)
 //	}
 //	fmt.Printf("Without cache: %v\n", time.Since(start))
-//	
+//
 //	// Re-enable for comparison
 //	cache.SetEnabled(true)
 //	start = time.Now()
@@ -792,7 +792,7 @@ type CacheStats struct {
 //	func executeQuery(query string, useCache bool) (*Result, error) {
 //		cache := cache.GlobalQueryCache()
 //		cache.SetEnabled(useCache)
-//		
+//
 //		// Execute query (cache behavior depends on useCache)
 //		return executor.Execute(query, nil)
 //	}
@@ -802,7 +802,7 @@ type CacheStats struct {
 //	func TestParserWithoutCache(t *testing.T) {
 //		cache := cache.NewQueryCache(100, 0)
 //		cache.SetEnabled(false) // Force re-parsing
-//		
+//
 //		// All queries will be parsed fresh
 //		for _, query := range testQueries {
 //			result := executeQuery(query, nil)
@@ -869,17 +869,17 @@ var (
 //	func executeQuery(query string, params map[string]interface{}) (*Result, error) {
 //		cache := cache.GlobalQueryCache()
 //		key := cache.Key(query, params)
-//		
+//
 //		if plan, ok := cache.Get(key); ok {
 //			return executePlan(plan.(*ParsedPlan), params)
 //		}
-//		
+//
 //		plan, err := parseQuery(query)
 //		if err != nil {
 //			return nil, err
 //		}
 //		cache.Put(key, plan)
-//		
+//
 //		return executePlan(plan, params)
 //	}
 //
@@ -889,7 +889,7 @@ var (
 //		// Configure before first use
 //		cache.ConfigureGlobalCache(5000, 10*time.Minute)
 //	}
-//	
+//
 //	func main() {
 //		// Now uses custom configuration
 //		cache := cache.GlobalQueryCache()
@@ -943,7 +943,7 @@ func GlobalQueryCache() *QueryCache {
 //	func main() {
 //		// Configure cache early in main()
 //		cache.ConfigureGlobalCache(5000, 10*time.Minute)
-//		
+//
 //		// Start application
 //		server.Start()
 //	}
@@ -953,7 +953,7 @@ func GlobalQueryCache() *QueryCache {
 //	func init() {
 //		maxSize := getEnvInt("CACHE_SIZE", 1000)
 //		ttl := getEnvDuration("CACHE_TTL", 5*time.Minute)
-//		
+//
 //		cache.ConfigureGlobalCache(maxSize, ttl)
 //	}
 //

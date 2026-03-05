@@ -41,10 +41,10 @@ type ConstraintInfo struct {
 //	apoc.schema.assert({Person: ['name']}, {Person: [['email']]})
 func Assert(indexes, constraints map[string]interface{}) map[string]interface{} {
 	return map[string]interface{}{
-		"indexesCreated":      0,
-		"indexesDropped":      0,
-		"constraintsCreated":  0,
-		"constraintsDropped":  0,
+		"indexesCreated":     0,
+		"indexesDropped":     0,
+		"constraintsCreated": 0,
+		"constraintsDropped": 0,
 	}
 }
 
@@ -461,10 +461,10 @@ func Stats() map[string]interface{} {
 //	apoc.schema.analyze() => analysis results
 func Analyze() map[string]interface{} {
 	return map[string]interface{}{
-		"unusedIndexes":      []string{},
-		"missingIndexes":     []string{},
-		"redundantIndexes":   []string{},
-		"recommendations":    []string{},
+		"unusedIndexes":    []string{},
+		"missingIndexes":   []string{},
+		"redundantIndexes": []string{},
+		"recommendations":  []string{},
 	}
 }
 

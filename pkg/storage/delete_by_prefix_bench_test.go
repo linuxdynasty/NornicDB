@@ -55,4 +55,3 @@ func BenchmarkBadgerEngine_DeleteByPrefix(b *testing.B) {
 		_ = engine.Close()
 	}
 }
-

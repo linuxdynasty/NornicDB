@@ -61,7 +61,7 @@ func NodeAll(label string, criteria map[string]interface{}) []*NodeType {
 		if !hasLabel(node, label) {
 			continue
 		}
-		
+
 		matches := true
 		for key, value := range criteria {
 			if propVal, ok := node.Properties[key]; !ok || propVal != value {
@@ -92,7 +92,7 @@ func NodeAny(label string, criteria map[string]interface{}) []*NodeType {
 		if !hasLabel(node, label) {
 			continue
 		}
-		
+
 		for key, value := range criteria {
 			if propVal, ok := node.Properties[key]; ok && propVal == value {
 				results = append(results, node)
@@ -167,7 +167,7 @@ func FullText(label, property, query string) []*NodeType {
 
 	queryLower := strings.ToLower(query)
 	words := strings.Fields(queryLower)
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -200,7 +200,7 @@ func Fuzzy(label, property, value string, maxDistance int) []*NodeType {
 	}
 
 	valueLower := strings.ToLower(value)
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -233,7 +233,7 @@ func Regex(label, property, pattern string) []*NodeType {
 	if err != nil {
 		return []*NodeType{}
 	}
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -262,7 +262,7 @@ func Prefix(label, property, prefix string) []*NodeType {
 	}
 
 	prefixLower := strings.ToLower(prefix)
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -291,7 +291,7 @@ func Suffix(label, property, suffix string) []*NodeType {
 	}
 
 	suffixLower := strings.ToLower(suffix)
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -320,7 +320,7 @@ func Contains(label, property, substring string) []*NodeType {
 	}
 
 	substringLower := strings.ToLower(substring)
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -436,7 +436,7 @@ func In(label, property string, values []interface{}) []*NodeType {
 	for _, v := range values {
 		valueSet[v] = true
 	}
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -466,7 +466,7 @@ func NotIn(label, property string, values []interface{}) []*NodeType {
 	for _, v := range values {
 		valueSet[v] = true
 	}
-	
+
 	results := make([]*NodeType, 0)
 	for _, node := range nodes {
 		if !hasLabel(node, label) {
@@ -711,7 +711,7 @@ func Highlight(text, query, prefix, suffix string) string {
 //	apoc.search.suggest('Person', 'name', 'Ali', 5) => ['Alice', 'Alison', ...]
 func Suggest(label, property, prefix string, limit int) []string {
 	nodes := Prefix(label, property, prefix)
-	
+
 	suggestions := make([]string, 0, limit)
 	for i, node := range nodes {
 		if i >= limit {
@@ -743,7 +743,7 @@ func Autocomplete(label, property, prefix string) []string {
 func DidYouMean(label, property, query string) []string {
 	// Get fuzzy matches within distance 2
 	nodes := Fuzzy(label, property, query, 2)
-	
+
 	suggestions := make([]string, 0)
 	for _, node := range nodes {
 		if propVal, ok := node.Properties[property]; ok {

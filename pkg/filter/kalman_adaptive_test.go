@@ -74,7 +74,7 @@ func TestKalmanAdaptive_StableSignal_StaysBasic(t *testing.T) {
 	if k.Mode() != ModeBasic && k.TrendScore() > 0.05 {
 		t.Errorf("Mode = %v with TrendScore=%.4f, expected ModeBasic or low trend", k.Mode(), k.TrendScore())
 	}
-	
+
 	// Allow a few mode switches for noisy stable signals
 	if k.SwitchCount() > 3 {
 		t.Errorf("Switched %d times (expected ≤3 for stable signal)", k.SwitchCount())

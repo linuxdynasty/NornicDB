@@ -114,11 +114,10 @@ func TestHNSWConfigIntegration(t *testing.T) {
 		svc.hnswMu.RLock()
 		if svc.hnswIndex != nil {
 			config := svc.hnswIndex.config
-			assert.Equal(t, 24, config.M)              // Overridden
+			assert.Equal(t, 24, config.M)               // Overridden
 			assert.Equal(t, 200, config.EfConstruction) // From balanced preset
-			assert.Equal(t, 150, config.EfSearch)      // Overridden
+			assert.Equal(t, 150, config.EfSearch)       // Overridden
 		}
 		svc.hnswMu.RUnlock()
 	})
 }
-

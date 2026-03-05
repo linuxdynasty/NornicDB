@@ -81,4 +81,3 @@ func TestCreateSetChainedClausesWithMapMerge(t *testing.T) {
 	assert.Equal(t, content, result.Rows[0][0])
 	assert.Equal(t, "2026-02-18T23:37:00Z", result.Rows[0][1])
 }
-

@@ -10,10 +10,10 @@ import (
 // ReplicatedEngine wraps a storage.Engine and routes write operations through a Replicator.
 //
 // Design:
-// - Reads are served locally from the embedded Engine.
-// - Writes are turned into replication Commands and applied via the Replicator.
-// - The embedded Engine is used only for reads; replicated writes are applied to the
-//   *inner* engine by the StorageAdapter on each node.
+//   - Reads are served locally from the embedded Engine.
+//   - Writes are turned into replication Commands and applied via the Replicator.
+//   - The embedded Engine is used only for reads; replicated writes are applied to the
+//     *inner* engine by the StorageAdapter on each node.
 //
 // This wrapper intentionally operates on the *base* storage (the engine that stores
 // fully-qualified IDs like "<db>:<id>") so multi-database isolation is preserved.
@@ -21,7 +21,7 @@ type ReplicatedEngine struct {
 	storage.Engine
 
 	replicator Replicator
-	timeout   time.Duration
+	timeout    time.Duration
 }
 
 func NewReplicatedEngine(inner storage.Engine, replicator Replicator, timeout time.Duration) *ReplicatedEngine {

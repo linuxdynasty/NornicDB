@@ -189,13 +189,13 @@ type Node struct {
 	Properties map[string]any `json:"properties"`
 
 	// NornicDB extensions
-	CreatedAt       time.Time              `json:"-"`
-	UpdatedAt       time.Time              `json:"-"`
-	DecayScore      float64                `json:"-"`
-	LastAccessed    time.Time              `json:"-"`
-	AccessCount     int64                  `json:"-"`
-	NamedEmbeddings map[string][]float32   `json:"-"` // Named vector embeddings (e.g., "title", "content", "default")
-	ChunkEmbeddings [][]float32            `json:"-"` // Chunked embeddings for long documents (legacy, migration support)
+	CreatedAt       time.Time            `json:"-"`
+	UpdatedAt       time.Time            `json:"-"`
+	DecayScore      float64              `json:"-"`
+	LastAccessed    time.Time            `json:"-"`
+	AccessCount     int64                `json:"-"`
+	NamedEmbeddings map[string][]float32 `json:"-"` // Named vector embeddings (e.g., "title", "content", "default")
+	ChunkEmbeddings [][]float32          `json:"-"` // Chunked embeddings for long documents (legacy, migration support)
 
 	// Embedding metadata (separate from user Properties to avoid namespace pollution)
 	// Keys: embedding_model, embedding_dimensions, has_embedding, embedded_at, has_chunks, chunk_count
@@ -816,19 +816,19 @@ func (n *Node) GetDefaultEmbedding() []float32 {
 	if n == nil {
 		return nil
 	}
-	
+
 	// First, check NamedEmbeddings["default"]
 	if n.NamedEmbeddings != nil {
 		if emb, ok := n.NamedEmbeddings["default"]; ok && len(emb) > 0 {
 			return emb
 		}
 	}
-	
+
 	// Migration behavior: treat ChunkEmbeddings[0] as "default"
 	if len(n.ChunkEmbeddings) > 0 && len(n.ChunkEmbeddings[0]) > 0 {
 		return n.ChunkEmbeddings[0]
 	}
-	
+
 	return nil
 }
 

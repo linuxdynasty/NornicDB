@@ -10,7 +10,7 @@ import (
 // TestHybridBasic verifies basic hybrid scoring works.
 func TestHybridBasic(t *testing.T) {
 	graph := buildTestGraph()
-	
+
 	config := DefaultHybridConfig()
 	scorer := NewHybridScorer(config)
 
@@ -207,12 +207,12 @@ func TestHybridCompareAlgorithms(t *testing.T) {
 func TestHybridRealWorld(t *testing.T) {
 	// Build a knowledge graph: concepts linked by citations and semantic similarity
 	graph := Graph{
-		"ml":      {"ai": {}, "data": {}},
-		"ai":      {"ml": {}, "robotics": {}},
-		"data":    {"ml": {}, "stats": {}},
+		"ml":       {"ai": {}, "data": {}},
+		"ai":       {"ml": {}, "robotics": {}},
+		"data":     {"ml": {}, "stats": {}},
 		"robotics": {"ai": {}, "control": {}},
-		"stats":   {"data": {}, "math": {}},
-		"math":    {"stats": {}, "physics": {}},
+		"stats":    {"data": {}, "math": {}},
+		"math":     {"stats": {}, "physics": {}},
 	}
 
 	config := HybridConfig{
@@ -248,7 +248,7 @@ func TestHybridRealWorld(t *testing.T) {
 			foundStats = true
 			t.Logf("ml → stats: hybrid=%.3f (topo=%.3f, sem=%.3f)",
 				pred.Score, pred.TopologyScore, pred.SemanticScore)
-			
+
 			// Should have both signals contributing
 			if pred.TopologyScore == 0 {
 				t.Error("Expected non-zero topology score for ml→stats")

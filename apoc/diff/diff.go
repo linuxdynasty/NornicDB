@@ -27,9 +27,9 @@ type Relationship struct {
 
 // DiffResult represents the result of a diff operation.
 type DiffResult struct {
-	Added    map[string]interface{}
-	Removed  map[string]interface{}
-	Changed  map[string]interface{}
+	Added     map[string]interface{}
+	Removed   map[string]interface{}
+	Changed   map[string]interface{}
 	Unchanged map[string]interface{}
 }
 
@@ -40,9 +40,9 @@ type DiffResult struct {
 //	apoc.diff.nodes(node1, node2) => {added: {...}, removed: {...}, changed: {...}}
 func Nodes(node1, node2 *Node) *DiffResult {
 	result := &DiffResult{
-		Added:    make(map[string]interface{}),
-		Removed:  make(map[string]interface{}),
-		Changed:  make(map[string]interface{}),
+		Added:     make(map[string]interface{}),
+		Removed:   make(map[string]interface{}),
+		Changed:   make(map[string]interface{}),
 		Unchanged: make(map[string]interface{}),
 	}
 
@@ -79,9 +79,9 @@ func Nodes(node1, node2 *Node) *DiffResult {
 //	apoc.diff.relationships(rel1, rel2) => {added: {...}, removed: {...}, changed: {...}}
 func Relationships(rel1, rel2 *Relationship) *DiffResult {
 	result := &DiffResult{
-		Added:    make(map[string]interface{}),
-		Removed:  make(map[string]interface{}),
-		Changed:  make(map[string]interface{}),
+		Added:     make(map[string]interface{}),
+		Removed:   make(map[string]interface{}),
+		Changed:   make(map[string]interface{}),
 		Unchanged: make(map[string]interface{}),
 	}
 
@@ -118,9 +118,9 @@ func Relationships(rel1, rel2 *Relationship) *DiffResult {
 //	apoc.diff.maps({a: 1}, {a: 2, b: 3}) => {added: {b: 3}, changed: {a: {old: 1, new: 2}}}
 func Maps(map1, map2 map[string]interface{}) *DiffResult {
 	result := &DiffResult{
-		Added:    make(map[string]interface{}),
-		Removed:  make(map[string]interface{}),
-		Changed:  make(map[string]interface{}),
+		Added:     make(map[string]interface{}),
+		Removed:   make(map[string]interface{}),
+		Changed:   make(map[string]interface{}),
 		Unchanged: make(map[string]interface{}),
 	}
 
@@ -337,9 +337,9 @@ func combineValues(v1, v2 interface{}) interface{} {
 //	apoc.diff.summary(diff) => {added: 2, removed: 1, changed: 3}
 func Summary(diff *DiffResult) map[string]int {
 	return map[string]int{
-		"added":   len(diff.Added),
-		"removed": len(diff.Removed),
-		"changed": len(diff.Changed),
+		"added":     len(diff.Added),
+		"removed":   len(diff.Removed),
+		"changed":   len(diff.Changed),
 		"unchanged": len(diff.Unchanged),
 	}
 }

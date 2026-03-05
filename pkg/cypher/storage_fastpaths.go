@@ -59,4 +59,3 @@ func (e *StorageExecutor) batchGetNodesFast(ids []storage.NodeID) (map[storage.N
 	}
 	return nodes, idPrefix, nil
 }
-

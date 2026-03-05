@@ -147,12 +147,12 @@ func main() {
 	startTime := time.Now()
 
 	var (
-		latencies     = make([]time.Duration, 0, *requests)
-		latenciesMu   sync.Mutex
-		successCount  int64
-		errorCount    int64
-		totalBytes    int64
-		wg            sync.WaitGroup
+		latencies    = make([]time.Duration, 0, *requests)
+		latenciesMu  sync.Mutex
+		successCount int64
+		errorCount   int64
+		totalBytes   int64
+		wg           sync.WaitGroup
 	)
 
 	// Create request queue
@@ -305,7 +305,7 @@ func main() {
 		"duration":    totalDuration.String(),
 		"success":     success,
 		"errors":      errors,
-		"throughput": throughput,
+		"throughput":  throughput,
 		"latencies": map[string]float64{
 			"min_ms":  min.Seconds() * 1000,
 			"p50_ms":  p50.Seconds() * 1000,

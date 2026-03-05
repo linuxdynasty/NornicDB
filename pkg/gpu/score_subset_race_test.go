@@ -104,10 +104,9 @@ func TestEmbeddingIndex_ScoreSubset_ConcurrentRemoveDoesNotPanic(t *testing.T) {
 
 var (
 	errUnexpectedResultsLen = &testErr{s: "unexpected results length"}
-	errUnexpectedResultID  = &testErr{s: "unexpected result id"}
+	errUnexpectedResultID   = &testErr{s: "unexpected result id"}
 )
 
 type testErr struct{ s string }
 
 func (e *testErr) Error() string { return e.s }
-

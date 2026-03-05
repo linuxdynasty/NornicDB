@@ -18,11 +18,11 @@ func createCommunityTestGraph(t *testing.T, engine storage.Engine) {
 	aNode := &storage.Node{ID: storage.NodeID("a"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}}
 	actualA, err := engine.CreateNode(aNode)
 	require.NoError(t, err)
-	
+
 	bNode := &storage.Node{ID: storage.NodeID("b"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}}
 	actualB, err := engine.CreateNode(bNode)
 	require.NoError(t, err)
-	
+
 	cNode := &storage.Node{ID: storage.NodeID("c"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}}
 	actualC, err := engine.CreateNode(cNode)
 	require.NoError(t, err)
@@ -31,11 +31,11 @@ func createCommunityTestGraph(t *testing.T, engine storage.Engine) {
 	dNode := &storage.Node{ID: storage.NodeID("d"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}}
 	actualD, err := engine.CreateNode(dNode)
 	require.NoError(t, err)
-	
+
 	eNode := &storage.Node{ID: storage.NodeID("e"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "E"}}
 	actualE, err := engine.CreateNode(eNode)
 	require.NoError(t, err)
-	
+
 	fNode := &storage.Node{ID: storage.NodeID("f"), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "F"}}
 	actualF, err := engine.CreateNode(fNode)
 	require.NoError(t, err)

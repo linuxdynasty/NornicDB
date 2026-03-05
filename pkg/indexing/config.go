@@ -78,18 +78,18 @@
 //
 // Think of this package like a librarian organizing books:
 //
-// 1. **Extracting text**: The librarian looks at each book and writes down
-//    the important information - title, summary, topic - on index cards.
+//  1. **Extracting text**: The librarian looks at each book and writes down
+//     the important information - title, summary, topic - on index cards.
 //
-// 2. **Cleaning text**: Sometimes books have smudged or weird characters,
-//    so the librarian fixes them so they're readable.
+//  2. **Cleaning text**: Sometimes books have smudged or weird characters,
+//     so the librarian fixes them so they're readable.
 //
-// 3. **Making word lists**: The librarian breaks down all the text into
-//    individual words, like "machine", "learning", "artificial", etc.
+//  3. **Making word lists**: The librarian breaks down all the text into
+//     individual words, like "machine", "learning", "artificial", etc.
 //
-// 4. **Organizing for search**: All these words go into a big filing system
-//    so when someone asks "find me books about machine learning", the
-//    librarian can quickly find the right books.
+//  4. **Organizing for search**: All these words go into a big filing system
+//     so when someone asks "find me books about machine learning", the
+//     librarian can quickly find the right books.
 //
 // This package does the same thing but for computer data instead of books!
 package indexing
@@ -201,11 +201,11 @@ func ExtractSearchableText(properties map[string]interface{}) string {
 //	// Result: ["python3", "9", "and", "node", "js", "v18", "0"]
 //
 // Algorithm:
-//   1. Convert to lowercase
-//   2. Iterate through each character
-//   3. Collect alphanumeric characters into tokens
-//   4. Split on non-alphanumeric characters
-//   5. Return non-empty tokens
+//  1. Convert to lowercase
+//  2. Iterate through each character
+//  3. Collect alphanumeric characters into tokens
+//  4. Split on non-alphanumeric characters
+//  5. Return non-empty tokens
 //
 // Use Cases:
 //   - BM25 full-text search indexing

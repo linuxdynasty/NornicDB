@@ -14,9 +14,10 @@ import (
 // ToBoolean converts a value to boolean.
 //
 // Example:
-//   apoc.convert.toBoolean('true') => true
-//   apoc.convert.toBoolean(1) => true
-//   apoc.convert.toBoolean(0) => false
+//
+//	apoc.convert.toBoolean('true') => true
+//	apoc.convert.toBoolean(1) => true
+//	apoc.convert.toBoolean(0) => false
 func ToBoolean(value interface{}) bool {
 	switch v := value.(type) {
 	case bool:
@@ -35,8 +36,9 @@ func ToBoolean(value interface{}) bool {
 // ToInteger converts a value to integer.
 //
 // Example:
-//   apoc.convert.toInteger('42') => 42
-//   apoc.convert.toInteger(3.14) => 3
+//
+//	apoc.convert.toInteger('42') => 42
+//	apoc.convert.toInteger(3.14) => 3
 func ToInteger(value interface{}) int64 {
 	switch v := value.(type) {
 	case int:
@@ -64,8 +66,9 @@ func ToInteger(value interface{}) int64 {
 // ToFloat converts a value to float.
 //
 // Example:
-//   apoc.convert.toFloat('3.14') => 3.14
-//   apoc.convert.toFloat(42) => 42.0
+//
+//	apoc.convert.toFloat('3.14') => 3.14
+//	apoc.convert.toFloat(42) => 42.0
 func ToFloat(value interface{}) float64 {
 	switch v := value.(type) {
 	case float64:
@@ -93,8 +96,9 @@ func ToFloat(value interface{}) float64 {
 // ToString converts a value to string.
 //
 // Example:
-//   apoc.convert.toString(42) => '42'
-//   apoc.convert.toString(true) => 'true'
+//
+//	apoc.convert.toString(42) => '42'
+//	apoc.convert.toString(true) => 'true'
 func ToString(value interface{}) string {
 	return fmt.Sprintf("%v", value)
 }
@@ -102,8 +106,9 @@ func ToString(value interface{}) string {
 // ToList converts a value to a list.
 //
 // Example:
-//   apoc.convert.toList('hello') => ['h','e','l','l','o']
-//   apoc.convert.toList(42) => [42]
+//
+//	apoc.convert.toList('hello') => ['h','e','l','l','o']
+//	apoc.convert.toList(42) => [42]
 func ToList(value interface{}) []interface{} {
 	switch v := value.(type) {
 	case []interface{}:
@@ -122,8 +127,9 @@ func ToList(value interface{}) []interface{} {
 // ToMap converts a value to a map.
 //
 // Example:
-//   apoc.convert.toMap('{"name":"Alice","age":30}') 
-//   => {name:'Alice', age:30}
+//
+//	apoc.convert.toMap('{"name":"Alice","age":30}')
+//	=> {name:'Alice', age:30}
 func ToMap(value interface{}) map[string]interface{} {
 	switch v := value.(type) {
 	case map[string]interface{}:
@@ -139,8 +145,9 @@ func ToMap(value interface{}) map[string]interface{} {
 // ToJson converts a value to JSON string.
 //
 // Example:
-//   apoc.convert.toJson({name:'Alice', age:30}) 
-//   => '{"name":"Alice","age":30}'
+//
+//	apoc.convert.toJson({name:'Alice', age:30})
+//	=> '{"name":"Alice","age":30}'
 func ToJson(value interface{}) string {
 	bytes, err := json.Marshal(value)
 	if err != nil {
@@ -152,7 +159,8 @@ func ToJson(value interface{}) string {
 // FromJsonList converts a JSON array string to a list.
 //
 // Example:
-//   apoc.convert.fromJsonList('[1,2,3]') => [1,2,3]
+//
+//	apoc.convert.fromJsonList('[1,2,3]') => [1,2,3]
 func FromJsonList(jsonStr string) []interface{} {
 	var result []interface{}
 	json.Unmarshal([]byte(jsonStr), &result)
@@ -162,7 +170,8 @@ func FromJsonList(jsonStr string) []interface{} {
 // FromJsonMap converts a JSON object string to a map.
 //
 // Example:
-//   apoc.convert.fromJsonMap('{"name":"Alice"}') => {name:'Alice'}
+//
+//	apoc.convert.fromJsonMap('{"name":"Alice"}') => {name:'Alice'}
 func FromJsonMap(jsonStr string) map[string]interface{} {
 	var result map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &result)
@@ -172,11 +181,12 @@ func FromJsonMap(jsonStr string) map[string]interface{} {
 // ToSet converts a list to a set (removes duplicates).
 //
 // Example:
-//   apoc.convert.toSet([1,2,2,3,3,3]) => [1,2,3]
+//
+//	apoc.convert.toSet([1,2,2,3,3,3]) => [1,2,3]
 func ToSet(list []interface{}) []interface{} {
 	seen := make(map[string]bool)
 	result := make([]interface{}, 0)
-	
+
 	for _, item := range list {
 		key := fmt.Sprintf("%v", item)
 		if !seen[key] {
@@ -184,14 +194,15 @@ func ToSet(list []interface{}) []interface{} {
 			result = append(result, item)
 		}
 	}
-	
+
 	return result
 }
 
 // ToSortedJsonMap converts a map to a sorted JSON string.
 //
 // Example:
-//   apoc.convert.toSortedJsonMap({z:1, a:2}) => '{"a":2,"z":1}'
+//
+//	apoc.convert.toSortedJsonMap({z:1, a:2}) => '{"a":2,"z":1}'
 func ToSortedJsonMap(m map[string]interface{}) string {
 	// Note: In production, implement proper sorted JSON marshaling
 	return ToJson(m)
@@ -200,7 +211,8 @@ func ToSortedJsonMap(m map[string]interface{}) string {
 // ToTree converts a path to a tree structure.
 //
 // Example:
-//   apoc.convert.toTree(path) => nested map structure
+//
+//	apoc.convert.toTree(path) => nested map structure
 func ToTree(path interface{}) map[string]interface{} {
 	// Note: In production, implement proper path-to-tree conversion
 	return make(map[string]interface{})
@@ -209,7 +221,8 @@ func ToTree(path interface{}) map[string]interface{} {
 // FromJsonNode converts a JSON string to a node-like map.
 //
 // Example:
-//   apoc.convert.fromJsonNode('{"id":1,"labels":["Person"],"properties":{}}')
+//
+//	apoc.convert.fromJsonNode('{"id":1,"labels":["Person"],"properties":{}}')
 func FromJsonNode(jsonStr string) map[string]interface{} {
 	return FromJsonMap(jsonStr)
 }
@@ -217,7 +230,8 @@ func FromJsonNode(jsonStr string) map[string]interface{} {
 // ToNode converts a map to a node structure.
 //
 // Example:
-//   apoc.convert.toNode({id:1, labels:['Person'], properties:{name:'Alice'}})
+//
+//	apoc.convert.toNode({id:1, labels:['Person'], properties:{name:'Alice'}})
 func ToNode(m map[string]interface{}) map[string]interface{} {
 	return m
 }
@@ -225,7 +239,8 @@ func ToNode(m map[string]interface{}) map[string]interface{} {
 // ToRelationship converts a map to a relationship structure.
 //
 // Example:
-//   apoc.convert.toRelationship({id:1, type:'KNOWS', properties:{}})
+//
+//	apoc.convert.toRelationship({id:1, type:'KNOWS', properties:{}})
 func ToRelationship(m map[string]interface{}) map[string]interface{} {
 	return m
 }
@@ -233,7 +248,8 @@ func ToRelationship(m map[string]interface{}) map[string]interface{} {
 // GetJsonProperty extracts a property from a JSON string.
 //
 // Example:
-//   apoc.convert.getJsonProperty('{"name":"Alice"}', 'name') => 'Alice'
+//
+//	apoc.convert.getJsonProperty('{"name":"Alice"}', 'name') => 'Alice'
 func GetJsonProperty(jsonStr, key string) interface{} {
 	m := FromJsonMap(jsonStr)
 	return m[key]
@@ -242,12 +258,13 @@ func GetJsonProperty(jsonStr, key string) interface{} {
 // GetJsonPropertyMap extracts a nested property from JSON.
 //
 // Example:
-//   apoc.convert.getJsonPropertyMap('{"user":{"name":"Alice"}}', 'user.name')
-//   => 'Alice'
+//
+//	apoc.convert.getJsonPropertyMap('{"user":{"name":"Alice"}}', 'user.name')
+//	=> 'Alice'
 func GetJsonPropertyMap(jsonStr, path string) interface{} {
 	m := FromJsonMap(jsonStr)
 	keys := strings.Split(path, ".")
-	
+
 	var current interface{} = m
 	for _, key := range keys {
 		if currentMap, ok := current.(map[string]interface{}); ok {
@@ -256,15 +273,16 @@ func GetJsonPropertyMap(jsonStr, path string) interface{} {
 			return nil
 		}
 	}
-	
+
 	return current
 }
 
 // SetJsonProperty sets a property in a JSON string.
 //
 // Example:
-//   apoc.convert.setJsonProperty('{"name":"Alice"}', 'age', 30)
-//   => '{"name":"Alice","age":30}'
+//
+//	apoc.convert.setJsonProperty('{"name":"Alice"}', 'age', 30)
+//	=> '{"name":"Alice","age":30}'
 func SetJsonProperty(jsonStr, key string, value interface{}) string {
 	m := FromJsonMap(jsonStr)
 	m[key] = value
@@ -274,7 +292,8 @@ func SetJsonProperty(jsonStr, key string, value interface{}) string {
 // ToIntList converts a list to integers.
 //
 // Example:
-//   apoc.convert.toIntList(['1','2','3']) => [1,2,3]
+//
+//	apoc.convert.toIntList(['1','2','3']) => [1,2,3]
 func ToIntList(list []interface{}) []int64 {
 	result := make([]int64, len(list))
 	for i, item := range list {
@@ -286,7 +305,8 @@ func ToIntList(list []interface{}) []int64 {
 // ToFloatList converts a list to floats.
 //
 // Example:
-//   apoc.convert.toFloatList(['1.5','2.5','3.5']) => [1.5,2.5,3.5]
+//
+//	apoc.convert.toFloatList(['1.5','2.5','3.5']) => [1.5,2.5,3.5]
 func ToFloatList(list []interface{}) []float64 {
 	result := make([]float64, len(list))
 	for i, item := range list {
@@ -298,7 +318,8 @@ func ToFloatList(list []interface{}) []float64 {
 // ToStringList converts a list to strings.
 //
 // Example:
-//   apoc.convert.toStringList([1,2,3]) => ['1','2','3']
+//
+//	apoc.convert.toStringList([1,2,3]) => ['1','2','3']
 func ToStringList(list []interface{}) []string {
 	result := make([]string, len(list))
 	for i, item := range list {
@@ -310,8 +331,9 @@ func ToStringList(list []interface{}) []string {
 // ToBooleanList converts a list to booleans.
 //
 // Example:
-//   apoc.convert.toBooleanList([1,0,'true','false']) 
-//   => [true,false,true,false]
+//
+//	apoc.convert.toBooleanList([1,0,'true','false'])
+//	=> [true,false,true,false]
 func ToBooleanList(list []interface{}) []bool {
 	result := make([]bool, len(list))
 	for i, item := range list {
@@ -323,7 +345,8 @@ func ToBooleanList(list []interface{}) []bool {
 // ToNodeList converts a list of maps to node structures.
 //
 // Example:
-//   apoc.convert.toNodeList([{id:1},{id:2}])
+//
+//	apoc.convert.toNodeList([{id:1},{id:2}])
 func ToNodeList(list []interface{}) []map[string]interface{} {
 	result := make([]map[string]interface{}, len(list))
 	for i, item := range list {
@@ -339,7 +362,8 @@ func ToNodeList(list []interface{}) []map[string]interface{} {
 // ToRelationshipList converts a list of maps to relationship structures.
 //
 // Example:
-//   apoc.convert.toRelationshipList([{id:1,type:'KNOWS'}])
+//
+//	apoc.convert.toRelationshipList([{id:1,type:'KNOWS'}])
 func ToRelationshipList(list []interface{}) []map[string]interface{} {
 	return ToNodeList(list)
 }

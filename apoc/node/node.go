@@ -6,7 +6,7 @@ package node
 
 import (
 	"fmt"
-	
+
 	"github.com/orneryd/nornicdb/apoc/storage"
 )
 
@@ -22,7 +22,8 @@ var Storage storage.Storage = storage.NewInMemoryStorage()
 // Degree returns the degree (number of relationships) of a node.
 //
 // Example:
-//   apoc.node.degree(node) => 5
+//
+//	apoc.node.degree(node) => 5
 func Degree(node *Node, relType string) int {
 	degree, err := Storage.GetNodeDegree(node.ID, relType, storage.DirectionBoth)
 	if err != nil {
@@ -34,7 +35,8 @@ func Degree(node *Node, relType string) int {
 // DegreeIn returns the in-degree of a node.
 //
 // Example:
-//   apoc.node.degree.in(node, 'KNOWS') => 3
+//
+//	apoc.node.degree.in(node, 'KNOWS') => 3
 func DegreeIn(node *Node, relType string) int {
 	degree, err := Storage.GetNodeDegree(node.ID, relType, storage.DirectionIncoming)
 	if err != nil {
@@ -46,7 +48,8 @@ func DegreeIn(node *Node, relType string) int {
 // DegreeOut returns the out-degree of a node.
 //
 // Example:
-//   apoc.node.degree.out(node, 'KNOWS') => 2
+//
+//	apoc.node.degree.out(node, 'KNOWS') => 2
 func DegreeOut(node *Node, relType string) int {
 	degree, err := Storage.GetNodeDegree(node.ID, relType, storage.DirectionOutgoing)
 	if err != nil {
@@ -58,7 +61,8 @@ func DegreeOut(node *Node, relType string) int {
 // ID returns the ID of a node.
 //
 // Example:
-//   apoc.node.id(node) => 123
+//
+//	apoc.node.id(node) => 123
 func ID(node *Node) int64 {
 	return node.ID
 }
@@ -66,7 +70,8 @@ func ID(node *Node) int64 {
 // Labels returns the labels of a node.
 //
 // Example:
-//   apoc.node.labels(node) => ['Person', 'Employee']
+//
+//	apoc.node.labels(node) => ['Person', 'Employee']
 func Labels(node *Node) []string {
 	return node.Labels
 }
@@ -74,7 +79,8 @@ func Labels(node *Node) []string {
 // Properties returns all properties of a node.
 //
 // Example:
-//   apoc.node.properties(node) => {name:'Alice', age:30}
+//
+//	apoc.node.properties(node) => {name:'Alice', age:30}
 func Properties(node *Node) map[string]interface{} {
 	return node.Properties
 }
@@ -82,7 +88,8 @@ func Properties(node *Node) map[string]interface{} {
 // Property returns a specific property value.
 //
 // Example:
-//   apoc.node.property(node, 'name') => 'Alice'
+//
+//	apoc.node.property(node, 'name') => 'Alice'
 func Property(node *Node, key string) interface{} {
 	return node.Properties[key]
 }
@@ -90,7 +97,8 @@ func Property(node *Node, key string) interface{} {
 // HasLabel checks if a node has a specific label.
 //
 // Example:
-//   apoc.node.hasLabel(node, 'Person') => true
+//
+//	apoc.node.hasLabel(node, 'Person') => true
 func HasLabel(node *Node, label string) bool {
 	for _, l := range node.Labels {
 		if l == label {
@@ -103,7 +111,8 @@ func HasLabel(node *Node, label string) bool {
 // HasLabels checks if a node has all specified labels.
 //
 // Example:
-//   apoc.node.hasLabels(node, ['Person', 'Employee']) => true
+//
+//	apoc.node.hasLabels(node, ['Person', 'Employee']) => true
 func HasLabels(node *Node, labels []string) bool {
 	for _, label := range labels {
 		if !HasLabel(node, label) {
@@ -116,18 +125,19 @@ func HasLabels(node *Node, labels []string) bool {
 // RelationshipTypes returns all relationship types of a node.
 //
 // Example:
-//   apoc.node.relationshipTypes(node) => ['KNOWS', 'WORKS_AT']
+//
+//	apoc.node.relationshipTypes(node) => ['KNOWS', 'WORKS_AT']
 func RelationshipTypes(node *Node) []string {
 	rels, err := Storage.GetNodeRelationships(node.ID, "", storage.DirectionBoth)
 	if err != nil {
 		return []string{}
 	}
-	
+
 	types := make(map[string]bool)
 	for _, rel := range rels {
 		types[rel.Type] = true
 	}
-	
+
 	result := make([]string, 0, len(types))
 	for t := range types {
 		result = append(result, t)
@@ -138,18 +148,19 @@ func RelationshipTypes(node *Node) []string {
 // RelationshipTypesIn returns incoming relationship types.
 //
 // Example:
-//   apoc.node.relationshipTypes.in(node) => ['KNOWS', 'FOLLOWS']
+//
+//	apoc.node.relationshipTypes.in(node) => ['KNOWS', 'FOLLOWS']
 func RelationshipTypesIn(node *Node) []string {
 	rels, err := Storage.GetNodeRelationships(node.ID, "", storage.DirectionIncoming)
 	if err != nil {
 		return []string{}
 	}
-	
+
 	types := make(map[string]bool)
 	for _, rel := range rels {
 		types[rel.Type] = true
 	}
-	
+
 	result := make([]string, 0, len(types))
 	for t := range types {
 		result = append(result, t)
@@ -160,18 +171,19 @@ func RelationshipTypesIn(node *Node) []string {
 // RelationshipTypesOut returns outgoing relationship types.
 //
 // Example:
-//   apoc.node.relationshipTypes.out(node) => ['KNOWS', 'WORKS_AT']
+//
+//	apoc.node.relationshipTypes.out(node) => ['KNOWS', 'WORKS_AT']
 func RelationshipTypesOut(node *Node) []string {
 	rels, err := Storage.GetNodeRelationships(node.ID, "", storage.DirectionOutgoing)
 	if err != nil {
 		return []string{}
 	}
-	
+
 	types := make(map[string]bool)
 	for _, rel := range rels {
 		types[rel.Type] = true
 	}
-	
+
 	result := make([]string, 0, len(types))
 	for t := range types {
 		result = append(result, t)
@@ -182,7 +194,8 @@ func RelationshipTypesOut(node *Node) []string {
 // Relationships returns all relationships of a node.
 //
 // Example:
-//   apoc.node.relationships(node) => [rel1, rel2, ...]
+//
+//	apoc.node.relationships(node) => [rel1, rel2, ...]
 func Relationships(node *Node, relType string) []*Relationship {
 	rels, err := Storage.GetNodeRelationships(node.ID, relType, storage.DirectionBoth)
 	if err != nil {
@@ -194,7 +207,8 @@ func Relationships(node *Node, relType string) []*Relationship {
 // RelationshipsIn returns incoming relationships.
 //
 // Example:
-//   apoc.node.relationships.in(node, 'KNOWS') => [rel1, rel2]
+//
+//	apoc.node.relationships.in(node, 'KNOWS') => [rel1, rel2]
 func RelationshipsIn(node *Node, relType string) []*Relationship {
 	rels, err := Storage.GetNodeRelationships(node.ID, relType, storage.DirectionIncoming)
 	if err != nil {
@@ -206,7 +220,8 @@ func RelationshipsIn(node *Node, relType string) []*Relationship {
 // RelationshipsOut returns outgoing relationships.
 //
 // Example:
-//   apoc.node.relationships.out(node, 'KNOWS') => [rel1, rel2]
+//
+//	apoc.node.relationships.out(node, 'KNOWS') => [rel1, rel2]
 func RelationshipsOut(node *Node, relType string) []*Relationship {
 	rels, err := Storage.GetNodeRelationships(node.ID, relType, storage.DirectionOutgoing)
 	if err != nil {
@@ -218,12 +233,13 @@ func RelationshipsOut(node *Node, relType string) []*Relationship {
 // RelationshipExists checks if a relationship exists.
 //
 // Example:
-//   apoc.node.relationshipExists(node, 'KNOWS>') => true
+//
+//	apoc.node.relationshipExists(node, 'KNOWS>') => true
 func RelationshipExists(node *Node, relPattern string) bool {
 	// Parse pattern to extract type and direction
 	relType := relPattern
 	direction := storage.DirectionBoth
-	
+
 	if len(relPattern) > 0 {
 		if relPattern[len(relPattern)-1] == '>' {
 			direction = storage.DirectionOutgoing
@@ -233,7 +249,7 @@ func RelationshipExists(node *Node, relPattern string) bool {
 			relType = relPattern[1:]
 		}
 	}
-	
+
 	rels, err := Storage.GetNodeRelationships(node.ID, relType, direction)
 	return err == nil && len(rels) > 0
 }
@@ -241,7 +257,8 @@ func RelationshipExists(node *Node, relPattern string) bool {
 // Connected checks if two nodes are connected.
 //
 // Example:
-//   apoc.node.connected(node1, node2, 'KNOWS') => true
+//
+//	apoc.node.connected(node1, node2, 'KNOWS') => true
 func Connected(node1, node2 *Node, relType string) bool {
 	path, err := Storage.FindShortestPath(node1.ID, node2.ID, relType, 1)
 	return err == nil && path != nil
@@ -250,7 +267,8 @@ func Connected(node1, node2 *Node, relType string) bool {
 // Neighbors returns neighboring nodes.
 //
 // Example:
-//   apoc.node.neighbors(node, 'KNOWS') => [node1, node2, ...]
+//
+//	apoc.node.neighbors(node, 'KNOWS') => [node1, node2, ...]
 func Neighbors(node *Node, relType string) []*Node {
 	neighbors, err := Storage.GetNodeNeighbors(node.ID, relType, storage.DirectionBoth)
 	if err != nil {
@@ -262,7 +280,8 @@ func Neighbors(node *Node, relType string) []*Node {
 // NeighborsIn returns incoming neighbors.
 //
 // Example:
-//   apoc.node.neighbors.in(node, 'KNOWS') => [node1, node2]
+//
+//	apoc.node.neighbors.in(node, 'KNOWS') => [node1, node2]
 func NeighborsIn(node *Node, relType string) []*Node {
 	neighbors, err := Storage.GetNodeNeighbors(node.ID, relType, storage.DirectionIncoming)
 	if err != nil {
@@ -274,7 +293,8 @@ func NeighborsIn(node *Node, relType string) []*Node {
 // NeighborsOut returns outgoing neighbors.
 //
 // Example:
-//   apoc.node.neighbors.out(node, 'KNOWS') => [node1, node2]
+//
+//	apoc.node.neighbors.out(node, 'KNOWS') => [node1, node2]
 func NeighborsOut(node *Node, relType string) []*Node {
 	neighbors, err := Storage.GetNodeNeighbors(node.ID, relType, storage.DirectionOutgoing)
 	if err != nil {
@@ -286,7 +306,8 @@ func NeighborsOut(node *Node, relType string) []*Node {
 // IsDense checks if a node is dense (many relationships).
 //
 // Example:
-//   apoc.node.isDense(node) => true
+//
+//	apoc.node.isDense(node) => true
 func IsDense(node *Node, threshold int) bool {
 	return Degree(node, "") > threshold
 }
@@ -294,7 +315,8 @@ func IsDense(node *Node, threshold int) bool {
 // ToMap converts a node to a map.
 //
 // Example:
-//   apoc.node.toMap(node) => {id:123, labels:['Person'], properties:{...}}
+//
+//	apoc.node.toMap(node) => {id:123, labels:['Person'], properties:{...}}
 func ToMap(node *Node) map[string]interface{} {
 	return map[string]interface{}{
 		"id":         node.ID,
@@ -306,17 +328,18 @@ func ToMap(node *Node) map[string]interface{} {
 // FromMap creates a node from a map.
 //
 // Example:
-//   apoc.node.fromMap({labels:['Person'], properties:{name:'Alice'}})
+//
+//	apoc.node.fromMap({labels:['Person'], properties:{name:'Alice'}})
 func FromMap(m map[string]interface{}) *Node {
 	node := &Node{
 		Labels:     []string{},
 		Properties: make(map[string]interface{}),
 	}
-	
+
 	if id, ok := m["id"].(int64); ok {
 		node.ID = id
 	}
-	
+
 	if labels, ok := m["labels"].([]interface{}); ok {
 		for _, label := range labels {
 			if labelStr, ok := label.(string); ok {
@@ -324,18 +347,19 @@ func FromMap(m map[string]interface{}) *Node {
 			}
 		}
 	}
-	
+
 	if props, ok := m["properties"].(map[string]interface{}); ok {
 		node.Properties = props
 	}
-	
+
 	return node
 }
 
 // SetProperty sets a property on a node.
 //
 // Example:
-//   apoc.node.setProperty(node, 'age', 31)
+//
+//	apoc.node.setProperty(node, 'age', 31)
 func SetProperty(node *Node, key string, value interface{}) *Node {
 	node.Properties[key] = value
 	return node
@@ -344,7 +368,8 @@ func SetProperty(node *Node, key string, value interface{}) *Node {
 // SetProperties sets multiple properties on a node.
 //
 // Example:
-//   apoc.node.setProperties(node, {age:31, city:'NYC'})
+//
+//	apoc.node.setProperties(node, {age:31, city:'NYC'})
 func SetProperties(node *Node, props map[string]interface{}) *Node {
 	for k, v := range props {
 		node.Properties[k] = v
@@ -355,7 +380,8 @@ func SetProperties(node *Node, props map[string]interface{}) *Node {
 // RemoveProperty removes a property from a node.
 //
 // Example:
-//   apoc.node.removeProperty(node, 'age')
+//
+//	apoc.node.removeProperty(node, 'age')
 func RemoveProperty(node *Node, key string) *Node {
 	delete(node.Properties, key)
 	return node
@@ -364,7 +390,8 @@ func RemoveProperty(node *Node, key string) *Node {
 // RemoveProperties removes multiple properties from a node.
 //
 // Example:
-//   apoc.node.removeProperties(node, ['age', 'city'])
+//
+//	apoc.node.removeProperties(node, ['age', 'city'])
 func RemoveProperties(node *Node, keys []string) *Node {
 	for _, key := range keys {
 		delete(node.Properties, key)
@@ -375,7 +402,8 @@ func RemoveProperties(node *Node, keys []string) *Node {
 // AddLabel adds a label to a node.
 //
 // Example:
-//   apoc.node.addLabel(node, 'Employee')
+//
+//	apoc.node.addLabel(node, 'Employee')
 func AddLabel(node *Node, label string) *Node {
 	if !HasLabel(node, label) {
 		node.Labels = append(node.Labels, label)
@@ -386,7 +414,8 @@ func AddLabel(node *Node, label string) *Node {
 // AddLabels adds multiple labels to a node.
 //
 // Example:
-//   apoc.node.addLabels(node, ['Employee', 'Manager'])
+//
+//	apoc.node.addLabels(node, ['Employee', 'Manager'])
 func AddLabels(node *Node, labels []string) *Node {
 	for _, label := range labels {
 		AddLabel(node, label)
@@ -397,7 +426,8 @@ func AddLabels(node *Node, labels []string) *Node {
 // RemoveLabel removes a label from a node.
 //
 // Example:
-//   apoc.node.removeLabel(node, 'Employee')
+//
+//	apoc.node.removeLabel(node, 'Employee')
 func RemoveLabel(node *Node, label string) *Node {
 	newLabels := make([]string, 0)
 	for _, l := range node.Labels {
@@ -412,7 +442,8 @@ func RemoveLabel(node *Node, label string) *Node {
 // RemoveLabels removes multiple labels from a node.
 //
 // Example:
-//   apoc.node.removeLabels(node, ['Employee', 'Manager'])
+//
+//	apoc.node.removeLabels(node, ['Employee', 'Manager'])
 func RemoveLabels(node *Node, labels []string) *Node {
 	for _, label := range labels {
 		RemoveLabel(node, label)
@@ -423,33 +454,35 @@ func RemoveLabels(node *Node, labels []string) *Node {
 // Clone creates a copy of a node.
 //
 // Example:
-//   apoc.node.clone(node) => new node with same properties
+//
+//	apoc.node.clone(node) => new node with same properties
 func Clone(node *Node) *Node {
 	newNode := &Node{
 		ID:         0, // New node gets new ID
 		Labels:     make([]string, len(node.Labels)),
 		Properties: make(map[string]interface{}),
 	}
-	
+
 	copy(newNode.Labels, node.Labels)
-	
+
 	for k, v := range node.Properties {
 		newNode.Properties[k] = v
 	}
-	
+
 	return newNode
 }
 
 // Diff compares two nodes and returns differences.
 //
 // Example:
-//   apoc.node.diff(node1, node2) 
-//   => {added:{...}, removed:{...}, changed:{...}}
+//
+//	apoc.node.diff(node1, node2)
+//	=> {added:{...}, removed:{...}, changed:{...}}
 func Diff(node1, node2 *Node) map[string]interface{} {
 	added := make(map[string]interface{})
 	removed := make(map[string]interface{})
 	changed := make(map[string]interface{})
-	
+
 	// Check for added/changed properties
 	for k, v2 := range node2.Properties {
 		if v1, ok := node1.Properties[k]; ok {
@@ -463,14 +496,14 @@ func Diff(node1, node2 *Node) map[string]interface{} {
 			added[k] = v2
 		}
 	}
-	
+
 	// Check for removed properties
 	for k, v := range node1.Properties {
 		if _, ok := node2.Properties[k]; !ok {
 			removed[k] = v
 		}
 	}
-	
+
 	return map[string]interface{}{
 		"added":   added,
 		"removed": removed,
@@ -481,31 +514,32 @@ func Diff(node1, node2 *Node) map[string]interface{} {
 // Equals checks if two nodes are equal.
 //
 // Example:
-//   apoc.node.equals(node1, node2) => true
+//
+//	apoc.node.equals(node1, node2) => true
 func Equals(node1, node2 *Node) bool {
 	if node1.ID != node2.ID {
 		return false
 	}
-	
+
 	if len(node1.Labels) != len(node2.Labels) {
 		return false
 	}
-	
+
 	for i, label := range node1.Labels {
 		if label != node2.Labels[i] {
 			return false
 		}
 	}
-	
+
 	if len(node1.Properties) != len(node2.Properties) {
 		return false
 	}
-	
+
 	for k, v1 := range node1.Properties {
 		if v2, ok := node2.Properties[k]; !ok || fmt.Sprintf("%v", v1) != fmt.Sprintf("%v", v2) {
 			return false
 		}
 	}
-	
+
 	return true
 }

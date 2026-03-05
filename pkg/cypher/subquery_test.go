@@ -1584,7 +1584,6 @@ func TestCollectSubquery(t *testing.T) {
 
 	baseStore := storage.NewMemoryEngine()
 
-
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

@@ -28,9 +28,9 @@ func (m *mockExecutor) Execute(ctx context.Context, query string, params map[str
 }
 
 type mockDBManager struct {
-	stores     map[string]storage.Engine
-	defaultDB  string
-	lastGetDB  string
+	stores    map[string]storage.Engine
+	defaultDB string
+	lastGetDB string
 }
 
 func (m *mockDBManager) GetStorage(name string) (storage.Engine, error) {
@@ -1660,7 +1660,7 @@ func TestHandleRun_UsesRunMetadataDatabase(t *testing.T) {
 	}
 
 	server := &Server{
-		config:   DefaultConfig(),
+		config:    DefaultConfig(),
 		dbManager: manager,
 	}
 	serverConn, clientConn := net.Pipe()
@@ -1672,11 +1672,11 @@ func TestHandleRun_UsesRunMetadataDatabase(t *testing.T) {
 		conn:          serverConn,
 		reader:        bufio.NewReaderSize(serverConn, 8192),
 		writer:        bufio.NewWriterSize(serverConn, 8192),
-		server:         server,
-		executor:       &mockExecutor{},
-		authenticated:  true,
-		authResult:     &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
-		messageBuf:     make([]byte, 0, 4096),
+		server:        server,
+		executor:      &mockExecutor{},
+		authenticated: true,
+		authResult:    &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
+		messageBuf:    make([]byte, 0, 4096),
 	}
 
 	queryBytes := encodePackStreamString("RETURN 1 AS one")
@@ -1705,7 +1705,7 @@ func TestHandleRun_UsesBeginDatabaseWhenRunOmitsDatabase(t *testing.T) {
 	}
 
 	server := &Server{
-		config:   DefaultConfig(),
+		config:    DefaultConfig(),
 		dbManager: manager,
 	}
 	serverConn, clientConn := net.Pipe()
@@ -1717,11 +1717,11 @@ func TestHandleRun_UsesBeginDatabaseWhenRunOmitsDatabase(t *testing.T) {
 		conn:          serverConn,
 		reader:        bufio.NewReaderSize(serverConn, 8192),
 		writer:        bufio.NewWriterSize(serverConn, 8192),
-		server:         server,
-		executor:       &mockExecutor{},
-		authenticated:  true,
-		authResult:     &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
-		messageBuf:     make([]byte, 0, 4096),
+		server:        server,
+		executor:      &mockExecutor{},
+		authenticated: true,
+		authResult:    &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
+		messageBuf:    make([]byte, 0, 4096),
 	}
 
 	beginData := encodePackStreamMap(map[string]any{"db": "translations"})

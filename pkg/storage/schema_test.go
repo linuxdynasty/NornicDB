@@ -212,7 +212,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// First node succeeds
 		node1 := &Node{
-			ID: NodeID(prefixTestID("user1")),
+			ID:     NodeID(prefixTestID("user1")),
 			Labels: []string{"User"},
 			Properties: map[string]any{
 				"email": "test@example.com",
@@ -226,7 +226,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Second node with same email fails
 		node2 := &Node{
-			ID: NodeID(prefixTestID("user2")),
+			ID:     NodeID(prefixTestID("user2")),
 			Labels: []string{"User"},
 			Properties: map[string]any{
 				"email": "test@example.com",
@@ -240,7 +240,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Different email succeeds
 		node3 := &Node{
-			ID: NodeID(prefixTestID("user3")),
+			ID:     NodeID(prefixTestID("user3")),
 			Labels: []string{"User"},
 			Properties: map[string]any{
 				"email": "different@example.com",
@@ -260,7 +260,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Node with Entity label
 		node1 := &Node{
-			ID: NodeID(prefixTestID("n1")),
+			ID:     NodeID(prefixTestID("n1")),
 			Labels: []string{"Entity", "User"},
 			Properties: map[string]any{
 				"id": "unique-id-1",
@@ -273,7 +273,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Another node with Entity label and same id should fail
 		node2 := &Node{
-			ID: NodeID(prefixTestID("n2")),
+			ID:     NodeID(prefixTestID("n2")),
 			Labels: []string{"Entity", "Post"},
 			Properties: map[string]any{
 				"id": "unique-id-1",
@@ -292,7 +292,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Create User with email
 		user := &Node{
-			ID: NodeID(prefixTestID("user1")),
+			ID:     NodeID(prefixTestID("user1")),
 			Labels: []string{"User"},
 			Properties: map[string]any{
 				"email": "test@example.com",
@@ -302,7 +302,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 		// Post with same email property should succeed (different label)
 		post := &Node{
-			ID: NodeID(prefixTestID("post1")),
+			ID:     NodeID(prefixTestID("post1")),
 			Labels: []string{"Post"},
 			Properties: map[string]any{
 				"email": "test@example.com",

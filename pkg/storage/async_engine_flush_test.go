@@ -68,7 +68,7 @@ func TestFlushResultHasErrors(t *testing.T) {
 // errorEngine wraps an engine and simulates failures for specific operations.
 type errorEngine struct {
 	Engine
-	baseEngine Engine
+	baseEngine      Engine
 	mu              sync.Mutex
 	failNodeIDs     map[NodeID]bool
 	failEdgeIDs     map[EdgeID]bool
@@ -95,7 +95,8 @@ func newErrorEngine() *errorEngine {
 //
 // This is important because AsyncEngine can accept unprefixed IDs when the inner engine
 // is namespace-scoped; these tests intentionally exercise the stack:
-//   AsyncEngine -> NamespacedEngine -> MemoryEngine
+//
+//	AsyncEngine -> NamespacedEngine -> MemoryEngine
 func (e *errorEngine) Namespace() string {
 	if provider, ok := e.Engine.(interface{ Namespace() string }); ok {
 		return provider.Namespace()

@@ -189,8 +189,8 @@ func TestCallPluginHandler(t *testing.T) {
 func TestNamespacedFunctionDetection(t *testing.T) {
 	// Test that namespaced functions are properly detected
 	testCases := []struct {
-		expr     string
-		hasNS    bool
+		expr          string
+		hasNS         bool
 		looksLikeFunc bool
 	}{
 		{"apoc.coll.sum([1,2,3])", true, true},

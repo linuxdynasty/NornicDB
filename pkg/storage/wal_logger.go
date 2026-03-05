@@ -31,4 +31,3 @@ func (defaultWALLogger) Log(level string, msg string, fields map[string]any) {
 	}
 	log.Printf("[wal] %s", string(b))
 }
-

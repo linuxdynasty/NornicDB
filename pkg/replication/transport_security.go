@@ -129,4 +129,3 @@ func parseCipherSuites(values []string) ([]uint16, error) {
 	}
 	return out, nil
 }
-

@@ -28,4 +28,3 @@ func TestClusteringTimer_StopDoesNotPanic(t *testing.T) {
 	// Give the goroutine a moment to observe stop.
 	time.Sleep(10 * time.Millisecond)
 }
-

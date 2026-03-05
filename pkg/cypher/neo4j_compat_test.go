@@ -334,7 +334,7 @@ func TestCreateSetWhitespaceVariations(t *testing.T) {
 		query string
 	}{
 		{
-			name: "single line",
+			name:  "single line",
 			query: `CREATE (n:Node {id: 'ws1'}) SET n.value = 1 RETURN n`,
 		},
 		{
@@ -356,7 +356,7 @@ SET n.value = 4
 RETURN n`,
 		},
 		{
-			name: "tabs instead of spaces",
+			name:  "tabs instead of spaces",
 			query: "CREATE (n:Node {id: 'ws5'})\tSET n.value = 5\tRETURN n",
 		},
 		{

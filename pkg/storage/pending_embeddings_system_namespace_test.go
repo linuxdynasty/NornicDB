@@ -35,4 +35,3 @@ func TestPendingEmbeddingsIndex_SkipsSystemNamespace(t *testing.T) {
 	_ = engine.RefreshPendingEmbeddingsIndex()
 	require.Equal(t, 1, engine.PendingEmbeddingsCount())
 }
-

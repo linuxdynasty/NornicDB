@@ -373,9 +373,9 @@ func TestAggregation_NullHandlingAdvanced(t *testing.T) {
 	queries := []string{
 		`CREATE (n:Record {group: 'A', value: 10})`,
 		`CREATE (n:Record {group: 'A', value: 20})`,
-		`CREATE (n:Record {group: 'A'})`,               // No value
+		`CREATE (n:Record {group: 'A'})`, // No value
 		`CREATE (n:Record {group: 'B', value: 30})`,
-		`CREATE (n:Record {value: 40})`,                // No group
+		`CREATE (n:Record {value: 40})`, // No group
 	}
 	for _, q := range queries {
 		_, err := exec.Execute(ctx, q, nil)

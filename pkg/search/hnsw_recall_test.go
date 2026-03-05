@@ -39,7 +39,7 @@ func TestHNSWRecall_ANNOnly(t *testing.T) {
 		vec = vector.Normalize(vec) // Normalize for cosine similarity
 		vectors[i] = vec
 
-		id := string(rune('a' + i%26)) + string(rune(i))
+		id := string(rune('a'+i%26)) + string(rune(i))
 		require.NoError(t, hnswIndex.Add(id, vec))
 		require.NoError(t, bruteIndex.Add(id, vec))
 	}
@@ -108,7 +108,7 @@ func TestHNSWRecall_ANNWithRerank(t *testing.T) {
 		vec = vector.Normalize(vec)
 		vectors[i] = vec
 
-		id := string(rune('a' + i%26)) + string(rune(i))
+		id := string(rune('a'+i%26)) + string(rune(i))
 		require.NoError(t, hnswIndex.Add(id, vec))
 		require.NoError(t, bruteIndex.Add(id, vec))
 	}
@@ -176,7 +176,7 @@ func BenchmarkHNSWRecall_ANNOnly(b *testing.B) {
 				}
 				vec = vector.Normalize(vec)
 
-				id := string(rune('a' + i%26)) + string(rune(i))
+				id := string(rune('a'+i%26)) + string(rune(i))
 				hnswIndex.Add(id, vec)
 				bruteIndex.Add(id, vec)
 			}
@@ -230,7 +230,7 @@ func BenchmarkHNSWRecall_ANNWithRerank(b *testing.B) {
 		}
 		vec = vector.Normalize(vec)
 
-		id := string(rune('a' + i%26)) + string(rune(i))
+		id := string(rune('a'+i%26)) + string(rune(i))
 		hnswIndex.Add(id, vec)
 		bruteIndex.Add(id, vec)
 	}
@@ -267,4 +267,3 @@ func BenchmarkHNSWRecall_ANNWithRerank(b *testing.B) {
 	avgRecall := totalRecall / float64(b.N)
 	b.ReportMetric(avgRecall, "recall@k")
 }
-

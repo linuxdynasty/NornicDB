@@ -21,8 +21,8 @@ func TestBadgerTransaction_DeleteNode_FiresEventsAndClearsVectorIndex(t *testing
 	notifier.OnNodeDeleted(func(nodeID storage.NodeID) { _ = svc.RemoveNode(nodeID) })
 
 	node := &storage.Node{
-		ID:             "db1:alpha",
-		Labels:         []string{"Doc"},
+		ID:              "db1:alpha",
+		Labels:          []string{"Doc"},
 		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 	}
 	_, err = engine.CreateNode(node)
@@ -36,4 +36,3 @@ func TestBadgerTransaction_DeleteNode_FiresEventsAndClearsVectorIndex(t *testing
 
 	require.Equal(t, 0, svc.EmbeddingCount())
 }
-

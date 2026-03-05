@@ -43,4 +43,3 @@ func TestNewDatabaseManager_ReadOnlyEngine_SkipsMetadataWrites(t *testing.T) {
 	require.Equal(t, int32(0), base.createCalls.Load())
 	require.Equal(t, int32(0), base.updateCalls.Load())
 }
-

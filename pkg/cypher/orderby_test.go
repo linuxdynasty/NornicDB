@@ -18,7 +18,7 @@ func TestOrderByLimitSkip(t *testing.T) {
 	for i := 1; i <= 10; i++ {
 		_, err := exec.Execute(ctx, "CREATE (n:Person {name: $name, age: $age})", map[string]interface{}{
 			"name": string(rune('A' + i - 1)), // A, B, C, etc.
-			"age":  int64(20 + i),              // 21, 22, 23, etc.
+			"age":  int64(20 + i),             // 21, 22, 23, etc.
 		})
 		if err != nil {
 			t.Fatalf("Failed to create node %d: %v", i, err)

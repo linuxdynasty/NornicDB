@@ -47,16 +47,16 @@ func storageNodeToModel(node *storage.Node) *models.Node {
 	decayScore := node.DecayScore
 
 	return &models.Node{
-		ID:                  string(node.ID),
-		InternalID:          string(node.ID),
-		Labels:              node.Labels,
-		Properties:          models.JSON(node.Properties),
-		CreatedAt:           createdAt,
-		UpdatedAt:           updatedAt,
-		DecayScore:          &decayScore,
-		LastAccessed:        lastAccessed,
-		AccessCount:         &accessCount,
-		HasEmbedding:        len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0,
+		ID:           string(node.ID),
+		InternalID:   string(node.ID),
+		Labels:       node.Labels,
+		Properties:   models.JSON(node.Properties),
+		CreatedAt:    createdAt,
+		UpdatedAt:    updatedAt,
+		DecayScore:   &decayScore,
+		LastAccessed: lastAccessed,
+		AccessCount:  &accessCount,
+		HasEmbedding: len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0,
 		EmbeddingDimensions: func() int {
 			if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 				return len(node.ChunkEmbeddings[0])

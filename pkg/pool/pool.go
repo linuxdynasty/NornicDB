@@ -79,7 +79,7 @@ var globalConfig = PoolConfig{
 //			Enabled: true,
 //			MaxSize: 1000,
 //		})
-//		
+//
 //		// Now start your application
 //		server.Start()
 //	}
@@ -106,7 +106,8 @@ var globalConfig = PoolConfig{
 //   - MaxSize too high: More memory usage
 //
 // Thread Safety:
-//   Not thread-safe. Call only during initialization.
+//
+//	Not thread-safe. Call only during initialization.
 func Configure(config PoolConfig) {
 	globalConfig = config
 
@@ -207,13 +208,13 @@ var rowSlicePool = sync.Pool{
 //
 //	rows := pool.GetRowSlice()
 //	defer pool.PutRowSlice(rows)
-//	
+//
 //	// Build result set
 //	for _, record := range records {
 //		row := []interface{}{record.ID, record.Name, record.Value}
 //		rows = append(rows, row)
 //	}
-//	
+//
 //	return rows
 //
 // Example 2 - Query Execution:
@@ -221,7 +222,7 @@ var rowSlicePool = sync.Pool{
 //	func executeQuery(query string) ([][]interface{}, error) {
 //		rows := pool.GetRowSlice()
 //		defer pool.PutRowSlice(rows)
-//		
+//
 //		// Execute query and populate rows
 //		results := db.Query(query)
 //		for results.Next() {
@@ -229,7 +230,7 @@ var rowSlicePool = sync.Pool{
 //			results.Scan(&id, &name, &value)
 //			rows = append(rows, []interface{}{id, name, value})
 //		}
-//		
+//
 //		// Make a copy to return (original goes back to pool)
 //		result := make([][]interface{}, len(rows))
 //		copy(result, rows)
@@ -241,11 +242,11 @@ var rowSlicePool = sync.Pool{
 //	// Process 10,000 records with minimal allocations
 //	for batch := range batches {
 //		rows := pool.GetRowSlice()
-//		
+//
 //		for _, record := range batch {
 //			rows = append(rows, record.ToRow())
 //		}
-//		
+//
 //		processBatch(rows)
 //		pool.PutRowSlice(rows) // Reuse for next batch
 //	}
@@ -287,7 +288,7 @@ func GetRowSlice() [][]interface{} {
 //
 //	rows := pool.GetRowSlice()
 //	defer pool.PutRowSlice(rows) // Always return to pool
-//	
+//
 //	// Use rows...
 //	rows = append(rows, []interface{}{1, "test"})
 //
@@ -353,7 +354,7 @@ func PutRowSlice(rows [][]interface{}) {
 //
 //	nodes := pool.GetNodeSlice()
 //	defer pool.PutNodeSlice(nodes)
-//	
+//
 //	nodes = append(nodes, &pool.PooledNode{
 //		ID:     "node-1",
 //		Labels: []string{"Person"},
@@ -393,7 +394,7 @@ var nodeSlicePool = sync.Pool{
 //	func findUsers(db *DB) []*pool.PooledNode {
 //		nodes := pool.GetNodeSlice()
 //		defer pool.PutNodeSlice(nodes)
-//		
+//
 //		for _, user := range db.QueryUsers() {
 //			nodes = append(nodes, &pool.PooledNode{
 //				ID:     user.ID,
@@ -404,7 +405,7 @@ var nodeSlicePool = sync.Pool{
 //				},
 //			})
 //		}
-//		
+//
 //		// Return a copy (original goes back to pool)
 //		result := make([]*pool.PooledNode, len(nodes))
 //		copy(result, nodes)
@@ -416,21 +417,21 @@ var nodeSlicePool = sync.Pool{
 //	func traverse(start string, depth int) []*pool.PooledNode {
 //		visited := pool.GetNodeSlice()
 //		defer pool.PutNodeSlice(visited)
-//		
+//
 //		queue := []string{start}
 //		for len(queue) > 0 && depth > 0 {
 //			current := queue[0]
 //			queue = queue[1:]
-//			
+//
 //			node := db.GetNode(current)
 //			visited = append(visited, node)
-//			
+//
 //			for _, neighbor := range db.GetNeighbors(current) {
 //				queue = append(queue, neighbor)
 //			}
 //			depth--
 //		}
-//		
+//
 //		return copyNodes(visited)
 //	}
 //
@@ -458,7 +459,7 @@ func GetNodeSlice() []*PooledNode {
 //
 //	nodes := pool.GetNodeSlice()
 //	defer pool.PutNodeSlice(nodes)
-//	
+//
 //	// Build node list...
 //	nodes = append(nodes, &pool.PooledNode{ID: "node-1"})
 //
@@ -516,7 +517,7 @@ var stringBuilderPool = sync.Pool{
 //
 //	builder := pool.GetStringBuilder()
 //	defer pool.PutStringBuilder(builder)
-//	
+//
 //	builder.WriteString("MATCH (n:User) WHERE ")
 //	for i, filter := range filters {
 //		if i > 0 {
@@ -525,21 +526,21 @@ var stringBuilderPool = sync.Pool{
 //		builder.WriteString(filter)
 //	}
 //	builder.WriteString(" RETURN n")
-//	
+//
 //	query := builder.String()
 //
 // Example 2 - Build JSON:
 //
 //	builder := pool.GetStringBuilder()
 //	defer pool.PutStringBuilder(builder)
-//	
+//
 //	builder.WriteByte('{')
 //	builder.WriteString(`"name":"`)
 //	builder.WriteString(name)
 //	builder.WriteString(`","age":`)
 //	builder.WriteString(strconv.Itoa(age))
 //	builder.WriteByte('}')
-//	
+//
 //	json := builder.String()
 //
 // Performance vs strings.Builder:
@@ -644,7 +645,7 @@ func (b *PooledStringBuilder) Len() int {
 //	builder := pool.GetStringBuilder()
 //	builder.WriteString("first")
 //	fmt.Println(builder.String()) // "first"
-//	
+//
 //	builder.Reset()
 //	builder.WriteString("second")
 //	fmt.Println(builder.String()) // "second"
@@ -665,7 +666,7 @@ func (b *PooledStringBuilder) Reset() {
 //
 //	builder := pool.GetStringBuilder()
 //	defer pool.PutStringBuilder(builder)
-//	
+//
 //	builder.WriteString("SELECT * FROM users WHERE ")
 //	for i, condition := range conditions {
 //		if i > 0 {
@@ -673,7 +674,7 @@ func (b *PooledStringBuilder) Reset() {
 //		}
 //		builder.WriteString(condition)
 //	}
-//	
+//
 //	return builder.String()
 //
 // Example 2 - Build CSV Line:
@@ -681,7 +682,7 @@ func (b *PooledStringBuilder) Reset() {
 //	func buildCSVLine(fields []string) string {
 //		builder := pool.GetStringBuilder()
 //		defer pool.PutStringBuilder(builder)
-//		
+//
 //		for i, field := range fields {
 //			if i > 0 {
 //				builder.WriteByte(',')
@@ -690,7 +691,7 @@ func (b *PooledStringBuilder) Reset() {
 //			builder.WriteString(field)
 //			builder.WriteByte('"')
 //		}
-//		
+//
 //		return builder.String()
 //	}
 //
@@ -698,14 +699,14 @@ func (b *PooledStringBuilder) Reset() {
 //
 //	builder := pool.GetStringBuilder()
 //	defer pool.PutStringBuilder(builder)
-//	
+//
 //	builder.WriteString("[")
 //	builder.WriteString(level)
 //	builder.WriteString("] ")
 //	builder.WriteString(time.Now().Format(time.RFC3339))
 //	builder.WriteString(": ")
 //	builder.WriteString(message)
-//	
+//
 //	logger.Print(builder.String())
 //
 // Performance:
@@ -733,7 +734,7 @@ func GetStringBuilder() *PooledStringBuilder {
 //
 //	builder := pool.GetStringBuilder()
 //	defer pool.PutStringBuilder(builder) // Always return to pool
-//	
+//
 //	builder.WriteString("temporary string")
 //	return builder.String()
 //
@@ -776,12 +777,12 @@ var byteBufferPool = sync.Pool{
 //	func encodeJSON(data interface{}) ([]byte, error) {
 //		buf := pool.GetByteBuffer()
 //		defer pool.PutByteBuffer(buf)
-//		
+//
 //		encoder := json.NewEncoder(bytes.NewBuffer(buf))
 //		if err := encoder.Encode(data); err != nil {
 //			return nil, err
 //		}
-//		
+//
 //		// Return a copy (original goes back to pool)
 //		result := make([]byte, len(buf))
 //		copy(result, buf)
@@ -793,14 +794,14 @@ var byteBufferPool = sync.Pool{
 //	func encodeMessage(msgType byte, payload []byte) []byte {
 //		buf := pool.GetByteBuffer()
 //		defer pool.PutByteBuffer(buf)
-//		
+//
 //		// Write header
 //		buf = append(buf, msgType)
 //		buf = binary.BigEndian.AppendUint32(buf, uint32(len(payload)))
-//		
+//
 //		// Write payload
 //		buf = append(buf, payload...)
-//		
+//
 //		return append([]byte(nil), buf...) // Return copy
 //	}
 //
@@ -809,7 +810,7 @@ var byteBufferPool = sync.Pool{
 //	func computeHash(data string) []byte {
 //		buf := pool.GetByteBuffer()
 //		defer pool.PutByteBuffer(buf)
-//		
+//
 //		h := sha256.New()
 //		h.Write([]byte(data))
 //		return h.Sum(buf[:0]) // Use buf as backing array
@@ -838,7 +839,7 @@ func GetByteBuffer() []byte {
 //
 //	buf := pool.GetByteBuffer()
 //	defer pool.PutByteBuffer(buf)
-//	
+//
 //	// Use buffer...
 //	buf = append(buf, []byte("data")...)
 //
@@ -881,12 +882,12 @@ var mapPool = sync.Pool{
 //	func buildParams(userID string, filters map[string]string) map[string]interface{} {
 //		params := pool.GetMap()
 //		defer pool.PutMap(params)
-//		
+//
 //		params["userID"] = userID
 //		for k, v := range filters {
 //			params[k] = v
 //		}
-//		
+//
 //		// Return a copy
 //		result := make(map[string]interface{}, len(params))
 //		for k, v := range params {
@@ -900,12 +901,12 @@ var mapPool = sync.Pool{
 //	func createNode(id, name string, age int) *Node {
 //		props := pool.GetMap()
 //		defer pool.PutMap(props)
-//		
+//
 //		props["id"] = id
 //		props["name"] = name
 //		props["age"] = age
 //		props["created_at"] = time.Now()
-//		
+//
 //		return &Node{Properties: copyMap(props)}
 //	}
 //
@@ -914,11 +915,11 @@ var mapPool = sync.Pool{
 //	func buildResponse(status string, data interface{}) map[string]interface{} {
 //		resp := pool.GetMap()
 //		defer pool.PutMap(resp)
-//		
+//
 //		resp["status"] = status
 //		resp["data"] = data
 //		resp["timestamp"] = time.Now().Unix()
-//		
+//
 //		return copyMap(resp)
 //	}
 //
@@ -950,7 +951,7 @@ func GetMap() map[string]interface{} {
 //
 //	params := pool.GetMap()
 //	defer pool.PutMap(params)
-//	
+//
 //	params["key"] = "value"
 //	// Use params...
 //
@@ -997,13 +998,13 @@ var stringSlicePool = sync.Pool{
 //	func getNodeLabels(node *Node) []string {
 //		labels := pool.GetStringSlice()
 //		defer pool.PutStringSlice(labels)
-//		
+//
 //		for _, label := range node.Labels {
 //			if isActive(label) {
 //				labels = append(labels, label)
 //			}
 //		}
-//		
+//
 //		return append([]string(nil), labels...) // Return copy
 //	}
 //
@@ -1012,11 +1013,11 @@ var stringSlicePool = sync.Pool{
 //	func getColumns(fields []Field) []string {
 //		cols := pool.GetStringSlice()
 //		defer pool.PutStringSlice(cols)
-//		
+//
 //		for _, field := range fields {
 //			cols = append(cols, field.Name)
 //		}
-//		
+//
 //		return append([]string(nil), cols...)
 //	}
 //
@@ -1025,14 +1026,14 @@ var stringSlicePool = sync.Pool{
 //	func parseTags(input string) []string {
 //		tags := pool.GetStringSlice()
 //		defer pool.PutStringSlice(tags)
-//		
+//
 //		for _, tag := range strings.Split(input, ",") {
 //			tag = strings.TrimSpace(tag)
 //			if tag != "" {
 //				tags = append(tags, tag)
 //			}
 //		}
-//		
+//
 //		return append([]string(nil), tags...)
 //	}
 //
@@ -1059,7 +1060,7 @@ func GetStringSlice() []string {
 //
 //	labels := pool.GetStringSlice()
 //	defer pool.PutStringSlice(labels)
-//	
+//
 //	labels = append(labels, "User", "Active")
 //	// Use labels...
 //
@@ -1101,9 +1102,9 @@ var interfaceSlicePool = sync.Pool{
 //	func buildRow(id int, name string, active bool) []interface{} {
 //		row := pool.GetInterfaceSlice()
 //		defer pool.PutInterfaceSlice(row)
-//		
+//
 //		row = append(row, id, name, active)
-//		
+//
 //		// Return a copy
 //		return append([]interface{}(nil), row...)
 //	}
@@ -1113,13 +1114,13 @@ var interfaceSlicePool = sync.Pool{
 //	func extractValues(props map[string]interface{}, keys []string) []interface{} {
 //		values := pool.GetInterfaceSlice()
 //		defer pool.PutInterfaceSlice(values)
-//		
+//
 //		for _, key := range keys {
 //			if val, ok := props[key]; ok {
 //				values = append(values, val)
 //			}
 //		}
-//		
+//
 //		return append([]interface{}(nil), values...)
 //	}
 //
@@ -1128,9 +1129,9 @@ var interfaceSlicePool = sync.Pool{
 //	func callFunction(name string, args ...interface{}) interface{} {
 //		argList := pool.GetInterfaceSlice()
 //		defer pool.PutInterfaceSlice(argList)
-//		
+//
 //		argList = append(argList, args...)
-//		
+//
 //		return functions[name](argList...)
 //	}
 //
@@ -1158,7 +1159,7 @@ func GetInterfaceSlice() []interface{} {
 //
 //	row := pool.GetInterfaceSlice()
 //	defer pool.PutInterfaceSlice(row)
-//	
+//
 //	row = append(row, 1, "test", true)
 //	// Use row...
 //

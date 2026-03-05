@@ -389,9 +389,9 @@ func (m *mockFunctionPlugin) Functions() map[string]interface{} {
 }
 
 type mockHeimdallPlugin struct {
-	name    string
-	version string
-	ptype   string
+	name       string
+	version    string
+	ptype      string
 	startCalls int
 }
 

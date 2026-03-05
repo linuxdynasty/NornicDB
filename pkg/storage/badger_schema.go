@@ -215,4 +215,3 @@ func (b *BadgerEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
 
 	return sm
 }
-

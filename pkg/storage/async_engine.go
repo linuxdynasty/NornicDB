@@ -84,7 +84,6 @@ type AsyncEngine struct {
 	flushMu sync.RWMutex
 }
 
-
 // AsyncEngineConfig configures the async engine behavior.
 type AsyncEngineConfig struct {
 	// FlushInterval controls how often pending writes are flushed.

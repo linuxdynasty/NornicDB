@@ -38,4 +38,3 @@ func TestBasicAuthCache_Expires(t *testing.T) {
 		t.Fatalf("expected cache miss after expiry")
 	}
 }
-

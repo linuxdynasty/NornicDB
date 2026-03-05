@@ -90,4 +90,3 @@ func TestBadgerEngine_EdgePrefixStatsAreCorrect_TransactionalAndNonTransactional
 	require.NoError(t, err)
 	require.Equal(t, int64(0), count)
 }
-

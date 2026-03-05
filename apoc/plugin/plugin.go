@@ -7,7 +7,7 @@ package plugin
 import (
 	"fmt"
 	"sync"
-	
+
 	"github.com/orneryd/nornicdb/apoc/registry"
 	"github.com/orneryd/nornicdb/apoc/storage"
 )
@@ -16,19 +16,19 @@ import (
 type Plugin interface {
 	// Name returns the plugin name (e.g., "coll", "text", "math")
 	Name() string
-	
+
 	// Version returns the plugin version
 	Version() string
-	
+
 	// Description returns a description of the plugin
 	Description() string
-	
+
 	// Register registers all functions in this plugin
 	Register(reg *registry.FunctionRegistry) error
-	
+
 	// Initialize initializes the plugin with storage
 	Initialize(store storage.Storage) error
-	
+
 	// Cleanup cleans up plugin resources
 	Cleanup() error
 }
@@ -52,23 +52,23 @@ func NewPluginManager(store storage.Storage) *PluginManager {
 func (pm *PluginManager) Load(plugin Plugin) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	
+
 	name := plugin.Name()
-	
+
 	if _, exists := pm.plugins[name]; exists {
 		return fmt.Errorf("plugin %s already loaded", name)
 	}
-	
+
 	// Initialize plugin with storage
 	if err := plugin.Initialize(pm.storage); err != nil {
 		return fmt.Errorf("failed to initialize plugin %s: %w", name, err)
 	}
-	
+
 	// Register functions
 	if err := plugin.Register(registry.GetGlobalRegistry()); err != nil {
 		return fmt.Errorf("failed to register plugin %s: %w", name, err)
 	}
-	
+
 	pm.plugins[name] = plugin
 	return nil
 }
@@ -77,23 +77,23 @@ func (pm *PluginManager) Load(plugin Plugin) error {
 func (pm *PluginManager) Unload(name string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	
+
 	plugin, exists := pm.plugins[name]
 	if !exists {
 		return fmt.Errorf("plugin %s not loaded", name)
 	}
-	
+
 	// Cleanup plugin
 	if err := plugin.Cleanup(); err != nil {
 		return fmt.Errorf("failed to cleanup plugin %s: %w", name, err)
 	}
-	
+
 	// Unregister functions
 	reg := registry.GetGlobalRegistry()
 	for _, funcName := range reg.ListByCategory(name) {
 		reg.Unregister(funcName)
 	}
-	
+
 	delete(pm.plugins, name)
 	return nil
 }
@@ -102,7 +102,7 @@ func (pm *PluginManager) Unload(name string) error {
 func (pm *PluginManager) IsLoaded(name string) bool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	_, exists := pm.plugins[name]
 	return exists
 }
@@ -111,7 +111,7 @@ func (pm *PluginManager) IsLoaded(name string) bool {
 func (pm *PluginManager) List() []string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	names := make([]string, 0, len(pm.plugins))
 	for name := range pm.plugins {
 		names = append(names, name)
@@ -123,7 +123,7 @@ func (pm *PluginManager) List() []string {
 func (pm *PluginManager) Get(name string) (Plugin, bool) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	plugin, exists := pm.plugins[name]
 	return plugin, exists
 }
@@ -146,13 +146,13 @@ func (pm *PluginManager) UnloadAll() error {
 		names = append(names, name)
 	}
 	pm.mu.Unlock()
-	
+
 	for _, name := range names {
 		if err := pm.Unload(name); err != nil {
 			return err
 		}
 	}
-	
+
 	return nil
 }
 
@@ -169,14 +169,14 @@ func (pm *PluginManager) Info(name string) (*PluginInfo, error) {
 	pm.mu.RLock()
 	plugin, exists := pm.plugins[name]
 	pm.mu.RUnlock()
-	
+
 	if !exists {
 		return nil, fmt.Errorf("plugin %s not loaded", name)
 	}
-	
+
 	reg := registry.GetGlobalRegistry()
 	functions := reg.ListByCategory(name)
-	
+
 	return &PluginInfo{
 		Name:        plugin.Name(),
 		Version:     plugin.Version(),
@@ -189,14 +189,14 @@ func (pm *PluginManager) Info(name string) (*PluginInfo, error) {
 func (pm *PluginManager) AllInfo() []*PluginInfo {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	infos := make([]*PluginInfo, 0, len(pm.plugins))
 	for name := range pm.plugins {
 		if info, err := pm.Info(name); err == nil {
 			infos = append(infos, info)
 		}
 	}
-	
+
 	return infos
 }
 

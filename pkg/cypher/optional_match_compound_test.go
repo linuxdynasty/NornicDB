@@ -26,7 +26,7 @@ func TestCompoundMatchOptionalMatch_OrderStatusPharmacy(t *testing.T) {
 			"userId":          "user-1",
 			"orderId":         "ord-1",
 			"orderDate":       "2026-02-03",
-			"fillType":       "RETAIL",
+			"fillType":        "RETAIL",
 			"fulFillmentType": "PICK",
 			"details":         "[]",
 		},

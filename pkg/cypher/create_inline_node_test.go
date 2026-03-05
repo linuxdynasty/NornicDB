@@ -248,11 +248,11 @@ func TestMatchMatchWhereCreate_TwoMatchWithWhere(t *testing.T) {
 // TestCreateSingleNode tests basic single node creation
 func TestCreateSingleNodeComprehensive(t *testing.T) {
 	tests := []struct {
-		name     string
-		query    string
-		labels   []string
-		propKey  string
-		propVal  interface{}
+		name    string
+		query   string
+		labels  []string
+		propKey string
+		propVal interface{}
 	}{
 		{
 			name:    "simple node with label",

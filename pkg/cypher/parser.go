@@ -187,7 +187,7 @@ type SetItem struct {
 func (p *Parser) Parse(cypher string) (*Query, error) {
 	// Normalize whitespace
 	cypher = strings.TrimSpace(cypher)
-	
+
 	query := &Query{
 		Clauses:    make([]Clause, 0),
 		Parameters: make(map[string]any),
@@ -203,7 +203,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 	pos := 0
 	for pos < len(tokens) {
 		token := strings.ToUpper(tokens[pos])
-		
+
 		switch token {
 		case "MATCH":
 			clause, newPos, err := p.parseMatch(tokens, pos)
@@ -213,7 +213,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryMatch
-			
+
 		case "OPTIONAL":
 			if pos+1 < len(tokens) && strings.EqualFold(tokens[pos+1], "MATCH") {
 				clause, newPos, err := p.parseMatch(tokens, pos+1)
@@ -224,7 +224,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 				query.Clauses = append(query.Clauses, clause)
 				pos = newPos
 			}
-			
+
 		case "CREATE":
 			clause, newPos, err := p.parseCreate(tokens, pos)
 			if err != nil {
@@ -233,7 +233,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryCreate
-			
+
 		case "RETURN":
 			clause, newPos, err := p.parseReturn(tokens, pos)
 			if err != nil {
@@ -241,7 +241,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			}
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
-			
+
 		case "WHERE":
 			clause, newPos, err := p.parseWhere(tokens, pos)
 			if err != nil {
@@ -249,7 +249,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			}
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
-			
+
 		case "SET":
 			clause, newPos, err := p.parseSet(tokens, pos)
 			if err != nil {
@@ -258,7 +258,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QuerySet
-			
+
 		case "DELETE", "DETACH":
 			clause, newPos, err := p.parseDelete(tokens, pos)
 			if err != nil {
@@ -267,7 +267,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryDelete
-			
+
 		default:
 			pos++
 		}
@@ -280,12 +280,12 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 func (p *Parser) parseMatch(tokens []string, pos int) (*MatchClause, int, error) {
 	// Skip MATCH keyword
 	pos++
-	
+
 	clause := &MatchClause{}
-	
+
 	// Parse pattern (simplified)
 	// TODO: Full pattern parsing
-	
+
 	return clause, pos, nil
 }
 
@@ -324,13 +324,13 @@ func (p *Parser) parseSet(tokens []string, pos int) (*SetClause, int, error) {
 // parseDelete parses a DELETE clause.
 func (p *Parser) parseDelete(tokens []string, pos int) (*DeleteClause, int, error) {
 	clause := &DeleteClause{}
-	
+
 	if strings.EqualFold(tokens[pos], "DETACH") {
 		clause.Detach = true
 		pos++
 	}
 	pos++ // Skip DELETE
-	
+
 	return clause, pos, nil
 }
 
@@ -344,7 +344,7 @@ func tokenize(cypher string) []string {
 
 	for i := 0; i < len(cypher); i++ {
 		c := cypher[i]
-		
+
 		if inString {
 			current.WriteByte(c)
 			if c == stringChar {
@@ -354,7 +354,7 @@ func tokenize(cypher string) []string {
 			}
 			continue
 		}
-		
+
 		switch c {
 		case '"', '\'':
 			inString = true
@@ -375,11 +375,11 @@ func tokenize(cypher string) []string {
 			current.WriteByte(c)
 		}
 	}
-	
+
 	if current.Len() > 0 {
 		tokens = append(tokens, current.String())
 	}
-	
+
 	return tokens
 }
 

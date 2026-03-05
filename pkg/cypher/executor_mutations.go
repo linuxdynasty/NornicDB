@@ -1485,7 +1485,6 @@ func (e *StorageExecutor) parseReturnItems(returnPart string) []returnItem {
 	return items
 }
 
-
 func (e *StorageExecutor) generateID() string {
 	// Use UUID for globally unique IDs
 	// This prevents ID collisions across server restarts which caused

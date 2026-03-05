@@ -24,7 +24,7 @@ type QueryAnalyzer struct {
 func NewQueryAnalyzer() *QueryAnalyzer {
 	return &QueryAnalyzer{
 		labelRouting:     make(map[string][]string),
-		propertyRouting:   make(map[string]map[interface{}]string),
+		propertyRouting:  make(map[string]map[interface{}]string),
 		propertyDefaults: make(map[string]string),
 	}
 }
@@ -141,4 +141,3 @@ type QueryInfo struct {
 	IsWrite    bool
 	IsFullScan bool
 }
-

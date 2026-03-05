@@ -76,9 +76,9 @@ func TestUnifiedPluginLoading(t *testing.T) {
 		// Create minimal Heimdall context
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}
@@ -146,9 +146,9 @@ func TestUnifiedPluginLoading(t *testing.T) {
 		// Create Heimdall context
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}
@@ -223,9 +223,9 @@ func TestPluginAutoDetection(t *testing.T) {
 
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}
@@ -311,9 +311,9 @@ func TestHeimdallPluginLifecycle(t *testing.T) {
 		// Create Heimdall context
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}
@@ -405,9 +405,9 @@ func TestPluginLoadingSequence(t *testing.T) {
 
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}
@@ -476,9 +476,9 @@ func TestPluginIsolation(t *testing.T) {
 
 		ctx := &heimdall.SubsystemContext{
 			Config: heimdall.Config{
-				Model:        "test-model",
-				ModelsDir:    "models",
-				GPULayers:    0,
+				Model:       "test-model",
+				ModelsDir:   "models",
+				GPULayers:   0,
 				ContextSize: 2048,
 			},
 		}

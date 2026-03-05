@@ -58,7 +58,7 @@ func TestBug_BulkImportCount(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Step 4: Check counts via different methods
-	
+
 	// Method 1: storage.NodeCount()
 	storageCount, err := db.storage.NodeCount()
 	require.NoError(t, err)

@@ -19,21 +19,21 @@ func TestPolygonFunction(t *testing.T) {
 		point({x: 0.0, y: 3.0})
 	])`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	polygonMap, ok := result.(map[string]interface{})
 	if !ok {
 		t.Fatalf("polygon() should return map, got %T", result)
 	}
-	
+
 	if polygonMap["type"] != "polygon" {
 		t.Errorf("polygon type = %v, want 'polygon'", polygonMap["type"])
 	}
-	
+
 	points, ok := polygonMap["points"].([]interface{})
 	if !ok {
 		t.Fatal("polygon should have points list")
 	}
-	
+
 	if len(points) != 4 {
 		t.Errorf("polygon should have 4 points, got %d", len(points))
 	}
@@ -45,7 +45,7 @@ func TestPolygonFunctionInvalid(t *testing.T) {
 	// Test with too few points (less than 3)
 	expr := `polygon([point({x: 0.0, y: 0.0}), point({x: 1.0, y: 1.0})])`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != nil {
 		t.Error("polygon with less than 3 points should return nil")
 	}
@@ -61,21 +61,21 @@ func TestLineStringFunction(t *testing.T) {
 		point({x: 2.0, y: 0.0})
 	])`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	lineMap, ok := result.(map[string]interface{})
 	if !ok {
 		t.Fatalf("lineString() should return map, got %T", result)
 	}
-	
+
 	if lineMap["type"] != "linestring" {
 		t.Errorf("lineString type = %v, want 'linestring'", lineMap["type"])
 	}
-	
+
 	points, ok := lineMap["points"].([]interface{})
 	if !ok {
 		t.Fatal("lineString should have points list")
 	}
-	
+
 	if len(points) != 3 {
 		t.Errorf("lineString should have 3 points, got %d", len(points))
 	}
@@ -87,7 +87,7 @@ func TestLineStringFunctionInvalid(t *testing.T) {
 	// Test with too few points (less than 2)
 	expr := `lineString([point({x: 0.0, y: 0.0})])`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != nil {
 		t.Error("lineString with less than 2 points should return nil")
 	}
@@ -104,7 +104,7 @@ func TestPointIntersectsPolygon(t *testing.T) {
 		point({x: 0.0, y: 3.0})
 	])`
 	polygon := e.evaluateExpressionWithContext(polygonExpr, nil, nil)
-	
+
 	tests := []struct {
 		name     string
 		point    string
@@ -136,23 +136,23 @@ func TestPointIntersectsPolygon(t *testing.T) {
 			expected: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			point := e.evaluateExpressionWithContext(tt.point, nil, nil)
-			
+
 			// Create a node with the polygon for testing
 			polygonMap := polygon.(map[string]interface{})
 			pointMap := point.(map[string]interface{})
-			
+
 			// Build the point.intersects expression manually
 			result := e.evaluateExpressionWithContext("", nil, nil)
-			
+
 			// Test using the helper function directly
 			points := extractPolygonPoints(polygonMap)
 			px, py, _ := getXY(pointMap)
 			result = pointInPolygon(px, py, points)
-			
+
 			if result != tt.expected {
 				t.Errorf("point.intersects(%s, polygon) = %v, want %v", tt.name, result, tt.expected)
 			}
@@ -175,7 +175,7 @@ func TestPointIntersectsFunction(t *testing.T) {
 		])
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point.intersects should return true for point inside polygon")
 	}
@@ -191,7 +191,7 @@ func TestPointIntersectsFunction(t *testing.T) {
 		])
 	)`
 	result = e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point.intersects should return false for point outside polygon")
 	}
@@ -212,7 +212,7 @@ func TestPointContainsFunction(t *testing.T) {
 		point({x: 2.0, y: 1.5})
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point.contains should return true for point inside polygon")
 	}
@@ -228,7 +228,7 @@ func TestPointContainsFunction(t *testing.T) {
 		point({x: 5.0, y: 5.0})
 	)`
 	result = e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point.contains should return false for point outside polygon")
 	}
@@ -249,7 +249,7 @@ func TestPointIntersectsWithLatLon(t *testing.T) {
 		])
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point.intersects should work with lat/lon coordinates")
 	}
@@ -269,7 +269,7 @@ func TestPointContainsWithLatLon(t *testing.T) {
 		point({latitude: 40.7128, longitude: -74.0060})
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point.contains should work with lat/lon coordinates")
 	}
@@ -291,7 +291,7 @@ func TestComplexPolygonShape(t *testing.T) {
 		])
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point should be outside L-shaped polygon")
 	}
@@ -309,7 +309,7 @@ func TestComplexPolygonShape(t *testing.T) {
 		])
 	)`
 	result = e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point should be inside L-shaped polygon")
 	}
@@ -328,7 +328,7 @@ func TestTrianglePolygon(t *testing.T) {
 		])
 	)`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != true {
 		t.Error("point should be inside triangle")
 	}
@@ -343,7 +343,7 @@ func TestTrianglePolygon(t *testing.T) {
 		])
 	)`
 	result = e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point should be outside triangle")
 	}
@@ -355,7 +355,7 @@ func TestEdgeCases(t *testing.T) {
 	// Test with invalid polygon (no points)
 	expr := `point.intersects(point({x: 1.0, y: 1.0}), polygon([]))`
 	result := e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point.intersects should return false for empty polygon")
 	}
@@ -367,7 +367,7 @@ func TestEdgeCases(t *testing.T) {
 		point({x: 1.0, y: 1.0})
 	]))`
 	result = e.evaluateExpressionWithContext(expr, nil, nil)
-	
+
 	if result != false {
 		t.Error("point.intersects should return false for invalid point format")
 	}

@@ -108,10 +108,10 @@ import (
 
 // Errors
 var (
-	ErrPolicyNotFound   = errors.New("retention: policy not found")
-	ErrLegalHold        = errors.New("retention: data under legal hold cannot be deleted")
-	ErrInvalidPolicy    = errors.New("retention: invalid policy configuration")
-	ErrAlreadyExists    = errors.New("retention: policy already exists")
+	ErrPolicyNotFound    = errors.New("retention: policy not found")
+	ErrLegalHold         = errors.New("retention: data under legal hold cannot be deleted")
+	ErrInvalidPolicy     = errors.New("retention: invalid policy configuration")
+	ErrAlreadyExists     = errors.New("retention: policy already exists")
 	ErrErasureInProgress = errors.New("retention: erasure already in progress")
 )
 
@@ -128,10 +128,10 @@ const (
 	CategoryArchive   DataCategory = "ARCHIVE"   // Archived data
 
 	// Compliance-specific categories
-	CategoryPHI      DataCategory = "PHI"      // Protected Health Information (HIPAA)
-	CategoryPII      DataCategory = "PII"      // Personally Identifiable Information (GDPR)
+	CategoryPHI       DataCategory = "PHI"       // Protected Health Information (HIPAA)
+	CategoryPII       DataCategory = "PII"       // Personally Identifiable Information (GDPR)
 	CategoryFinancial DataCategory = "FINANCIAL" // Financial records (SOX)
-	CategoryLegal    DataCategory = "LEGAL"    // Legal documents
+	CategoryLegal     DataCategory = "LEGAL"     // Legal documents
 )
 
 // RetentionPeriod defines a time-based retention period.
@@ -348,15 +348,15 @@ type DataRecord struct {
 
 // Manager manages retention policies and data lifecycle.
 type Manager struct {
-	mu         sync.RWMutex
-	policies   map[string]*Policy
-	holds      map[string]*LegalHold
-	erasures   map[string]*ErasureRequest
-	
+	mu       sync.RWMutex
+	policies map[string]*Policy
+	holds    map[string]*LegalHold
+	erasures map[string]*ErasureRequest
+
 	// Callbacks
-	onDelete   func(record *DataRecord) error
-	onArchive  func(record *DataRecord, archivePath string) error
-	
+	onDelete  func(record *DataRecord) error
+	onArchive func(record *DataRecord, archivePath string) error
+
 	// Configuration
 	defaultPolicy *Policy
 }
@@ -387,18 +387,18 @@ type Manager struct {
 // Example 1 - GDPR Compliance Setup:
 //
 //	manager := retention.NewManager()
-//	
+//
 //	// Add GDPR-compliant policies
 //	for _, policy := range retention.DefaultPolicies() {
 //		manager.AddPolicy(policy)
 //	}
-//	
+//
 //	// Set callbacks for data operations
 //	manager.SetDeleteCallback(func(record *retention.DataRecord) error {
 //		log.Printf("Deleting record: %s (age: %v)", record.ID, time.Since(record.CreatedAt))
 //		return database.Delete(record.ID)
 //	})
-//	
+//
 //	manager.SetArchiveCallback(func(record *retention.DataRecord, path string) error {
 //		log.Printf("Archiving to: %s", path)
 //		return archiveSystem.Store(record, path)
@@ -407,7 +407,7 @@ type Manager struct {
 // Example 2 - HIPAA Healthcare Application:
 //
 //	manager := retention.NewManager()
-//	
+//
 //	// PHI retention: 6 years minimum
 //	phiPolicy := &retention.Policy{
 //		ID:       "phi-6y",
@@ -422,7 +422,7 @@ type Manager struct {
 //		Active:               true,
 //	}
 //	manager.AddPolicy(phiPolicy)
-//	
+//
 //	// Audit logs: 7 years
 //	auditPolicy := &retention.Policy{
 //		ID:       "audit-7y",
@@ -438,7 +438,7 @@ type Manager struct {
 //
 //	manager := retention.NewManager()
 //	manager.AddPolicy(retention.DefaultPolicies()[0])
-//	
+//
 //	// Create legal hold for litigation
 //	hold, err := manager.CreateLegalHold(
 //		"litigation-2024-001",
@@ -448,7 +448,7 @@ type Manager struct {
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	// Records matching these tags won't be deleted
 //	record := &retention.DataRecord{
 //		ID:       "email-123",
@@ -456,14 +456,14 @@ type Manager struct {
 //		Tags:     []string{"hr", "employment"},
 //		CreatedAt: time.Now().Add(-5 * 365 * 24 * time.Hour),
 //	}
-//	
+//
 //	// Won't delete - protected by legal hold
 //	err = manager.ProcessRecord(ctx, record)
 //
 // Example 4 - GDPR Right to Erasure:
 //
 //	manager := retention.NewManager()
-//	
+//
 //	// User requests data deletion
 //	erasureReq, err := manager.CreateErasureRequest(
 //		"user-456",
@@ -472,20 +472,20 @@ type Manager struct {
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	// Find all user's data across systems
 //	records := []*retention.DataRecord{
 //		{ID: "profile-456", SubjectID: "user-456"},
 //		{ID: "orders-456", SubjectID: "user-456"},
 //		{ID: "analytics-456", SubjectID: "user-456"},
 //	}
-//	
+//
 //	// Process erasure (30-day GDPR deadline)
 //	err = manager.ProcessErasure(ctx, erasureReq.ID, records)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	fmt.Printf("Erased: %d, Retained: %d (legal hold)\n",
 //		erasureReq.ItemsErased, erasureReq.ItemsRetained)
 //
@@ -505,10 +505,10 @@ type Manager struct {
 //   - Storage costs: Old data costs money to store
 //
 // How it works:
-//   1. Set up policies: "Keep PHI for 6 years, analytics for 90 days"
-//   2. Manager checks records: "Is this record too old?"
-//   3. If yes: Archive first (if policy says so), then delete
-//   4. If legal hold: "Can't delete this, it's in a lawsuit!"
+//  1. Set up policies: "Keep PHI for 6 years, analytics for 90 days"
+//  2. Manager checks records: "Is this record too old?"
+//  3. If yes: Archive first (if policy says so), then delete
+//  4. If legal hold: "Can't delete this, it's in a lawsuit!"
 //
 // Real-world Use:
 //   - Healthcare: Manage patient records (HIPAA compliance)
@@ -530,7 +530,8 @@ type Manager struct {
 //   - Erasure request: O(m) where m = records to erase
 //
 // Thread Safety:
-//   All methods are thread-safe for concurrent access.
+//
+//	All methods are thread-safe for concurrent access.
 func NewManager() *Manager {
 	return &Manager{
 		policies: make(map[string]*Policy),
@@ -699,8 +700,9 @@ func (m *Manager) ListPolicies() []*Policy {
 //	manager.ReleaseLegalHold("hold-2024-001")
 //
 // Warning:
-//   Failure to preserve data under legal hold can result in sanctions,
-//   adverse inference instructions, or case dismissal.
+//
+//	Failure to preserve data under legal hold can result in sanctions,
+//	adverse inference instructions, or case dismissal.
 func (m *Manager) PlaceLegalHold(hold *LegalHold) error {
 	if hold.ID == "" {
 		return fmt.Errorf("%w: ID required", ErrInvalidPolicy)
@@ -874,7 +876,8 @@ func (m *Manager) ProcessRecord(ctx context.Context, record *DataRecord) error {
 //	}
 //
 // Compliance:
-//   GDPR Art.17 requires processing within 30 days without undue delay.
+//
+//	GDPR Art.17 requires processing within 30 days without undue delay.
 func (m *Manager) CreateErasureRequest(subjectID, subjectEmail string) (*ErasureRequest, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1084,37 +1087,38 @@ func (m *Manager) LoadPolicies(path string) error {
 //	manager.SavePolicies("./config/retention-policies.json")
 //
 // Customization:
-//   These are starting points. Adjust retention periods based on your:
-//   - Industry regulations
-//   - Geographic requirements
-//   - Business needs
-//   - Legal counsel recommendations
+//
+//	These are starting points. Adjust retention periods based on your:
+//	- Industry regulations
+//	- Geographic requirements
+//	- Business needs
+//	- Legal counsel recommendations
 //
 // Example 1 - Use All Default Policies:
 //
 //	manager := retention.NewManager()
-//	
+//
 //	// Add all pre-configured compliance policies
 //	for _, policy := range retention.DefaultPolicies() {
 //		if err := manager.AddPolicy(policy); err != nil {
 //			log.Printf("Failed to add policy %s: %v", policy.ID, err)
 //		}
 //	}
-//	
+//
 //	// Now manager has HIPAA, GDPR, SOX policies configured
 //
 // Example 2 - Selective Policy Usage:
 //
 //	policies := retention.DefaultPolicies()
 //	manager := retention.NewManager()
-//	
+//
 //	// Only add policies relevant to your industry
 //	for _, policy := range policies {
 //		// Healthcare app - need HIPAA policies
 //		if contains(policy.ComplianceFrameworks, "HIPAA") {
 //			manager.AddPolicy(policy)
 //		}
-//		
+//
 //		// European app - need GDPR policies
 //		if contains(policy.ComplianceFrameworks, "GDPR") {
 //			manager.AddPolicy(policy)
@@ -1125,7 +1129,7 @@ func (m *Manager) LoadPolicies(path string) error {
 //
 //	policies := retention.DefaultPolicies()
 //	manager := retention.NewManager()
-//	
+//
 //	// Find and customize specific policy
 //	for _, policy := range policies {
 //		if policy.Category == retention.CategoryPII {
@@ -1139,12 +1143,12 @@ func (m *Manager) LoadPolicies(path string) error {
 // Example 4 - Override with Custom Policies:
 //
 //	manager := retention.NewManager()
-//	
+//
 //	// Start with defaults
 //	for _, policy := range retention.DefaultPolicies() {
 //		manager.AddPolicy(policy)
 //	}
-//	
+//
 //	// Add industry-specific policy
 //	customPolicy := &retention.Policy{
 //		ID:       "telemetry-30d",
@@ -1174,39 +1178,39 @@ func (m *Manager) LoadPolicies(path string) error {
 // Included Policies:
 //
 // 1. **Audit Logs (7 years)** - audit-7y
-//    - HIPAA §164.530(j), SOX §802, FISMA
-//    - Archives before deletion
-//    - Critical for compliance audits
+//   - HIPAA §164.530(j), SOX §802, FISMA
+//   - Archives before deletion
+//   - Critical for compliance audits
 //
 // 2. **PHI/Health Data (6 years)** - phi-6y
-//    - HIPAA §164.530(j) requirement
-//    - Archives before deletion
-//    - Protected health information
+//   - HIPAA §164.530(j) requirement
+//   - Archives before deletion
+//   - Protected health information
 //
 // 3. **PII/Personal Data (3 years)** - pii-gdpr
-//    - GDPR Art.5(1)(e) minimization
-//    - No archival (privacy-focused)
-//    - Personally identifiable information
+//   - GDPR Art.5(1)(e) minimization
+//   - No archival (privacy-focused)
+//   - Personally identifiable information
 //
 // 4. **Financial Records (7 years)** - financial-7y
-//    - SOX §802, IRS requirements
-//    - Archives before deletion
-//    - Tax and audit compliance
+//   - SOX §802, IRS requirements
+//   - Archives before deletion
+//   - Tax and audit compliance
 //
 // 5. **User Data (1 year)** - user-1y
-//    - General user content
-//    - No archival by default
-//    - Configurable based on needs
+//   - General user content
+//   - No archival by default
+//   - Configurable based on needs
 //
 // 6. **Analytics (90 days)** - analytics-90d
-//    - Short-term metrics
-//    - No archival
-//    - Quick cleanup
+//   - Short-term metrics
+//   - No archival
+//   - Quick cleanup
 //
 // 7. **System Data (indefinite)** - system-indefinite
-//    - Core configuration
-//    - Never deleted
-//    - Essential operations
+//   - Core configuration
+//   - Never deleted
+//   - Essential operations
 //
 // When to Modify:
 //   - Your industry has stricter requirements
@@ -1226,7 +1230,8 @@ func (m *Manager) LoadPolicies(path string) error {
 //   - No I/O or computation
 //
 // Thread Safety:
-//   Returns new policy instances - safe to modify.
+//
+//	Returns new policy instances - safe to modify.
 func DefaultPolicies() []*Policy {
 	now := time.Now().UTC()
 	return []*Policy{

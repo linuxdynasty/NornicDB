@@ -175,4 +175,3 @@ func TestReplaceVariableInQuery_ForNestedMapPropertyAccess(t *testing.T) {
 		t.Fatalf("expected map literal substitution in query, got: %s", out)
 	}
 }
-

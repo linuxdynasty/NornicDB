@@ -111,10 +111,10 @@ func TestCosineSimilarityFloat64(t *testing.T) {
 func TestCosineSimilarityGPU(t *testing.T) {
 	a := []float32{1.0, 2.0, 3.0}
 	b := []float32{4.0, 5.0, 6.0}
-	
+
 	result := CosineSimilarityGPU(a, b)
 	expected := float32(0.9746318)
-	
+
 	if math.Abs(float64(result-expected)) > 0.001 {
 		t.Errorf("expected %f, got %f", expected, result)
 	}
@@ -195,7 +195,7 @@ func TestNormalize(t *testing.T) {
 	t.Run("normalizes vector to unit length", func(t *testing.T) {
 		vec := []float32{3.0, 4.0}
 		result := Normalize(vec)
-		
+
 		// Expected: [0.6, 0.8]
 		if math.Abs(float64(result[0]-0.6)) > 0.001 {
 			t.Errorf("expected [0] = 0.6, got %f", result[0])
@@ -203,7 +203,7 @@ func TestNormalize(t *testing.T) {
 		if math.Abs(float64(result[1]-0.8)) > 0.001 {
 			t.Errorf("expected [1] = 0.8, got %f", result[1])
 		}
-		
+
 		// Original should be unchanged
 		if vec[0] != 3.0 || vec[1] != 4.0 {
 			t.Error("original vector was modified")
@@ -213,7 +213,7 @@ func TestNormalize(t *testing.T) {
 	t.Run("zero vector returns zero vector", func(t *testing.T) {
 		vec := []float32{0.0, 0.0, 0.0}
 		result := Normalize(vec)
-		
+
 		for i, v := range result {
 			if v != 0.0 {
 				t.Errorf("expected [%d] = 0, got %f", i, v)
@@ -226,7 +226,7 @@ func TestNormalizeInPlace(t *testing.T) {
 	t.Run("normalizes vector in place", func(t *testing.T) {
 		vec := []float32{3.0, 4.0}
 		NormalizeInPlace(vec)
-		
+
 		// Expected: [0.6, 0.8]
 		if math.Abs(float64(vec[0]-0.6)) > 0.001 {
 			t.Errorf("expected [0] = 0.6, got %f", vec[0])
@@ -239,7 +239,7 @@ func TestNormalizeInPlace(t *testing.T) {
 	t.Run("zero vector unchanged", func(t *testing.T) {
 		vec := []float32{0.0, 0.0}
 		NormalizeInPlace(vec)
-		
+
 		if vec[0] != 0.0 || vec[1] != 0.0 {
 			t.Error("zero vector should remain unchanged")
 		}

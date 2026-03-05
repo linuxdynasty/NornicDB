@@ -41,7 +41,7 @@ func TestTransaction_SetMetadata_Merge(t *testing.T) {
 
 	// Set initial metadata
 	tx.SetMetadata(map[string]interface{}{
-		"app": "test-app",
+		"app":    "test-app",
 		"userId": 123,
 	})
 
@@ -128,7 +128,7 @@ func TestTransaction_Commit_LogsMetadata(t *testing.T) {
 
 	// Create a node
 	node := &Node{
-		ID: NodeID(prefixTestID("test-node")),
+		ID:     NodeID(prefixTestID("test-node")),
 		Labels: []string{"Test"},
 	}
 	tx.CreateNode(node)

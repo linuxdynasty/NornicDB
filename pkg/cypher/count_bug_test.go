@@ -41,7 +41,7 @@ func TestBug_CountReturnsZeroWhenNodesExist(t *testing.T) {
 	require.Len(t, result.Rows, 1)
 	countN := result.Rows[0][0]
 	t.Logf("MATCH (n) RETURN count(n) returned: %v (type: %T)", countN, countN)
-	
+
 	// Convert to int64 for comparison
 	var countNInt int64
 	switch v := countN.(type) {
@@ -60,7 +60,7 @@ func TestBug_CountReturnsZeroWhenNodesExist(t *testing.T) {
 	require.Len(t, result.Rows, 1)
 	countStar := result.Rows[0][0]
 	t.Logf("MATCH (n) RETURN count(*) returned: %v (type: %T)", countStar, countStar)
-	
+
 	var countStarInt int64
 	switch v := countStar.(type) {
 	case int64:

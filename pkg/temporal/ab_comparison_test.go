@@ -26,13 +26,13 @@ import (
 
 // ComparisonResult holds A/B test results
 type ComparisonResult struct {
-	Name              string
-	RawMAE            float64
-	FilteredMAE       float64
-	RawVariance       float64
-	FilteredVariance  float64
-	ImprovementPct    float64
-	KalmanWins        bool
+	Name             string
+	RawMAE           float64
+	FilteredMAE      float64
+	RawVariance      float64
+	FilteredVariance float64
+	ImprovementPct   float64
+	KalmanWins       bool
 }
 
 // =============================================================================
@@ -285,7 +285,7 @@ func TestAB_RelationshipWeightSmoothing(t *testing.T) {
 	// True trend: slowly increasing from 0.5 to 0.8
 	weights := make([]float64, 50)
 	for i := range weights {
-		trueWeight := 0.5 + float64(i)*0.006 // 0.5 to 0.8
+		trueWeight := 0.5 + float64(i)*0.006               // 0.5 to 0.8
 		weights[i] = trueWeight + (rand.Float64()-0.5)*0.2 // ±0.1 noise
 	}
 
@@ -376,17 +376,17 @@ func TestAB_DecayModifierStability(t *testing.T) {
 func TestAB_FeatureFlags(t *testing.T) {
 	// Test with feature disabled
 	config.DisableKalmanFiltering()
-	
+
 	kf := filter.NewKalman(filter.DefaultConfig())
 	rawValue := 100.0
-	
+
 	var resultDisabled float64
 	if config.IsFeatureEnabled(config.FeatureKalmanTemporal) {
 		resultDisabled = kf.Process(rawValue, 0)
 	} else {
 		resultDisabled = rawValue
 	}
-	
+
 	if resultDisabled != rawValue {
 		t.Error("Should NOT be filtered when disabled")
 	}
@@ -397,12 +397,12 @@ func TestAB_FeatureFlags(t *testing.T) {
 	// Test with feature enabled
 	config.EnableKalmanFiltering()
 	config.EnableFeature(config.FeatureKalmanTemporal)
-	
+
 	// Process some values to warm up
 	for i := 0; i < 10; i++ {
 		kf.Process(100.0, 0)
 	}
-	
+
 	testValue := 150.0
 	var resultEnabled float64
 	if config.IsFeatureEnabled(config.FeatureKalmanTemporal) {
@@ -410,7 +410,7 @@ func TestAB_FeatureFlags(t *testing.T) {
 	} else {
 		resultEnabled = testValue
 	}
-	
+
 	// Should be filtered and different from raw
 	if resultEnabled == testValue {
 		t.Error("Should be filtered when enabled (smoothing should change the value)")

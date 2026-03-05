@@ -313,7 +313,7 @@ func PageRank(incomingScores []float64, dampingFactor float64) float64 {
 		sum += score
 	}
 
-	return (1-dampingFactor) + dampingFactor*sum
+	return (1 - dampingFactor) + dampingFactor*sum
 }
 
 // Normalize normalizes scores to 0-1 range.

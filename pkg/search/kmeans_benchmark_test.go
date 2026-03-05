@@ -232,4 +232,3 @@ func TestKMeansCandidateGen_Integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(candidates), 1)
 }
-

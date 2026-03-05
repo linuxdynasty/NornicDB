@@ -26,7 +26,7 @@ type TraversalContext struct {
 	endNode     *storage.Node
 	relTypes    []string // Allowed relationship types (empty = any)
 	relTypeSet  map[string]struct{}
-	direction   string   // "outgoing", "incoming", "both"
+	direction   string // "outgoing", "incoming", "both"
 	minHops     int
 	maxHops     int
 	visited     map[storage.NodeID]bool
@@ -924,14 +924,14 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 
 	for _, startNode := range startNodes {
 		ctx := &TraversalContext{
-			startNode: startNode,
-			relTypes:  match.Relationship.Types,
+			startNode:  startNode,
+			relTypes:   match.Relationship.Types,
 			relTypeSet: buildRelTypeSet(match.Relationship.Types),
-			direction: match.Relationship.Direction,
-			minHops:   match.Relationship.MinHops,
-			maxHops:   match.Relationship.MaxHops,
-			visited:   make(map[storage.NodeID]bool),
-			nodeCache: make(map[storage.NodeID]*storage.Node),
+			direction:  match.Relationship.Direction,
+			minHops:    match.Relationship.MinHops,
+			maxHops:    match.Relationship.MaxHops,
+			visited:    make(map[storage.NodeID]bool),
+			nodeCache:  make(map[storage.NodeID]*storage.Node),
 		}
 
 		paths := e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
@@ -977,14 +977,14 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 			for _, startNode := range workerNodes {
 				// Each goroutine gets its own context (no shared state)
 				ctx := &TraversalContext{
-					startNode: startNode,
-					relTypes:  match.Relationship.Types,
+					startNode:  startNode,
+					relTypes:   match.Relationship.Types,
 					relTypeSet: buildRelTypeSet(match.Relationship.Types),
-					direction: match.Relationship.Direction,
-					minHops:   match.Relationship.MinHops,
-					maxHops:   match.Relationship.MaxHops,
-					visited:   make(map[storage.NodeID]bool),
-					nodeCache: make(map[storage.NodeID]*storage.Node),
+					direction:  match.Relationship.Direction,
+					minHops:    match.Relationship.MinHops,
+					maxHops:    match.Relationship.MaxHops,
+					visited:    make(map[storage.NodeID]bool),
+					nodeCache:  make(map[storage.NodeID]*storage.Node),
 				}
 
 				paths := e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
@@ -1110,14 +1110,14 @@ func (e *StorageExecutor) traverseFromNode(startNode *storage.Node, match *Trave
 	}
 
 	ctx := &TraversalContext{
-		startNode: startNode,
-		relTypes:  match.Relationship.Types,
+		startNode:  startNode,
+		relTypes:   match.Relationship.Types,
 		relTypeSet: buildRelTypeSet(match.Relationship.Types),
-		direction: match.Relationship.Direction,
-		minHops:   match.Relationship.MinHops,
-		maxHops:   match.Relationship.MaxHops,
-		visited:   make(map[storage.NodeID]bool),
-		nodeCache: make(map[storage.NodeID]*storage.Node),
+		direction:  match.Relationship.Direction,
+		minHops:    match.Relationship.MinHops,
+		maxHops:    match.Relationship.MaxHops,
+		visited:    make(map[storage.NodeID]bool),
+		nodeCache:  make(map[storage.NodeID]*storage.Node),
 	}
 
 	return e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)

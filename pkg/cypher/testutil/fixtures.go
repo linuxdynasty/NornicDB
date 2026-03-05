@@ -16,7 +16,7 @@
 //	func TestSomething(t *testing.T) {
 //	    exec := testutil.SetupTestExecutor(t)
 //	    testutil.CreateTestNodes(t, exec)
-//	    
+//
 //	    result, err := exec.Execute(ctx, "MATCH (p:Person) RETURN p", nil)
 //	    testutil.AssertQueryResult(t, result, 3)
 //	}
@@ -109,7 +109,7 @@ func SetupTestExecutorWithStore(t *testing.T, store storage.Engine) *cypher.Stor
 //	func TestPersonQueries(t *testing.T) {
 //	    exec := testutil.SetupTestExecutor(t)
 //	    testutil.CreateTestNodes(t, exec)
-//	    
+//
 //	    result, err := exec.Execute(ctx, "MATCH (p:Person) RETURN p.name", nil)
 //	    require.NoError(t, err)
 //	    assert.Len(t, result.Rows, 3)
@@ -146,8 +146,8 @@ func CreateTestNodes(t *testing.T, exec *cypher.StorageExecutor) {
 //	func TestRelationshipQueries(t *testing.T) {
 //	    exec := testutil.SetupTestExecutor(t)
 //	    testutil.CreateTestGraph(t, exec)
-//	    
-//	    result, err := exec.Execute(ctx, 
+//
+//	    result, err := exec.Execute(ctx,
 //	        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name", nil)
 //	    require.NoError(t, err)
 //	}

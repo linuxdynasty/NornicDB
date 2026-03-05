@@ -74,4 +74,3 @@ func TestExplicitTransaction_NamespacedCreateRollback(t *testing.T) {
 		t.Fatalf("expected 0 rolled-back nodes, got %d", got)
 	}
 }
-

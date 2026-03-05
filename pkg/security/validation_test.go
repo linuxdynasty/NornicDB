@@ -26,16 +26,16 @@ func TestValidateToken_Valid(t *testing.T) {
 
 func TestValidateToken_InjectionAttacks(t *testing.T) {
 	attacks := map[string]string{
-		"CRLF injection":         "token\r\nX-Evil: header",
-		"Newline injection":      "token\nX-Evil: header",
-		"HTML injection":         "<script>alert('xss')</script>",
-		"JavaScript protocol":    "javascript:alert('xss')",
-		"Data URI":               "data:text/html,<script>alert('xss')</script>",
-		"File protocol":          "file:///etc/passwd",
-		"Null byte":              "token\x00evil",
-		"Too long":               strings.Repeat("a", 8193),
-		"Empty":                  "",
-		"Semicolon":              "token;rm -rf /",
+		"CRLF injection":      "token\r\nX-Evil: header",
+		"Newline injection":   "token\nX-Evil: header",
+		"HTML injection":      "<script>alert('xss')</script>",
+		"JavaScript protocol": "javascript:alert('xss')",
+		"Data URI":            "data:text/html,<script>alert('xss')</script>",
+		"File protocol":       "file:///etc/passwd",
+		"Null byte":           "token\x00evil",
+		"Too long":            strings.Repeat("a", 8193),
+		"Empty":               "",
+		"Semicolon":           "token;rm -rf /",
 	}
 
 	for name, token := range attacks {
@@ -103,12 +103,12 @@ func TestValidateURL_ProtocolSmuggling(t *testing.T) {
 
 func TestValidateURL_HTTPInProduction(t *testing.T) {
 	httpURL := "http://oauth.example.com/api"
-	
+
 	// Should fail without allowHTTP
 	if err := ValidateURL(httpURL, false, false); err != ErrURLHTTPNotAllowed {
 		t.Errorf("Expected HTTP block in production, got: %v", err)
 	}
-	
+
 	// Should succeed with allowHTTP
 	if err := ValidateURL(httpURL, false, true); err != nil {
 		t.Errorf("Expected HTTP allowed with flag, got: %v", err)

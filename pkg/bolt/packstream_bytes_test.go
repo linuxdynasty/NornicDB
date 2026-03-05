@@ -36,4 +36,3 @@ func TestEncodeDecodePackStreamBytes_RoundTrip(t *testing.T) {
 		})
 	}
 }
-

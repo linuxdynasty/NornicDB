@@ -97,7 +97,7 @@ func TestVectorSearchPipeline(t *testing.T) {
 	t.Run("HNSW pipeline", func(t *testing.T) {
 		idx := NewVectorIndex(4)
 		hnswIdx := NewHNSWIndex(4, DefaultHNSWConfig())
-		
+
 		// Populate both indexes
 		require.NoError(t, idx.Add("vec1", []float32{1, 0, 0, 0}))
 		require.NoError(t, idx.Add("vec2", []float32{0, 1, 0, 0}))
@@ -185,11 +185,11 @@ func TestCalculateCandidateLimit(t *testing.T) {
 		k        int
 		expected int
 	}{
-		{"small k", 5, 200},           // min(5*20, 200) = 200
-		{"medium k", 20, 400},          // 20*20 = 400
-		{"large k", 100, 2000},         // 100*20 = 2000
-		{"very large k", 500, 5000},    // capped at MaxCandidates
-		{"zero k", 0, 200},             // min(0*20, 200) = 200
+		{"small k", 5, 200},         // min(5*20, 200) = 200
+		{"medium k", 20, 400},       // 20*20 = 400
+		{"large k", 100, 2000},      // 100*20 = 2000
+		{"very large k", 500, 5000}, // capped at MaxCandidates
+		{"zero k", 0, 200},          // min(0*20, 200) = 200
 	}
 
 	for _, tt := range tests {

@@ -1140,13 +1140,13 @@ var internalDiscoverPropertyKeys = map[string]bool{
 	"embedding_model":      true,
 	"embedding_dimensions": true,
 	"has_embedding":        true,
-	"embedded_at":         true,
-	"chunk_count":         true,
-	"orderLevelLookupKey": true,
+	"embedded_at":          true,
+	"chunk_count":          true,
+	"orderLevelLookupKey":  true,
 	"fetchedAt":            true,
 	"id":                   true,
-	"created_at":          true,
-	"updated_at":          true,
+	"created_at":           true,
+	"updated_at":           true,
 }
 
 // formatDiscoverResult formats DiscoverResult as context text for the LLM (PrePrompt or action result).

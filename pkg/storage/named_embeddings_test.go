@@ -120,7 +120,7 @@ func TestNamedEmbeddingsSerialization(t *testing.T) {
 
 	t.Run("handles empty NamedEmbeddings map", func(t *testing.T) {
 		original := &Node{
-			ID:             NodeID("test-empty"),
+			ID:              NodeID("test-empty"),
 			NamedEmbeddings: map[string][]float32{},
 		}
 
@@ -183,4 +183,3 @@ func TestNamedEmbeddingsCopy(t *testing.T) {
 		assert.Nil(t, copied.NamedEmbeddings)
 	})
 }
-

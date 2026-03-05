@@ -134,28 +134,28 @@ type edgeKey struct {
 }
 
 type smoothedConfidence struct {
-	Raw             float64
-	Smoothed        float64
-	Velocity        float64
-	SessionCount    int
-	LastUpdate      time.Time
+	Raw          float64
+	Smoothed     float64
+	Velocity     float64
+	SessionCount int
+	LastUpdate   time.Time
 }
 
 type crossSessionData struct {
-	SessionIDs    []string  // Session IDs where this pair co-occurred
-	TotalCoAccess int       // Total co-access count
+	SessionIDs    []string // Session IDs where this pair co-occurred
+	TotalCoAccess int      // Total co-access count
 	FirstSeen     time.Time
 	LastSeen      time.Time
 }
 
 // InferenceAdapterStats holds statistics about the adapter's operation.
 type InferenceAdapterStats struct {
-	TotalSuggestions        int64
-	KalmanSmoothed          int64
-	SessionEnhanced         int64
-	CrossSessionBoosted     int64
+	TotalSuggestions          int64
+	KalmanSmoothed            int64
+	SessionEnhanced           int64
+	CrossSessionBoosted       int64
 	RelationshipsStrengthened int64
-	RelationshipsWeakened   int64
+	RelationshipsWeakened     int64
 }
 
 // NewKalmanAdapter creates a new Kalman-enhanced inference adapter.
@@ -290,16 +290,16 @@ func (ka *KalmanAdapter) getSessionCoAccessSuggestions(nodeID string) []EdgeSugg
 		// Track cross-session co-access
 		if ka.sessionCoAccess[key] == nil {
 			ka.sessionCoAccess[key] = &crossSessionData{
-				SessionIDs: []string{currentSessionID},
+				SessionIDs:    []string{currentSessionID},
 				TotalCoAccess: 1,
-				FirstSeen: time.Now(),
-				LastSeen:  time.Now(),
+				FirstSeen:     time.Now(),
+				LastSeen:      time.Now(),
 			}
 		} else {
 			data := ka.sessionCoAccess[key]
 			data.TotalCoAccess++
 			data.LastSeen = time.Now()
-			
+
 			// Check if this is a new session
 			isNewSession := true
 			for _, sid := range data.SessionIDs {

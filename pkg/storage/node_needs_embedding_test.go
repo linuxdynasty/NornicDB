@@ -13,10 +13,10 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 
 	t.Run("node with embedding returns false", func(t *testing.T) {
 		node := &Node{
-			ID:         "test-1",
-			Labels:     []string{"Person"},
-			Properties: map[string]interface{}{"name": "Alice"},
-			ChunkEmbeddings:  [][]float32{{0.1, 0.2, 0.3}},
+			ID:              "test-1",
+			Labels:          []string{"Person"},
+			Properties:      map[string]interface{}{"name": "Alice"},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		}
 		assert.False(t, NodeNeedsEmbedding(node))
 	})
@@ -34,30 +34,30 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 
 	t.Run("node without embedding returns true", func(t *testing.T) {
 		node := &Node{
-			ID:         "test-2",
-			Labels:     []string{"Person"},
-			Properties: map[string]interface{}{"name": "Bob"},
-			ChunkEmbeddings:  nil,
+			ID:              "test-2",
+			Labels:          []string{"Person"},
+			Properties:      map[string]interface{}{"name": "Bob"},
+			ChunkEmbeddings: nil,
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
 
 	t.Run("node with empty embedding returns true", func(t *testing.T) {
 		node := &Node{
-			ID:         "test-3",
-			Labels:     []string{"Person"},
-			Properties: map[string]interface{}{"name": "Charlie"},
-			ChunkEmbeddings:  [][]float32{},
+			ID:              "test-3",
+			Labels:          []string{"Person"},
+			Properties:      map[string]interface{}{"name": "Charlie"},
+			ChunkEmbeddings: [][]float32{},
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
 
 	t.Run("internal node (underscore label) returns false", func(t *testing.T) {
 		node := &Node{
-			ID:         "test-4",
-			Labels:     []string{"_Internal"},
-			Properties: map[string]interface{}{"data": "internal"},
-			ChunkEmbeddings:  nil,
+			ID:              "test-4",
+			Labels:          []string{"_Internal"},
+			Properties:      map[string]interface{}{"data": "internal"},
+			ChunkEmbeddings: nil,
 		}
 		assert.False(t, NodeNeedsEmbedding(node))
 	})

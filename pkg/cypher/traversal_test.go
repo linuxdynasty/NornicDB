@@ -10,9 +10,10 @@ import (
 
 // setupTraversalTestData creates a small graph for testing traversals
 // Graph structure:
-//   Alice -[KNOWS]-> Bob -[KNOWS]-> Carol
-//   Alice -[WORKS_WITH]-> Carol
-//   Bob -[FOLLOWS]-> Dave
+//
+//	Alice -[KNOWS]-> Bob -[KNOWS]-> Carol
+//	Alice -[WORKS_WITH]-> Carol
+//	Bob -[FOLLOWS]-> Dave
 func setupTraversalTestData(t *testing.T, exec *StorageExecutor) {
 	ctx := context.Background()
 
@@ -133,13 +134,13 @@ func TestParseTraversalPattern(t *testing.T) {
 	exec := setupTestExecutor(t)
 
 	tests := []struct {
-		pattern       string
-		startVar      string
-		startLabels   []string
-		relDirection  string
-		relTypes      []string
-		endVar        string
-		endLabels     []string
+		pattern      string
+		startVar     string
+		startLabels  []string
+		relDirection string
+		relTypes     []string
+		endVar       string
+		endLabels    []string
 	}{
 		{
 			"(a:Person)-[r:KNOWS]->(b:Person)",

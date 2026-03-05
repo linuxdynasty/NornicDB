@@ -24,9 +24,9 @@ func TestYieldReturnIntegration(t *testing.T) {
 
 	// Create test data with various content for fulltext search
 	testNodes := []struct {
-		id      string
-		labels  []string
-		props   map[string]interface{}
+		id     string
+		labels []string
+		props  map[string]interface{}
 	}{
 		{"node-1", []string{"Memory"}, map[string]interface{}{"title": "Authentication System", "content": "JWT tokens and OAuth2 authentication flow", "type": "memory", "priority": int64(1)}},
 		{"node-2", []string{"Memory"}, map[string]interface{}{"title": "Database Design", "content": "PostgreSQL schema with authentication tables", "type": "memory", "priority": int64(2)}},

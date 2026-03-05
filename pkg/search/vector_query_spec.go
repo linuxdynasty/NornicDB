@@ -50,9 +50,9 @@ type VectorQueryHit struct {
 // VectorQueryNodes executes a Cypher-style vector query.
 //
 // This method preserves Cypher semantics for per-node embedding selection:
-//   1) Prefer NamedEmbeddings[Property] (or "default" when Property is empty)
-//   2) If Property is set, next try node.Properties[Property] as a vector array
-//   3) Fallback to ChunkEmbeddings[0..N] (best score across chunks)
+//  1. Prefer NamedEmbeddings[Property] (or "default" when Property is empty)
+//  2. If Property is set, next try node.Properties[Property] as a vector array
+//  3. Fallback to ChunkEmbeddings[0..N] (best score across chunks)
 //
 // For performance, cosine-similarity queries are executed against the in-memory
 // vector index (unified pipeline) rather than scanning storage.

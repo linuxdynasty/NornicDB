@@ -29,4 +29,3 @@ func TestClusterIndex_SearchWithClusters_NilManagerDoesNotPanic(t *testing.T) {
 	require.Len(t, results, 2)
 	require.Equal(t, "a", results[0].ID)
 }
-

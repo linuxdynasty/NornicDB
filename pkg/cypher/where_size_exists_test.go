@@ -93,7 +93,7 @@ func TestMatchWhereExists(t *testing.T) {
 		ID:     "n1",
 		Labels: []string{"Doc"},
 		Properties: map[string]interface{}{
-			"content":           "some text",
+			"content":          "some text",
 			"openai_embedding": []float32{0.1, 0.2},
 		},
 	}
@@ -106,7 +106,7 @@ func TestMatchWhereExists(t *testing.T) {
 		ID:     "n3",
 		Labels: []string{"Doc"},
 		Properties: map[string]interface{}{
-			"content":           "other",
+			"content":          "other",
 			"openai_embedding": []float32{0.3},
 		},
 	}
@@ -147,7 +147,7 @@ func TestMatchWhereSizeAndExists(t *testing.T) {
 		ID:     "n1",
 		Labels: []string{"Doc"},
 		Properties: map[string]interface{}{
-			"content":           largeContent,
+			"content":          largeContent,
 			"openai_embedding": []float32{0.1},
 			"name":             "large-with-embedding",
 		},
@@ -158,7 +158,7 @@ func TestMatchWhereSizeAndExists(t *testing.T) {
 		Labels: []string{"Doc"},
 		Properties: map[string]interface{}{
 			"content": largeContent,
-			"name":   "large-no-embedding",
+			"name":    "large-no-embedding",
 		},
 	}
 	// Small content with embedding
@@ -166,7 +166,7 @@ func TestMatchWhereSizeAndExists(t *testing.T) {
 		ID:     "n3",
 		Labels: []string{"Doc"},
 		Properties: map[string]interface{}{
-			"content":           "short",
+			"content":          "short",
 			"openai_embedding": []float32{0.2},
 			"name":             "small-with-embedding",
 		},

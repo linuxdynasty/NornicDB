@@ -186,5 +186,3 @@ func recoverBadgerFromSnapshotAndWAL(dataDir string, badgerOpts storage.BadgerOp
 
 	return newStore, backupDir, nil
 }
-
-

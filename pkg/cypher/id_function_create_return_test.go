@@ -23,4 +23,3 @@ func TestIDFunction_CreateReturn(t *testing.T) {
 	// Ensure elementId(a) is not null as well.
 	require.NotNil(t, res.Rows[0][2], "elementId(a) returned nil (a=%T)", res.Rows[0][0])
 }
-

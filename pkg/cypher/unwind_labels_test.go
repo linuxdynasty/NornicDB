@@ -461,7 +461,7 @@ func TestUnwindWithCreate(t *testing.T) {
 		`, nil)
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 3)
-		
+
 		// Check sorted by age
 		assert.Equal(t, "Bob", result.Rows[0][0])
 		assert.Equal(t, int64(25), result.Rows[0][1])
@@ -508,11 +508,11 @@ func TestUnwindWithCreate(t *testing.T) {
 		`, nil)
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 3, "Should return 3 created nodes")
-		
+
 		// Debug: print what we got
 		t.Logf("Result columns: %v", result.Columns)
 		t.Logf("Result rows: %v", result.Rows)
-		
+
 		names := []string{}
 		for _, row := range result.Rows {
 			if val, ok := row[0].(string); ok {
@@ -558,7 +558,7 @@ func TestUnwindWithCreate(t *testing.T) {
 		params := map[string]interface{}{
 			"names": []interface{}{"X", "Y", "Z"},
 		}
-		
+
 		_, err := exec.Execute(ctx, `
 			UNWIND $names AS name
 			CREATE (n:TestNode {name: name})
