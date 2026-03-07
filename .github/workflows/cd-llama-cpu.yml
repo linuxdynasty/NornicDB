@@ -1,0 +1,112 @@
+name: CD Llama CPU Libs
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "docker/Dockerfile.llama-cpu"
+      - "Makefile"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Existing branch, tag, or commit SHA to build llama-cpu-libs from"
+        required: true
+        default: "main"
+        type: string
+      image_tag:
+        description: "Docker tag to publish. Defaults to source_ref (sanitized for Docker tag rules)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  DOCKERHUB_USERNAME: timothyswt
+
+jobs:
+  meta:
+    name: Resolve llama-cpu-libs tag
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      docker_repo: ${{ steps.meta.outputs.docker_repo }}
+      llama_version: ${{ steps.meta.outputs.llama_version }}
+      llama_cpu_image: ${{ steps.meta.outputs.llama_cpu_image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
+
+      - id: meta
+        run: |
+          sanitize_tag() {
+            local raw="$1"
+            raw="${raw#refs/heads/}"
+            raw="${raw#refs/tags/}"
+            raw="${raw#refs/}"
+            raw="${raw//\//-}"
+            raw="$(printf '%s' "$raw" | tr -c '[:alnum:]._-' '-')"
+            raw="${raw#-}"
+            raw="${raw%-}"
+            if [ -z "$raw" ]; then
+              raw="latest"
+            fi
+            printf '%s' "$raw"
+          }
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CHECKOUT_REF="${{ inputs.source_ref }}"
+            if [ -n "${{ inputs.image_tag }}" ]; then
+              VERSION_INPUT="${{ inputs.image_tag }}"
+            else
+              VERSION_INPUT="${{ inputs.source_ref }}"
+            fi
+          else
+            CHECKOUT_REF="${GITHUB_REF}"
+            VERSION_INPUT="${GITHUB_REF_NAME}"
+          fi
+          VERSION_TAG="$(sanitize_tag "$VERSION_INPUT")"
+          LLAMA_VERSION="$(sed -n 's/^LLAMA_VERSION ?= //p' Makefile | head -n1)"
+          if [ -z "$LLAMA_VERSION" ]; then
+            echo "Failed to determine LLAMA_VERSION from Makefile" >&2
+            exit 1
+          fi
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+          echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
+          echo "llama_version=${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "llama_cpu_image=${DOCKERHUB_USERNAME}/llama-cpu-libs:${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+
+  build-llama-cpu-libs:
+    name: Build and Push ${{ needs.meta.outputs.llama_cpu_image }}
+    runs-on: ubuntu-latest
+    needs: meta
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Build and push CPU prerequisite image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.llama-cpu
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ needs.meta.outputs.llama_cpu_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
