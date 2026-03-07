@@ -898,6 +898,7 @@ func TestHandleDiscover_WithDBKeywordResults(t *testing.T) {
 		map[string]interface{}{"from": rootID, "to": neighborID},
 	)
 	require.NoError(t, err)
+	require.NoError(t, db.BuildSearchIndexes(context.Background()))
 
 	server := NewServer(db, nil)
 	result, err := server.handleDiscover(ctx, map[string]interface{}{

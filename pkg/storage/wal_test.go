@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,10 @@ type walStreamingCountEngine struct {
 type walNamespaceListerEngine struct {
 	Engine
 	namespaces []string
+}
+
+type walCaptureLogger struct {
+	entries []map[string]any
 }
 
 func (e *walStreamErrorEngine) StreamNodes(_ context.Context, _ func(*Node) error) error {
@@ -154,6 +160,30 @@ func (e *walNamespaceListerEngine) ListNamespaces() []string {
 	return append([]string(nil), e.namespaces...)
 }
 
+func (l *walCaptureLogger) Log(level, msg string, fields map[string]any) {
+	entry := map[string]any{
+		"level": level,
+		"msg":   msg,
+	}
+	for k, v := range fields {
+		entry[k] = v
+	}
+	l.entries = append(l.entries, entry)
+}
+
+func buildAtomicWALRecord(t *testing.T, entry WALEntry) []byte {
+	t.Helper()
+
+	payload, err := json.Marshal(entry)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	_, err = writeAtomicRecordV2(&buf, payload)
+	require.NoError(t, err)
+
+	return buf.Bytes()
+}
+
 func TestNewWAL(t *testing.T) {
 	config.EnableWAL()
 	defer config.DisableWAL()
@@ -235,6 +265,208 @@ func TestNewWAL(t *testing.T) {
 		require.Len(t, entries, 2)
 		require.Equal(t, uint64(1), entries[0].Sequence)
 		require.Equal(t, uint64(2), entries[1].Sequence)
+	})
+}
+
+func TestWALTailRepairHelpers(t *testing.T) {
+	makeNodeData := func(id NodeID) json.RawMessage {
+		t.Helper()
+		data, err := json.Marshal(WALNodeData{Node: &Node{ID: id, Labels: []string{"Test"}}})
+		require.NoError(t, err)
+		return data
+	}
+
+	makeEntry := func(seq uint64, data json.RawMessage) WALEntry {
+		return WALEntry{
+			Sequence:  seq,
+			Timestamp: time.Now(),
+			Operation: OpCreateNode,
+			Data:      data,
+			Checksum:  crc32Checksum(data),
+		}
+	}
+
+	t.Run("repair wal tail no-op cases", func(t *testing.T) {
+		repaired, diag, err := repairWALTailIfNeeded("", nil)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+		assert.Nil(t, diag)
+
+		missingPath := filepath.Join(t.TempDir(), "missing.log")
+		repaired, diag, err = repairWALTailIfNeeded(missingPath, nil)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+		assert.Nil(t, diag)
+
+		emptyPath := filepath.Join(t.TempDir(), "empty.log")
+		require.NoError(t, os.WriteFile(emptyPath, nil, 0644))
+		repaired, diag, err = repairWALTailIfNeeded(emptyPath, nil)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+		assert.Nil(t, diag)
+
+		legacyPath := filepath.Join(t.TempDir(), "legacy.log")
+		require.NoError(t, os.WriteFile(legacyPath, []byte(`{"legacy":true}`), 0644))
+		repaired, diag, err = repairWALTailIfNeeded(legacyPath, nil)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+		assert.Nil(t, diag)
+	})
+
+	t.Run("repair truncates incomplete header to zero", func(t *testing.T) {
+		walPath := filepath.Join(t.TempDir(), "wal.log")
+		require.NoError(t, os.WriteFile(walPath, []byte{0x57, 0x41}, 0644))
+
+		logger := &walCaptureLogger{}
+		repaired, diag, err := repairWALTailIfNeeded(walPath, logger)
+		require.NoError(t, err)
+		require.True(t, repaired)
+		require.NotNil(t, diag)
+		assert.Equal(t, "truncate_incomplete_tail", diag.RecoveryAction)
+		assert.Len(t, logger.entries, 1)
+
+		fi, err := os.Stat(walPath)
+		require.NoError(t, err)
+		assert.Zero(t, fi.Size())
+	})
+
+	t.Run("truncate wal file truncates logs and no-op when already short enough", func(t *testing.T) {
+		dir := t.TempDir()
+		walPath := filepath.Join(dir, "wal.log")
+		require.NoError(t, os.WriteFile(walPath, []byte("123456789"), 0644))
+
+		repaired, diag, err := truncateWALFile(walPath, 99, 3, "crc_mismatch", nil)
+		require.NoError(t, err)
+		assert.False(t, repaired)
+		assert.Nil(t, diag)
+
+		logger := &walCaptureLogger{}
+		repaired, diag, err = truncateWALFile(walPath, -5, 7, "crc_mismatch", logger)
+		require.NoError(t, err)
+		require.True(t, repaired)
+		require.NotNil(t, diag)
+		assert.Equal(t, uint64(8), diag.CorruptedSeq)
+		assert.Equal(t, "truncate_corrupt_tail", diag.RecoveryAction)
+		assert.Equal(t, "crc_mismatch", diag.Operation)
+		assert.Len(t, logger.entries, 1)
+		assert.Equal(t, int64(0), logger.entries[0]["truncate_offset"])
+
+		fi, err := os.Stat(walPath)
+		require.NoError(t, err)
+		assert.Zero(t, fi.Size())
+	})
+
+	t.Run("scan atomic wal for repair detects tail corruption reasons", func(t *testing.T) {
+		first := buildAtomicWALRecord(t, makeEntry(1, makeNodeData("n1")))
+
+		validSecond := buildAtomicWALRecord(t, makeEntry(2, makeNodeData("n2")))
+		payloadLen := int(binary.LittleEndian.Uint32(validSecond[5:9]))
+		crcOffset := 9 + payloadLen
+		trailerOffset := crcOffset + 4
+
+		invalidJSONSecond := func() []byte {
+			var buf bytes.Buffer
+			_, err := writeAtomicRecordV2(&buf, []byte(`{"broken"`))
+			require.NoError(t, err)
+			return buf.Bytes()
+		}
+
+		dataChecksumMismatch := makeEntry(2, makeNodeData("n2"))
+		dataChecksumMismatch.Checksum++
+
+		cases := []struct {
+			name   string
+			record []byte
+			reason string
+		}{
+			{
+				name: "invalid magic",
+				record: func() []byte {
+					b := append([]byte(nil), validSecond...)
+					binary.LittleEndian.PutUint32(b[0:4], 0xDEADBEEF)
+					return b
+				}(),
+				reason: "invalid_magic",
+			},
+			{
+				name:   "unsupported version",
+				record: func() []byte { b := append([]byte(nil), validSecond...); b[4] = walFormatVersion + 1; return b }(),
+				reason: "unsupported_version",
+			},
+			{
+				name: "invalid payload size",
+				record: func() []byte {
+					b := make([]byte, 9)
+					binary.LittleEndian.PutUint32(b[0:4], walMagic)
+					b[4] = walFormatVersion
+					binary.LittleEndian.PutUint32(b[5:9], walMaxEntrySize+1)
+					return b
+				}(),
+				reason: "invalid_payload_size",
+			},
+			{
+				name:   "crc mismatch",
+				record: func() []byte { b := append([]byte(nil), validSecond...); b[crcOffset] ^= 0xFF; return b }(),
+				reason: "crc_mismatch",
+			},
+			{
+				name:   "invalid trailer",
+				record: func() []byte { b := append([]byte(nil), validSecond...); b[trailerOffset] ^= 0xFF; return b }(),
+				reason: "invalid_trailer",
+			},
+			{
+				name:   "invalid json payload",
+				record: invalidJSONSecond(),
+				reason: "invalid_json",
+			},
+			{
+				name:   "inner data checksum mismatch",
+				record: buildAtomicWALRecord(t, dataChecksumMismatch),
+				reason: "data_checksum_mismatch",
+			},
+			{
+				name:   "incomplete tail",
+				record: validSecond[:len(validSecond)-2],
+				reason: "incomplete_tail",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "wal.log")
+				data := append(append([]byte(nil), first...), tc.record...)
+				require.NoError(t, os.WriteFile(path, data, 0644))
+
+				f, err := os.Open(path)
+				require.NoError(t, err)
+				defer f.Close()
+
+				truncateOffset, lastGoodSeq, reason, ok, err := scanAtomicWALForRepair(f, int64(len(data)))
+				require.NoError(t, err)
+				assert.False(t, ok)
+				assert.Equal(t, int64(len(first)), truncateOffset)
+				assert.Equal(t, uint64(1), lastGoodSeq)
+				assert.Equal(t, tc.reason, reason)
+			})
+		}
+
+		t.Run("healthy atomic wal returns ok", func(t *testing.T) {
+			second := buildAtomicWALRecord(t, makeEntry(2, makeNodeData("n2")))
+			data := append(append([]byte(nil), first...), second...)
+			path := filepath.Join(t.TempDir(), "wal.log")
+			require.NoError(t, os.WriteFile(path, data, 0644))
+
+			f, err := os.Open(path)
+			require.NoError(t, err)
+			defer f.Close()
+
+			truncateOffset, lastGoodSeq, reason, ok, err := scanAtomicWALForRepair(f, int64(len(data)))
+			require.NoError(t, err)
+			assert.True(t, ok)
+			assert.Zero(t, truncateOffset)
+			assert.Equal(t, uint64(2), lastGoodSeq)
+			assert.Empty(t, reason)
+		})
 	})
 }
 

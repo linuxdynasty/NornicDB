@@ -1662,3 +1662,106 @@ func TestANTLRExpressionEvaluator_ConversionAndExtractionCompleteness(t *testing
 		}
 	})
 }
+
+func TestANTLRExpressionEvaluator_BuiltinEdgeCases(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	cases := []struct {
+		name string
+		args []interface{}
+		want interface{}
+	}{
+		{"head", []interface{}{[]interface{}{}}, nil},
+		{"tail", []interface{}{[]interface{}{int64(1)}}, nil},
+		{"last", []interface{}{[]interface{}{}}, nil},
+		{"reverse", []interface{}{"not-a-list"}, nil},
+		{"range", []interface{}{int64(1), int64(3), int64(0)}, []interface{}{int64(1), int64(2), int64(3)}},
+		{"coalesce", []interface{}{nil, nil}, nil},
+		{"substring", []interface{}{"abcdef", int64(-2)}, "abcdef"},
+		{"substring", []interface{}{"abcdef", int64(20)}, ""},
+		{"substring", []interface{}{"abcdef", int64(2), int64(99)}, "cdef"},
+		{"left", []interface{}{"abcdef", int64(99)}, "abcdef"},
+		{"right", []interface{}{"abcdef", int64(99)}, "abcdef"},
+		{"keys", []interface{}{"not-a-map"}, nil},
+		{"properties", []interface{}{"not-a-map"}, nil},
+		{"exists", nil, false},
+	}
+
+	for _, tc := range cases {
+		if got := e.evaluateBuiltInFunction(tc.name, tc.args); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s(%#v) => %#v, want %#v", tc.name, tc.args, got, tc.want)
+		}
+	}
+
+	if got := e.evaluateBuiltInFunction("id", []interface{}{map[string]interface{}{"_edgeId": "e-1"}}); got != "e-1" {
+		t.Fatalf("id(_edgeId) => %#v", got)
+	}
+}
+
+func TestANTLRExpressionEvaluator_AdditionalExtractionAndEvaluateBranches(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	if got := e.Evaluate(parseExpressionForTest(t, "1 AND 2")); got != nil {
+		t.Fatalf("Evaluate on AND expression should return nil, got %#v", got)
+	}
+	if got := e.Evaluate(parseExpressionForTest(t, "1 < 2")); got != nil {
+		t.Fatalf("Evaluate on comparison expression should return nil, got %#v", got)
+	}
+
+	proj := ExtractProjectionItem(parseProjectionItemForTest(t, "n.name"))
+	if proj.Alias != "n.name" || proj.IsAggregation {
+		t.Fatalf("unexpected simple projection info: %+v", proj)
+	}
+
+	if atom := findAtomInExpression(nil); atom != nil {
+		t.Fatalf("nil expression should not expose atom: %#v", atom)
+	}
+	if atom := findAtomInExpression(parseExpressionForTest(t, "n.name")); atom == nil {
+		t.Fatal("property expression should expose atom")
+	}
+
+	if got := ExtractVariableFromExpression(parseExpressionForTest(t, "1 AND 2")); got != "" {
+		t.Fatalf("AND expression should not extract simple variable, got %q", got)
+	}
+
+	proc := ExtractProcedureName(parseInvocationNameForTest(t, "labels"))
+	if proc.Name != "labels" || proc.IsDbProc || proc.Namespace != "" {
+		t.Fatalf("unexpected non-db procedure info: %+v", proc)
+	}
+}
+
+func TestANTLRExpressionEvaluator_ArithmeticAndConversionEdges(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	if got := e.Evaluate(parseExpressionForTest(t, "5 - 2")); got != int64(3) {
+		t.Fatalf("subtraction => %#v", got)
+	}
+	if got := e.Evaluate(parseExpressionForTest(t, "8 / 2")); got != int64(4) {
+		t.Fatalf("division => %#v", got)
+	}
+	if got := e.Evaluate(parseExpressionForTest(t, "8 / 0")); got != int64(8) {
+		t.Fatalf("division by zero should leave lhs unchanged, got %#v", got)
+	}
+	if got := e.Evaluate(parseExpressionForTest(t, "8 % 0")); got != int64(8) {
+		t.Fatalf("modulo by zero should leave lhs unchanged, got %#v", got)
+	}
+	if got := e.evaluateLiteral(literalFromExpr(t, "42")); got != int64(42) {
+		t.Fatalf("integer literal => %#v", got)
+	}
+
+	if !e.valuesEqual(int64(2), int(2)) || !e.valuesEqual(float64(2), float64(2)) || e.valuesEqual(int64(2), "2") {
+		t.Fatal("unexpected additional equality behavior")
+	}
+	if e.compareValues("a", "a") != 0 || e.compareValues(true, false) != 0 {
+		t.Fatal("unexpected compareValues equality/fallback behavior")
+	}
+	if e.toFloat64("3.25") != 3.25 {
+		t.Fatal("string toFloat64 conversion should parse")
+	}
+	if v, ok := e.toNumericOk(int64(2)); !ok || v != 2 {
+		t.Fatal("toNumericOk(int64) should succeed")
+	}
+	if v, ok := e.toNumericOk(int(3)); !ok || v != 3 {
+		t.Fatal("toNumericOk(int) should succeed")
+	}
+}
