@@ -3,6 +3,7 @@ package storage
 import (
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,6 +84,127 @@ func TestBadgerEngine_BatchGetNodes_Missing(t *testing.T) {
 	result, err := b.BatchGetNodes([]NodeID{NodeID(prefixTestID("nonexist"))})
 	require.NoError(t, err)
 	assert.Empty(t, result)
+}
+
+func TestBadgerEngine_QueryHelpers_Extra(t *testing.T) {
+	t.Run("GetFirstNodeByLabel skips stale and corrupt indexed entries", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		missingID := NodeID(prefixTestID("aa-missing"))
+		corruptID := NodeID(prefixTestID("ab-corrupt"))
+		valid := &Node{ID: NodeID(prefixTestID("zz-valid")), Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "valid"}}
+		_, err := b.CreateNode(valid)
+		require.NoError(t, err)
+
+		require.NoError(t, b.withUpdate(func(txn *badger.Txn) error {
+			if err := txn.Set(labelIndexKey("Person", missingID), []byte{}); err != nil {
+				return err
+			}
+			if err := txn.Set(labelIndexKey("Person", corruptID), []byte{}); err != nil {
+				return err
+			}
+			return txn.Set(nodeKey(corruptID), []byte("not-a-node"))
+		}))
+
+		got, err := b.GetFirstNodeByLabel("Person")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, valid.ID, got.ID)
+	})
+
+	t.Run("ForEachNodeIDByLabel invalidates stale cache and supports early stop", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		first := &Node{ID: NodeID(prefixTestID("foreach-a")), Labels: []string{"Person"}}
+		second := &Node{ID: NodeID(prefixTestID("foreach-b")), Labels: []string{"Person"}}
+		_, err := b.CreateNode(first)
+		require.NoError(t, err)
+		_, err = b.CreateNode(second)
+		require.NoError(t, err)
+
+		staleID := NodeID(prefixTestID("foreach-stale"))
+		b.labelCacheSetFirst("Person", staleID)
+
+		var visited []NodeID
+		err = b.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+			visited = append(visited, id)
+			return true
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []NodeID{first.ID, second.ID}, visited)
+
+		cachedID, ok := b.labelCacheGetFirst("Person")
+		require.True(t, ok)
+		assert.NotEqual(t, staleID, cachedID)
+
+		visited = visited[:0]
+		err = b.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+			visited = append(visited, id)
+			return false
+		})
+		require.NoError(t, err)
+		assert.Len(t, visited, 1)
+	})
+
+	t.Run("BatchGetNodes merges cache hits db hits and empty ids", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		cached := &Node{ID: NodeID(prefixTestID("batch-cached")), Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "cached"}}
+		stored := &Node{ID: NodeID(prefixTestID("batch-stored")), Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "stored"}}
+		b.cacheStoreNode(cached)
+		_, err := b.CreateNode(stored)
+		require.NoError(t, err)
+
+		result, err := b.BatchGetNodes([]NodeID{"", cached.ID, stored.ID, NodeID(prefixTestID("batch-missing"))})
+		require.NoError(t, err)
+		require.Len(t, result, 2)
+		assert.Equal(t, "cached", result[cached.ID].Properties["name"])
+		assert.Equal(t, "stored", result[stored.ID].Properties["name"])
+
+		b.nodeCacheMu.RLock()
+		_, cachedStored := b.nodeCache[stored.ID]
+		b.nodeCacheMu.RUnlock()
+		assert.True(t, cachedStored)
+	})
+
+	t.Run("edge query helpers validate ids and skip corrupt payloads", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		_, err := b.GetOutgoingEdges("")
+		require.ErrorIs(t, err, ErrInvalidID)
+		_, err = b.GetIncomingEdges("")
+		require.ErrorIs(t, err, ErrInvalidID)
+
+		start := testNode(prefixTestID("edge-start"))
+		end := testNode(prefixTestID("edge-end"))
+		_, err = b.CreateNode(start)
+		require.NoError(t, err)
+		_, err = b.CreateNode(end)
+		require.NoError(t, err)
+		require.NoError(t, b.CreateEdge(&Edge{ID: EdgeID(prefixTestID("edge-good")), StartNode: start.ID, EndNode: end.ID, Type: "REL"}))
+
+		corruptID := EdgeID(prefixTestID("edge-bad"))
+		require.NoError(t, b.withUpdate(func(txn *badger.Txn) error {
+			if err := txn.Set(outgoingIndexKey(start.ID, corruptID), []byte{}); err != nil {
+				return err
+			}
+			if err := txn.Set(incomingIndexKey(end.ID, corruptID), []byte{}); err != nil {
+				return err
+			}
+			if err := txn.Set(edgeTypeIndexKey("REL", corruptID), []byte{}); err != nil {
+				return err
+			}
+			return txn.Set(edgeKey(corruptID), []byte("not-an-edge"))
+		}))
+
+		outgoing, err := b.GetOutgoingEdges(start.ID)
+		require.NoError(t, err)
+		assert.Len(t, outgoing, 1)
+
+		incoming, err := b.GetIncomingEdges(end.ID)
+		require.NoError(t, err)
+		assert.Len(t, incoming, 1)
+
+		byType, err := b.GetEdgesByType("REL")
+		require.NoError(t, err)
+		assert.Len(t, byType, 1)
+	})
 }
 
 // ============================================================================

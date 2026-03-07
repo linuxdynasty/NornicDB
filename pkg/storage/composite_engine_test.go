@@ -17,6 +17,150 @@ type compositeStreamEngine struct {
 	chunkErr      error
 }
 
+type compositeErrorEngine struct {
+	*MemoryEngine
+	getNodeErr          error
+	getEdgeErr          error
+	firstNodeErr        error
+	returnNilFirstNode  bool
+	outgoingErr         error
+	incomingErr         error
+	betweenErr          error
+	byTypeErr           error
+	allNodesErr         error
+	allEdgesErr         error
+	batchGetErr         error
+	nodeCountErr        error
+	edgeCountErr        error
+	closeErr            error
+	createNodeErr       error
+	createEdgeErr       error
+	bulkCreateNodesErr  error
+	bulkCreateEdgesErr  error
+}
+
+func (e *compositeErrorEngine) GetNode(id NodeID) (*Node, error) {
+	if e.getNodeErr != nil {
+		return nil, e.getNodeErr
+	}
+	return e.MemoryEngine.GetNode(id)
+}
+
+func (e *compositeErrorEngine) GetEdge(id EdgeID) (*Edge, error) {
+	if e.getEdgeErr != nil {
+		return nil, e.getEdgeErr
+	}
+	return e.MemoryEngine.GetEdge(id)
+}
+
+func (e *compositeErrorEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	if e.firstNodeErr != nil {
+		return nil, e.firstNodeErr
+	}
+	if e.returnNilFirstNode {
+		return nil, nil
+	}
+	return e.MemoryEngine.GetFirstNodeByLabel(label)
+}
+
+func (e *compositeErrorEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
+	if e.outgoingErr != nil {
+		return nil, e.outgoingErr
+	}
+	return e.MemoryEngine.GetOutgoingEdges(nodeID)
+}
+
+func (e *compositeErrorEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
+	if e.incomingErr != nil {
+		return nil, e.incomingErr
+	}
+	return e.MemoryEngine.GetIncomingEdges(nodeID)
+}
+
+func (e *compositeErrorEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
+	if e.betweenErr != nil {
+		return nil, e.betweenErr
+	}
+	return e.MemoryEngine.GetEdgesBetween(startID, endID)
+}
+
+func (e *compositeErrorEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
+	if e.byTypeErr != nil {
+		return nil, e.byTypeErr
+	}
+	return e.MemoryEngine.GetEdgesByType(edgeType)
+}
+
+func (e *compositeErrorEngine) AllNodes() ([]*Node, error) {
+	if e.allNodesErr != nil {
+		return nil, e.allNodesErr
+	}
+	return e.MemoryEngine.AllNodes()
+}
+
+func (e *compositeErrorEngine) AllEdges() ([]*Edge, error) {
+	if e.allEdgesErr != nil {
+		return nil, e.allEdgesErr
+	}
+	return e.MemoryEngine.AllEdges()
+}
+
+func (e *compositeErrorEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
+	if e.batchGetErr != nil {
+		return nil, e.batchGetErr
+	}
+	return e.MemoryEngine.BatchGetNodes(ids)
+}
+
+func (e *compositeErrorEngine) NodeCount() (int64, error) {
+	if e.nodeCountErr != nil {
+		return 0, e.nodeCountErr
+	}
+	return e.MemoryEngine.NodeCount()
+}
+
+func (e *compositeErrorEngine) EdgeCount() (int64, error) {
+	if e.edgeCountErr != nil {
+		return 0, e.edgeCountErr
+	}
+	return e.MemoryEngine.EdgeCount()
+}
+
+func (e *compositeErrorEngine) Close() error {
+	if e.closeErr != nil {
+		return e.closeErr
+	}
+	return e.MemoryEngine.Close()
+}
+
+func (e *compositeErrorEngine) CreateNode(node *Node) (NodeID, error) {
+	if e.createNodeErr != nil {
+		return "", e.createNodeErr
+	}
+	return e.MemoryEngine.CreateNode(node)
+}
+
+func (e *compositeErrorEngine) CreateEdge(edge *Edge) error {
+	if e.createEdgeErr != nil {
+		return e.createEdgeErr
+	}
+	return e.MemoryEngine.CreateEdge(edge)
+}
+
+func (e *compositeErrorEngine) BulkCreateNodes(nodes []*Node) error {
+	if e.bulkCreateNodesErr != nil {
+		return e.bulkCreateNodesErr
+	}
+	return e.MemoryEngine.BulkCreateNodes(nodes)
+}
+
+func (e *compositeErrorEngine) BulkCreateEdges(edges []*Edge) error {
+	if e.bulkCreateEdgesErr != nil {
+		return e.bulkCreateEdgesErr
+	}
+	return e.MemoryEngine.BulkCreateEdges(edges)
+}
+
 func (e *compositeStreamEngine) StreamNodes(_ context.Context, fn func(node *Node) error) error {
 	if e.streamNodeErr != nil {
 		return e.streamNodeErr
@@ -2211,4 +2355,148 @@ func TestCompositeEngine_EdgeCount(t *testing.T) {
 	count, err := composite.EdgeCount()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, count, int64(2))
+}
+
+func TestCompositeEngine_ErrorPaths(t *testing.T) {
+	t.Run("query helpers propagate constituent errors and continue nil-first-node results", func(t *testing.T) {
+		boom := errors.New("boom")
+		errEngine := &compositeErrorEngine{MemoryEngine: NewMemoryEngine()}
+		okEngine := NewMemoryEngine()
+		t.Cleanup(func() { _ = errEngine.MemoryEngine.Close() })
+		t.Cleanup(func() { _ = okEngine.Close() })
+
+		okNode := &Node{ID: NodeID(prefixTestID("ok-node")), Labels: []string{"Person"}}
+		_, err := okEngine.CreateNode(okNode)
+		require.NoError(t, err)
+
+		errorOnly := NewCompositeEngine(
+			map[string]Engine{"err": errEngine},
+			map[string]string{"err": "err"},
+			map[string]string{"err": "read_write"},
+		)
+
+		errEngine.getNodeErr = boom
+		_, err = errorOnly.GetNode(okNode.ID)
+		require.ErrorIs(t, err, boom)
+		err = errorOnly.UpdateNode(&Node{ID: okNode.ID, Labels: []string{"Person"}})
+		require.ErrorIs(t, err, boom)
+		err = errorOnly.DeleteNode(okNode.ID)
+		require.ErrorIs(t, err, boom)
+		errEngine.getNodeErr = nil
+
+		errEngine.getEdgeErr = boom
+		_, err = errorOnly.GetEdge(EdgeID(prefixTestID("missing-edge")))
+		require.ErrorIs(t, err, boom)
+		err = errorOnly.UpdateEdge(&Edge{ID: EdgeID(prefixTestID("missing-edge")), StartNode: okNode.ID, EndNode: okNode.ID, Type: "REL"})
+		require.ErrorIs(t, err, boom)
+		err = errorOnly.DeleteEdge(EdgeID(prefixTestID("missing-edge")))
+		require.ErrorIs(t, err, boom)
+		errEngine.getEdgeErr = nil
+
+		errEngine.firstNodeErr = boom
+		_, err = errorOnly.GetFirstNodeByLabel("Person")
+		require.ErrorIs(t, err, boom)
+		errEngine.firstNodeErr = nil
+
+		composite := NewCompositeEngine(
+			map[string]Engine{"err": errEngine, "ok": okEngine},
+			map[string]string{"err": "err", "ok": "ok"},
+			map[string]string{"err": "read_write", "ok": "read_write"},
+		)
+		errEngine.returnNilFirstNode = true
+		got, err := composite.GetFirstNodeByLabel("Person")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, okNode.ID, got.ID)
+		errEngine.returnNilFirstNode = false
+
+		errEngine.outgoingErr = boom
+		_, err = composite.GetOutgoingEdges(okNode.ID)
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.outgoingErr = nil
+
+		errEngine.incomingErr = boom
+		_, err = composite.GetIncomingEdges(okNode.ID)
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.incomingErr = nil
+
+		errEngine.betweenErr = boom
+		_, err = composite.GetEdgesBetween(okNode.ID, okNode.ID)
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.betweenErr = nil
+
+		errEngine.byTypeErr = boom
+		_, err = composite.GetEdgesByType("REL")
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.byTypeErr = nil
+
+		errEngine.allNodesErr = boom
+		_, err = composite.AllNodes()
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.allNodesErr = nil
+
+		errEngine.allEdgesErr = boom
+		_, err = composite.AllEdges()
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.allEdgesErr = nil
+
+		errEngine.batchGetErr = boom
+		_, err = composite.BatchGetNodes([]NodeID{okNode.ID})
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.batchGetErr = nil
+
+		errEngine.nodeCountErr = boom
+		_, err = composite.NodeCount()
+		require.ErrorContains(t, err, "constituent 'err'")
+		errEngine.nodeCountErr = nil
+
+		errEngine.edgeCountErr = boom
+		_, err = composite.EdgeCount()
+		require.ErrorContains(t, err, "constituent 'err'")
+	})
+
+	t.Run("write helpers propagate routed constituent and close errors", func(t *testing.T) {
+		boom := errors.New("boom")
+		errEngine := &compositeErrorEngine{MemoryEngine: NewMemoryEngine()}
+		okEngine := NewMemoryEngine()
+		t.Cleanup(func() { _ = errEngine.MemoryEngine.Close() })
+		t.Cleanup(func() { _ = okEngine.Close() })
+
+		composite := NewCompositeEngine(
+			map[string]Engine{"err": errEngine, "ok": okEngine},
+			map[string]string{"err": "err", "ok": "ok"},
+			map[string]string{"err": "read_write", "ok": "read_write"},
+		)
+		composite.SetLabelRouting("ErrLabel", []string{"err"})
+
+		errEngine.createNodeErr = boom
+		_, err := composite.CreateNode(&Node{ID: NodeID(prefixTestID("route-node")), Labels: []string{"ErrLabel"}})
+		require.ErrorIs(t, err, boom)
+		errEngine.createNodeErr = nil
+
+		start := &Node{ID: NodeID(prefixTestID("start")), Labels: []string{"ErrLabel"}}
+		end := &Node{ID: NodeID(prefixTestID("end")), Labels: []string{"ErrLabel"}}
+		_, err = errEngine.CreateNode(start)
+		require.NoError(t, err)
+		_, err = errEngine.CreateNode(end)
+		require.NoError(t, err)
+
+		errEngine.createEdgeErr = boom
+		err = composite.CreateEdge(&Edge{ID: EdgeID(prefixTestID("route-edge")), StartNode: start.ID, EndNode: end.ID, Type: "REL"})
+		require.ErrorIs(t, err, boom)
+		errEngine.createEdgeErr = nil
+
+		errEngine.bulkCreateNodesErr = boom
+		err = composite.BulkCreateNodes([]*Node{{ID: NodeID(prefixTestID("bulk-node")), Labels: []string{"ErrLabel"}}})
+		require.ErrorContains(t, err, "failed to create nodes in constituent 'err'")
+		errEngine.bulkCreateNodesErr = nil
+
+		errEngine.bulkCreateEdgesErr = boom
+		err = composite.BulkCreateEdges([]*Edge{{ID: EdgeID(prefixTestID("bulk-edge")), StartNode: start.ID, EndNode: end.ID, Type: "REL"}})
+		require.ErrorContains(t, err, "failed to create edges in constituent 'err'")
+
+		errEngine.closeErr = errors.New("close failed")
+		err = composite.Close()
+		require.ErrorContains(t, err, "error closing constituent 'err'")
+	})
 }

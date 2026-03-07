@@ -1070,6 +1070,84 @@ func TestTransaction_DeleteNodeBuffered(t *testing.T) {
 	})
 }
 
+func TestTransaction_BufferedWriteAndLifecycleEdgeCases(t *testing.T) {
+	t.Run("begin transaction on closed engine fails", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		require.NoError(t, engine.Close())
+
+		tx, err := engine.BeginTransaction()
+		require.Nil(t, tx)
+		require.ErrorContains(t, err, "engine is closed")
+	})
+
+	t.Run("flushBufferedWrites applies delete wins semantics and clears buffers", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		defer tx.Rollback()
+
+		keepKey := []byte("txn:keep")
+		dropKey := []byte("txn:drop")
+		tx.bufferSet(keepKey, []byte("value"))
+		tx.bufferSet(dropKey, []byte("value"))
+		tx.bufferDelete(dropKey)
+
+		require.NoError(t, tx.flushBufferedWrites())
+		require.Empty(t, tx.pendingWrites)
+		require.Empty(t, tx.pendingDeletes)
+
+		item, err := tx.badgerTx.Get(keepKey)
+		require.NoError(t, err)
+		err = item.Value(func(val []byte) error {
+			require.Equal(t, []byte("value"), val)
+			return nil
+		})
+		require.NoError(t, err)
+
+		_, err = tx.badgerTx.Get(dropKey)
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+	})
+
+	t.Run("flushBufferedWrites surfaces invalid buffered deletes", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		defer tx.Rollback()
+
+		tx.bufferDelete([]byte{})
+		err = tx.flushBufferedWrites()
+		require.Error(t, err)
+	})
+
+	t.Run("deleteNodeBuffered loads stored node when old node not provided", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("buffered-read-node"))
+		_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Person", "Member"}})
+		require.NoError(t, err)
+
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		defer tx.Rollback()
+
+		count, ids, err := tx.deleteNodeBuffered(nodeID, nil)
+		require.NoError(t, err)
+		require.Zero(t, count)
+		require.Empty(t, ids)
+		require.True(t, tx.pendingDeletes[string(labelIndexKey("Person", nodeID))])
+		require.True(t, tx.pendingDeletes[string(labelIndexKey("Member", nodeID))])
+		require.True(t, tx.pendingDeletes[string(nodeKey(nodeID))])
+		require.True(t, tx.pendingDeletes[string(pendingEmbedKey(nodeID))])
+	})
+
+	t.Run("commit on closed transaction returns ErrTransactionClosed", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		tx, err := engine.BeginTransaction()
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback())
+		require.ErrorIs(t, tx.Commit(), ErrTransactionClosed)
+	})
+}
+
 func TestTransaction_Isolation(t *testing.T) {
 	engine := NewMemoryEngine()
 	defer engine.Close()
