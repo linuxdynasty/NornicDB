@@ -40,7 +40,8 @@ RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/l
       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
       -DLLAMA_CURL=OFF \
       -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
-      -DCMAKE_C_FLAGS="-O3" -DCMAKE_CXX_FLAGS="-O3" && \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DCMAKE_C_FLAGS="-O3 -fPIC" -DCMAKE_CXX_FLAGS="-O3 -fPIC" && \
     cmake --build build --config Release -j${LLAMA_BUILD_JOBS}
 
 # Combine static libs into single archive
