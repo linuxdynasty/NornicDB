@@ -7,6 +7,8 @@
 # Headless (no UI):
 #         docker build -f docker/Dockerfile.arm64-metal --build-arg HEADLESS=true -t nornicdb-arm64-metal-headless .
 
+ARG LLAMA_CPU_IMAGE=timothyswt/llama-cpu-libs:b8157
+
 # =============================================================================
 # Stage 1: UI (skipped in headless mode)
 # =============================================================================
@@ -25,36 +27,9 @@ RUN if [ "$HEADLESS" != "true" ]; then \
     fi
 
 # =============================================================================
-# Stage 2: llama.cpp static library (ARM64)
+# Stage 2: prebuilt llama.cpp static library (ARM64)
 # =============================================================================
-FROM debian:bookworm-slim AS llama
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git ca-certificates && rm -rf /var/lib/apt/lists/*
-
-ARG LLAMA_VERSION=b8157
-ARG LLAMA_BUILD_JOBS=2
-WORKDIR /llama
-RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git . && \
-    cmake -B build \
-      -DLLAMA_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
-      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
-      -DLLAMA_CURL=OFF \
-      -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
-      -DCMAKE_C_FLAGS="-mcpu=generic" -DCMAKE_CXX_FLAGS="-mcpu=generic" && \
-    cmake --build build --config Release -j${LLAMA_BUILD_JOBS}
-
-# Combine static libs into single archive
-RUN mkdir -p /out && \
-    find build -name "*.a" -exec cp {} /out/ \; && \
-    echo "Libraries found:" && ls -la /out/*.a && \
-    echo "CREATE /out/libllama_combined.a" > /tmp/ar.mri && \
-    for lib in /out/lib*.a; do echo "ADDLIB $lib" >> /tmp/ar.mri; done && \
-    echo "SAVE" >> /tmp/ar.mri && \
-    echo "END" >> /tmp/ar.mri && \
-    cat /tmp/ar.mri && \
-    ar -M < /tmp/ar.mri && \
-    cp include/llama.h ggml/include/*.h /out/ && \
-    echo "Combined library:" && ls -lh /out/libllama_combined.a
+FROM ${LLAMA_CPU_IMAGE} AS llama
 
 # =============================================================================
 # Stage 3: Go build
@@ -66,7 +41,7 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 
 # Copy llama static library (before COPY . . for better layer caching)
-COPY --from=llama /out/libllama_combined.a /build/lib/llama/libllama_linux_arm64.a
+COPY --from=llama /output/lib/libllama_combined.a /build/lib/llama/libllama_linux_arm64.a
 
 # Go dependencies
 COPY go.mod go.sum ./
@@ -79,7 +54,7 @@ COPY --from=ui /ui/dist ./ui/dist
 # Overwrite repo headers with ones matching LLAMA_VERSION (must be AFTER COPY . .)
 # COPY . . would otherwise replace these with the stale headers committed to the repo,
 # causing a struct size mismatch between the compiled library and the CGo bindings.
-COPY --from=llama /out/*.h /build/lib/llama/
+COPY --from=llama /output/include/*.h /build/lib/llama/
 
 # Build (with or without UI based on HEADLESS arg)
 # NOTE: Cannot use -static linking because Go plugins require dynamic linking

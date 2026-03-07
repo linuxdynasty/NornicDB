@@ -69,6 +69,7 @@ IMAGE_AMD64_VULKAN := $(REGISTRY)/nornicdb-amd64-vulkan:$(VERSION)
 IMAGE_AMD64_VULKAN_BGE := $(REGISTRY)/nornicdb-amd64-vulkan-bge:$(VERSION)
 IMAGE_AMD64_VULKAN_HEADLESS := $(REGISTRY)/nornicdb-amd64-vulkan-headless:$(VERSION)
 LLAMA_VERSION ?= b8157
+LLAMA_CPU := $(REGISTRY)/llama-cpu-libs:$(LLAMA_VERSION)
 LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:$(LLAMA_VERSION)
 
 # Dockerfiles
@@ -101,6 +102,7 @@ BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/reso
 .PHONY: deploy-cpu-bge deploy-cpu-bge-headless
 .PHONY: deploy-amd64-vulkan deploy-amd64-vulkan-bge deploy-amd64-vulkan-headless
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
+.PHONY: build-llama-cpu push-llama-cpu deploy-llama-cpu ensure-llama-cpu
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda ensure-llama-cuda
 .PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen download-bge-reranker check-models
@@ -255,29 +257,29 @@ endif
 # Build (local only, no push)
 # ==============================================================================
 
-build-arm64-metal:
+build-arm64-metal: ensure-llama-cpu
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64) [BYOM]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 -t $(IMAGE_ARM64) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) -t $(IMAGE_ARM64) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
-build-arm64-metal-bge: download-bge download-bge-reranker
+build-arm64-metal-bge: ensure-llama-cpu download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg EMBED_MODEL=true -t $(IMAGE_ARM64_BGE) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) --build-arg EMBED_MODEL=true -t $(IMAGE_ARM64_BGE) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
-build-arm64-metal-bge-heimdall: download-models
+build-arm64-metal-bge-heimdall: ensure-llama-cpu download-models
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64_BGE_HEIMDALL) [BGE + Heimdall]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 -t $(IMAGE_ARM64_BGE_HEIMDALL) -f $(DOCKER_DIR)/Dockerfile.arm64-metal-heimdall .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) -t $(IMAGE_ARM64_BGE_HEIMDALL) -f $(DOCKER_DIR)/Dockerfile.arm64-metal-heimdall .
 
-build-arm64-metal-headless:
+build-arm64-metal-headless: ensure-llama-cpu
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64_HEADLESS) [headless, no UI]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg HEADLESS=true -t $(IMAGE_ARM64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) --build-arg HEADLESS=true -t $(IMAGE_ARM64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
 build-amd64-cuda: ensure-llama-cuda
 	@echo "╔══════════════════════════════════════════════════════════════╗"
@@ -316,17 +318,17 @@ build-amd64-cpu-headless:
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg HEADLESS=true -t $(IMAGE_AMD64_CPU_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cpu .
 
 # CPU-only with BGE embeddings + reranker (cross-platform: works on both AMD64 and ARM64)
-build-cpu-bge: download-bge download-bge-reranker
+build-cpu-bge: ensure-llama-cpu download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_CPU_BGE) [CPU + BGE embeddings + reranker]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) -t $(IMAGE_CPU_BGE) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
+	docker build $(DOCKER_BUILD_FLAGS) --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) -t $(IMAGE_CPU_BGE) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
 
-build-cpu-bge-headless: download-bge download-bge-reranker
+build-cpu-bge-headless: ensure-llama-cpu download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_CPU_BGE_HEADLESS) [CPU + BGE + reranker, headless]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --build-arg HEADLESS=true -t $(IMAGE_CPU_BGE_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
+	docker build $(DOCKER_BUILD_FLAGS) --build-arg LLAMA_CPU_IMAGE=$(LLAMA_CPU) --build-arg HEADLESS=true -t $(IMAGE_CPU_BGE_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
 
 # AMD64 Vulkan (any GPU: NVIDIA/AMD/Intel)
 build-amd64-vulkan:
@@ -498,6 +500,52 @@ endif
 	@echo "✓ All images for $(HOST_ARCH) deployed"
 
 # ==============================================================================
+# CPU/Metal prerequisite (one-time build)
+# ==============================================================================
+
+ensure-llama-cpu:
+ifeq ($(HOST_OS),windows)
+	@echo Checking CPU libs image: $(LLAMA_CPU)
+	@docker image inspect "$(LLAMA_CPU)" >NUL 2>&1 && ( \
+		echo Found local image $(LLAMA_CPU) \
+	) || ( \
+		echo Missing local image $(LLAMA_CPU); attempting to pull... && \
+		docker pull "$(LLAMA_CPU)" >NUL 2>&1 && ( \
+			echo Pulled $(LLAMA_CPU) \
+		) || ( \
+			echo Pull failed; building one-time prerequisite locally... && \
+			$(MAKE) build-llama-cpu \
+		) \
+	)
+else
+	@echo "→ Checking CPU libs image: $(LLAMA_CPU)"
+	@if docker image inspect "$(LLAMA_CPU)" > /dev/null 2>&1; then \
+		echo "✓ Found local image $(LLAMA_CPU)"; \
+	else \
+		echo "→ Missing local image $(LLAMA_CPU); attempting to pull..."; \
+		if docker pull "$(LLAMA_CPU)" > /dev/null 2>&1; then \
+			echo "✓ Pulled $(LLAMA_CPU)"; \
+		else \
+			echo "→ Pull failed; building one-time prerequisite locally..."; \
+			$(MAKE) build-llama-cpu; \
+		fi; \
+	fi
+endif
+
+build-llama-cpu:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building CPU libs (one-time): $(LLAMA_CPU)"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/$(HOST_ARCH) -t $(LLAMA_CPU) -f $(DOCKER_DIR)/Dockerfile.llama-cpu .
+
+push-llama-cpu:
+	@echo "→ Pushing $(LLAMA_CPU)"
+	docker push $(LLAMA_CPU)
+
+deploy-llama-cpu: build-llama-cpu push-llama-cpu
+	@echo "✓ Deployed $(LLAMA_CPU)"
+
+# ==============================================================================
 # CUDA Prerequisite (one-time build, ~15 min)
 # ==============================================================================
 
@@ -507,16 +555,26 @@ ifeq ($(HOST_OS),windows)
 	@docker image inspect "$(LLAMA_CUDA)" >NUL 2>&1 && ( \
 		echo Found local image $(LLAMA_CUDA) \
 	) || ( \
-		echo Missing $(LLAMA_CUDA); building one-time prerequisite... && \
-		$(MAKE) build-llama-cuda \
+		echo Missing local image $(LLAMA_CUDA); attempting to pull... && \
+		docker pull "$(LLAMA_CUDA)" >NUL 2>&1 && ( \
+			echo Pulled $(LLAMA_CUDA) \
+		) || ( \
+			echo Pull failed; building one-time prerequisite locally... && \
+			$(MAKE) build-llama-cuda \
+		) \
 	)
 else
 	@echo "→ Checking CUDA libs image: $(LLAMA_CUDA)"
 	@if docker image inspect "$(LLAMA_CUDA)" > /dev/null 2>&1; then \
 		echo "✓ Found local image $(LLAMA_CUDA)"; \
 	else \
-		echo "→ Missing $(LLAMA_CUDA); building one-time prerequisite..."; \
-		$(MAKE) build-llama-cuda; \
+		echo "→ Missing local image $(LLAMA_CUDA); attempting to pull..."; \
+		if docker pull "$(LLAMA_CUDA)" > /dev/null 2>&1; then \
+			echo "✓ Pulled $(LLAMA_CUDA)"; \
+		else \
+			echo "→ Pull failed; building one-time prerequisite locally..."; \
+			$(MAKE) build-llama-cuda; \
+		fi; \
 	fi
 endif
 

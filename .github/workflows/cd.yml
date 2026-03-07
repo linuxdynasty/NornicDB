@@ -28,6 +28,7 @@ jobs:
       checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
       version: ${{ steps.meta.outputs.version }}
       docker_repo: ${{ steps.meta.outputs.docker_repo }}
+      llama_cpu_image: ${{ steps.meta.outputs.llama_cpu_image }}
       llama_version: ${{ steps.meta.outputs.llama_version }}
       llama_cuda_image: ${{ steps.meta.outputs.llama_cuda_image }}
     steps:
@@ -73,6 +74,7 @@ jobs:
           echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
+          echo "llama_cpu_image=${DOCKERHUB_USERNAME}/llama-cpu-libs:${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
           echo "llama_version=${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
           echo "llama_cuda_image=${DOCKERHUB_USERNAME}/llama-cuda-libs:${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -172,7 +174,9 @@ jobs:
           push: true
           provenance: false
           tags: ${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}:${{ needs.meta.outputs.version }}
-          build-args: ${{ matrix.build_args }}
+          build-args: |
+            LLAMA_CPU_IMAGE=${{ needs.meta.outputs.llama_cpu_image }}
+            ${{ matrix.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
