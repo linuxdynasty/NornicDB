@@ -6,10 +6,15 @@ on:
       - "*"
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Existing branch, tag, or commit SHA to build from and use as the Docker tag"
+      source_ref:
+        description: "Existing branch, tag, or commit SHA to build from"
         required: true
         default: "main"
+        type: string
+      image_tag:
+        description: "Docker tag to publish. Defaults to source_ref (sanitized for Docker tag rules)"
+        required: false
+        default: ""
         type: string
 
 env:
@@ -20,6 +25,7 @@ jobs:
     name: Release Metadata
     runs-on: ubuntu-latest
     outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
       version: ${{ steps.meta.outputs.version }}
       docker_repo: ${{ steps.meta.outputs.docker_repo }}
       llama_version: ${{ steps.meta.outputs.llama_version }}
@@ -28,21 +34,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
 
       - id: meta
         run: |
+          sanitize_tag() {
+            local raw="$1"
+            raw="${raw#refs/heads/}"
+            raw="${raw#refs/tags/}"
+            raw="${raw#refs/}"
+            raw="${raw//\//-}"
+            raw="$(printf '%s' "$raw" | tr -c '[:alnum:]._-' '-')"
+            raw="${raw#-}"
+            raw="${raw%-}"
+            if [ -z "$raw" ]; then
+              raw="latest"
+            fi
+            printf '%s' "$raw"
+          }
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION_INPUT="${{ inputs.ref }}"
+            CHECKOUT_REF="${{ inputs.source_ref }}"
+            if [ -n "${{ inputs.image_tag }}" ]; then
+              VERSION_INPUT="${{ inputs.image_tag }}"
+            else
+              VERSION_INPUT="${{ inputs.source_ref }}"
+            fi
           else
+            CHECKOUT_REF="${GITHUB_REF}"
             VERSION_INPUT="${GITHUB_REF_NAME}"
           fi
+          VERSION_TAG="$(sanitize_tag "$VERSION_INPUT")"
           LLAMA_VERSION="$(sed -n 's/^LLAMA_VERSION ?= //p' Makefile | head -n1)"
           if [ -z "$LLAMA_VERSION" ]; then
             echo "Failed to determine LLAMA_VERSION from Makefile" >&2
             exit 1
           fi
-          echo "version=${VERSION_INPUT}" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
           echo "llama_version=${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
           echo "llama_cuda_image=${DOCKERHUB_USERNAME}/llama-cuda-libs:${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
@@ -120,7 +149,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          ref: ${{ needs.meta.outputs.checkout_ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -178,7 +207,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          ref: ${{ needs.meta.outputs.checkout_ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

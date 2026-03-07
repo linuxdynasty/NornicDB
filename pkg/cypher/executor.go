@@ -112,7 +112,6 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1777,17 +1776,6 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 				return e.executeMatchWithCallProcedure(ctx, cypher)
 			}
 		}
-	}
-
-	// Log CREATE routing to diagnose CREATE DATABASE not creating DB (executor path taken)
-	if startsWithCreate {
-		createDbIdx := findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE")
-		createCompositeIdx := findMultiWordKeywordIndex(cypher, "CREATE", "COMPOSITE DATABASE")
-		prefix := cypher
-		if len(prefix) > 100 {
-			prefix = prefix[:100] + "..."
-		}
-		log.Printf("[nornicdb:CREATE_DATABASE] executor routing: cypher=%q createDbIdx=%d createCompositeIdx=%d", prefix, createDbIdx, createCompositeIdx)
 	}
 
 	switch {

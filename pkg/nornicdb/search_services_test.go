@@ -20,6 +20,20 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Wait for the per-database search services to finish their initial startup build
+	// before injecting event-driven index updates. This test is verifying namespace
+	// routing, not the startup warmup path, and a concurrent startup rebuild can
+	// otherwise race with IndexNode() and make the expected counts nondeterministic.
+	defaultSvc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()))
+	require.Equal(t, 0, defaultSvc.EmbeddingCount())
+
+	db2Svc, err := db.GetOrCreateSearchService("db2", nil)
+	require.NoError(t, err)
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "db2"))
+	require.Equal(t, 0, db2Svc.EmbeddingCount())
+
 	// Create and index a node in the default database (nornic).
 	alpha := &storage.Node{
 		ID:     storage.NodeID("alpha"),
@@ -58,15 +72,9 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	})
 
 	// Default DB service should only contain default DB embedding.
-	defaultSvc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
-	require.NoError(t, err)
-	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()))
 	require.Equal(t, 1, defaultSvc.EmbeddingCount())
 
 	// db2 service should exist and contain only db2 embedding.
-	db2Svc, err := db.GetOrCreateSearchService("db2", nil)
-	require.NoError(t, err)
-	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "db2"))
 	require.Equal(t, 1, db2Svc.EmbeddingCount())
 
 	// Verify text-only search does not cross-contaminate.
