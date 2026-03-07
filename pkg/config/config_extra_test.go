@@ -36,6 +36,34 @@ func TestFeatureFlagsConfig_HeimdallGetters_Defaults(t *testing.T) {
 	assert.Equal(t, "", f.GetHeimdallAPIKey())
 }
 
+func TestFeatureFlagsConfig_AdditionalHeimdallGetters(t *testing.T) {
+	f := &FeatureFlagsConfig{
+		HeimdallGPULayers:        7,
+		HeimdallContextSize:      4096,
+		HeimdallBatchSize:        512,
+		HeimdallMaxTokens:        256,
+		HeimdallTemperature:      0.25,
+		HeimdallAnomalyDetection: true,
+		HeimdallRuntimeDiagnosis: true,
+		HeimdallMemoryCuration:   true,
+		HeimdallMaxContextTokens: 5000,
+		HeimdallMaxSystemTokens:  3000,
+		HeimdallMaxUserTokens:    1000,
+	}
+
+	assert.Equal(t, 7, f.GetHeimdallGPULayers())
+	assert.Equal(t, 4096, f.GetHeimdallContextSize())
+	assert.Equal(t, 512, f.GetHeimdallBatchSize())
+	assert.Equal(t, 256, f.GetHeimdallMaxTokens())
+	assert.Equal(t, float32(0.25), f.GetHeimdallTemperature())
+	assert.True(t, f.GetHeimdallAnomalyDetection())
+	assert.True(t, f.GetHeimdallRuntimeDiagnosis())
+	assert.True(t, f.GetHeimdallMemoryCuration())
+	assert.Equal(t, 5000, f.GetHeimdallMaxContextTokens())
+	assert.Equal(t, 3000, f.GetHeimdallMaxSystemTokens())
+	assert.Equal(t, 1000, f.GetHeimdallMaxUserTokens())
+}
+
 // ============================================================================
 // FindConfigFile – env override path
 // ============================================================================
@@ -85,4 +113,15 @@ func TestApplyEnvVars_WithSomeEnvVars(t *testing.T) {
 func TestGetParserType_Default(t *testing.T) {
 	result := GetParserType()
 	assert.IsType(t, "", result)
+}
+
+func TestGetParserType_SetParserTypeFallbacks(t *testing.T) {
+	prev := GetParserType()
+	defer SetParserType(prev)
+
+	SetParserType("antlr")
+	assert.Equal(t, ParserTypeANTLR, GetParserType())
+
+	SetParserType("unexpected")
+	assert.Equal(t, ParserTypeNornic, GetParserType())
 }

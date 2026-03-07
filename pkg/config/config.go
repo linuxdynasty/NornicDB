@@ -1443,7 +1443,9 @@ func applyEnvVars(config *Config) error {
 	}
 
 	// WAL auto-compaction settings
-	config.Database.WALAutoCompactionEnabled = getEnvBool("NORNICDB_WAL_AUTO_COMPACTION_ENABLED", true)
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_WAL_AUTO_COMPACTION_ENABLED"); ok {
+		config.Database.WALAutoCompactionEnabled = v
+	}
 
 	// WAL retention settings
 	if v := getEnvInt("NORNICDB_WAL_RETENTION_MAX_SEGMENTS", 0); v > 0 {
@@ -1452,7 +1454,9 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvDuration("NORNICDB_WAL_RETENTION_MAX_AGE", 0); v > 0 {
 		config.Database.WALRetentionMaxAge = v
 	}
-	config.Database.WALRetentionLedgerDefaults = getEnvBool("NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS", false)
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS"); ok {
+		config.Database.WALRetentionLedgerDefaults = v
+	}
 	if config.Database.WALRetentionLedgerDefaults &&
 		config.Database.WALRetentionMaxSegments == 0 &&
 		config.Database.WALRetentionMaxAge == 0 {
@@ -1490,7 +1494,9 @@ func applyEnvVars(config *Config) error {
 	if v := getEnv("NORNICDB_STORAGE_SERIALIZER", ""); v != "" {
 		config.Database.StorageSerializer = strings.ToLower(v)
 	}
-	config.Database.PersistSearchIndexes = getEnvBool("NORNICDB_PERSIST_SEARCH_INDEXES", false)
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_PERSIST_SEARCH_INDEXES"); ok {
+		config.Database.PersistSearchIndexes = v
+	}
 
 	// Server settings - Bolt
 	if getEnv("NORNICDB_BOLT_ENABLED", "") == "false" {

@@ -12,6 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func assertMinOpsPerSec(t *testing.T, label string, opsPerSec, minOpsPerSec float64) {
+	t.Helper()
+
+	if opsPerSec >= minOpsPerSec {
+		return
+	}
+
+	message := fmt.Sprintf("%s throughput %.2f ops/sec is below target %.2f", label, opsPerSec, minOpsPerSec)
+	if os.Getenv("NORNICDB_STRICT_PERF_ASSERTS") != "" {
+		t.Fatalf("%s", message)
+	}
+	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+		t.Logf("WARNING: %s (not failing in shared CI; run with NORNICDB_STRICT_PERF_ASSERTS=1 for a hard gate)", message)
+		return
+	}
+	t.Errorf("%s", message)
+}
+
 // skipDiskIOTestOnWindows skips disk I/O intensive tests on Windows to avoid OOM
 func skipDiskIOTestOnWindows(t *testing.T) {
 	t.Helper()
@@ -396,10 +414,7 @@ func TestBenchmarkMatchCreateDelete(t *testing.T) {
 		t.Errorf("Expected 0 relationships after all iterations, got %v", countAfter.Rows[0][0])
 	}
 
-	// Target: Should be >1000 ops/sec to match Neo4j
-	if opsPerSec < 1000 {
-		t.Errorf("PERFORMANCE REGRESSION: %.2f ops/sec is below target of 1000 ops/sec", opsPerSec)
-	}
+	assertMinOpsPerSec(t, "MATCH...CREATE...DELETE (MemoryEngine)", opsPerSec, 1000)
 }
 
 // TestBenchmarkMatchCreateDelete_WithFlush simulates the Bolt path where we flush after each query
@@ -561,10 +576,7 @@ func TestBenchmarkMatchCreateDelete_WithBadgerAndFlush(t *testing.T) {
 		t.Errorf("Expected 0 relationships, got %v", countAfter.Rows[0][0])
 	}
 
-	// This should be close to Neo4j's ~1400 ops/sec target
-	if opsPerSec < 500 {
-		t.Logf("WARNING: Performance %.2f ops/sec is below 500 target", opsPerSec)
-	}
+	assertMinOpsPerSec(t, "MATCH...CREATE...DELETE (Badger+Flush)", opsPerSec, 500)
 }
 
 // TestBenchmarkMatchCreateDelete_LargeDataset_Direct tests with 100 actors + 150 movies
@@ -617,9 +629,7 @@ func TestBenchmarkMatchCreateDelete_LargeDataset_Direct(t *testing.T) {
 	opsPerSec := float64(iterations) / elapsed.Seconds()
 	t.Logf("Direct executor (large dataset): %.2f ops/sec, %.3f ms/op", opsPerSec, elapsed.Seconds()*1000/float64(iterations))
 
-	if opsPerSec < 10000 {
-		t.Errorf("Direct executor should be >10000 ops/sec, got %.2f", opsPerSec)
-	}
+	assertMinOpsPerSec(t, "Large dataset direct executor", opsPerSec, 10000)
 }
 
 // TestBenchmarkMatchCreateDelete_LargeDataset_WithFlush tests flush impact

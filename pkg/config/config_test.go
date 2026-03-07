@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestLoadFromEnv_Defaults tests default values are loaded correctly.
@@ -349,6 +351,252 @@ func TestLoadFromEnv_CustomValues(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
+	clearEnvVars(t)
+
+	t.Setenv("NORNICDB_AUTH", "envuser:envpass")
+	t.Setenv("NORNICDB_MIN_PASSWORD_LENGTH", "12")
+	t.Setenv("NORNICDB_AUTH_TOKEN_EXPIRY", "3h")
+	t.Setenv("NORNICDB_AUTH_JWT_SECRET", "env-secret")
+	t.Setenv("NORNICDB_DATA_DIR", "/env/data")
+	t.Setenv("NORNICDB_DEFAULT_DATABASE", "envdb")
+	t.Setenv("NORNICDB_READ_ONLY", "true")
+	t.Setenv("NORNICDB_TRANSACTION_TIMEOUT", "90")
+	t.Setenv("NORNICDB_MAX_TRANSACTIONS", "55")
+	t.Setenv("NORNICDB_WAL_AUTO_COMPACTION_ENABLED", "false")
+	t.Setenv("NORNICDB_WAL_RETENTION_MAX_SEGMENTS", "12")
+	t.Setenv("NORNICDB_WAL_RETENTION_MAX_AGE", "36h")
+	t.Setenv("NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS", "true")
+	t.Setenv("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_COUNT", "5")
+	t.Setenv("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_AGE", "24h")
+	t.Setenv("NORNICDB_PERSIST_SEARCH_INDEXES", "true")
+	t.Setenv("NORNICDB_BOLT_ENABLED", "false")
+	t.Setenv("NORNICDB_BOLT_ADDRESS", "127.0.0.1")
+	t.Setenv("NORNICDB_BOLT_TLS_ENABLED", "true")
+	t.Setenv("NORNICDB_TLS_DIR", "/tlsdir")
+	t.Setenv("NORNICDB_HTTP_ENABLED", "false")
+	t.Setenv("NORNICDB_HTTP_ADDRESS", "127.0.0.2")
+	t.Setenv("NORNICDB_HTTPS_ENABLED", "true")
+	t.Setenv("NORNICDB_HTTPS_PORT", "9443")
+	t.Setenv("NORNICDB_ENV", "production")
+	t.Setenv("NORNICDB_ALLOW_HTTP", "false")
+	t.Setenv("NORNICDB_PLUGINS_DIR", "/env/plugins")
+	t.Setenv("NORNICDB_HEIMDALL_PLUGINS_DIR", "/env/heim")
+	t.Setenv("NORNICDB_CORS_ENABLED", "false")
+	t.Setenv("NORNICDB_CORS_ORIGINS", "https://a.example, https://b.example")
+	t.Setenv("NORNICDB_ENCRYPTION_ENABLED", "true")
+	t.Setenv("NORNICDB_ENCRYPTION_PASSWORD", "env-password")
+	t.Setenv("NORNICDB_MEMORY_DECAY_ENABLED", "false")
+	t.Setenv("NORNICDB_MEMORY_ARCHIVE_THRESHOLD", "0.3")
+	t.Setenv("NORNICDB_EMBEDDING_ENABLED", "1")
+	t.Setenv("NORNICDB_EMBEDDING_MODEL", "env-embed-model")
+	t.Setenv("NORNICDB_EMBEDDING_API_URL", "http://embed-env")
+	t.Setenv("NORNICDB_EMBEDDING_API_KEY", "embed-env-key")
+	t.Setenv("NORNICDB_EMBEDDING_CACHE_SIZE", "999")
+	t.Setenv("NORNICDB_SEARCH_MIN_SIMILARITY", "0.75")
+	t.Setenv("NORNICDB_MODELS_DIR", "/models")
+	t.Setenv("NORNICDB_EMBEDDING_GPU_LAYERS", "4")
+	t.Setenv("NORNICDB_EMBEDDING_WARMUP_INTERVAL", "11m")
+	t.Setenv("NORNICDB_KMEANS_MIN_EMBEDDINGS", "222")
+	t.Setenv("NORNICDB_KMEANS_CLUSTER_INTERVAL", "8m")
+	t.Setenv("NORNICDB_KMEANS_NUM_CLUSTERS", "6")
+	t.Setenv("NORNICDB_AUTO_LINKS_ENABLED", "false")
+	t.Setenv("NORNICDB_AUTO_LINKS_THRESHOLD", "0.67")
+	t.Setenv("NORNICDB_EMBED_SCAN_INTERVAL", "5m")
+	t.Setenv("NORNICDB_EMBED_BATCH_DELAY", "3s")
+	t.Setenv("NORNICDB_EMBED_MAX_RETRIES", "7")
+	t.Setenv("NORNICDB_EMBED_CHUNK_SIZE", "2048")
+	t.Setenv("NORNICDB_EMBED_CHUNK_OVERLAP", "33")
+	t.Setenv("NORNICDB_EMBEDDING_PROPERTIES_INCLUDE", "title, body")
+	t.Setenv("NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE", "secret, internal")
+	t.Setenv("NORNICDB_EMBEDDING_INCLUDE_LABELS", "false")
+	t.Setenv("NORNICDB_AUDIT_ENABLED", "false")
+	t.Setenv("NORNICDB_AUDIT_LOG_PATH", "/env/audit.log")
+	t.Setenv("NORNICDB_RETENTION_ENABLED", "true")
+	t.Setenv("NORNICDB_RETENTION_POLICY_DAYS", "88")
+	t.Setenv("NORNICDB_RETENTION_AUTO_DELETE", "true")
+	t.Setenv("NORNICDB_ACCESS_CONTROL_ENABLED", "false")
+	t.Setenv("NORNICDB_LOCKOUT_DURATION", "7m")
+	t.Setenv("NORNICDB_ENCRYPTION_IN_TRANSIT", "false")
+	t.Setenv("NORNICDB_ENCRYPTION_KEY_PATH", "/keys/env")
+	t.Setenv("NORNICDB_DATA_EXPORT_ENABLED", "false")
+	t.Setenv("NORNICDB_DATA_ERASURE_ENABLED", "false")
+	t.Setenv("NORNICDB_DATA_ACCESS_ENABLED", "false")
+	t.Setenv("NORNICDB_ANONYMIZATION_ENABLED", "false")
+	t.Setenv("NORNICDB_ANONYMIZATION_METHOD", "suppression")
+	t.Setenv("NORNICDB_CONSENT_REQUIRED", "true")
+	t.Setenv("NORNICDB_CONSENT_VERSIONING", "false")
+	t.Setenv("NORNICDB_CONSENT_AUDIT_TRAIL", "false")
+	t.Setenv("NORNICDB_BREACH_DETECTION_ENABLED", "true")
+	t.Setenv("NORNICDB_BREACH_NOTIFY_EMAIL", "env@example.com")
+	t.Setenv("NORNICDB_BREACH_NOTIFY_WEBHOOK", "https://hooks.example/env")
+	t.Setenv("NORNICDB_LOG_LEVEL", "WARN")
+	t.Setenv("NORNICDB_LOG_FORMAT", "text")
+	t.Setenv("NORNICDB_LOG_OUTPUT", "stderr")
+	t.Setenv("NORNICDB_QUERY_LOG_ENABLED", "true")
+	t.Setenv("NORNICDB_SLOW_QUERY_THRESHOLD", "6s")
+	t.Setenv("NORNICDB_KALMAN_ENABLED", "true")
+	t.Setenv("NORNICDB_TOPOLOGY_AUTO_INTEGRATION_ENABLED", "true")
+	t.Setenv("NORNICDB_TOPOLOGY_ALGORITHM", "resource_allocation")
+	t.Setenv("NORNICDB_TOPOLOGY_WEIGHT", "0.9")
+	t.Setenv("NORNICDB_TOPOLOGY_TOPK", "15")
+	t.Setenv("NORNICDB_TOPOLOGY_MIN_SCORE", "0.44")
+	t.Setenv("NORNICDB_TOPOLOGY_GRAPH_REFRESH_INTERVAL", "77")
+	t.Setenv("NORNICDB_TOPOLOGY_AB_TEST_ENABLED", "true")
+	t.Setenv("NORNICDB_TOPOLOGY_AB_TEST_PERCENTAGE", "35")
+	t.Setenv("NORNICDB_HEIMDALL_ENABLED", "true")
+	t.Setenv("NORNICDB_HEIMDALL_MODEL", "qwen")
+	t.Setenv("NORNICDB_HEIMDALL_PROVIDER", "ollama")
+	t.Setenv("NORNICDB_HEIMDALL_API_URL", "http://heim-env")
+	t.Setenv("NORNICDB_HEIMDALL_API_KEY", "heim-env-key")
+	t.Setenv("NORNICDB_HEIMDALL_GPU_LAYERS", "3")
+	t.Setenv("NORNICDB_HEIMDALL_CONTEXT_SIZE", "2048")
+	t.Setenv("NORNICDB_HEIMDALL_BATCH_SIZE", "256")
+	t.Setenv("NORNICDB_HEIMDALL_MAX_TOKENS", "128")
+	t.Setenv("NORNICDB_HEIMDALL_TEMPERATURE", "0.4")
+	t.Setenv("NORNICDB_HEIMDALL_ANOMALY_DETECTION", "false")
+	t.Setenv("NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS", "false")
+	t.Setenv("NORNICDB_HEIMDALL_MEMORY_CURATION", "true")
+	t.Setenv("NORNICDB_HEIMDALL_MCP_ENABLE", "true")
+	t.Setenv("NORNICDB_HEIMDALL_MCP_TOOLS", "store, link")
+	t.Setenv("NORNICDB_SEARCH_RERANK_ENABLED", "true")
+	t.Setenv("NORNICDB_SEARCH_RERANK_PROVIDER", " HTTP ")
+	t.Setenv("NORNICDB_SEARCH_RERANK_MODEL", "rerank-env")
+	t.Setenv("NORNICDB_SEARCH_RERANK_API_URL", "https://rerank-env")
+	t.Setenv("NORNICDB_SEARCH_RERANK_API_KEY", "rerank-env-key")
+	t.Setenv("NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS", "6000")
+	t.Setenv("NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS", "3500")
+	t.Setenv("NORNICDB_HEIMDALL_MAX_USER_TOKENS", "1500")
+	t.Setenv("NORNICDB_QDRANT_GRPC_ENABLED", "1")
+	t.Setenv("NORNICDB_QDRANT_GRPC_LISTEN_ADDR", ":6335")
+	t.Setenv("NORNICDB_QDRANT_GRPC_MAX_VECTOR_DIM", "123")
+	t.Setenv("NORNICDB_QDRANT_GRPC_MAX_BATCH_POINTS", "456")
+	t.Setenv("NORNICDB_QDRANT_GRPC_MAX_TOP_K", "78")
+
+	cfg := LoadFromEnv()
+
+	if !cfg.Auth.Enabled || cfg.Auth.InitialUsername != "envuser" || cfg.Auth.InitialPassword != "envpass" {
+		t.Fatalf("unexpected auth config: %+v", cfg.Auth)
+	}
+	if cfg.Auth.MinPasswordLength != 12 || cfg.Auth.TokenExpiry != 3*time.Hour || cfg.Auth.JWTSecret != "env-secret" {
+		t.Fatalf("unexpected auth override values: %+v", cfg.Auth)
+	}
+	if cfg.Database.DataDir != "/env/data" || cfg.Database.DefaultDatabase != "envdb" || !cfg.Database.ReadOnly {
+		t.Fatalf("unexpected database basics: %+v", cfg.Database)
+	}
+	if cfg.Database.TransactionTimeout != 90*time.Second || cfg.Database.MaxConcurrentTransactions != 55 {
+		t.Fatalf("unexpected transaction values: %+v", cfg.Database)
+	}
+	if cfg.Database.WALAutoCompactionEnabled || cfg.Database.WALRetentionMaxSegments != 12 || cfg.Database.WALRetentionMaxAge != 36*time.Hour {
+		t.Fatalf("unexpected wal retention config: %+v", cfg.Database)
+	}
+	if !cfg.Database.WALRetentionLedgerDefaults || cfg.Database.WALSnapshotRetentionMaxCount != 5 || cfg.Database.WALSnapshotRetentionMaxAge != 24*time.Hour {
+		t.Fatalf("unexpected wal snapshot config: %+v", cfg.Database)
+	}
+	if !cfg.Database.PersistSearchIndexes || !cfg.Database.EncryptionEnabled || cfg.Database.EncryptionPassword != "env-password" {
+		t.Fatalf("unexpected database feature config: %+v", cfg.Database)
+	}
+	if cfg.Server.BoltEnabled || cfg.Server.BoltAddress != "127.0.0.1" || !cfg.Server.BoltTLSEnabled {
+		t.Fatalf("unexpected bolt server config: %+v", cfg.Server)
+	}
+	if cfg.Server.BoltTLSCert != "/tlsdir/public.crt" || cfg.Server.BoltTLSKey != "/tlsdir/private.key" {
+		t.Fatalf("unexpected TLS paths: %+v", cfg.Server)
+	}
+	if cfg.Server.HTTPEnabled || cfg.Server.HTTPAddress != "127.0.0.2" || !cfg.Server.HTTPSEnabled || cfg.Server.HTTPSPort != 9443 {
+		t.Fatalf("unexpected http server config: %+v", cfg.Server)
+	}
+	if cfg.Server.Environment != "production" || cfg.Server.AllowHTTP {
+		t.Fatalf("unexpected server env flags: %+v", cfg.Server)
+	}
+	if cfg.Server.PluginsDir != "/env/plugins" || cfg.Server.HeimdallPluginsDir != "/env/heim" {
+		t.Fatalf("unexpected plugin dirs: %+v", cfg.Server)
+	}
+	if !cfg.Server.EnableCORS || len(cfg.Server.CORSOrigins) != 2 || cfg.Server.CORSOrigins[1] != "https://b.example" {
+		t.Fatalf("unexpected cors config: %+v", cfg.Server)
+	}
+	if cfg.Memory.DecayEnabled || !cfg.Memory.EmbeddingEnabled || cfg.Memory.EmbeddingModel != "env-embed-model" {
+		t.Fatalf("unexpected memory embedding basics: %+v", cfg.Memory)
+	}
+	if cfg.Memory.EmbeddingAPIURL != "http://embed-env" || cfg.Memory.EmbeddingAPIKey != "embed-env-key" || cfg.Memory.EmbeddingCacheSize != 999 {
+		t.Fatalf("unexpected embedding api config: %+v", cfg.Memory)
+	}
+	if cfg.Memory.SearchMinSimilarity != 0.75 || cfg.Memory.ModelsDir != "/models" || cfg.Memory.EmbeddingGPULayers != 4 {
+		t.Fatalf("unexpected search/model config: %+v", cfg.Memory)
+	}
+	if cfg.Memory.EmbeddingWarmupInterval != 11*time.Minute || cfg.Memory.KmeansMinEmbeddings != 222 || cfg.Memory.KmeansClusterInterval != 8*time.Minute || cfg.Memory.KmeansNumClusters != 6 {
+		t.Fatalf("unexpected kmeans config: %+v", cfg.Memory)
+	}
+	if cfg.Memory.AutoLinksEnabled || cfg.Memory.AutoLinksSimilarityThreshold != 0.67 || cfg.Memory.ArchiveThreshold != 0.3 {
+		t.Fatalf("unexpected autolink/archive config: %+v", cfg.Memory)
+	}
+	if cfg.EmbeddingWorker.ScanInterval != 5*time.Minute || cfg.EmbeddingWorker.BatchDelay != 3*time.Second || cfg.EmbeddingWorker.MaxRetries != 7 {
+		t.Fatalf("unexpected embedding worker timings: %+v", cfg.EmbeddingWorker)
+	}
+	if cfg.EmbeddingWorker.ChunkSize != 2048 || cfg.EmbeddingWorker.ChunkOverlap != 33 || cfg.EmbeddingWorker.IncludeLabels {
+		t.Fatalf("unexpected embedding worker chunk config: %+v", cfg.EmbeddingWorker)
+	}
+	if len(cfg.EmbeddingWorker.PropertiesInclude) != 2 || cfg.EmbeddingWorker.PropertiesExclude[1] != "internal" {
+		t.Fatalf("unexpected embedding worker property filters: %+v", cfg.EmbeddingWorker)
+	}
+	if cfg.Compliance.AuditEnabled || cfg.Compliance.AuditLogPath != "/env/audit.log" || !cfg.Compliance.RetentionEnabled {
+		t.Fatalf("unexpected compliance basics: %+v", cfg.Compliance)
+	}
+	if cfg.Compliance.RetentionPolicyDays != 88 || !cfg.Compliance.RetentionAutoDelete || cfg.Compliance.AccessControlEnabled {
+		t.Fatalf("unexpected compliance retention/access config: %+v", cfg.Compliance)
+	}
+	if cfg.Compliance.LockoutDuration != 7*time.Minute || cfg.Compliance.EncryptionInTransit || cfg.Compliance.EncryptionKeyPath != "/keys/env" {
+		t.Fatalf("unexpected compliance encryption config: %+v", cfg.Compliance)
+	}
+	if cfg.Compliance.DataExportEnabled || cfg.Compliance.DataErasureEnabled || cfg.Compliance.DataAccessEnabled || cfg.Compliance.AnonymizationEnabled {
+		t.Fatalf("unexpected compliance data rights config: %+v", cfg.Compliance)
+	}
+	if cfg.Compliance.AnonymizationMethod != "suppression" || !cfg.Compliance.ConsentRequired || cfg.Compliance.ConsentVersioning || cfg.Compliance.ConsentAuditTrail {
+		t.Fatalf("unexpected compliance consent config: %+v", cfg.Compliance)
+	}
+	if !cfg.Compliance.BreachDetectionEnabled || cfg.Compliance.BreachNotifyEmail != "env@example.com" || cfg.Compliance.BreachNotifyWebhook != "https://hooks.example/env" {
+		t.Fatalf("unexpected compliance breach config: %+v", cfg.Compliance)
+	}
+	if cfg.Logging.Level != "WARN" || cfg.Logging.Format != "text" || cfg.Logging.Output != "stderr" || !cfg.Logging.QueryLogEnabled || cfg.Logging.SlowQueryThreshold != 6*time.Second {
+		t.Fatalf("unexpected logging config: %+v", cfg.Logging)
+	}
+	if !cfg.Features.KalmanEnabled || !cfg.Features.TopologyAutoIntegrationEnabled || cfg.Features.TopologyAlgorithm != "resource_allocation" {
+		t.Fatalf("unexpected topology basics: %+v", cfg.Features)
+	}
+	if cfg.Features.TopologyWeight != 0.9 || cfg.Features.TopologyTopK != 15 || cfg.Features.TopologyMinScore != 0.44 || cfg.Features.TopologyGraphRefreshInterval != 77 {
+		t.Fatalf("unexpected topology values: %+v", cfg.Features)
+	}
+	if !cfg.Features.TopologyABTestEnabled || cfg.Features.TopologyABTestPercentage != 35 {
+		t.Fatalf("unexpected topology ab config: %+v", cfg.Features)
+	}
+	if !cfg.Features.HeimdallEnabled || cfg.Features.HeimdallModel != "qwen" || cfg.Features.HeimdallProvider != "ollama" {
+		t.Fatalf("unexpected heimdall basics: %+v", cfg.Features)
+	}
+	if cfg.Features.HeimdallAPIURL != "http://heim-env" || cfg.Features.HeimdallAPIKey != "heim-env-key" || cfg.Features.HeimdallGPULayers != 3 {
+		t.Fatalf("unexpected heimdall api/gpu config: %+v", cfg.Features)
+	}
+	if cfg.Features.HeimdallContextSize != 2048 || cfg.Features.HeimdallBatchSize != 256 || cfg.Features.HeimdallMaxTokens != 128 || cfg.Features.HeimdallTemperature != float32(0.4) {
+		t.Fatalf("unexpected heimdall runtime config: %+v", cfg.Features)
+	}
+	if cfg.Features.HeimdallAnomalyDetection || cfg.Features.HeimdallRuntimeDiagnosis || !cfg.Features.HeimdallMemoryCuration {
+		t.Fatalf("unexpected heimdall booleans: %+v", cfg.Features)
+	}
+	if !cfg.Features.HeimdallMCPEnable || len(cfg.Features.HeimdallMCPTools) != 2 || cfg.Features.HeimdallMCPTools[1] != "link" {
+		t.Fatalf("unexpected heimdall mcp config: %+v", cfg.Features)
+	}
+	if !cfg.Features.SearchRerankEnabled || cfg.Features.SearchRerankProvider != "http" || cfg.Features.SearchRerankModel != "rerank-env" {
+		t.Fatalf("unexpected rerank basics: %+v", cfg.Features)
+	}
+	if cfg.Features.SearchRerankAPIURL != "https://rerank-env" || cfg.Features.SearchRerankAPIKey != "rerank-env-key" {
+		t.Fatalf("unexpected rerank api config: %+v", cfg.Features)
+	}
+	if cfg.Features.HeimdallMaxContextTokens != 6000 || cfg.Features.HeimdallMaxSystemTokens != 3500 || cfg.Features.HeimdallMaxUserTokens != 1500 {
+		t.Fatalf("unexpected heimdall token budget config: %+v", cfg.Features)
+	}
+	if !cfg.Features.QdrantGRPCEnabled || cfg.Features.QdrantGRPCListenAddr != ":6335" || cfg.Features.QdrantGRPCMaxVectorDim != 123 || cfg.Features.QdrantGRPCMaxBatchPoints != 456 || cfg.Features.QdrantGRPCMaxTopK != 78 {
+		t.Fatalf("unexpected qdrant grpc config: %+v", cfg.Features)
+	}
+}
+
 // TestLoadFromEnv_EmbeddingWorkerNumWorkers ensures NORNICDB_EMBED_WORKER_NUM_WORKERS is applied.
 func TestLoadFromEnv_EmbeddingWorkerNumWorkers(t *testing.T) {
 	clearEnvVars(t)
@@ -580,6 +828,309 @@ embedding_worker:
 	if cfg.EmbeddingWorker.IncludeLabels {
 		t.Error("expected include_labels false from YAML")
 	}
+}
+
+func TestLoadFromFile_ComprehensiveSectionsAndEnvPrecedence(t *testing.T) {
+	clearEnvVars(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+server:
+  port: 7777
+  http_port: 8484
+  host: "127.0.0.1"
+  auth: "yamladmin:yamlpass"
+  bolt_enabled: true
+  http_enabled: true
+  tls:
+    enabled: true
+    cert_file: "/tls/cert.pem"
+    key_file: "/tls/key.pem"
+database:
+  data_dir: "/yaml/data"
+  default_database: "tenant"
+  read_only: true
+  transaction_timeout: "45s"
+  max_concurrent_transactions: 42
+  strict_durability: true
+  wal_sync_mode: "none"
+  wal_sync_interval: "2s"
+  wal_auto_compaction_enabled: false
+  wal_retention_max_segments: 10
+  wal_retention_max_age: "48h"
+  wal_ledger_retention_defaults: true
+  wal_snapshot_retention_max_count: 8
+  wal_snapshot_retention_max_age: "72h"
+  encryption_enabled: true
+  encryption_password: "yaml-secret"
+  badger_node_cache_max_entries: 321
+  badger_edge_type_cache_max_types: 12
+  storage_serializer: "msgpack"
+  persist_search_indexes: true
+auth:
+  enabled: true
+  username: "fileuser"
+  password: "filepass"
+  min_password_length: 14
+  token_expiry: "2h"
+  jwt_secret: "file-secret"
+embedding:
+  enabled: true
+  provider: "ollama"
+  model: "embed-model"
+  url: "http://embed"
+  api_key: "embed-key"
+  dimensions: 1536
+  cache_size: 77
+  min_similarity: 0.42
+memory:
+  decay_enabled: true
+  decay_interval: "90m"
+  archive_threshold: 0.2
+  auto_links_enabled: true
+  auto_links_similarity_threshold: 0.91
+  runtime_limit: "512"
+  gc_percent: 77
+  pool_enabled: true
+  pool_max_size: 222
+  query_cache_enabled: true
+  query_cache_size: 333
+  query_cache_ttl: "7m"
+embedding_worker:
+  scan_interval: "1m"
+  batch_delay: "2s"
+  max_retries: 9
+  chunk_size: 1234
+  chunk_overlap: 12
+  properties_include: [title, body]
+  properties_exclude: [secret]
+  include_labels: false
+kmeans:
+  enabled: true
+auto_tlp:
+  enabled: true
+  algorithm: "jaccard"
+  weight: 0.7
+  top_k: 99
+  min_score: 0.61
+  graph_refresh_interval: 123
+  ab_test_enabled: true
+  ab_test_percentage: 25
+heimdall:
+  enabled: true
+  model: "guardian"
+  provider: "openai"
+  api_url: "https://heimdall"
+  api_key: "heim-key"
+  gpu_layers: 7
+  context_size: 4096
+  batch_size: 512
+  max_tokens: 256
+  temperature: 0.25
+  anomaly_detection: true
+  runtime_diagnosis: true
+  memory_curation: true
+  max_context_tokens: 5000
+  max_system_tokens: 3000
+  max_user_tokens: 1000
+  mcp_enable: true
+  mcp_tools: [store, discover]
+search_rerank:
+  enabled: true
+  provider: "http"
+  model: "rerank-model"
+  api_url: "https://rerank"
+  api_key: "rerank-key"
+features:
+  qdrant_grpc_enabled: true
+  qdrant_grpc_listen_addr: ":7334"
+  qdrant_grpc_max_vector_dim: 2048
+  qdrant_grpc_max_batch_points: 88
+  qdrant_grpc_max_top_k: 77
+  qdrant_grpc_rbac:
+    methods:
+      "Points/Upsert": "write"
+compliance:
+  audit_enabled: true
+  audit_log_path: "/audit.log"
+  audit_retention_days: 99
+  retention_enabled: true
+  retention_policy_days: 30
+  retention_auto_delete: true
+  retention_exempt_roles: [admin, auditor]
+  access_control_enabled: true
+  session_timeout: "12m"
+  max_failed_logins: 4
+  lockout_duration: "22m"
+  encryption_at_rest: true
+  encryption_in_transit: true
+  encryption_key_path: "/keys/enc"
+  data_export_enabled: true
+  data_erasure_enabled: true
+  data_access_enabled: true
+  anonymization_enabled: true
+  anonymization_method: "suppression"
+  consent_required: true
+  consent_versioning: true
+  consent_audit_trail: true
+  breach_detection_enabled: true
+  breach_notify_email: "ops@example.com"
+  breach_notify_webhook: "https://hooks.example.com/breach"
+logging:
+  level: "DEBUG"
+  format: "text"
+  output: "stderr"
+  query_log_enabled: true
+  slow_query_threshold: "9s"
+plugins:
+  dir: "/plugins"
+  heimdall_dir: "/plugins/heim"
+`), 0o600)
+	require.NoError(t, err)
+
+	t.Setenv("NORNICDB_BOLT_PORT", "9999")
+	t.Setenv("NORNICDB_HEIMDALL_ENABLED", "false")
+	t.Setenv("NORNICDB_STORAGE_SERIALIZER", "gob")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+
+	require.Equal(t, 9999, cfg.Server.BoltPort)
+	require.Equal(t, 8484, cfg.Server.HTTPPort)
+	require.Equal(t, "127.0.0.1", cfg.Server.BoltAddress)
+	require.True(t, cfg.Server.BoltTLSEnabled)
+	require.True(t, cfg.Server.HTTPSEnabled)
+	require.Equal(t, "/tls/cert.pem", cfg.Server.BoltTLSCert)
+	require.Equal(t, "/tls/key.pem", cfg.Server.BoltTLSKey)
+	require.Equal(t, "/yaml/data", cfg.Database.DataDir)
+	require.Equal(t, "tenant", cfg.Database.DefaultDatabase)
+	require.True(t, cfg.Database.ReadOnly)
+	require.Equal(t, 45*time.Second, cfg.Database.TransactionTimeout)
+	require.Equal(t, 42, cfg.Database.MaxConcurrentTransactions)
+	require.True(t, cfg.Database.StrictDurability)
+	require.Equal(t, "immediate", cfg.Database.WALSyncMode)
+	require.Equal(t, time.Duration(0), cfg.Database.WALSyncInterval)
+	require.False(t, cfg.Database.WALAutoCompactionEnabled)
+	require.Equal(t, 10, cfg.Database.WALRetentionMaxSegments)
+	require.Equal(t, 48*time.Hour, cfg.Database.WALRetentionMaxAge)
+	require.True(t, cfg.Database.WALRetentionLedgerDefaults)
+	require.Equal(t, 8, cfg.Database.WALSnapshotRetentionMaxCount)
+	require.Equal(t, 72*time.Hour, cfg.Database.WALSnapshotRetentionMaxAge)
+	require.True(t, cfg.Database.EncryptionEnabled)
+	require.Equal(t, "yaml-secret", cfg.Database.EncryptionPassword)
+	require.Equal(t, 321, cfg.Database.BadgerNodeCacheMaxEntries)
+	require.Equal(t, 12, cfg.Database.BadgerEdgeTypeCacheMaxTypes)
+	require.Equal(t, "gob", cfg.Database.StorageSerializer)
+	require.True(t, cfg.Database.PersistSearchIndexes)
+
+	require.True(t, cfg.Auth.Enabled)
+	require.Equal(t, "fileuser", cfg.Auth.InitialUsername)
+	require.Equal(t, "filepass", cfg.Auth.InitialPassword)
+	require.Equal(t, 14, cfg.Auth.MinPasswordLength)
+	require.Equal(t, 2*time.Hour, cfg.Auth.TokenExpiry)
+	require.Equal(t, "file-secret", cfg.Auth.JWTSecret)
+
+	require.True(t, cfg.Memory.EmbeddingEnabled)
+	require.Equal(t, "ollama", cfg.Memory.EmbeddingProvider)
+	require.Equal(t, "embed-model", cfg.Memory.EmbeddingModel)
+	require.Equal(t, "http://embed", cfg.Memory.EmbeddingAPIURL)
+	require.Equal(t, "embed-key", cfg.Memory.EmbeddingAPIKey)
+	require.Equal(t, 1536, cfg.Memory.EmbeddingDimensions)
+	require.Equal(t, 77, cfg.Memory.EmbeddingCacheSize)
+	require.Equal(t, 0.42, cfg.Memory.SearchMinSimilarity)
+	require.Equal(t, 90*time.Minute, cfg.Memory.DecayInterval)
+	require.Equal(t, 0.2, cfg.Memory.ArchiveThreshold)
+	require.True(t, cfg.Memory.AutoLinksEnabled)
+	require.Equal(t, 0.91, cfg.Memory.AutoLinksSimilarityThreshold)
+	require.Equal(t, int64(512*1024*1024), cfg.Memory.RuntimeLimit)
+	require.Equal(t, 77, cfg.Memory.GCPercent)
+	require.True(t, cfg.Memory.PoolEnabled)
+	require.Equal(t, 222, cfg.Memory.PoolMaxSize)
+	require.True(t, cfg.Memory.QueryCacheEnabled)
+	require.Equal(t, 333, cfg.Memory.QueryCacheSize)
+	require.Equal(t, 7*time.Minute, cfg.Memory.QueryCacheTTL)
+
+	require.Equal(t, 1*time.Minute, cfg.EmbeddingWorker.ScanInterval)
+	require.Equal(t, 2*time.Second, cfg.EmbeddingWorker.BatchDelay)
+	require.Equal(t, 9, cfg.EmbeddingWorker.MaxRetries)
+	require.Equal(t, 1234, cfg.EmbeddingWorker.ChunkSize)
+	require.Equal(t, 12, cfg.EmbeddingWorker.ChunkOverlap)
+	require.Equal(t, []string{"title", "body"}, cfg.EmbeddingWorker.PropertiesInclude)
+	require.Equal(t, []string{"secret"}, cfg.EmbeddingWorker.PropertiesExclude)
+	require.False(t, cfg.EmbeddingWorker.IncludeLabels)
+
+	require.True(t, cfg.Features.KalmanEnabled)
+	require.True(t, cfg.Features.TopologyAutoIntegrationEnabled)
+	require.Equal(t, "jaccard", cfg.Features.TopologyAlgorithm)
+	require.Equal(t, 0.7, cfg.Features.TopologyWeight)
+	require.Equal(t, 99, cfg.Features.TopologyTopK)
+	require.Equal(t, 0.61, cfg.Features.TopologyMinScore)
+	require.Equal(t, 123, cfg.Features.TopologyGraphRefreshInterval)
+	require.True(t, cfg.Features.TopologyABTestEnabled)
+	require.Equal(t, 25, cfg.Features.TopologyABTestPercentage)
+	require.False(t, cfg.Features.HeimdallEnabled)
+	require.Equal(t, "guardian", cfg.Features.HeimdallModel)
+	require.Equal(t, "openai", cfg.Features.HeimdallProvider)
+	require.Equal(t, "https://heimdall", cfg.Features.HeimdallAPIURL)
+	require.Equal(t, "heim-key", cfg.Features.HeimdallAPIKey)
+	require.Equal(t, 7, cfg.Features.HeimdallGPULayers)
+	require.Equal(t, 4096, cfg.Features.HeimdallContextSize)
+	require.Equal(t, 512, cfg.Features.HeimdallBatchSize)
+	require.Equal(t, 256, cfg.Features.HeimdallMaxTokens)
+	require.Equal(t, float32(0.25), cfg.Features.HeimdallTemperature)
+	require.True(t, cfg.Features.HeimdallAnomalyDetection)
+	require.True(t, cfg.Features.HeimdallRuntimeDiagnosis)
+	require.True(t, cfg.Features.HeimdallMemoryCuration)
+	require.Equal(t, 5000, cfg.Features.HeimdallMaxContextTokens)
+	require.Equal(t, 3000, cfg.Features.HeimdallMaxSystemTokens)
+	require.Equal(t, 1000, cfg.Features.HeimdallMaxUserTokens)
+	require.True(t, cfg.Features.HeimdallMCPEnable)
+	require.Equal(t, []string{"store", "discover"}, cfg.Features.HeimdallMCPTools)
+	require.True(t, cfg.Features.SearchRerankEnabled)
+	require.Equal(t, "http", cfg.Features.SearchRerankProvider)
+	require.Equal(t, "rerank-model", cfg.Features.SearchRerankModel)
+	require.Equal(t, "https://rerank", cfg.Features.SearchRerankAPIURL)
+	require.Equal(t, "rerank-key", cfg.Features.SearchRerankAPIKey)
+	require.True(t, cfg.Features.QdrantGRPCEnabled)
+	require.Equal(t, ":7334", cfg.Features.QdrantGRPCListenAddr)
+	require.Equal(t, 2048, cfg.Features.QdrantGRPCMaxVectorDim)
+	require.Equal(t, 88, cfg.Features.QdrantGRPCMaxBatchPoints)
+	require.Equal(t, 77, cfg.Features.QdrantGRPCMaxTopK)
+	require.Equal(t, map[string]string{"Points/Upsert": "write"}, cfg.Features.QdrantGRPCMethodPermissions)
+
+	require.True(t, cfg.Compliance.RetentionEnabled)
+	require.Equal(t, 30, cfg.Compliance.RetentionPolicyDays)
+	require.True(t, cfg.Compliance.RetentionAutoDelete)
+	require.Equal(t, []string{"admin", "auditor"}, cfg.Compliance.RetentionExemptRoles)
+	require.Equal(t, 12*time.Minute, cfg.Compliance.SessionTimeout)
+	require.Equal(t, 4, cfg.Compliance.MaxFailedLogins)
+	require.Equal(t, 22*time.Minute, cfg.Compliance.LockoutDuration)
+	require.True(t, cfg.Compliance.EncryptionAtRest)
+	require.True(t, cfg.Compliance.EncryptionInTransit)
+	require.Equal(t, "/keys/enc", cfg.Compliance.EncryptionKeyPath)
+	require.Equal(t, "suppression", cfg.Compliance.AnonymizationMethod)
+	require.True(t, cfg.Compliance.ConsentRequired)
+	require.True(t, cfg.Compliance.BreachDetectionEnabled)
+	require.Equal(t, "ops@example.com", cfg.Compliance.BreachNotifyEmail)
+	require.Equal(t, "https://hooks.example.com/breach", cfg.Compliance.BreachNotifyWebhook)
+
+	require.Equal(t, "DEBUG", cfg.Logging.Level)
+	require.Equal(t, "text", cfg.Logging.Format)
+	require.Equal(t, "stderr", cfg.Logging.Output)
+	require.True(t, cfg.Logging.QueryLogEnabled)
+	require.Equal(t, 9*time.Second, cfg.Logging.SlowQueryThreshold)
+	require.Equal(t, "/plugins", cfg.Server.PluginsDir)
+	require.Equal(t, "/plugins/heim", cfg.Server.HeimdallPluginsDir)
+}
+
+func TestLoadFromFile_MissingFileReturnsDefaults(t *testing.T) {
+	clearEnvVars(t)
+
+	cfg, err := LoadFromFile(filepath.Join(t.TempDir(), "missing.yaml"))
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(t, "nornic", cfg.Database.DefaultDatabase)
 }
 
 // TestLoadFromEnv_HeimdallProvider tests Heimdall provider env vars (openai/ollama/local).

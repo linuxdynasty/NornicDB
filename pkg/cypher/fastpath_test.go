@@ -55,10 +55,7 @@ func TestFastPath_MatchCreateDeleteRel(t *testing.T) {
 
 	t.Logf("Pattern 1 (WITH LIMIT): %.0f ops/sec", opsPerSec)
 
-	// Should be at least 10K ops/sec with fast-path
-	if opsPerSec < 10000 {
-		t.Errorf("Fast-path too slow: %.0f ops/sec (expected >10000)", opsPerSec)
-	}
+	assertMinOpsPerSec(t, "Fast-path WITH LIMIT", opsPerSec, 10000)
 }
 
 // TestFastPath_LDBCPattern tests the LDBC-style pattern with property matching.
@@ -101,11 +98,8 @@ func TestFastPath_LDBCPattern(t *testing.T) {
 
 	t.Logf("Pattern 2 (LDBC property match): %.0f ops/sec", opsPerSec)
 
-	// Should be at least 5K ops/sec with fast-path + caching
-	// First iteration is slower due to cache miss, subsequent are fast
-	if opsPerSec < 5000 {
-		t.Errorf("Fast-path too slow: %.0f ops/sec (expected >5000)", opsPerSec)
-	}
+	// First iteration is slower due to cache miss, subsequent are fast.
+	assertMinOpsPerSec(t, "Fast-path LDBC property match", opsPerSec, 5000)
 }
 
 // TestFastPath_RegexMatching verifies the regex patterns match correctly.
