@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.14] - 2026-03-07
+
+### Changed
+
+- **Neo4j procedure compatibility completion**: Finished the stored-procedure parity tranche with startup-compiled procedure DDL, msgpack-backed procedure catalog persistence, registry preloading on startup, and transaction-script handling for `BEGIN TRANSACTION` / `BEGIN` shorthand, `COMMIT`, and rollback-oriented flows.
+- **CI/CD simplification and release automation**: Replaced the older workflow sprawl with a tighter CI path, added Docker CD workflows for release tags and manual dispatch, and split `llama-cuda-libs` publishing into its own workflow so CUDA base images are only rebuilt when their pinned dependency version changes.
+- **Docker image build resilience**: Updated the release Dockerfiles to download required embedding / reranker / Heimdall models during `docker build` instead of assuming a pre-populated local `models/` directory.
+- **Configuration hardening**: Standardized memory-limit parsing to a single integer-in-megabytes model with fail-fast validation for invalid configuration values.
+- **Repository hygiene**: Renamed `LICENCE` to `LICENSE.md`, refreshed coverage/reporting badges and workflow names, and aligned release automation with the current repository layout.
+
+### Fixed
+
+- **MCP server build regression**: Fixed a helper-path regression where `pkg/mcp/server.go` referenced `containsLabel()` from production code even though the helper only existed in tests, breaking non-test builds.
+- **Snapshot collision risk in storage recovery**: Fixed the snapshot overwrite / timestamp-collision path that could make recovery select the wrong snapshot in CI or fast-running test environments.
+- **Coverage-report drift and generated-code filtering**: Corrected package scoping and generated-folder exclusions so CI coverage reporting reflects handwritten code instead of noisy generated or hardware-specific paths.
+- **Storage helper regressions exposed by tests**: Fixed helper-path issues uncovered during the storage coverage push, including schema fallback assumptions, streaming helper safety, and other small branch-specific regressions across async, namespaced, composite, WAL, and transaction helpers.
+
+### Tests
+
+- **Major handwritten coverage expansion**: Added a large maintenance pass of regression tests across `pkg/storage`, `pkg/mcp`, `pkg/nornicdb`, `pkg/auth`, `pkg/config`, and handwritten ANTLR / Cypher helpers.
+- **Parser and storage hardening**: Extended parser, procedure, APOC adapter, transaction, WAL, async-engine, namespaced-engine, and composite-engine coverage to exercise previously untested compatibility and recovery paths.
+- **Flake reduction**: Added targeted regression coverage around snapshot recovery and helper behavior so CI catches the same edge cases that previously slipped through.
+
+### Documentation
+
+- **Procedure compatibility docs**: Added and refined stored procedure parity and usage documentation, including procedure DDL and transaction-script examples.
+- **Operational docs refresh**: Updated README / docs links, coverage-related docs, and release-supporting notes to match the current CI/CD and packaging flow.
+
+### Technical Details
+
+- **Statistics**: 30 commits, 341 files changed, +23,539 / -4,441 lines.
+- **Primary focus areas**: Cypher procedure compatibility, CI/CD and Docker release automation, storage/MCP hardening, and large regression-coverage expansion.
+
 ## [1.0.13] - 2026-03-04
 
 ### Added
@@ -877,6 +910,7 @@ See [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contr
 ---
 
 [1.0.13]: https://github.com/orneryd/NornicDB/compare/v1.0.12-hotfix...v1.0.13
+[1.0.14]: https://github.com/orneryd/NornicDB/compare/v1.0.13...v1.0.14
 [1.0.12-hotfix]: https://github.com/orneryd/NornicDB/compare/v1.0.12...v1.0.12-hotfix
 [1.0.12]: https://github.com/orneryd/NornicDB/compare/v1.0.12-preview...v1.0.12
 [1.0.12-preview]: https://github.com/orneryd/NornicDB/compare/v1.0.11...v1.0.12-preview
