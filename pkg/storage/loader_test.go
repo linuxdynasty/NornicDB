@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,19 @@ func TestLoadFromNeo4jJSON(t *testing.T) {
 		count, _ := engine.NodeCount()
 		assert.Equal(t, int64(0), count)
 	})
+
+	t.Run("relationship parse errors bubble up", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "nodes.json"), []byte(`{"id": "n1", "labels": ["Test"], "properties": {}}
+{"id": "n2", "labels": ["Test"], "properties": {}}`), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "relationships.json"), []byte(`not-json`), 0644))
+
+		base := NewMemoryEngine()
+		defer base.Close()
+		engine := NewNamespacedEngine(base, "test")
+		err := LoadFromNeo4jJSON(engine, tmpDir)
+		require.ErrorContains(t, err, "loading relationships")
+	})
 }
 
 func TestSaveToNeo4jExport(t *testing.T) {
@@ -222,6 +236,28 @@ func TestSaveToNeo4jExport(t *testing.T) {
 		assert.Contains(t, string(data), `"nodes"`)
 		assert.Contains(t, string(data), `"relationships"`)
 	})
+
+	t.Run("unsupported engine type", func(t *testing.T) {
+		var engine Engine
+		err := SaveToNeo4jExport(engine, filepath.Join(t.TempDir(), "export.json"))
+		require.ErrorContains(t, err, "does not support full export")
+	})
+
+	t.Run("exportable engine node and edge errors", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "export.json")
+		err := SaveToNeo4jExport(&exportableOnlyEngine{
+			Engine:  &lookupEngine{Engine: NewMemoryEngine()},
+			nodeErr: errors.New("nodes failed"),
+		}, path)
+		require.ErrorContains(t, err, "getting all nodes")
+
+		err = SaveToNeo4jExport(&exportableOnlyEngine{
+			Engine:   &lookupEngine{Engine: NewMemoryEngine()},
+			allNodes: []*Node{},
+			edgeErr:  errors.New("edges failed"),
+		}, path)
+		require.ErrorContains(t, err, "getting all edges")
+	})
 }
 
 func TestGenericSaveToNeo4jExport(t *testing.T) {
@@ -244,6 +280,22 @@ func TestGenericSaveToNeo4jExport(t *testing.T) {
 		// Verify file created
 		_, err = os.Stat(exportPath)
 		assert.NoError(t, err)
+	})
+
+	t.Run("node and edge load errors", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "generic.json")
+		err := GenericSaveToNeo4jExport(&exportableOnlyEngine{
+			Engine:  NewMemoryEngine(),
+			nodeErr: errors.New("nodes failed"),
+		}, path)
+		require.ErrorContains(t, err, "getting nodes")
+
+		err = GenericSaveToNeo4jExport(&exportableOnlyEngine{
+			Engine:   NewMemoryEngine(),
+			allNodes: []*Node{},
+			edgeErr:  errors.New("edges failed"),
+		}, path)
+		require.ErrorContains(t, err, "getting edges")
 	})
 }
 
@@ -357,6 +409,22 @@ func TestLoadRelationshipsFromReader(t *testing.T) {
 
 		err = loadRelationshipsFromReader(engine, strings.NewReader(input))
 		assert.ErrorIs(t, err, ErrNotFound)
+	})
+
+	t.Run("invalid JSON and empty ID", func(t *testing.T) {
+		base := NewMemoryEngine()
+		defer base.Close()
+		engine := NewNamespacedEngine(base, "test")
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
+
+		err = loadRelationshipsFromReader(engine, strings.NewReader("not-json"))
+		require.Error(t, err)
+
+		err = loadRelationshipsFromReader(engine, strings.NewReader(`{"id": "", "type": "KNOWS", "start": {"id": "n1"}, "end": {"id": "n2"}, "properties": {}}`))
+		require.ErrorIs(t, err, ErrInvalidID)
 	})
 }
 

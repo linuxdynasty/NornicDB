@@ -94,3 +94,17 @@ func TestOverridesFromProperties_WrongType(t *testing.T) {
 	result := overridesFromProperties(map[string]any{"overrides": 42})
 	assert.Nil(t, result)
 }
+
+func TestOverridesFromProperties_InvalidJSON(t *testing.T) {
+	result := overridesFromProperties(map[string]any{"overrides": "{not-json"})
+	assert.Nil(t, result)
+}
+
+func TestIsAllowedKey_Excluded(t *testing.T) {
+	KeysExcludedFromPerDB["NORNICDB_EMBEDDING_MODEL"] = true
+	t.Cleanup(func() {
+		delete(KeysExcludedFromPerDB, "NORNICDB_EMBEDDING_MODEL")
+	})
+
+	assert.False(t, IsAllowedKey("NORNICDB_EMBEDDING_MODEL"))
+}

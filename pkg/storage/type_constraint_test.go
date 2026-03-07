@@ -21,6 +21,10 @@ func TestValidatePropertyType(t *testing.T) {
 		// INTEGER tests
 		{"int valid", 42, PropertyTypeInteger, false},
 		{"int64 valid", int64(42), PropertyTypeInteger, false},
+		{"integer float64 whole number valid", float64(42), PropertyTypeInteger, false},
+		{"integer float64 fractional invalid", 42.5, PropertyTypeInteger, true},
+		{"integer float32 whole number valid", float32(7), PropertyTypeInteger, false},
+		{"integer float32 fractional invalid", float32(7.5), PropertyTypeInteger, true},
 		{"int invalid string", "42", PropertyTypeInteger, true},
 
 		// FLOAT tests
@@ -40,12 +44,18 @@ func TestValidatePropertyType(t *testing.T) {
 		{"null boolean", nil, PropertyTypeBoolean, false},
 
 		// Temporal type tests (Neo4j semantics)
+		{"date valid string", "2025-11-27", PropertyTypeDate, false},
+		{"date valid time", time.Now(), PropertyTypeDate, false},
+		{"date invalid string", "2025-11-27T10:30:00Z", PropertyTypeDate, true},
 		{"zoned datetime valid RFC3339", "2025-11-27T10:30:00Z", PropertyTypeZonedDateTime, false},
 		{"zoned datetime valid offset", "2025-11-27T10:30:00+02:00", PropertyTypeZonedDateTime, false},
 		{"zoned datetime invalid local format", "2025-11-27T10:30:00", PropertyTypeZonedDateTime, true},
+		{"legacy datetime alias accepts zoned string", "2025-11-27T10:30:00Z", PropertyTypeDateTime, false},
 		{"local datetime valid", "2025-11-27T10:30:00", PropertyTypeLocalDateTime, false},
+		{"local datetime valid spaced format", "2025-11-27 10:30:00", PropertyTypeLocalDateTime, false},
 		{"local datetime invalid zoned format", "2025-11-27T10:30:00Z", PropertyTypeLocalDateTime, true},
 		{"legacy datetime alias accepts time.Time", time.Now(), PropertyTypeDateTime, false},
+		{"unknown type", "hello", PropertyType("WEIRD"), true},
 	}
 
 	for _, tt := range tests {

@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -210,6 +212,46 @@ func TestLabelNodeIDLookupHelpers(t *testing.T) {
 		allIDs, err := NodeIDsByLabel(engine, "Missing", 0)
 		require.NoError(t, err)
 		require.Empty(t, allIDs)
+	})
+}
+
+func TestNamespaceAndLoggerHelpers(t *testing.T) {
+	t.Run("namespace prefix parsing", func(t *testing.T) {
+		prefix, ok := namespacePrefixFromID("system:config")
+		require.True(t, ok)
+		require.Equal(t, "system:", prefix)
+
+		for _, id := range []string{"", "plain", ":leading"} {
+			prefix, ok = namespacePrefixFromID(id)
+			require.False(t, ok, id)
+			require.Empty(t, prefix)
+		}
+
+		require.True(t, isSystemNamespaceID("system:user"))
+		require.False(t, isSystemNamespaceID("tenant:user"))
+		require.False(t, isSystemNamespaceID("invalid"))
+	})
+
+	t.Run("default wal logger writes structured and fallback output", func(t *testing.T) {
+		var buf bytes.Buffer
+		prevWriter := log.Writer()
+		prevFlags := log.Flags()
+		log.SetOutput(&buf)
+		log.SetFlags(0)
+		t.Cleanup(func() {
+			log.SetOutput(prevWriter)
+			log.SetFlags(prevFlags)
+		})
+
+		logger := defaultWALLogger{}
+		logger.Log("info", "structured", map[string]any{"seq": 7})
+		require.Contains(t, buf.String(), `"level":"info"`)
+		require.Contains(t, buf.String(), `"msg":"structured"`)
+
+		buf.Reset()
+		logger.Log("error", "fallback", map[string]any{"bad": func() {}})
+		require.Contains(t, buf.String(), "level=error")
+		require.Contains(t, buf.String(), "msg=fallback")
 	})
 }
 

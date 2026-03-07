@@ -192,12 +192,18 @@ func TestBadgerEngine_GetSchema(t *testing.T) {
 func TestBadgerEngine_EventSetterCallbacks(t *testing.T) {
 	b := createTestBadgerEngine(t)
 
+	nodeCreatedCount := 0
+	nodeDeletedCount := 0
 	nodeUpdated := func(n *Node) {}
+	nodeCreated := func(n *Node) { nodeCreatedCount++ }
+	nodeDeleted := func(id NodeID) { nodeDeletedCount++ }
 	edgeCreated := func(e *Edge) {}
 	edgeUpdated := func(e *Edge) {}
 	edgeDeleted := func(id EdgeID) {}
 
+	b.OnNodeCreated(nodeCreated)
 	b.OnNodeUpdated(nodeUpdated)
+	b.OnNodeDeleted(nodeDeleted)
 	b.OnEdgeCreated(edgeCreated)
 	b.OnEdgeUpdated(edgeUpdated)
 	b.OnEdgeDeleted(edgeDeleted)
@@ -208,6 +214,16 @@ func TestBadgerEngine_EventSetterCallbacks(t *testing.T) {
 	assert.NotNil(t, b.onEdgeCreated)
 	assert.NotNil(t, b.onEdgeUpdated)
 	assert.NotNil(t, b.onEdgeDeleted)
+
+	b.notifyNodeCreated(testNode("evt-node"))
+	b.notifyNodeUpdated(testNode("evt-node"))
+	b.notifyNodeDeleted(NodeID(prefixTestID("evt-node")))
+	b.notifyEdgeCreated(testEdge("evt-edge", "evt-start", "evt-end", "LINK"))
+	b.notifyEdgeUpdated(testEdge("evt-edge", "evt-start", "evt-end", "LINK"))
+	b.notifyEdgeDeleted(EdgeID(prefixTestID("evt-edge")))
+
+	assert.Equal(t, 1, nodeCreatedCount)
+	assert.Equal(t, 1, nodeDeletedCount)
 }
 
 func TestBadgerEngine_LabelBatchAndStatsHelpers(t *testing.T) {

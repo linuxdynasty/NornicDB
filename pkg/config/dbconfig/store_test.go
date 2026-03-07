@@ -67,3 +67,60 @@ func TestStore_EmptyDbNameIgnored(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, store.GetOverrides(""))
 }
+
+func TestStore_LoadFiltersAndParsesConfigNodes(t *testing.T) {
+	ctx := context.Background()
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "db_config:alpha",
+		Labels: []string{"_DbConfig", "_System"},
+		Properties: map[string]any{
+			"overrides": `{"NORNICDB_EMBEDDING_MODEL":"bge-m3"}`,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "db_config:broken",
+		Labels: []string{"_DbConfig"},
+		Properties: map[string]any{
+			"overrides": `{not-json`,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "db_config:no-label",
+		Labels: []string{"Other"},
+		Properties: map[string]any{
+			"overrides": `{"IGNORED":"true"}`,
+		},
+	})
+	require.NoError(t, err)
+
+	store := NewStore(eng)
+	require.NoError(t, store.Load(ctx))
+	assert.Equal(t, map[string]string{"NORNICDB_EMBEDDING_MODEL": "bge-m3"}, store.GetOverrides("alpha"))
+	assert.Nil(t, store.GetOverrides("broken"))
+	assert.Nil(t, store.GetOverrides("no-label"))
+}
+
+func TestStore_SetOverrides_UpdateAndTrimmedDbName(t *testing.T) {
+	ctx := context.Background()
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+	store := NewStore(eng)
+
+	require.NoError(t, store.SetOverrides(ctx, "  mydb  ", map[string]string{"K": "v1"}))
+	first, err := eng.GetNode(storage.NodeID("db_config:mydb"))
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetOverrides(ctx, "mydb", map[string]string{"K": "v2"}))
+	second, err := eng.GetNode(storage.NodeID("db_config:mydb"))
+	require.NoError(t, err)
+
+	assert.Equal(t, first.CreatedAt, second.CreatedAt)
+	assert.Equal(t, map[string]string{"K": "v2"}, store.GetOverrides("mydb"))
+}

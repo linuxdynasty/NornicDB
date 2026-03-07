@@ -3,6 +3,8 @@ package storage
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestBadgerEngine_RelationshipUniqueConstraint tests UNIQUE constraints on relationship properties.
@@ -168,4 +170,48 @@ func TestBadgerEngine_RelationshipConstraintValidTypes(t *testing.T) {
 	if err != nil {
 		t.Errorf("UNIQUE constraint should only apply to matching relationship type: %v", err)
 	}
+}
+
+func TestBadgerEngine_RelationshipConstraintValidationErrors(t *testing.T) {
+	engine, cleanup := setupTestBadgerEngine(t)
+	defer cleanup()
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{ID: NodeID(prefixTestID("user-1")), Labels: []string{"User"}})
+	require.NoError(t, err)
+	_, err = tx.CreateNode(&Node{ID: NodeID(prefixTestID("user-2")), Labels: []string{"User"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.CreateEdge(&Edge{
+		ID:         EdgeID(prefixTestID("rel-1")),
+		StartNode:  NodeID(prefixTestID("user-1")),
+		EndNode:    NodeID(prefixTestID("user-2")),
+		Type:       "KNOWS",
+		Properties: map[string]any{},
+	}))
+	require.NoError(t, tx.Commit())
+
+	err = engine.ValidateRelationshipConstraint(RelationshipConstraint{
+		Name:       "unknown",
+		Type:       ConstraintType("WEIRD"),
+		RelType:    "KNOWS",
+		Properties: []string{"since"},
+	})
+	require.ErrorContains(t, err, "unsupported relationship constraint type")
+
+	err = engine.ValidateRelationshipConstraint(RelationshipConstraint{
+		Name:       "bad_unique_arity",
+		Type:       ConstraintUnique,
+		RelType:    "KNOWS",
+		Properties: []string{"since", "weight"},
+	})
+	require.ErrorContains(t, err, "exactly 1 property")
+
+	err = engine.ValidateRelationshipConstraint(RelationshipConstraint{
+		Name:       "bad_exists_arity",
+		Type:       ConstraintExists,
+		RelType:    "KNOWS",
+		Properties: nil,
+	})
+	require.ErrorContains(t, err, "exactly 1 property")
 }

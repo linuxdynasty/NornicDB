@@ -785,6 +785,37 @@ func TestBadgerEngine_BulkCreateNodes(t *testing.T) {
 		count, _ := engine2.NodeCount()
 		assert.EqualValues(t, 1, count)
 	})
+
+	t.Run("rejects invalid inputs and closed engine", func(t *testing.T) {
+		err := engine.BulkCreateNodes([]*Node{nil})
+		assert.ErrorIs(t, err, ErrInvalidData)
+
+		err = engine.BulkCreateNodes([]*Node{{ID: ""}})
+		assert.ErrorIs(t, err, ErrInvalidID)
+
+		err = engine.BulkCreateNodes([]*Node{{ID: "plain-id", Labels: []string{"Test"}}})
+		require.ErrorContains(t, err, "node ID must be prefixed with namespace")
+
+		closed := createTestBadgerEngine(t)
+		require.NoError(t, closed.Close())
+		err = closed.BulkCreateNodes([]*Node{testNode("closed")})
+		assert.ErrorIs(t, err, ErrStorageClosed)
+	})
+
+	t.Run("notifies node created listeners", func(t *testing.T) {
+		engine2 := createTestBadgerEngine(t)
+		var created []NodeID
+		engine2.OnNodeCreated(func(n *Node) {
+			created = append(created, n.ID)
+		})
+
+		nodes := []*Node{
+			testNode("notify-1"),
+			testNode("notify-2"),
+		}
+		require.NoError(t, engine2.BulkCreateNodes(nodes))
+		assert.ElementsMatch(t, []NodeID{nodes[0].ID, nodes[1].ID}, created)
+	})
 }
 
 func TestBadgerEngine_BulkCreateEdges(t *testing.T) {
@@ -809,6 +840,57 @@ func TestBadgerEngine_BulkCreateEdges(t *testing.T) {
 
 		count, _ := engine.EdgeCount()
 		assert.EqualValues(t, 20, count)
+	})
+
+	t.Run("rejects invalid inputs duplicates and missing nodes", func(t *testing.T) {
+		err := engine.BulkCreateEdges([]*Edge{nil})
+		assert.ErrorIs(t, err, ErrInvalidData)
+
+		err = engine.BulkCreateEdges([]*Edge{{ID: ""}})
+		assert.ErrorIs(t, err, ErrInvalidID)
+
+		err = engine.BulkCreateEdges([]*Edge{{
+			ID:        EdgeID(prefixTestID("missing-edge")),
+			StartNode: NodeID(prefixTestID("n0")),
+			EndNode:   NodeID(prefixTestID("does-not-exist")),
+			Type:      "CONNECTS",
+		}})
+		assert.ErrorIs(t, err, ErrNotFound)
+
+		err = engine.BulkCreateEdges([]*Edge{{
+			ID:        EdgeID(prefixTestID("e00")),
+			StartNode: NodeID(prefixTestID("n0")),
+			EndNode:   NodeID(prefixTestID("n1")),
+			Type:      "CONNECTS",
+		}})
+		assert.ErrorIs(t, err, ErrAlreadyExists)
+
+		closed := createTestBadgerEngine(t)
+		require.NoError(t, closed.Close())
+		err = closed.BulkCreateEdges([]*Edge{{
+			ID:        EdgeID(prefixTestID("closed-edge")),
+			StartNode: NodeID(prefixTestID("n0")),
+			EndNode:   NodeID(prefixTestID("n1")),
+			Type:      "CONNECTS",
+		}})
+		assert.ErrorIs(t, err, ErrStorageClosed)
+	})
+
+	t.Run("notifies edge created listeners", func(t *testing.T) {
+		engine2 := createTestBadgerEngine(t)
+		_, err := engine2.CreateNode(testNode("edge-notify-1"))
+		require.NoError(t, err)
+		_, err = engine2.CreateNode(testNode("edge-notify-2"))
+		require.NoError(t, err)
+
+		var created []EdgeID
+		engine2.OnEdgeCreated(func(e *Edge) {
+			created = append(created, e.ID)
+		})
+
+		edges := []*Edge{testEdge("edge-notify", "edge-notify-1", "edge-notify-2", "LINK")}
+		require.NoError(t, engine2.BulkCreateEdges(edges))
+		assert.Equal(t, []EdgeID{edges[0].ID}, created)
 	})
 }
 
@@ -1173,6 +1255,58 @@ func TestNewBadgerEngineWithOptions(t *testing.T) {
 
 		// Should work with sync writes
 		_, err = engine.CreateNode(testNode("test"))
+		require.NoError(t, err)
+	})
+
+	t.Run("rejects invalid serializer and encryption key", func(t *testing.T) {
+		_, err := NewBadgerEngineWithOptions(BadgerOptions{
+			InMemory:   true,
+			Serializer: StorageSerializer("bogus"),
+		})
+		require.Error(t, err)
+
+		_, err = NewBadgerEngineWithOptions(BadgerOptions{
+			InMemory:      true,
+			EncryptionKey: []byte("short"),
+		})
+		require.ErrorContains(t, err, "16, 24, or 32 bytes")
+	})
+
+	t.Run("applies cache defaults and overrides", func(t *testing.T) {
+		engine, err := NewBadgerEngineWithOptions(BadgerOptions{
+			InMemory: true,
+		})
+		require.NoError(t, err)
+		require.Equal(t, defaultBadgerNodeCacheMaxEntries, engine.nodeCacheMaxEntries)
+		require.Equal(t, defaultBadgerEdgeTypeCacheMaxTypes, engine.edgeTypeCacheMaxTypes)
+		require.Equal(t, defaultBadgerLabelFirstCacheMax, engine.labelFirstCacheMax)
+		require.NoError(t, engine.Close())
+
+		engine, err = NewBadgerEngineWithOptions(BadgerOptions{
+			InMemory:                      true,
+			HighPerformance:               true,
+			NodeCacheMaxEntries:           7,
+			EdgeTypeCacheMaxTypes:         9,
+			LabelFirstNodeCacheMaxEntries: 11,
+		})
+		require.NoError(t, err)
+		defer engine.Close()
+		require.Equal(t, 7, engine.nodeCacheMaxEntries)
+		require.Equal(t, 9, engine.edgeTypeCacheMaxTypes)
+		require.Equal(t, 11, engine.labelFirstCacheMax)
+		_, err = engine.CreateNode(testNode("hp"))
+		require.NoError(t, err)
+	})
+
+	t.Run("low memory mode also initializes successfully", func(t *testing.T) {
+		engine, err := NewBadgerEngineWithOptions(BadgerOptions{
+			InMemory:  true,
+			LowMemory: true,
+		})
+		require.NoError(t, err)
+		defer engine.Close()
+
+		_, err = engine.CreateNode(testNode("lm"))
 		require.NoError(t, err)
 	})
 }

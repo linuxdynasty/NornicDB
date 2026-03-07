@@ -41,6 +41,56 @@ func TestResolve_Overrides(t *testing.T) {
 	assert.Equal(t, "v2", r.Effective["NORNICDB_SEARCH_BM25_ENGINE"])
 }
 
+func TestResolve_DefaultDimensionsAndIgnoredOverrides(t *testing.T) {
+	t.Setenv("NORNICDB_SEARCH_BM25_ENGINE", "unexpected")
+	global := config.LoadDefaults()
+	global.Memory.EmbeddingDimensions = 0
+	global.Memory.SearchMinSimilarity = 0.55
+
+	r := Resolve(global, map[string]string{
+		"NOT_ALLOWED":                    "ignored",
+		"NORNICDB_EMBEDDING_DIMENSIONS":  "-5",
+		"NORNICDB_SEARCH_BM25_ENGINE":    "v1",
+		"NORNICDB_SEARCH_MIN_SIMILARITY": "bad",
+	})
+	require.NotNil(t, r)
+	assert.Equal(t, 1024, r.EmbeddingDimensions)
+	assert.Equal(t, 0.55, r.SearchMinSimilarity)
+	assert.Equal(t, "v1", r.BM25Engine)
+	_, ok := r.Effective["NOT_ALLOWED"]
+	assert.False(t, ok)
+}
+
+func TestApplyOverride(t *testing.T) {
+	r := &ResolvedDbConfig{
+		EmbeddingDimensions: 1024,
+		SearchMinSimilarity: 0.5,
+		BM25Engine:          "v2",
+		Effective:           map[string]string{},
+	}
+
+	applyOverride(r, "NORNICDB_EMBEDDING_DIMENSIONS", " 2048 ")
+	assert.Equal(t, 2048, r.EmbeddingDimensions)
+
+	applyOverride(r, "NORNICDB_EMBEDDING_DIMENSIONS", "0")
+	assert.Equal(t, 1024, r.EmbeddingDimensions)
+
+	applyOverride(r, "NORNICDB_SEARCH_MIN_SIMILARITY", "0.75")
+	assert.Equal(t, 0.75, r.SearchMinSimilarity)
+
+	applyOverride(r, "NORNICDB_SEARCH_MIN_SIMILARITY", "0")
+	assert.Equal(t, 0.0, r.SearchMinSimilarity)
+
+	applyOverride(r, "NORNICDB_SEARCH_BM25_ENGINE", "V1")
+	assert.Equal(t, "v1", r.BM25Engine)
+
+	applyOverride(r, "NORNICDB_EMBEDDING_ENABLED", "1")
+	assert.Equal(t, "v1", r.BM25Engine)
+
+	applyOverride(r, "UNKNOWN_KEY", "value")
+	assert.Equal(t, 1024, r.EmbeddingDimensions)
+}
+
 func TestIsAllowedKey(t *testing.T) {
 	assert.True(t, IsAllowedKey("NORNICDB_EMBEDDING_MODEL"))
 	assert.True(t, IsAllowedKey("NORNICDB_SEARCH_MIN_SIMILARITY"))
