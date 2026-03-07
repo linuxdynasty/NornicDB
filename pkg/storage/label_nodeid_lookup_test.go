@@ -1,10 +1,37 @@
 package storage
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+type labelLookupFallbackEngine struct {
+	Engine
+	nodes []*Node
+	err   error
+}
+
+type firstNodeOnlyEngine struct {
+	Engine
+	node *Node
+	err  error
+}
+
+func (e *labelLookupFallbackEngine) GetNodesByLabel(label string) ([]*Node, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return e.nodes, nil
+}
+
+func (e *firstNodeOnlyEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return e.node, nil
+}
 
 func TestFirstNodeIDByLabel_NamespaceFiltering(t *testing.T) {
 	base := NewMemoryEngine()
@@ -57,4 +84,46 @@ func TestFirstNodeIDByLabel_InvalidatesOnDelete(t *testing.T) {
 	} else {
 		require.Equal(t, NodeID("node-1"), id2)
 	}
+}
+
+func TestNodeIDsByLabel_FallbackBranches(t *testing.T) {
+	engine := &labelLookupFallbackEngine{
+		Engine: NewMemoryEngine(),
+		nodes: []*Node{
+			nil,
+			{ID: "n1"},
+			{ID: "n2"},
+		},
+	}
+
+	ids, err := NodeIDsByLabel(engine, "Person", 0)
+	require.NoError(t, err)
+	require.Equal(t, []NodeID{"n1", "n2"}, ids)
+
+	ids, err = NodeIDsByLabel(engine, "Person", 1)
+	require.NoError(t, err)
+	require.Equal(t, []NodeID{"n1"}, ids)
+
+	engine.err = ErrNotFound
+	_, err = NodeIDsByLabel(engine, "Person", 1)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestFirstNodeIDByLabel_FallbackBranches(t *testing.T) {
+	base := NewMemoryEngine()
+	engine := &firstNodeOnlyEngine{Engine: base, node: &Node{ID: "n1"}}
+
+	id, err := FirstNodeIDByLabel(engine, "Person")
+	require.NoError(t, err)
+	require.Equal(t, NodeID("n1"), id)
+
+	engine.node = nil
+	id, err = FirstNodeIDByLabel(engine, "Person")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Empty(t, id)
+
+	engine.err = errors.New("first lookup failed")
+	id, err = FirstNodeIDByLabel(engine, "Person")
+	require.ErrorContains(t, err, "first lookup failed")
+	require.Empty(t, id)
 }

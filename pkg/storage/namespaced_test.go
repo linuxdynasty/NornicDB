@@ -2,12 +2,236 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type namespacedHelperEngine struct {
+	*MemoryEngine
+	streamNodeErr error
+	streamEdgeErr error
+	chunkErr      error
+	findQueue     []*Node
+	refreshCount  int
+	addedIDs      []NodeID
+	markedIDs     []NodeID
+	missingIDs    map[NodeID]bool
+}
+
+type namespacedPrefixStatsEngine struct {
+	Engine
+	nodeCount int64
+	edgeCount int64
+	nodeErr   error
+	edgeErr   error
+}
+
+type namespacedStreamingOnlyEngine struct {
+	Engine
+	streamNodeErr error
+	streamEdgeErr error
+}
+
+type namespacedSchemaProviderEngine struct {
+	Engine
+	schema *SchemaManager
+}
+
+type namespacedSchemaFallbackEngine struct {
+	Engine
+	schema *SchemaManager
+}
+
+func (e *namespacedHelperEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
+	if e.streamNodeErr != nil {
+		return e.streamNodeErr
+	}
+	nodes, err := e.MemoryEngine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedHelperEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
+	if e.streamEdgeErr != nil {
+		return e.streamEdgeErr
+	}
+	edges, err := e.MemoryEngine.AllEdges()
+	if err != nil {
+		return err
+	}
+	for _, edge := range edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedHelperEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error {
+	if e.chunkErr != nil {
+		return e.chunkErr
+	}
+	nodes, err := e.MemoryEngine.AllNodes()
+	if err != nil {
+		return err
+	}
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for i := 0; i < len(nodes); i += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + chunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := fn(nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedHelperEngine) FindNodeNeedingEmbedding() *Node {
+	if len(e.findQueue) == 0 {
+		return nil
+	}
+	node := CopyNode(e.findQueue[0])
+	e.findQueue = e.findQueue[1:]
+	return node
+}
+
+func (e *namespacedHelperEngine) RefreshPendingEmbeddingsIndex() int {
+	return e.refreshCount
+}
+
+func (e *namespacedHelperEngine) AddToPendingEmbeddings(nodeID NodeID) {
+	e.addedIDs = append(e.addedIDs, nodeID)
+}
+
+func (e *namespacedHelperEngine) MarkNodeEmbedded(nodeID NodeID) {
+	e.markedIDs = append(e.markedIDs, nodeID)
+}
+
+func (e *namespacedHelperEngine) GetNode(nodeID NodeID) (*Node, error) {
+	if e.missingIDs != nil && e.missingIDs[nodeID] {
+		return nil, ErrNotFound
+	}
+	return e.MemoryEngine.GetNode(nodeID)
+}
+
+func (e *namespacedPrefixStatsEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	if e.nodeErr != nil {
+		return 0, e.nodeErr
+	}
+	return e.nodeCount, nil
+}
+
+func (e *namespacedPrefixStatsEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	if e.edgeErr != nil {
+		return 0, e.edgeErr
+	}
+	return e.edgeCount, nil
+}
+
+func (e *namespacedStreamingOnlyEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
+	if e.streamNodeErr != nil {
+		return e.streamNodeErr
+	}
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedStreamingOnlyEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
+	if e.streamEdgeErr != nil {
+		return e.streamEdgeErr
+	}
+	edges, err := e.Engine.AllEdges()
+	if err != nil {
+		return err
+	}
+	for _, edge := range edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedStreamingOnlyEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error {
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(nodes); i += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + chunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := fn(nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedSchemaProviderEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
+	return e.schema
+}
+
+func (e *namespacedSchemaFallbackEngine) GetSchema() *SchemaManager {
+	return e.schema
+}
 
 func TestNamespacedEngine_BasicOperations(t *testing.T) {
 	inner := NewMemoryEngine()
@@ -355,4 +579,446 @@ func TestNamespacedEngine_QueryDelegateMethods(t *testing.T) {
 	batch, err := tenantA.BatchGetNodes([]NodeID{"n1", "n2"})
 	require.NoError(t, err)
 	assert.Len(t, batch, 2)
+}
+
+func TestNamespacedEngine_DirectStreamingAndEmbeddingHelpers(t *testing.T) {
+	t.Run("direct streaming filters namespace and propagates errors", func(t *testing.T) {
+		inner := &namespacedHelperEngine{MemoryEngine: NewMemoryEngine()}
+		t.Cleanup(func() { _ = inner.Close() })
+		tenantA := NewNamespacedEngine(inner, "tenant_a")
+		tenantB := NewNamespacedEngine(inner, "tenant_b")
+
+		_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"name": "a1"}})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"name": "a2"}})
+		require.NoError(t, err)
+		_, err = tenantB.CreateNode(&Node{ID: "n9", Labels: []string{"Person"}, Properties: map[string]any{"name": "b1"}})
+		require.NoError(t, err)
+		require.NoError(t, tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"}))
+		require.NoError(t, tenantB.CreateEdge(&Edge{ID: "e9", StartNode: "n9", EndNode: "n9", Type: "KNOWS"}))
+
+		var nodeIDs []NodeID
+		err = tenantA.StreamNodes(context.Background(), func(node *Node) error {
+			nodeIDs = append(nodeIDs, node.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []NodeID{"n1", "n2"}, nodeIDs)
+
+		var edgeIDs []EdgeID
+		err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error {
+			edgeIDs = append(edgeIDs, edge.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []EdgeID{"e1"}, edgeIDs)
+
+		var chunked [][]NodeID
+		err = tenantA.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error {
+			var ids []NodeID
+			for _, node := range nodes {
+				ids = append(ids, node.ID)
+			}
+			chunked = append(chunked, ids)
+			return nil
+		})
+		require.NoError(t, err)
+		require.Len(t, chunked, 1)
+		assert.ElementsMatch(t, []NodeID{"n1", "n2"}, chunked[0])
+
+		errBoom := errors.New("node callback failed")
+		err = tenantA.StreamNodes(context.Background(), func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("edge callback failed")
+		err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("chunk callback failed")
+		err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		inner.streamNodeErr = errors.New("stream nodes failed")
+		err = tenantA.StreamNodes(context.Background(), func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "stream nodes failed")
+
+		inner.streamNodeErr = nil
+		inner.streamEdgeErr = errors.New("stream edges failed")
+		err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "stream edges failed")
+
+		inner.streamEdgeErr = nil
+		inner.chunkErr = errors.New("stream chunks failed")
+		err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return nil })
+		require.ErrorContains(t, err, "stream chunks failed")
+	})
+
+	t.Run("find node needing embedding skips foreign and stale nodes", func(t *testing.T) {
+		inner := &namespacedHelperEngine{
+			MemoryEngine: NewMemoryEngine(),
+			findQueue: []*Node{
+				{ID: "tenant_b:foreign", Labels: []string{"Doc"}, Properties: map[string]any{"text": "skip me"}},
+				{ID: "tenant_a:stale", Labels: []string{"Doc"}, Properties: map[string]any{"text": "stale"}},
+				{ID: "tenant_a:valid", Labels: []string{"Doc"}, Properties: map[string]any{"text": "keep"}},
+			},
+			missingIDs: map[NodeID]bool{"tenant_a:stale": true},
+		}
+		t.Cleanup(func() { _ = inner.Close() })
+		tenantA := NewNamespacedEngine(inner, "tenant_a")
+
+		_, err := inner.CreateNode(&Node{ID: "tenant_a:valid", Labels: []string{"Doc"}, Properties: map[string]any{"text": "keep"}})
+		require.NoError(t, err)
+
+		found := tenantA.FindNodeNeedingEmbedding()
+		require.NotNil(t, found)
+		assert.Equal(t, NodeID("valid"), found.ID)
+		assert.Equal(t, []NodeID{"tenant_a:stale"}, inner.markedIDs)
+	})
+
+	t.Run("refresh pending embeddings prefixes add and remove operations", func(t *testing.T) {
+		inner := &namespacedHelperEngine{
+			MemoryEngine: NewMemoryEngine(),
+			refreshCount: 2,
+		}
+		t.Cleanup(func() { _ = inner.Close() })
+		tenantA := NewNamespacedEngine(inner, "tenant_a")
+
+		_, err := tenantA.CreateNode(&Node{ID: "needs", Labels: []string{"Doc"}, Properties: map[string]any{"text": "embed me"}})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{
+			ID:              "done",
+			Labels:          []string{"Doc"},
+			Properties:      map[string]any{"text": "embedded"},
+			ChunkEmbeddings: [][]float32{{1, 2}},
+		})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{ID: "internal", Labels: []string{"_Meta"}, Properties: map[string]any{"text": "skip"}})
+		require.NoError(t, err)
+
+		removed := tenantA.RefreshPendingEmbeddingsIndex()
+		assert.Equal(t, 3, removed)
+		assert.Equal(t, []NodeID{"tenant_a:needs"}, inner.addedIDs)
+		assert.Equal(t, []NodeID{"tenant_a:done"}, inner.markedIDs)
+	})
+
+	t.Run("streaming fallbacks work without streaming inner engine", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		inner := &nonStreamingCountEngine{Engine: base}
+		tenantA := NewNamespacedEngine(inner, "tenant_a")
+		tenantB := NewNamespacedEngine(inner, "tenant_b")
+
+		_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantB.CreateNode(&Node{ID: "n9", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		require.NoError(t, tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"}))
+		require.NoError(t, tenantB.CreateEdge(&Edge{ID: "e9", StartNode: "n9", EndNode: "n9", Type: "KNOWS"}))
+
+		var nodeIDs []NodeID
+		err = tenantA.StreamNodes(context.Background(), func(node *Node) error {
+			nodeIDs = append(nodeIDs, node.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []NodeID{"n1", "n2"}, nodeIDs)
+
+		var edgeIDs []EdgeID
+		err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error {
+			edgeIDs = append(edgeIDs, edge.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []EdgeID{"e1"}, edgeIDs)
+
+		var chunkedCount int
+		err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error {
+			chunkedCount += len(nodes)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, chunkedCount)
+
+		errBoom := errors.New("fallback node callback failed")
+		err = tenantA.StreamNodes(context.Background(), func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("fallback edge callback failed")
+		err = tenantA.StreamEdges(context.Background(), func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("fallback chunk callback failed")
+		err = tenantA.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+	})
+
+	t.Run("find node needing embedding falls back to namespace scan after many foreign nodes", func(t *testing.T) {
+		foreignQueue := make([]*Node, 10000)
+		for i := range foreignQueue {
+			foreignQueue[i] = &Node{
+				ID:         NodeID("tenant_b:foreign"),
+				Labels:     []string{"Doc"},
+				Properties: map[string]any{"text": "skip"},
+			}
+		}
+		inner := &namespacedHelperEngine{
+			MemoryEngine: NewMemoryEngine(),
+			findQueue:    foreignQueue,
+		}
+		t.Cleanup(func() { _ = inner.Close() })
+		tenantA := NewNamespacedEngine(inner, "tenant_a")
+
+		_, err := tenantA.CreateNode(&Node{
+			ID:         "scan-me",
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"text": "embed me"},
+		})
+		require.NoError(t, err)
+
+		found := tenantA.FindNodeNeedingEmbedding()
+		require.NotNil(t, found)
+		assert.Equal(t, NodeID("scan-me"), found.ID)
+		assert.Equal(t, []NodeID{"tenant_a:scan-me"}, inner.addedIDs)
+	})
+}
+
+func TestNamespacedEngine_CountAndLookupHelpers(t *testing.T) {
+	t.Run("node and edge count use prefix stats and propagate errors", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &namespacedPrefixStatsEngine{
+			Engine:    base,
+			nodeCount: 7,
+			edgeCount: 3,
+		}
+		tenantA := NewNamespacedEngine(engine, "tenant_a")
+
+		nodeCount, err := tenantA.NodeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(7), nodeCount)
+
+		edgeCount, err := tenantA.EdgeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), edgeCount)
+
+		engine.nodeErr = errors.New("node count failed")
+		_, err = tenantA.NodeCount()
+		require.ErrorContains(t, err, "node count failed")
+
+		engine.edgeErr = errors.New("edge count failed")
+		_, err = tenantA.EdgeCount()
+		require.ErrorContains(t, err, "edge count failed")
+	})
+
+	t.Run("node and edge count use streaming and all fallbacks", func(t *testing.T) {
+		streamingBase := NewMemoryEngine()
+		t.Cleanup(func() { _ = streamingBase.Close() })
+		streamingInner := &namespacedStreamingOnlyEngine{Engine: streamingBase}
+		tenantA := NewNamespacedEngine(streamingInner, "tenant_a")
+		tenantB := NewNamespacedEngine(streamingInner, "tenant_b")
+
+		_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantB.CreateNode(&Node{ID: "n9", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		require.NoError(t, tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"}))
+		require.NoError(t, tenantB.CreateEdge(&Edge{ID: "e9", StartNode: "n9", EndNode: "n9", Type: "KNOWS"}))
+
+		nodeCount, err := tenantA.NodeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), nodeCount)
+
+		edgeCount, err := tenantA.EdgeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), edgeCount)
+
+		streamingInner.streamNodeErr = errors.New("stream nodes failed")
+		_, err = tenantA.NodeCount()
+		require.ErrorContains(t, err, "stream nodes failed")
+
+		streamingInner.streamNodeErr = nil
+		streamingInner.streamEdgeErr = errors.New("stream edges failed")
+		_, err = tenantA.EdgeCount()
+		require.ErrorContains(t, err, "stream edges failed")
+
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		fallbackInner := &nonStreamingCountEngine{Engine: base}
+		tenantAFallback := NewNamespacedEngine(fallbackInner, "tenant_a")
+		tenantBFallback := NewNamespacedEngine(fallbackInner, "tenant_b")
+		_, err = tenantAFallback.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantBFallback.CreateNode(&Node{ID: "n9", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		require.NoError(t, tenantAFallback.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "KNOWS"}))
+		require.NoError(t, tenantBFallback.CreateEdge(&Edge{ID: "e9", StartNode: "n9", EndNode: "n9", Type: "KNOWS"}))
+
+		nodeCount, err = tenantAFallback.NodeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), nodeCount)
+
+		edgeCount, err = tenantAFallback.EdgeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), edgeCount)
+
+		fallbackInner.allNodesErr = errors.New("all nodes failed")
+		_, err = tenantAFallback.NodeCount()
+		require.ErrorContains(t, err, "all nodes failed")
+
+		fallbackInner.allNodesErr = nil
+		fallbackInner.allEdgesErr = errors.New("all edges failed")
+		_, err = tenantAFallback.EdgeCount()
+		require.ErrorContains(t, err, "all edges failed")
+	})
+
+	t.Run("get first falls back when inner first node is foreign", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		_, err := base.CreateNode(&Node{ID: "tenant_a:first", Labels: []string{"Person"}, Properties: map[string]any{"name": "tenant-a"}})
+		require.NoError(t, err)
+		_, err = base.CreateNode(&Node{ID: "tenant_b:first", Labels: []string{"Person"}, Properties: map[string]any{"name": "tenant-b"}})
+		require.NoError(t, err)
+
+		engine := &firstLabelEngine{
+			Engine: base,
+			node:   &Node{ID: "tenant_b:first", Labels: []string{"Person"}, Properties: map[string]any{"name": "tenant-b"}},
+		}
+		tenantA := NewNamespacedEngine(engine, "tenant_a")
+
+		first, err := tenantA.GetFirstNodeByLabel("Person")
+		require.NoError(t, err)
+		require.NotNil(t, first)
+		assert.Equal(t, NodeID("first"), first.ID)
+
+		engine.err = errors.New("first label failed")
+		first, err = tenantA.GetFirstNodeByLabel("Person")
+		require.NoError(t, err)
+		require.NotNil(t, first)
+		assert.Equal(t, NodeID("first"), first.ID)
+	})
+
+	t.Run("get first returns not found when namespace has no matches", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &firstLabelEngine{
+			Engine: base,
+			node:   &Node{ID: "tenant_b:first", Labels: []string{"Person"}},
+			err:    errors.New("first label failed"),
+		}
+		tenantA := NewNamespacedEngine(engine, "tenant_a")
+
+		first, err := tenantA.GetFirstNodeByLabel("Person")
+		require.ErrorIs(t, err, ErrNotFound)
+		assert.Nil(t, first)
+	})
+
+	t.Run("for-each uses lookup and fallback paths", func(t *testing.T) {
+		engine := &lookupEngine{
+			Engine: NewMemoryEngine(),
+			ids:    []NodeID{"tenant_b:skip", "tenant_a:one", "tenant_a:two"},
+		}
+		t.Cleanup(func() {
+			if closer, ok := engine.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+		tenantA := NewNamespacedEngine(engine, "tenant_a")
+
+		var seen []NodeID
+		err := tenantA.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+			seen = append(seen, id)
+			return id != "one"
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []NodeID{"one"}, seen)
+
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		fallback := NewNamespacedEngine(&nonStreamingCountEngine{Engine: base}, "tenant_a")
+		other := NewNamespacedEngine(&nonStreamingCountEngine{Engine: base}, "tenant_b")
+		_, err = fallback.CreateNode(&Node{ID: "one", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = other.CreateNode(&Node{ID: "two", Labels: []string{"Person"}})
+		require.NoError(t, err)
+
+		seen = nil
+		err = fallback.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+			seen = append(seen, id)
+			return true
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []NodeID{"one"}, seen)
+
+		require.NoError(t, fallback.ForEachNodeIDByLabel("Person", nil))
+	})
+
+	t.Run("get edge between filters foreign edges and schema uses provider", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		tenantA := NewNamespacedEngine(base, "tenant_a")
+		tenantB := NewNamespacedEngine(base, "tenant_b")
+
+		_, err := tenantA.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantA.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = tenantB.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		require.NoError(t, tenantA.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"}))
+		require.NoError(t, tenantB.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "KNOWS"}))
+
+		edge := tenantA.GetEdgeBetween("n1", "n2", "KNOWS")
+		require.NotNil(t, edge)
+		assert.Equal(t, EdgeID("e1"), edge.ID)
+
+		assert.Nil(t, tenantA.GetEdgeBetween("n1", "n1", "KNOWS"))
+
+		provider := &namespacedSchemaProviderEngine{Engine: base, schema: NewSchemaManager()}
+		assert.Same(t, provider.schema, NewNamespacedEngine(provider, "tenant_a").GetSchema())
+		fallbackSchema := NewSchemaManager()
+		fallback := &namespacedSchemaFallbackEngine{Engine: base, schema: fallbackSchema}
+		assert.Same(t, fallbackSchema, NewNamespacedEngine(fallback, "tenant_a").GetSchema())
+	})
+}
+
+func TestNamespacedEngine_UserConversionHelpers(t *testing.T) {
+	memory := NewNamespacedEngine(NewMemoryEngine(), "tenant_a")
+	assert.Nil(t, memory.toUserNode(nil))
+	assert.Nil(t, memory.toUserEdge(nil))
+
+	shallowNode := memory.toUserNode(&Node{ID: "tenant_a:n1", Labels: []string{"Doc"}, Properties: map[string]any{"name": "one"}})
+	require.NotNil(t, shallowNode)
+	assert.Equal(t, NodeID("n1"), shallowNode.ID)
+
+	shallow := memory.toUserEdge(&Edge{
+		ID:        "tenant_a:e1",
+		StartNode: "tenant_a:n1",
+		EndNode:   "tenant_a:n2",
+		Type:      "KNOWS",
+	})
+	require.NotNil(t, shallow)
+	assert.Equal(t, EdgeID("e1"), shallow.ID)
+	assert.Equal(t, NodeID("n1"), shallow.StartNode)
+	assert.Equal(t, NodeID("n2"), shallow.EndNode)
+
+	asyncInner := NewAsyncEngine(NewMemoryEngine(), &AsyncEngineConfig{FlushInterval: time.Hour})
+	defer asyncInner.Close()
+	deep := NewNamespacedEngine(asyncInner, "tenant_a").toUserEdge(&Edge{
+		ID:        "tenant_a:e2",
+		StartNode: "tenant_a:n3",
+		EndNode:   "tenant_a:n4",
+		Type:      "KNOWS",
+	})
+	require.NotNil(t, deep)
+	assert.Equal(t, EdgeID("e2"), deep.ID)
+	assert.Equal(t, NodeID("n3"), deep.StartNode)
+	assert.Equal(t, NodeID("n4"), deep.EndNode)
+
+	deepNode := NewNamespacedEngine(asyncInner, "tenant_a").toUserNode(&Node{ID: "tenant_a:n2", Labels: []string{"Doc"}})
+	require.NotNil(t, deepNode)
+	assert.Equal(t, NodeID("n2"), deepNode.ID)
 }

@@ -717,27 +717,11 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 
 	// Query by filters
 	if exec != nil {
-		// Use label filter if provided
-		label := ""
-		if len(nodeTypes) > 0 {
-			label = strings.ReplaceAll(nodeTypes[0], "`", "")
-		}
-
 		var b strings.Builder
-		if label != "" {
-			b.WriteString("MATCH (n:`")
-			b.WriteString(label)
-			b.WriteString("`)")
-		} else {
-			b.WriteString("MATCH (n)")
-		}
+		b.WriteString("MATCH (n)")
 
-		conds := make([]string, 0, 2)
-		params := map[string]interface{}{"limit": limit}
-		if len(tags) > 0 {
-			conds = append(conds, "ALL(tag IN $tags WHERE tag IN coalesce(n.tags, []))")
-			params["tags"] = tags
-		}
+		conds := make([]string, 0, 1)
+		params := map[string]interface{}{}
 		if since != "" {
 			// created_at is stored as RFC3339 string by store; lexical compare works for RFC3339 timestamps.
 			conds = append(conds, "coalesce(n.created_at, '') >= $since")
@@ -764,6 +748,15 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 				continue
 			}
 			props := toInterfaceMap(snode.Properties)
+			if len(nodeTypes) > 0 && !containsLabel(snode.Labels, nodeTypes[0]) {
+				continue
+			}
+			if len(tags) > 0 {
+				nodeTags := getStringSliceProp(props, "tags")
+				if len(nodeTags) == 0 || !hasAllTags(nodeTags, tags) {
+					continue
+				}
+			}
 			nodes = append(nodes, Node{
 				ID:         normalizeNodeElementID(string(snode.ID)),
 				Type:       getLabelType(snode.Labels),
@@ -783,6 +776,25 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 		Nodes: []Node{},
 		Count: 0,
 	}, nil
+}
+
+func hasAllTags(nodeTags, requested []string) bool {
+	if len(requested) == 0 {
+		return true
+	}
+	if len(nodeTags) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(nodeTags))
+	for _, tag := range nodeTags {
+		set[tag] = struct{}{}
+	}
+	for _, tag := range requested {
+		if _, ok := set[tag]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // handleDiscover implements the discover tool - semantic search with graph traversal.
@@ -1320,21 +1332,19 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 
 		// Create dependency edges
 		if len(dependsOn) > 0 {
-			deps := make([]string, 0, len(dependsOn))
 			for _, depID := range dependsOn {
 				if strings.TrimSpace(depID) == "" {
 					continue
 				}
-				deps = append(deps, normalizeNodeElementID(depID))
-			}
-			if len(deps) > 0 {
-				_, _ = exec.Execute(ctx,
-					`MATCH (t:Task) WHERE elementId(t) = $id
-					 UNWIND $deps AS dep
-					 MATCH (d:Task) WHERE elementId(d) = dep
+				depElementID := normalizeNodeElementID(depID)
+				if _, err := exec.Execute(ctx,
+					`MATCH (t:Task), (d:Task)
+					 WHERE elementId(t) = $id AND elementId(d) = $dep
 					 CREATE (t)-[:DEPENDS_ON]->(d)`,
-					map[string]interface{}{"id": taskID, "deps": deps},
-				)
+					map[string]interface{}{"id": taskID, "dep": depElementID},
+				); err != nil {
+					return nil, fmt.Errorf("failed to create task dependency %q: %w", depID, err)
+				}
 			}
 		}
 	} else {
@@ -1414,12 +1424,6 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 			conditions = append(conditions, "t.assigned_to = $assigned_to")
 			params["assigned_to"] = assignedTo
 		}
-		if unblockedOnly {
-			conditions = append(conditions, `NOT EXISTS {
-				MATCH (t)-[:DEPENDS_ON]->(dep:Task)
-				WHERE dep.status <> 'completed'
-			}`)
-		}
 		if len(conditions) > 0 {
 			base += " WHERE " + strings.Join(conditions, " AND ")
 		}
@@ -1442,6 +1446,12 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 			statusVal, _ := row[3].(string)
 			priorityVal, _ := row[4].(string)
 			assignedVal, _ := row[5].(string)
+			if unblockedOnly {
+				blocked, err := taskHasIncompleteDependencies(ctx, exec, id)
+				if err != nil || blocked {
+					continue
+				}
+			}
 			tasks = append(tasks, Node{
 				ID:      id,
 				Type:    "Task",
@@ -1456,31 +1466,29 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 		}
 
 		// Stats for the filtered set (no limit)
-		statsQuery := base + " RETURN t.status AS status, t.priority AS priority, count(t) AS count"
+		statsQuery := base + " RETURN elementId(t) AS id, t.status AS status, t.priority AS priority"
 		statsResult, err := exec.Execute(ctx, statsQuery, params)
 		if err == nil {
 			for _, row := range statsResult.Rows {
 				if len(row) < 3 {
 					continue
 				}
-				st, _ := row[0].(string)
-				pr, _ := row[1].(string)
-				var c int64
-				switch v := row[2].(type) {
-				case int64:
-					c = v
-				case int:
-					c = int64(v)
-				case float64:
-					c = int64(v)
+				id, _ := row[0].(string)
+				st, _ := row[1].(string)
+				pr, _ := row[2].(string)
+				if unblockedOnly {
+					blocked, checkErr := taskHasIncompleteDependencies(ctx, exec, id)
+					if checkErr != nil || blocked {
+						continue
+					}
 				}
 				if st != "" {
-					stats.ByStatus[st] += int(c)
+					stats.ByStatus[st]++
 				}
 				if pr != "" {
-					stats.ByPriority[pr] += int(c)
+					stats.ByPriority[pr]++
 				}
-				stats.Total += int(c)
+				stats.Total++
 			}
 		}
 	}
@@ -1489,6 +1497,34 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 		Tasks: tasks,
 		Stats: stats,
 	}, nil
+}
+
+func taskHasIncompleteDependencies(ctx context.Context, exec *cypher.StorageExecutor, taskID string) (bool, error) {
+	if exec == nil || strings.TrimSpace(taskID) == "" {
+		return false, nil
+	}
+	result, err := exec.Execute(ctx,
+		`MATCH (t:Task)-[:DEPENDS_ON]->(dep:Task)
+		 WHERE elementId(t) = $id AND coalesce(dep.status, '') <> 'completed'
+		 RETURN count(dep)`,
+		map[string]interface{}{"id": taskID},
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
+		return false, nil
+	}
+	switch v := result.Rows[0][0].(type) {
+	case int64:
+		return v > 0, nil
+	case int:
+		return v > 0, nil
+	case float64:
+		return v > 0, nil
+	default:
+		return false, nil
+	}
 }
 
 // =============================================================================
@@ -1501,6 +1537,15 @@ func getLabelType(labels []string) string {
 		return labels[0]
 	}
 	return "Node"
+}
+
+func containsLabel(labels []string, label string) bool {
+	for _, existing := range labels {
+		if existing == label {
+			return true
+		}
+	}
+	return false
 }
 
 // getStringProp safely gets a string property
@@ -1652,17 +1697,17 @@ func (s *Server) validateAndConvertEmbedding(input interface{}) ([]float32, erro
 		return nil, fmt.Errorf("invalid embedding: must be an array of numbers (got %T)", input)
 	}
 
+	// Validate not empty
+	if len(embedding) == 0 {
+		return nil, fmt.Errorf("invalid embedding: cannot be empty array")
+	}
+
 	// Validate dimensions if configured
 	if s.config.EmbeddingDimensions > 0 && len(embedding) != s.config.EmbeddingDimensions {
 		return nil, fmt.Errorf("invalid embedding dimensions: expected %d, got %d. "+
 			"The configured embedding model (%s) requires %d-dimensional vectors",
 			s.config.EmbeddingDimensions, len(embedding),
 			s.config.EmbeddingModel, s.config.EmbeddingDimensions)
-	}
-
-	// Validate not empty
-	if len(embedding) == 0 {
-		return nil, fmt.Errorf("invalid embedding: cannot be empty array")
 	}
 
 	return embedding, nil

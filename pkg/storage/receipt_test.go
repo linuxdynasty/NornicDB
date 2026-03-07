@@ -34,3 +34,25 @@ func TestReceiptHash_ChangesOnFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, base.Hash, changedTx.Hash)
 }
+
+func TestReceiptValidationAndUpdateHash(t *testing.T) {
+	_, err := NewReceipt("", 10, 15, "nornic", time.Time{})
+	require.ErrorContains(t, err, "tx_id is required")
+
+	_, err = NewReceipt("tx-123", 0, 15, "nornic", time.Time{})
+	require.ErrorContains(t, err, "wal sequence must be non-zero")
+
+	_, err = NewReceipt("tx-123", 20, 15, "nornic", time.Time{})
+	require.ErrorContains(t, err, "wal_seq_end")
+
+	r, err := NewReceipt("tx-123", 10, 15, "nornic", time.Time{})
+	require.NoError(t, err)
+	assert.False(t, r.Timestamp.IsZero())
+
+	require.ErrorContains(t, (*Receipt)(nil).UpdateHash(), "nil receiver")
+
+	originalHash := r.Hash
+	r.Database = "other"
+	require.NoError(t, r.UpdateHash())
+	assert.NotEqual(t, originalHash, r.Hash)
+}

@@ -203,6 +203,125 @@ func TestSchemaManager(t *testing.T) {
 	})
 }
 
+func TestSchemaManager_DropConstraintAndIndexHelpers(t *testing.T) {
+	t.Run("DropConstraint handles standard and property type constraints", func(t *testing.T) {
+		sm := NewSchemaManager()
+		if err := sm.AddUniqueConstraint("user_email_unique", "User", "email"); err != nil {
+			t.Fatalf("AddUniqueConstraint failed: %v", err)
+		}
+		if err := sm.AddPropertyTypeConstraint("user_age_type", "User", "age", PropertyTypeInteger); err != nil {
+			t.Fatalf("AddPropertyTypeConstraint failed: %v", err)
+		}
+
+		if err := sm.DropConstraint("user_email_unique"); err != nil {
+			t.Fatalf("DropConstraint(unique) failed: %v", err)
+		}
+		if err := sm.CheckUniqueConstraint("User", "email", "a@example.com", ""); err != nil {
+			t.Fatalf("expected dropped unique constraint to stop enforcing, got %v", err)
+		}
+
+		if err := sm.DropConstraint("user_age_type"); err != nil {
+			t.Fatalf("DropConstraint(property type) failed: %v", err)
+		}
+		if got := sm.GetAllPropertyTypeConstraints(); len(got) != 0 {
+			t.Fatalf("expected property type constraints to be empty, got %d", len(got))
+		}
+
+		if err := sm.DropConstraint("missing"); err == nil {
+			t.Fatal("expected missing constraint error")
+		}
+	})
+
+	t.Run("DropConstraint rolls back on persist errors", func(t *testing.T) {
+		sm := NewSchemaManager()
+		if err := sm.AddUniqueConstraint("user_email_unique", "User", "email"); err != nil {
+			t.Fatalf("AddUniqueConstraint failed: %v", err)
+		}
+		if err := sm.AddPropertyTypeConstraint("user_age_type", "User", "age", PropertyTypeInteger); err != nil {
+			t.Fatalf("AddPropertyTypeConstraint failed: %v", err)
+		}
+		sm.persist = func(def *SchemaDefinition) error {
+			return fmt.Errorf("persist failed")
+		}
+
+		if err := sm.DropConstraint("user_email_unique"); err == nil {
+			t.Fatal("expected persist rollback error for unique constraint")
+		}
+		if len(sm.GetConstraints()) == 0 {
+			t.Fatal("expected dropped unique constraint to be restored after persist error")
+		}
+
+		if err := sm.DropConstraint("user_age_type"); err == nil {
+			t.Fatal("expected persist rollback error for property type constraint")
+		}
+		if len(sm.GetAllPropertyTypeConstraints()) == 0 {
+			t.Fatal("expected dropped property type constraint to be restored after persist error")
+		}
+	})
+
+	t.Run("GetRangeIndex and GetIndexStats expose registered indexes", func(t *testing.T) {
+		sm := NewSchemaManager()
+		if err := sm.AddPropertyIndex("user_email_idx", "User", []string{"email"}); err != nil {
+			t.Fatalf("AddPropertyIndex failed: %v", err)
+		}
+		if err := sm.PropertyIndexInsert("User", "email", NodeID("u1"), "a@example.com"); err != nil {
+			t.Fatalf("PropertyIndexInsert 1 failed: %v", err)
+		}
+		if err := sm.PropertyIndexInsert("User", "email", NodeID("u2"), "a@example.com"); err != nil {
+			t.Fatalf("PropertyIndexInsert 2 failed: %v", err)
+		}
+		if err := sm.AddRangeIndex("user_age_idx", "User", "age"); err != nil {
+			t.Fatalf("AddRangeIndex failed: %v", err)
+		}
+		if err := sm.RangeIndexInsert("user_age_idx", NodeID("u1"), 10); err != nil {
+			t.Fatalf("RangeIndexInsert failed: %v", err)
+		}
+		if err := sm.AddCompositeIndex("user_geo_idx", "User", []string{"country", "city"}); err != nil {
+			t.Fatalf("AddCompositeIndex failed: %v", err)
+		}
+		if idx, ok := sm.compositeIndexes["user_geo_idx"]; ok {
+			idx.fullIndex[fmt.Sprintf("%v", []interface{}{"US", "NYC"})] = []NodeID{"u1", "u2"}
+		} else {
+			t.Fatal("expected composite index to be registered")
+		}
+		if err := sm.AddFulltextIndex("user_text_idx", []string{"User"}, []string{"bio"}); err != nil {
+			t.Fatalf("AddFulltextIndex failed: %v", err)
+		}
+		if err := sm.AddVectorIndex("user_vec_idx", "User", "embedding", 3, "cosine"); err != nil {
+			t.Fatalf("AddVectorIndex failed: %v", err)
+		}
+
+		if idx, ok := sm.GetRangeIndex("user_age_idx"); !ok || idx == nil {
+			t.Fatal("expected GetRangeIndex to return registered range index")
+		}
+		if idx, ok := sm.GetRangeIndex("missing"); ok || idx != nil {
+			t.Fatal("expected missing range index lookup to fail")
+		}
+
+		stats := sm.GetIndexStats()
+		if len(stats) != 5 {
+			t.Fatalf("expected 5 index stats entries, got %d", len(stats))
+		}
+
+		seen := map[string]IndexStats{}
+		for _, stat := range stats {
+			seen[stat.Name] = stat
+		}
+		if seen["user_email_idx"].TotalEntries != 2 || seen["user_email_idx"].UniqueValues != 1 {
+			t.Fatalf("unexpected property index stats: %+v", seen["user_email_idx"])
+		}
+		if seen["user_age_idx"].TotalEntries != 1 || seen["user_age_idx"].Type != "RANGE" {
+			t.Fatalf("unexpected range index stats: %+v", seen["user_age_idx"])
+		}
+		if seen["user_geo_idx"].TotalEntries != 2 || seen["user_geo_idx"].Type != "COMPOSITE" {
+			t.Fatalf("unexpected composite index stats: %+v", seen["user_geo_idx"])
+		}
+		if seen["user_text_idx"].Type != "FULLTEXT" || seen["user_vec_idx"].Type != "VECTOR" {
+			t.Fatalf("unexpected fulltext/vector stats: fulltext=%+v vector=%+v", seen["user_text_idx"], seen["user_vec_idx"])
+		}
+	})
+}
+
 func TestMemoryEngineConstraintIntegration(t *testing.T) {
 	t.Run("ConstraintEnforcementOnCreate", func(t *testing.T) {
 		store := NewMemoryEngine()

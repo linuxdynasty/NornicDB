@@ -1074,17 +1074,7 @@ func (ae *AsyncEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	}
 	ae.mu.RUnlock()
 
-	// Check underlying engine
-	if getter, ok := ae.engine.(interface{ GetFirstNodeByLabel(string) (*Node, error) }); ok {
-		return getter.GetFirstNodeByLabel(label)
-	}
-
-	// Fallback: get all and return first
-	nodes, err := ae.engine.GetNodesByLabel(label)
-	if err != nil || len(nodes) == 0 {
-		return nil, err
-	}
-	return nodes[0], nil
+	return ae.engine.GetFirstNodeByLabel(label)
 }
 
 func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
@@ -1264,7 +1254,13 @@ func (ae *AsyncEngine) AllEdges() ([]*Edge, error) {
 
 	engineEdges, err := ae.engine.AllEdges()
 	if err != nil {
-		return cachedEdges, nil
+		result := make([]*Edge, 0, len(cachedEdges))
+		for _, edge := range cachedEdges {
+			if !deletedIDs[edge.ID] {
+				result = append(result, edge)
+			}
+		}
+		return result, nil
 	}
 
 	result := make([]*Edge, 0, len(cachedEdges)+len(engineEdges))
@@ -2337,6 +2333,12 @@ func (ae *AsyncEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 
 	// First, stream cached nodes (not yet flushed)
 	for id, node := range ae.nodeCache {
+		select {
+		case <-ctx.Done():
+			ae.mu.RUnlock()
+			return ctx.Err()
+		default:
+		}
 		if ae.deleteNodes[id] {
 			continue // Skip if marked for deletion
 		}
@@ -2378,6 +2380,11 @@ func (ae *AsyncEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 		return err
 	}
 	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if cachedIDs[node.ID] || deletedIDs[node.ID] {
 			continue
 		}
@@ -2397,6 +2404,12 @@ func (ae *AsyncEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) erro
 
 	// First, stream cached edges
 	for id, edge := range ae.edgeCache {
+		select {
+		case <-ctx.Done():
+			ae.mu.RUnlock()
+			return ctx.Err()
+		default:
+		}
 		if ae.deleteEdges[id] {
 			continue
 		}
@@ -2437,6 +2450,11 @@ func (ae *AsyncEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) erro
 		return err
 	}
 	for _, edge := range edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if cachedIDs[edge.ID] || deletedIDs[edge.ID] {
 			continue
 		}

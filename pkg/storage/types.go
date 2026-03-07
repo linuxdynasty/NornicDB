@@ -887,10 +887,8 @@ func StreamNodesWithFallback(ctx context.Context, engine Engine, chunkSize int, 
 			return err
 		}
 
-		// Nil out the reference to allow GC
-		nodes[i] = nil
-
-		// Hint GC every chunk
+		// Hint GC every chunk. We intentionally do not mutate the backing slice
+		// returned by the engine because some engines may reuse that storage.
 		if chunkSize > 0 && (i+1)%chunkSize == 0 {
 			// runtime.GC() // Optional: enable for aggressive GC
 		}
@@ -912,7 +910,7 @@ func StreamEdgesWithFallback(ctx context.Context, engine Engine, chunkSize int, 
 		return err
 	}
 
-	for i, edge := range edges {
+	for _, edge := range edges {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -923,8 +921,6 @@ func StreamEdgesWithFallback(ctx context.Context, engine Engine, chunkSize int, 
 			return err
 		}
 
-		// Nil out the reference to allow GC
-		edges[i] = nil
 	}
 
 	return nil

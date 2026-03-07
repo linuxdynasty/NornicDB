@@ -362,6 +362,42 @@ func TestNewAuthMiddleware(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_SetAuditLoggerAndValidateHelpers(t *testing.T) {
+	middleware := NewAuthMiddleware(nil, DefaultAuthConfig())
+
+	logger := NewAuditLogger()
+	middleware.SetAuditLogger(logger)
+	if middleware.auditLogger != logger {
+		t.Fatal("SetAuditLogger should replace the audit logger")
+	}
+
+	_, err := middleware.validateJWT("token")
+	if err == nil {
+		t.Fatal("validateJWT should fail when authenticator is not configured")
+	}
+}
+
+func TestAuthMiddleware_BuildAuthContext_DefaultsViewerOnInvalidRoles(t *testing.T) {
+	middleware := NewAuthMiddleware(nil, DefaultAuthConfig())
+	claims := &auth.JWTClaims{
+		Sub:      "user-1",
+		Username: "alice",
+		Email:    "alice@example.com",
+		Roles:    []string{"unknown-role"},
+	}
+
+	authCtx := middleware.buildAuthContext(claims)
+	if authCtx.UserID != "user-1" || authCtx.Username != "alice" || authCtx.Email != "alice@example.com" {
+		t.Fatalf("unexpected auth context: %+v", authCtx)
+	}
+	if len(authCtx.Roles) != 1 || authCtx.Roles[0] != RoleOrgViewer {
+		t.Fatalf("expected default viewer role, got %+v", authCtx.Roles)
+	}
+	if authCtx.Claims != claims {
+		t.Fatal("expected claims to be preserved")
+	}
+}
+
 func TestAuthMiddlewareSecurityDisabled(t *testing.T) {
 	// Create authenticator with security disabled
 	authConfig := auth.AuthConfig{

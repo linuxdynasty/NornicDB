@@ -212,6 +212,69 @@ func TestSchemaManager_CheckUniqueConstraint_WithConstraint(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestBadgerEngine_validateBulkNodeConstraints(t *testing.T) {
+	t.Run("rejects unprefixed ids and batch constraint violations", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		schema := b.GetSchemaForNamespace("test")
+		require.NoError(t, schema.AddUniqueConstraint("user_email", "User", "email"))
+		require.NoError(t, schema.AddConstraint(Constraint{
+			Name:       "user_key",
+			Type:       ConstraintNodeKey,
+			Label:      "User",
+			Properties: []string{"tenant", "username"},
+		}))
+		require.NoError(t, schema.AddConstraint(Constraint{
+			Name:       "user_name_exists",
+			Type:       ConstraintExists,
+			Label:      "User",
+			Properties: []string{"name"},
+		}))
+
+		err := b.validateBulkNodeConstraints([]*Node{{ID: "plain-id", Labels: []string{"User"}}})
+		require.ErrorContains(t, err, "node ID must be prefixed with namespace")
+
+		err = b.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u1")), Labels: []string{"User"}, Properties: map[string]any{"email": "dup@example.com", "tenant": "t1", "username": "alice", "name": "Alice"}},
+			{ID: NodeID(prefixTestID("u2")), Labels: []string{"User"}, Properties: map[string]any{"email": "dup@example.com", "tenant": "t2", "username": "bob", "name": "Bob"}},
+		})
+		require.Error(t, err)
+		var violation *ConstraintViolationError
+		require.ErrorAs(t, err, &violation)
+		assert.Equal(t, ConstraintUnique, violation.Type)
+
+		err = b.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u3")), Labels: []string{"User"}, Properties: map[string]any{"tenant": "t1"}},
+		})
+		require.ErrorAs(t, err, &violation)
+		assert.Equal(t, ConstraintNodeKey, violation.Type)
+
+		err = b.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("u4")), Labels: []string{"User"}, Properties: map[string]any{"tenant": "t1", "username": "alice"}},
+		})
+		require.ErrorAs(t, err, &violation)
+		assert.Equal(t, ConstraintExists, violation.Type)
+	})
+
+	t.Run("ignores unsupported unique arity and nil unique values", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		schema := b.GetSchemaForNamespace("test")
+		require.NoError(t, schema.AddConstraint(Constraint{
+			Name:       "ignored_multi_unique",
+			Type:       ConstraintUnique,
+			Label:      "Multi",
+			Properties: []string{"a", "b"},
+		}))
+		require.NoError(t, schema.AddUniqueConstraint("user_email", "User", "email"))
+
+		err := b.validateBulkNodeConstraints([]*Node{
+			{ID: NodeID(prefixTestID("m1")), Labels: []string{"Multi"}, Properties: map[string]any{"b": "only-second"}},
+			{ID: NodeID(prefixTestID("u5")), Labels: []string{"User"}, Properties: map[string]any{"email": nil}},
+			{ID: NodeID(prefixTestID("u6")), Labels: []string{"NoConstraint"}, Properties: map[string]any{"name": "ok"}},
+		})
+		require.NoError(t, err)
+	})
+}
+
 // ============================================================================
 // NodeConfig / NodeConfigStore
 // ============================================================================

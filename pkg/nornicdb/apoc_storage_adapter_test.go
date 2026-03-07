@@ -1,0 +1,472 @@
+package nornicdb
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	apocstorage "github.com/orneryd/nornicdb/apoc/storage"
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type apocAdapterTestEngine struct {
+	nextNodeID int64
+	nextEdgeID int64
+	nodes      map[storage.NodeID]*storage.Node
+	edges      map[storage.EdgeID]*storage.Edge
+	schema     *storage.SchemaManager
+}
+
+func newAPOCAdapterTestEngine() *apocAdapterTestEngine {
+	return &apocAdapterTestEngine{
+		nextNodeID: 1,
+		nextEdgeID: 1,
+		nodes:      make(map[storage.NodeID]*storage.Node),
+		edges:      make(map[storage.EdgeID]*storage.Edge),
+		schema:     storage.NewSchemaManager(),
+	}
+}
+
+func cloneNode(n *storage.Node) *storage.Node {
+	if n == nil {
+		return nil
+	}
+	labels := append([]string(nil), n.Labels...)
+	props := make(map[string]interface{}, len(n.Properties))
+	for k, v := range n.Properties {
+		props[k] = v
+	}
+	return &storage.Node{ID: n.ID, Labels: labels, Properties: props}
+}
+
+func cloneEdge(e *storage.Edge) *storage.Edge {
+	if e == nil {
+		return nil
+	}
+	props := make(map[string]interface{}, len(e.Properties))
+	for k, v := range e.Properties {
+		props[k] = v
+	}
+	return &storage.Edge{
+		ID:         e.ID,
+		StartNode:  e.StartNode,
+		EndNode:    e.EndNode,
+		Type:       e.Type,
+		Properties: props,
+	}
+}
+
+func (e *apocAdapterTestEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
+	stored := cloneNode(node)
+	if stored.ID == "" {
+		stored.ID = storage.NodeID(fmt.Sprintf("%d", e.nextNodeID))
+		e.nextNodeID++
+	}
+	if stored.Properties == nil {
+		stored.Properties = map[string]interface{}{}
+	}
+	e.nodes[stored.ID] = stored
+	node.ID = stored.ID
+	return stored.ID, nil
+}
+
+func (e *apocAdapterTestEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	node, ok := e.nodes[id]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	return cloneNode(node), nil
+}
+
+func (e *apocAdapterTestEngine) UpdateNode(node *storage.Node) error {
+	if _, ok := e.nodes[node.ID]; !ok {
+		return storage.ErrNotFound
+	}
+	e.nodes[node.ID] = cloneNode(node)
+	return nil
+}
+
+func (e *apocAdapterTestEngine) DeleteNode(id storage.NodeID) error {
+	if _, ok := e.nodes[id]; !ok {
+		return storage.ErrNotFound
+	}
+	delete(e.nodes, id)
+	for edgeID, edge := range e.edges {
+		if edge.StartNode == id || edge.EndNode == id {
+			delete(e.edges, edgeID)
+		}
+	}
+	return nil
+}
+
+func (e *apocAdapterTestEngine) CreateEdge(edge *storage.Edge) error {
+	stored := cloneEdge(edge)
+	if stored.ID == "" {
+		stored.ID = storage.EdgeID(fmt.Sprintf("%d", e.nextEdgeID))
+		e.nextEdgeID++
+	}
+	if stored.Properties == nil {
+		stored.Properties = map[string]interface{}{}
+	}
+	e.edges[stored.ID] = stored
+	edge.ID = stored.ID
+	return nil
+}
+
+func (e *apocAdapterTestEngine) GetEdge(id storage.EdgeID) (*storage.Edge, error) {
+	edge, ok := e.edges[id]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	return cloneEdge(edge), nil
+}
+
+func (e *apocAdapterTestEngine) UpdateEdge(edge *storage.Edge) error {
+	if _, ok := e.edges[edge.ID]; !ok {
+		return storage.ErrNotFound
+	}
+	e.edges[edge.ID] = cloneEdge(edge)
+	return nil
+}
+
+func (e *apocAdapterTestEngine) DeleteEdge(id storage.EdgeID) error {
+	if _, ok := e.edges[id]; !ok {
+		return storage.ErrNotFound
+	}
+	delete(e.edges, id)
+	return nil
+}
+
+func (e *apocAdapterTestEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
+	var out []*storage.Node
+	for _, node := range e.nodes {
+		for _, l := range node.Labels {
+			if l == label {
+				out = append(out, cloneNode(node))
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) GetFirstNodeByLabel(label string) (*storage.Node, error) {
+	nodes, _ := e.GetNodesByLabel(label)
+	if len(nodes) == 0 {
+		return nil, storage.ErrNotFound
+	}
+	return nodes[0], nil
+}
+
+func (e *apocAdapterTestEngine) GetOutgoingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
+	var out []*storage.Edge
+	for _, edge := range e.edges {
+		if edge.StartNode == nodeID {
+			out = append(out, cloneEdge(edge))
+		}
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) GetIncomingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
+	var out []*storage.Edge
+	for _, edge := range e.edges {
+		if edge.EndNode == nodeID {
+			out = append(out, cloneEdge(edge))
+		}
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) GetEdgesBetween(startID, endID storage.NodeID) ([]*storage.Edge, error) {
+	var out []*storage.Edge
+	for _, edge := range e.edges {
+		if edge.StartNode == startID && edge.EndNode == endID {
+			out = append(out, cloneEdge(edge))
+		}
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) GetEdgeBetween(startID, endID storage.NodeID, edgeType string) *storage.Edge {
+	for _, edge := range e.edges {
+		if edge.StartNode == startID && edge.EndNode == endID && edge.Type == edgeType {
+			return cloneEdge(edge)
+		}
+	}
+	return nil
+}
+
+func (e *apocAdapterTestEngine) GetEdgesByType(edgeType string) ([]*storage.Edge, error) {
+	var out []*storage.Edge
+	for _, edge := range e.edges {
+		if edge.Type == edgeType {
+			out = append(out, cloneEdge(edge))
+		}
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) AllNodes() ([]*storage.Node, error) {
+	var out []*storage.Node
+	for _, node := range e.nodes {
+		out = append(out, cloneNode(node))
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) AllEdges() ([]*storage.Edge, error) {
+	var out []*storage.Edge
+	for _, edge := range e.edges {
+		out = append(out, cloneEdge(edge))
+	}
+	return out, nil
+}
+
+func (e *apocAdapterTestEngine) GetAllNodes() []*storage.Node {
+	nodes, _ := e.AllNodes()
+	return nodes
+}
+
+func (e *apocAdapterTestEngine) GetInDegree(nodeID storage.NodeID) int {
+	edges, _ := e.GetIncomingEdges(nodeID)
+	return len(edges)
+}
+
+func (e *apocAdapterTestEngine) GetOutDegree(nodeID storage.NodeID) int {
+	edges, _ := e.GetOutgoingEdges(nodeID)
+	return len(edges)
+}
+
+func (e *apocAdapterTestEngine) GetSchema() *storage.SchemaManager { return e.schema }
+func (e *apocAdapterTestEngine) BulkCreateNodes(nodes []*storage.Node) error {
+	for _, node := range nodes {
+		if _, err := e.CreateNode(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (e *apocAdapterTestEngine) BulkCreateEdges(edges []*storage.Edge) error {
+	for _, edge := range edges {
+		if err := e.CreateEdge(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (e *apocAdapterTestEngine) BulkDeleteNodes(ids []storage.NodeID) error {
+	for _, id := range ids {
+		if err := e.DeleteNode(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (e *apocAdapterTestEngine) BulkDeleteEdges(ids []storage.EdgeID) error {
+	for _, id := range ids {
+		if err := e.DeleteEdge(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (e *apocAdapterTestEngine) BatchGetNodes(ids []storage.NodeID) (map[storage.NodeID]*storage.Node, error) {
+	out := make(map[storage.NodeID]*storage.Node, len(ids))
+	for _, id := range ids {
+		if node, ok := e.nodes[id]; ok {
+			out[id] = cloneNode(node)
+		}
+	}
+	return out, nil
+}
+func (e *apocAdapterTestEngine) Close() error { return nil }
+func (e *apocAdapterTestEngine) NodeCount() (int64, error) {
+	return int64(len(e.nodes)), nil
+}
+func (e *apocAdapterTestEngine) EdgeCount() (int64, error) {
+	return int64(len(e.edges)), nil
+}
+func (e *apocAdapterTestEngine) DeleteByPrefix(prefix string) (int64, int64, error) {
+	var nodesDeleted, edgesDeleted int64
+	for id := range e.nodes {
+		if prefix == "" || strings.HasPrefix(string(id), prefix) {
+			delete(e.nodes, id)
+			nodesDeleted++
+		}
+	}
+	for id := range e.edges {
+		if prefix == "" || strings.HasPrefix(string(id), prefix) {
+			delete(e.edges, id)
+			edgesDeleted++
+		}
+	}
+	return nodesDeleted, edgesDeleted, nil
+}
+
+func TestAPOCStorageAdapter_NodeAndRelationshipCRUD(t *testing.T) {
+	engine := newAPOCAdapterTestEngine()
+	adapter := NewAPOCStorageAdapter(engine)
+
+	node, err := adapter.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Alice"})
+	require.NoError(t, err)
+	require.NotZero(t, node.ID)
+	require.Equal(t, "Alice", node.Properties["name"])
+
+	storedNode, err := adapter.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Equal(t, node.ID, storedNode.ID)
+
+	require.NoError(t, adapter.UpdateNode(node.ID, map[string]interface{}{"age": 30}))
+	storedNode, err = adapter.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Equal(t, 30, storedNode.Properties["age"])
+
+	require.NoError(t, adapter.AddLabels(node.ID, []string{"Employee", "Person"}))
+	storedNode, err = adapter.GetNode(node.ID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"Person", "Employee"}, storedNode.Labels)
+
+	require.NoError(t, adapter.RemoveLabels(node.ID, []string{"Person"}))
+	storedNode, err = adapter.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Employee"}, storedNode.Labels)
+
+	other, err := adapter.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Bob"})
+	require.NoError(t, err)
+	rel, err := adapter.CreateRelationship(node.ID, other.ID, "KNOWS", map[string]interface{}{"since": 2020})
+	require.NoError(t, err)
+	require.Equal(t, "KNOWS", rel.Type)
+
+	storedRel, err := adapter.GetRelationship(rel.ID)
+	require.NoError(t, err)
+	require.Equal(t, rel.ID, storedRel.ID)
+	require.Equal(t, node.ID, storedRel.StartNode)
+	require.Equal(t, other.ID, storedRel.EndNode)
+
+	require.NoError(t, adapter.UpdateRelationship(rel.ID, map[string]interface{}{"weight": 0.5}))
+	storedRel, err = adapter.GetRelationship(rel.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0.5, storedRel.Properties["weight"])
+
+	require.NoError(t, adapter.DeleteRelationship(rel.ID))
+	_, err = adapter.GetRelationship(rel.ID)
+	require.ErrorIs(t, err, apocstorage.ErrRelationshipNotFound)
+
+	require.NoError(t, adapter.DeleteNode(node.ID))
+	_, err = adapter.GetNode(node.ID)
+	require.ErrorIs(t, err, apocstorage.ErrNodeNotFound)
+}
+
+func TestAPOCStorageAdapter_UpdateInitializesNilPropertyMaps(t *testing.T) {
+	engine := newAPOCAdapterTestEngine()
+	engine.nodes["1"] = &storage.Node{ID: "1", Labels: []string{"Person"}}
+	engine.edges["1"] = &storage.Edge{ID: "1", StartNode: "1", EndNode: "1", Type: "SELF"}
+	adapter := NewAPOCStorageAdapter(engine)
+
+	require.NotPanics(t, func() {
+		require.NoError(t, adapter.UpdateNode(1, map[string]interface{}{"name": "Alice"}))
+	})
+	require.Equal(t, "Alice", engine.nodes["1"].Properties["name"])
+
+	require.NotPanics(t, func() {
+		require.NoError(t, adapter.UpdateRelationship(1, map[string]interface{}{"weight": 1.0}))
+	})
+	require.Equal(t, 1.0, engine.edges["1"].Properties["weight"])
+}
+
+func TestAPOCStorageAdapter_GraphTraversalAndPaths(t *testing.T) {
+	engine := newAPOCAdapterTestEngine()
+	adapter := NewAPOCStorageAdapter(engine)
+
+	for i := int64(1); i <= 4; i++ {
+		engine.nodes[storage.NodeID(fmt.Sprintf("%d", i))] = &storage.Node{
+			ID:         storage.NodeID(fmt.Sprintf("%d", i)),
+			Labels:     []string{"Node"},
+			Properties: map[string]interface{}{"name": fmt.Sprintf("n%d", i)},
+		}
+	}
+	for _, edge := range []*storage.Edge{
+		{ID: "10", StartNode: "1", EndNode: "2", Type: "LINK"},
+		{ID: "11", StartNode: "2", EndNode: "4", Type: "LINK"},
+		{ID: "12", StartNode: "1", EndNode: "3", Type: "LINK"},
+		{ID: "13", StartNode: "3", EndNode: "4", Type: "LINK"},
+		{ID: "14", StartNode: "4", EndNode: "1", Type: "BACK"},
+	} {
+		engine.edges[edge.ID] = cloneEdge(edge)
+	}
+
+	outgoing, err := adapter.GetNodeRelationships(1, "LINK", apocstorage.DirectionOutgoing)
+	require.NoError(t, err)
+	require.Len(t, outgoing, 2)
+
+	incoming, err := adapter.GetNodeRelationships(1, "", apocstorage.DirectionIncoming)
+	require.NoError(t, err)
+	require.Len(t, incoming, 1)
+	require.Equal(t, int64(14), incoming[0].ID)
+
+	neighbors, err := adapter.GetNodeNeighbors(1, "", apocstorage.DirectionBoth)
+	require.NoError(t, err)
+	require.Len(t, neighbors, 3)
+
+	degree, err := adapter.GetNodeDegree(1, "", apocstorage.DirectionBoth)
+	require.NoError(t, err)
+	require.Equal(t, 3, degree)
+
+	samePath, err := adapter.FindShortestPath(1, 1, "", 3)
+	require.NoError(t, err)
+	require.Equal(t, 0, samePath.Length)
+
+	shortest, err := adapter.FindShortestPath(1, 4, "LINK", 3)
+	require.NoError(t, err)
+	require.Equal(t, 2, shortest.Length)
+	require.Equal(t, int64(1), shortest.Nodes[0].ID)
+	require.Equal(t, int64(4), shortest.Nodes[len(shortest.Nodes)-1].ID)
+
+	allPaths, err := adapter.FindAllPaths(1, 4, "LINK", 3)
+	require.NoError(t, err)
+	require.Len(t, allPaths, 2)
+
+	var bfsOrder []int64
+	require.NoError(t, adapter.BFS(1, "", 2, func(node *apocstorage.Node) bool {
+		bfsOrder = append(bfsOrder, node.ID)
+		return node.ID != 2
+	}))
+	require.NotEmpty(t, bfsOrder)
+	require.Equal(t, int64(1), bfsOrder[0])
+	require.Contains(t, bfsOrder, int64(2))
+
+	var dfsOrder []int64
+	require.NoError(t, adapter.DFS(1, "", 3, func(node *apocstorage.Node) bool {
+		dfsOrder = append(dfsOrder, node.ID)
+		return node.ID != 4
+	}))
+	require.Contains(t, dfsOrder, int64(4))
+
+	_, err = adapter.FindShortestPath(2, 3, "BACK", 1)
+	require.ErrorIs(t, err, apocstorage.ErrPathNotFound)
+}
+
+func TestAPOCStorageAdapter_ErrorMappings(t *testing.T) {
+	engine := newAPOCAdapterTestEngine()
+	adapter := NewAPOCStorageAdapter(engine)
+
+	_, err := adapter.GetNode(99)
+	require.ErrorIs(t, err, apocstorage.ErrNodeNotFound)
+	require.ErrorIs(t, adapter.UpdateNode(99, map[string]interface{}{"x": 1}), apocstorage.ErrNodeNotFound)
+	require.ErrorIs(t, adapter.AddLabels(99, []string{"X"}), apocstorage.ErrNodeNotFound)
+	require.ErrorIs(t, adapter.RemoveLabels(99, []string{"X"}), apocstorage.ErrNodeNotFound)
+
+	_, err = adapter.GetRelationship(99)
+	require.ErrorIs(t, err, apocstorage.ErrRelationshipNotFound)
+	require.ErrorIs(t, adapter.UpdateRelationship(99, map[string]interface{}{"x": 1}), apocstorage.ErrRelationshipNotFound)
+
+	node := adapter.convertNode(&storage.Node{ID: "abc", Labels: []string{"X"}, Properties: map[string]interface{}{"k": "v"}})
+	assert.Equal(t, int64(0), node.ID)
+	rel := adapter.convertRelationship(&storage.Edge{ID: "xyz", StartNode: "a", EndNode: "b", Type: "REL", Properties: map[string]interface{}{"k": "v"}})
+	assert.Equal(t, int64(0), rel.ID)
+	assert.Equal(t, int64(0), rel.StartNode)
+	assert.Equal(t, int64(0), rel.EndNode)
+}

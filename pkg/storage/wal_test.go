@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,142 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type walStreamErrorEngine struct {
+	Engine
+	nodeErr error
+	edgeErr error
+}
+
+type walPrefixErrorEngine struct {
+	Engine
+	nodeErr error
+	edgeErr error
+}
+
+type walPrefixStatsEngine struct {
+	Engine
+	nodeCount int64
+	edgeCount int64
+}
+
+type walSchemaProviderEngine struct {
+	Engine
+	schema *SchemaManager
+}
+
+type walStreamingCountEngine struct {
+	Engine
+	nodes []*Node
+	edges []*Edge
+}
+
+type walNamespaceListerEngine struct {
+	Engine
+	namespaces []string
+}
+
+func (e *walStreamErrorEngine) StreamNodes(_ context.Context, _ func(*Node) error) error {
+	return e.nodeErr
+}
+
+func (e *walStreamErrorEngine) StreamEdges(_ context.Context, _ func(*Edge) error) error {
+	return e.edgeErr
+}
+
+func (e *walStreamErrorEngine) StreamNodeChunks(_ context.Context, chunkSize int, fn func([]*Node) error) error {
+	if e.nodeErr != nil {
+		return e.nodeErr
+	}
+	return fn(nil)
+}
+
+func (e *walPrefixErrorEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	return 0, e.nodeErr
+}
+
+func (e *walPrefixErrorEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	return 0, e.edgeErr
+}
+
+func (e *walPrefixStatsEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	return e.nodeCount, nil
+}
+
+func (e *walPrefixStatsEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	return e.edgeCount, nil
+}
+
+func (e *walSchemaProviderEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
+	return e.schema
+}
+
+func (e *walSchemaProviderEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	if stats, ok := e.Engine.(interface{ NodeCountByPrefix(string) (int64, error) }); ok {
+		return stats.NodeCountByPrefix(prefix)
+	}
+	return 0, nil
+}
+
+func (e *walSchemaProviderEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	if stats, ok := e.Engine.(interface{ EdgeCountByPrefix(string) (int64, error) }); ok {
+		return stats.EdgeCountByPrefix(prefix)
+	}
+	return 0, nil
+}
+
+func (e *walStreamingCountEngine) StreamNodes(ctx context.Context, fn func(*Node) error) error {
+	for _, node := range e.nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walStreamingCountEngine) StreamEdges(ctx context.Context, fn func(*Edge) error) error {
+	for _, edge := range e.edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walStreamingCountEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func([]*Node) error) error {
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for i := 0; i < len(e.nodes); i += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + chunkSize
+		if end > len(e.nodes) {
+			end = len(e.nodes)
+		}
+		if err := fn(e.nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walNamespaceListerEngine) ListNamespaces() []string {
+	return append([]string(nil), e.namespaces...)
+}
 
 func TestNewWAL(t *testing.T) {
 	config.EnableWAL()
@@ -1822,6 +1959,284 @@ func TestWALEngine_StreamNodeChunks(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 100, totalNodes, "Should stream all 100 nodes")
 		assert.Equal(t, 4, chunkCount, "Should have 4 chunks of 25")
+	})
+}
+
+func TestWALEngine_HelperDelegatesAndFallbacks(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	newWALEngine := func(t *testing.T, engine Engine) *WALEngine {
+		t.Helper()
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = wal.Close() })
+		return NewWALEngine(engine, wal)
+	}
+
+	t.Run("prefix counts use fallback and propagate streaming errors", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &exportableOnlyEngine{
+			Engine:   base,
+			allNodes: []*Node{{ID: "test:n1"}, {ID: "other:n2"}},
+			allEdges: []*Edge{{ID: "test:e1", Type: "REL"}, {ID: "other:e2", Type: "REL"}},
+		}
+		walEngine := newWALEngine(t, engine)
+
+		nodes, err := walEngine.NodeCountByPrefix("test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), nodes)
+
+		edges, err := walEngine.EdgeCountByPrefix("test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), edges)
+
+		streamErrBase := NewMemoryEngine()
+		t.Cleanup(func() { _ = streamErrBase.Close() })
+		streamErrEngine := &walPrefixErrorEngine{
+			Engine:  streamErrBase,
+			nodeErr: errors.New("stream nodes failed"),
+			edgeErr: errors.New("stream edges failed"),
+		}
+		walEngine = newWALEngine(t, streamErrEngine)
+
+		_, err = walEngine.NodeCountByPrefix("test:")
+		require.ErrorContains(t, err, "stream nodes failed")
+
+		_, err = walEngine.EdgeCountByPrefix("test:")
+		require.ErrorContains(t, err, "stream edges failed")
+	})
+
+	t.Run("prefix stats and schema provider delegation", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		schema := NewSchemaManager()
+		engine := &walSchemaProviderEngine{
+			Engine: &walPrefixStatsEngine{
+				Engine:    base,
+				nodeCount: 7,
+				edgeCount: 4,
+			},
+			schema: schema,
+		}
+		walEngine := newWALEngine(t, engine)
+
+		nodes, err := walEngine.NodeCountByPrefix("ignored:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(7), nodes)
+
+		edges, err := walEngine.EdgeCountByPrefix("ignored:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), edges)
+
+		assert.Equal(t, schema, walEngine.GetSchemaForNamespace("tenant"))
+
+		noProvider := newWALEngine(t, &exportableOnlyEngine{Engine: base})
+		assert.Equal(t, base.GetSchema(), noProvider.GetSchemaForNamespace("tenant"))
+	})
+
+	t.Run("prefix counts use streaming fallback", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &walStreamingCountEngine{
+			Engine: base,
+			nodes: []*Node{
+				{ID: "test:stream-n1"},
+				{ID: "other:stream-n2"},
+				{ID: "test:stream-n3"},
+			},
+			edges: []*Edge{
+				{ID: "test:stream-e1", Type: "REL"},
+				{ID: "other:stream-e2", Type: "REL"},
+				{ID: "test:stream-e3", Type: "REL"},
+			},
+		}
+		walEngine := newWALEngine(t, engine)
+
+		nodes, err := walEngine.NodeCountByPrefix("test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), nodes)
+
+		edges, err := walEngine.EdgeCountByPrefix("test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), edges)
+	})
+
+	t.Run("embedding delegates and iterate fallback", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		t.Cleanup(func() { _ = engine.Close() })
+		walEngine := newWALEngine(t, engine)
+
+		_, err := engine.CreateNode(&Node{ID: "test:embed", Labels: []string{"Doc"}, Properties: map[string]any{"text": "embed me"}})
+		require.NoError(t, err)
+		walEngine.AddToPendingEmbeddings("test:embed")
+		assert.Equal(t, 1, walEngine.PendingEmbeddingsCount())
+
+		found := walEngine.FindNodeNeedingEmbedding()
+		require.NotNil(t, found)
+		assert.Equal(t, NodeID("test:embed"), found.ID)
+
+		walEngine.MarkNodeEmbedded("test:embed")
+		assert.Equal(t, 0, walEngine.PendingEmbeddingsCount())
+
+		added := walEngine.RefreshPendingEmbeddingsIndex()
+		assert.GreaterOrEqual(t, added, 0)
+
+		visited := 0
+		require.NoError(t, walEngine.IterateNodes(func(node *Node) bool {
+			visited++
+			return false
+		}))
+		assert.Equal(t, 1, visited)
+
+		noIterBase := NewMemoryEngine()
+		t.Cleanup(func() { _ = noIterBase.Close() })
+		noIter := newWALEngine(t, &exportableOnlyEngine{Engine: noIterBase})
+		err = noIter.IterateNodes(func(node *Node) bool { return true })
+		require.ErrorContains(t, err, "does not support IterateNodes")
+		assert.Nil(t, noIter.FindNodeNeedingEmbedding())
+		assert.Equal(t, 0, noIter.RefreshPendingEmbeddingsIndex())
+		assert.Equal(t, 0, noIter.PendingEmbeddingsCount())
+		noIter.AddToPendingEmbeddings("test:none")
+		noIter.MarkNodeEmbedded("test:none")
+	})
+
+	t.Run("stream fallback handles callback and load errors", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &exportableOnlyEngine{
+			Engine:   base,
+			allNodes: []*Node{{ID: "test:n1"}, {ID: "test:n2"}},
+			allEdges: []*Edge{{ID: "test:e1", Type: "REL"}, {ID: "test:e2", Type: "REL"}},
+		}
+		walEngine := newWALEngine(t, engine)
+
+		errBoom := errors.New("node callback failed")
+		err := walEngine.StreamNodes(context.Background(), func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("edge callback failed")
+		err = walEngine.StreamEdges(context.Background(), func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		engine.nodeErr = errors.New("all nodes failed")
+		err = walEngine.StreamNodes(context.Background(), func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "all nodes failed")
+
+		engine.edgeErr = errors.New("all edges failed")
+		err = walEngine.StreamEdges(context.Background(), func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "all edges failed")
+	})
+
+	t.Run("direct streaming delegate propagates node edge and chunk errors", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &walStreamErrorEngine{
+			Engine:  base,
+			nodeErr: errors.New("delegate nodes failed"),
+			edgeErr: errors.New("delegate edges failed"),
+		}
+		walEngine := newWALEngine(t, engine)
+
+		err := walEngine.StreamNodes(context.Background(), func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "delegate nodes failed")
+
+		err = walEngine.StreamEdges(context.Background(), func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "delegate edges failed")
+
+		err = walEngine.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error { return nil })
+		require.ErrorContains(t, err, "delegate nodes failed")
+	})
+
+	t.Run("stream node chunks fallback and delete by prefix", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &exportableOnlyEngine{
+			Engine: base,
+			allNodes: []*Node{
+				{ID: "test:n1"},
+				{ID: "test:n2"},
+				{ID: "test:n3"},
+			},
+		}
+		walEngine := newWALEngine(t, engine)
+
+		var chunkSizes []int
+		require.NoError(t, walEngine.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error {
+			chunkSizes = append(chunkSizes, len(nodes))
+			return nil
+		}))
+		assert.Equal(t, []int{2, 1}, chunkSizes)
+
+		errBoom := errors.New("chunk callback failed")
+		err := walEngine.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error {
+			return errBoom
+		})
+		require.ErrorIs(t, err, errBoom)
+
+		_, err = base.CreateNode(&Node{ID: "test:drop-n1"})
+		require.NoError(t, err)
+		_, err = base.CreateNode(&Node{ID: "other:keep"})
+		require.NoError(t, err)
+		require.NoError(t, base.CreateEdge(&Edge{ID: "test:drop-e1", StartNode: "test:drop-n1", EndNode: "other:keep", Type: "REL"}))
+
+		nodesDeleted, edgesDeleted, err := walEngine.DeleteByPrefix("test:")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), nodesDeleted)
+		assert.Equal(t, int64(1), edgesDeleted)
+	})
+
+	t.Run("read delegates last-write time and namespace listing", func(t *testing.T) {
+		assert.Equal(t, time.Time{}, (*WALEngine)(nil).LastWriteTime())
+
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		engine := &walNamespaceListerEngine{
+			Engine:     base,
+			namespaces: []string{"tenant_a", "tenant_b"},
+		}
+		walEngine := newWALEngine(t, engine)
+
+		assert.Equal(t, []string{"tenant_a", "tenant_b"}, walEngine.ListNamespaces())
+
+		_, err := walEngine.CreateNode(&Node{ID: NodeID(prefixTestID("last-write-node")), Labels: []string{"Doc"}})
+		require.NoError(t, err)
+		lastWrite := walEngine.LastWriteTime()
+		assert.False(t, lastWrite.IsZero())
+	})
+
+	t.Run("delegate getters and bulk delete edges", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		t.Cleanup(func() { _ = engine.Close() })
+		walEngine := newWALEngine(t, engine)
+
+		_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Doc"}, Properties: map[string]any{"name": "one"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"Doc"}, Properties: map[string]any{"name": "two"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "test:n3", Labels: []string{"Other"}, Properties: map[string]any{"name": "three"}})
+		require.NoError(t, err)
+		require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:n1", EndNode: "test:n2", Type: "REL"}))
+		require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e2", StartNode: "test:n2", EndNode: "test:n3", Type: "REL"}))
+
+		first, err := walEngine.GetFirstNodeByLabel("Doc")
+		require.NoError(t, err)
+		require.NotNil(t, first)
+
+		batch, err := walEngine.BatchGetNodes([]NodeID{"test:n1", "test:n2"})
+		require.NoError(t, err)
+		require.Len(t, batch, 2)
+
+		byType, err := walEngine.GetEdgesByType("REL")
+		require.NoError(t, err)
+		require.Len(t, byType, 2)
+
+		require.NoError(t, walEngine.BulkDeleteEdges([]EdgeID{"test:e1", "test:e2"}))
+		_, err = engine.GetEdge("test:e1")
+		assert.ErrorIs(t, err, ErrNotFound)
+		_, err = engine.GetEdge("test:e2")
+		assert.ErrorIs(t, err, ErrNotFound)
 	})
 }
 

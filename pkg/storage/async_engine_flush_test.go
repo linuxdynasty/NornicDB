@@ -80,6 +80,46 @@ type errorEngine struct {
 	deleteCalls     int
 }
 
+type rebaseTrackingEngine struct {
+	*MemoryEngine
+	getNodeResults []*Node
+	getNodeErrs    []error
+	updateErrs     []error
+	getNodeCalls   int
+	updateCalls    int
+	updatedNodes   []*Node
+}
+
+func newRebaseTrackingEngine() *rebaseTrackingEngine {
+	return &rebaseTrackingEngine{MemoryEngine: NewMemoryEngine()}
+}
+
+func (e *rebaseTrackingEngine) GetNode(id NodeID) (*Node, error) {
+	if e.getNodeCalls < len(e.getNodeErrs) && e.getNodeErrs[e.getNodeCalls] != nil {
+		err := e.getNodeErrs[e.getNodeCalls]
+		e.getNodeCalls++
+		return nil, err
+	}
+	if e.getNodeCalls < len(e.getNodeResults) && e.getNodeResults[e.getNodeCalls] != nil {
+		node := CopyNode(e.getNodeResults[e.getNodeCalls])
+		e.getNodeCalls++
+		return node, nil
+	}
+	e.getNodeCalls++
+	return e.MemoryEngine.GetNode(id)
+}
+
+func (e *rebaseTrackingEngine) UpdateNode(node *Node) error {
+	e.updatedNodes = append(e.updatedNodes, CopyNode(node))
+	if e.updateCalls < len(e.updateErrs) && e.updateErrs[e.updateCalls] != nil {
+		err := e.updateErrs[e.updateCalls]
+		e.updateCalls++
+		return err
+	}
+	e.updateCalls++
+	return e.MemoryEngine.UpdateNode(node)
+}
+
 func newErrorEngine() *errorEngine {
 	base := NewMemoryEngine()
 	namespaced := NewNamespacedEngine(base, "test")
@@ -673,6 +713,163 @@ func TestCloseCleansUpGoroutines(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Error("Close timed out - goroutine cleanup may be stuck")
 	}
+}
+
+// =============================================================================
+// ASYNC REBASE HELPERS
+// =============================================================================
+
+func TestFlushNodeWithRebaseAndHelpers(t *testing.T) {
+	t.Run("pending nil returns invalid data", func(t *testing.T) {
+		engine := newRebaseTrackingEngine()
+		defer engine.Close()
+
+		ae := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: 1000000})
+		defer ae.Close()
+
+		err := ae.flushNodeWithRebase(nil, nil)
+		if !errors.Is(err, ErrInvalidData) {
+			t.Fatalf("expected ErrInvalidData, got %v", err)
+		}
+	})
+
+	t.Run("nil baseline updates pending directly", func(t *testing.T) {
+		engine := newRebaseTrackingEngine()
+		defer engine.Close()
+
+		ae := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: 1000000})
+		defer ae.Close()
+
+		pending := &Node{ID: NodeID(prefixTestID("n1")), Labels: []string{"Doc"}, Properties: map[string]any{"title": "pending"}}
+		if err := ae.flushNodeWithRebase(pending, nil); err != nil {
+			t.Fatalf("flushNodeWithRebase returned error: %v", err)
+		}
+		if engine.updateCalls != 1 {
+			t.Fatalf("expected 1 update call, got %d", engine.updateCalls)
+		}
+		if len(engine.updatedNodes) != 1 || engine.updatedNodes[0].Properties["title"] != "pending" {
+			t.Fatalf("expected pending node to be written directly, got %#v", engine.updatedNodes)
+		}
+	})
+
+	t.Run("stale latest row is rebased onto newest engine state", func(t *testing.T) {
+		engine := newRebaseTrackingEngine()
+		defer engine.Close()
+
+		ae := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: 1000000})
+		defer ae.Close()
+
+		base := &Node{
+			ID:              NodeID(prefixTestID("n2")),
+			Labels:          []string{"Doc"},
+			Properties:      map[string]any{"title": "base", "obsolete": true},
+			NamedEmbeddings: map[string][]float32{"manual": {1}},
+			EmbedMeta:       map[string]any{"source": "base"},
+		}
+		pending := &Node{
+			ID:              NodeID(prefixTestID("n2")),
+			Labels:          []string{"Article"},
+			Properties:      map[string]any{"title": "pending"},
+			NamedEmbeddings: map[string][]float32{"manual": {9, 9}},
+			EmbedMeta:       map[string]any{"source": "pending"},
+		}
+		latest := &Node{
+			ID:              NodeID(prefixTestID("n2")),
+			Labels:          []string{"Doc", "Live"},
+			Properties:      map[string]any{"title": "base", "obsolete": true, "serverOnly": "keep"},
+			NamedEmbeddings: map[string][]float32{"manual": {5}},
+			ChunkEmbeddings: [][]float32{{7, 7}},
+			EmbedMeta:       map[string]any{"source": "latest"},
+		}
+		engine.getNodeResults = []*Node{latest}
+
+		if err := ae.flushNodeWithRebase(pending, base); err != nil {
+			t.Fatalf("flushNodeWithRebase returned error: %v", err)
+		}
+		if len(engine.updatedNodes) != 1 {
+			t.Fatalf("expected 1 updated node, got %d", len(engine.updatedNodes))
+		}
+
+		got := engine.updatedNodes[0]
+		if fmt.Sprint(got.Labels) != fmt.Sprint([]string{"Article"}) {
+			t.Fatalf("expected rebased labels from pending, got %v", got.Labels)
+		}
+		if got.Properties["title"] != "pending" {
+			t.Fatalf("expected rebased title from pending, got %#v", got.Properties["title"])
+		}
+		if got.Properties["serverOnly"] != "keep" {
+			t.Fatalf("expected latest-only property to be preserved, got %#v", got.Properties)
+		}
+		if _, exists := got.Properties["obsolete"]; exists {
+			t.Fatalf("expected base property removed when omitted from pending, got %#v", got.Properties)
+		}
+		if fmt.Sprint(got.NamedEmbeddings["manual"]) != fmt.Sprint([]float32{9, 9}) {
+			t.Fatalf("expected pending named embeddings to win, got %#v", got.NamedEmbeddings)
+		}
+		if got.EmbedMeta["source"] != "pending" {
+			t.Fatalf("expected pending embed meta to win, got %#v", got.EmbedMeta)
+		}
+		if fmt.Sprint(got.ChunkEmbeddings) != fmt.Sprint(latest.ChunkEmbeddings) {
+			t.Fatalf("expected unchanged chunk embeddings from latest, got %#v", got.ChunkEmbeddings)
+		}
+	})
+
+	t.Run("retries update until success", func(t *testing.T) {
+		engine := newRebaseTrackingEngine()
+		defer engine.Close()
+		engine.updateErrs = []error{errors.New("first"), errors.New("second"), nil}
+
+		ae := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: 1000000})
+		defer ae.Close()
+
+		base := &Node{ID: NodeID(prefixTestID("n3")), Labels: []string{"Doc"}, Properties: map[string]any{"title": "base"}}
+		pending := &Node{ID: NodeID(prefixTestID("n3")), Labels: []string{"Doc"}, Properties: map[string]any{"title": "pending"}}
+		engine.getNodeResults = []*Node{base, base, base}
+
+		if err := ae.flushNodeWithRebase(pending, base); err != nil {
+			t.Fatalf("expected retry to succeed, got %v", err)
+		}
+		if engine.updateCalls != 3 {
+			t.Fatalf("expected 3 update attempts, got %d", engine.updateCalls)
+		}
+	})
+
+	t.Run("returns last error after max attempts", func(t *testing.T) {
+		engine := newRebaseTrackingEngine()
+		defer engine.Close()
+		engine.updateErrs = []error{errors.New("first"), errors.New("second"), errors.New("third")}
+
+		ae := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: 1000000})
+		defer ae.Close()
+
+		base := &Node{ID: NodeID(prefixTestID("n4")), Labels: []string{"Doc"}, Properties: map[string]any{"title": "base"}}
+		pending := &Node{ID: NodeID(prefixTestID("n4")), Labels: []string{"Doc"}, Properties: map[string]any{"title": "pending"}}
+		engine.getNodeResults = []*Node{base, base, base}
+
+		err := ae.flushNodeWithRebase(pending, base)
+		if err == nil || !containsStr(err.Error(), "third") {
+			t.Fatalf("expected final update error, got %v", err)
+		}
+	})
+
+	t.Run("helper branches cover nil and equality cases", func(t *testing.T) {
+		if !nodesEquivalentForAsyncRebase(nil, nil) {
+			t.Fatal("expected nil nodes to be equivalent")
+		}
+		if nodesEquivalentForAsyncRebase(&Node{ID: NodeID(prefixTestID("a"))}, nil) {
+			t.Fatal("expected nil mismatch to be non-equivalent")
+		}
+
+		latest := &Node{ID: NodeID(prefixTestID("n5")), Labels: []string{"Doc"}, Properties: map[string]any{"k": "latest"}}
+		if got := rebaseNodeUpdate(nil, nil, latest); got.ID != latest.ID || got.Properties["k"] != "latest" {
+			t.Fatalf("expected latest copy when pending is nil, got %#v", got)
+		}
+
+		pending := &Node{ID: NodeID(prefixTestID("n6")), Labels: []string{"Doc"}, Properties: map[string]any{"k": "pending"}}
+		if got := rebaseNodeUpdate(nil, pending, nil); got.ID != pending.ID || got.Properties["k"] != "pending" {
+			t.Fatalf("expected pending copy when base/latest missing, got %#v", got)
+		}
+	})
 }
 
 // containsStr is a simple string contains helper for tests.

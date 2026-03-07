@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,20 @@ type captureLogger struct {
 	entries []map[string]any
 }
 
+type exportableOnlyEngine struct {
+	Engine
+	allNodes []*Node
+	allEdges []*Edge
+	nodeErr  error
+	edgeErr  error
+}
+
+type constraintValidationEngine struct {
+	Engine
+	nodes []*Node
+	err   error
+}
+
 func (l *captureLogger) Log(level string, msg string, fields map[string]any) {
 	entry := map[string]any{
 		"level": level,
@@ -48,6 +63,27 @@ func (l *captureLogger) Log(level string, msg string, fields map[string]any) {
 		entry[k] = v
 	}
 	l.entries = append(l.entries, entry)
+}
+
+func (e *exportableOnlyEngine) AllNodes() ([]*Node, error) {
+	if e.nodeErr != nil {
+		return nil, e.nodeErr
+	}
+	return e.allNodes, nil
+}
+
+func (e *exportableOnlyEngine) AllEdges() ([]*Edge, error) {
+	if e.edgeErr != nil {
+		return nil, e.edgeErr
+	}
+	return e.allEdges, nil
+}
+
+func (e *constraintValidationEngine) GetNodesByLabel(label string) ([]*Node, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return e.nodes, nil
 }
 
 func newIsolatedBadgerEngine(t *testing.T) *BadgerEngine {
@@ -387,5 +423,418 @@ func TestWALDiagnosticsHelpers(t *testing.T) {
 		require.NoError(t, err)
 
 		wal.reportCorruption(nil, nil)
+	})
+}
+
+func TestStreamingFallbackAndCollectionHelpers(t *testing.T) {
+	t.Run("stream nodes and edges with exportable fallback", func(t *testing.T) {
+		engine := &exportableOnlyEngine{
+			Engine: NewMemoryEngine(),
+			allNodes: []*Node{
+				{ID: "n1", Labels: []string{"Person", "User"}},
+				{ID: "n2", Labels: []string{"Person"}},
+			},
+			allEdges: []*Edge{
+				{ID: "e1", Type: "KNOWS"},
+				{ID: "e2", Type: "LIKES"},
+			},
+		}
+		t.Cleanup(func() {
+			if closer, ok := engine.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+
+		var nodeIDs []NodeID
+		require.NoError(t, StreamNodesWithFallback(context.Background(), engine, 1, func(node *Node) error {
+			nodeIDs = append(nodeIDs, node.ID)
+			return nil
+		}))
+		assert.Equal(t, []NodeID{"n1", "n2"}, nodeIDs)
+
+		var edgeIDs []EdgeID
+		require.NoError(t, StreamEdgesWithFallback(context.Background(), engine, 1, func(edge *Edge) error {
+			edgeIDs = append(edgeIDs, edge.ID)
+			return nil
+		}))
+		assert.Equal(t, []EdgeID{"e1", "e2"}, edgeIDs)
+
+		count, err := CountNodesWithLabel(context.Background(), engine, "Person")
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), count)
+
+		labels, err := CollectLabels(context.Background(), engine)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"Person", "User"}, labels)
+
+		types, err := CollectEdgeTypes(context.Background(), engine)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"KNOWS", "LIKES"}, types)
+	})
+
+	t.Run("stream fallback surfaces context and callback errors", func(t *testing.T) {
+		engine := &exportableOnlyEngine{
+			Engine:   NewMemoryEngine(),
+			allNodes: []*Node{{ID: "n1"}},
+			allEdges: []*Edge{{ID: "e1", Type: "REL"}},
+		}
+		t.Cleanup(func() {
+			if closer, ok := engine.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := StreamNodesWithFallback(ctx, engine, 1, func(node *Node) error { return nil })
+		require.ErrorIs(t, err, context.Canceled)
+
+		errBoom := errors.New("node visitor failed")
+		err = StreamNodesWithFallback(context.Background(), engine, 1, func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		ctx, cancel = context.WithCancel(context.Background())
+		cancel()
+		err = StreamEdgesWithFallback(ctx, engine, 1, func(edge *Edge) error { return nil })
+		require.ErrorIs(t, err, context.Canceled)
+
+		errBoom = errors.New("edge visitor failed")
+		err = StreamEdgesWithFallback(context.Background(), engine, 1, func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+	})
+
+	t.Run("stream fallback returns load errors", func(t *testing.T) {
+		engine := &exportableOnlyEngine{
+			Engine:  NewMemoryEngine(),
+			nodeErr: errors.New("all nodes failed"),
+			edgeErr: errors.New("all edges failed"),
+		}
+		t.Cleanup(func() {
+			if closer, ok := engine.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+
+		err := StreamNodesWithFallback(context.Background(), engine, 1, func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "all nodes failed")
+
+		err = StreamEdgesWithFallback(context.Background(), engine, 1, func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "all edges failed")
+	})
+}
+
+func TestLoaderEmbeddingFinderAndWALDegradedHelpers(t *testing.T) {
+	t.Run("loader embedding finder", func(t *testing.T) {
+		nonExportable := NewMemoryEngine()
+		t.Cleanup(func() { _ = nonExportable.Close() })
+		assert.Nil(t, FindNodeNeedingEmbedding(nonExportable))
+
+		exportable := &exportableOnlyEngine{
+			Engine: NewMemoryEngine(),
+			allNodes: []*Node{
+				{ID: "embedded", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{{1, 2}}},
+				{ID: "needs", Labels: []string{"Doc"}, Properties: map[string]any{"text": "embed me"}},
+			},
+		}
+		t.Cleanup(func() {
+			if closer, ok := exportable.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+		got := FindNodeNeedingEmbedding(exportable)
+		require.NotNil(t, got)
+		assert.Equal(t, NodeID("needs"), got.ID)
+
+		exportable.nodeErr = errors.New("loader nodes failed")
+		assert.Nil(t, FindNodeNeedingEmbedding(exportable))
+	})
+
+	t.Run("wal degraded status and diagnostics", func(t *testing.T) {
+		wal := &WAL{}
+		assert.False(t, wal.IsDegraded())
+		assert.Nil(t, wal.LastCorruptionDiagnostics())
+
+		diag := &CorruptionDiagnostics{Operation: "crc_mismatch"}
+		wal.degraded.Store(true)
+		wal.lastCorruption.Store(diag)
+		assert.True(t, wal.IsDegraded())
+		assert.Equal(t, diag, wal.LastCorruptionDiagnostics())
+
+		other := &WAL{}
+		other.lastCorruption.Store("unexpected")
+		assert.Nil(t, other.LastCorruptionDiagnostics())
+	})
+}
+
+func TestConstraintValidationCreationHelpers(t *testing.T) {
+	t.Run("dispatcher routes and unknown types error", func(t *testing.T) {
+		engine := &constraintValidationEngine{
+			Engine: NewMemoryEngine(),
+			nodes: []*Node{
+				{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"email": "a@example.com", "id": "1", "name": "alice"}},
+			},
+		}
+		t.Cleanup(func() {
+			if closer, ok := engine.Engine.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		})
+
+		require.NoError(t, ValidateConstraintOnCreationForEngine(engine, Constraint{
+			Type:       ConstraintUnique,
+			Label:      "Person",
+			Properties: []string{"email"},
+		}))
+		require.NoError(t, ValidateConstraintOnCreationForEngine(engine, Constraint{
+			Type:       ConstraintNodeKey,
+			Label:      "Person",
+			Properties: []string{"id", "name"},
+		}))
+		require.NoError(t, ValidateConstraintOnCreationForEngine(engine, Constraint{
+			Type:       ConstraintExists,
+			Label:      "Person",
+			Properties: []string{"name"},
+		}))
+
+		err := ValidateConstraintOnCreationForEngine(engine, Constraint{Type: ConstraintType("weird")})
+		require.ErrorContains(t, err, "unknown constraint type")
+	})
+
+	t.Run("node key helper validates property counts nulls and duplicates", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+
+		err := validateNodeKeyConstraintOnCreationWithEngine(&constraintValidationEngine{Engine: base}, Constraint{
+			Type:       ConstraintNodeKey,
+			Label:      "Person",
+			Properties: nil,
+		})
+		require.ErrorContains(t, err, "at least 1 property")
+
+		engine := &constraintValidationEngine{
+			Engine: base,
+			nodes: []*Node{
+				{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"id": "1"}},
+			},
+		}
+		err = validateNodeKeyConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintNodeKey,
+			Label:      "Person",
+			Properties: []string{"id", "name"},
+		})
+		var violation *ConstraintViolationError
+		require.ErrorAs(t, err, &violation)
+		require.Equal(t, ConstraintNodeKey, violation.Type)
+
+		engine.nodes = []*Node{
+			{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"id": "1", "name": "alice"}},
+			{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"id": "1", "name": "alice"}},
+		}
+		err = validateNodeKeyConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintNodeKey,
+			Label:      "Person",
+			Properties: []string{"id", "name"},
+		})
+		require.ErrorAs(t, err, &violation)
+		require.Equal(t, ConstraintNodeKey, violation.Type)
+	})
+
+	t.Run("temporal helper validates arity scan errors and temporal violations", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+
+		err := validateTemporalConstraintOnCreationWithEngine(&constraintValidationEngine{Engine: base}, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from"},
+		})
+		require.ErrorContains(t, err, "requires 3 properties")
+
+		engine := &constraintValidationEngine{
+			Engine: base,
+			err:    errors.New("scan failed"),
+		}
+		err = validateTemporalConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from", "to"},
+		})
+		require.ErrorContains(t, err, "scanning nodes")
+
+		engine.err = nil
+		engine.nodes = []*Node{
+			{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"from": time.Now(), "to": time.Now().Add(time.Hour)}},
+		}
+		err = validateTemporalConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from", "to"},
+		})
+		var violation *ConstraintViolationError
+		require.ErrorAs(t, err, &violation)
+		require.Equal(t, ConstraintTemporal, violation.Type)
+
+		now := time.Date(2026, 3, 6, 10, 0, 0, 0, time.UTC)
+		engine.nodes = []*Node{
+			{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"id": "a", "from": "bad", "to": now}},
+		}
+		err = validateTemporalConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from", "to"},
+		})
+		require.ErrorAs(t, err, &violation)
+		require.Equal(t, ConstraintTemporal, violation.Type)
+
+		engine.nodes = []*Node{
+			{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"id": "a", "from": now, "to": now.Add(2 * time.Hour)}},
+			{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"id": "a", "from": now.Add(time.Hour), "to": now.Add(3 * time.Hour)}},
+		}
+		err = validateTemporalConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from", "to"},
+		})
+		require.ErrorAs(t, err, &violation)
+		require.Equal(t, ConstraintTemporal, violation.Type)
+
+		engine.nodes = []*Node{
+			{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"id": "a", "from": now, "to": now.Add(time.Hour)}},
+			{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"id": "a", "from": now.Add(2 * time.Hour), "to": now.Add(3 * time.Hour)}},
+		}
+		require.NoError(t, validateTemporalConstraintOnCreationWithEngine(engine, Constraint{
+			Type:       ConstraintTemporal,
+			Label:      "Person",
+			Properties: []string{"id", "from", "to"},
+		}))
+	})
+}
+
+func TestDecodeNodeWithEmbeddings(t *testing.T) {
+	t.Run("loads separate embeddings and tolerates missing chunks", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("embedded-node"))
+		data, err := encodeValue(&Node{
+			ID:                         nodeID,
+			EmbeddingsStoredSeparately: true,
+			EmbedMeta:                  map[string]any{"chunk_count": int16(3)},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			emb0, err := encodeEmbedding([]float32{1, 2})
+			if err != nil {
+				return err
+			}
+			emb2, err := encodeEmbedding([]float32{5, 6})
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(embeddingKey(nodeID, 0), emb0); err != nil {
+				return err
+			}
+			return txn.Set(embeddingKey(nodeID, 2), emb2)
+		}))
+
+		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+			node, err := decodeNodeWithEmbeddings(txn, data, nodeID)
+			require.NoError(t, err)
+			require.False(t, node.EmbeddingsStoredSeparately)
+			require.Len(t, node.ChunkEmbeddings, 2)
+			assert.Equal(t, []float32{1, 2}, node.ChunkEmbeddings[0])
+			assert.Equal(t, []float32{5, 6}, node.ChunkEmbeddings[1])
+			return nil
+		}))
+	})
+
+	t.Run("parses string chunk counts and reports bad chunk payloads", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("embedded-node-str"))
+		data, err := encodeValue(&Node{
+			ID:                         nodeID,
+			EmbeddingsStoredSeparately: true,
+			EmbedMeta:                  map[string]any{"chunk_count": "1"},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			return txn.Set(embeddingKey(nodeID, 0), []byte("bad-embedding"))
+		}))
+
+		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+			node, err := decodeNodeWithEmbeddings(txn, data, nodeID)
+			require.ErrorContains(t, err, "failed to decode embedding chunk 0")
+			require.Nil(t, node)
+			return nil
+		}))
+	})
+}
+
+func TestSeparateEmbeddingChunkHelpers(t *testing.T) {
+	countChunks := func(t *testing.T, engine *BadgerEngine, nodeID NodeID) int {
+		t.Helper()
+		count := 0
+		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = embeddingPrefix(nodeID)
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+				count++
+			}
+			return nil
+		}))
+		return count
+	}
+
+	t.Run("deleteEmbeddingChunksBatched removes all chunks across batches", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("chunk-delete"))
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			for i := 0; i < 260; i++ {
+				emb, err := encodeEmbedding([]float32{float32(i)})
+				if err != nil {
+					return err
+				}
+				if err := txn.Set(embeddingKey(nodeID, i), emb); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+		require.Equal(t, 260, countChunks(t, engine, nodeID))
+		require.NoError(t, engine.deleteEmbeddingChunksBatched(nodeID))
+		require.Equal(t, 0, countChunks(t, engine, nodeID))
+	})
+
+	t.Run("replaceSeparateEmbeddingChunks rewrites chunks and supports empty replacement", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("chunk-replace"))
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			oldEmb, err := encodeEmbedding([]float32{1, 2, 3})
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(embeddingKey(nodeID, 0), oldEmb); err != nil {
+				return err
+			}
+			return txn.Set(embeddingKey(nodeID, 1), oldEmb)
+		}))
+
+		require.NoError(t, engine.replaceSeparateEmbeddingChunks(nodeID, [][]float32{{9, 9}, {8, 8, 8}}))
+		require.Equal(t, 2, countChunks(t, engine, nodeID))
+		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+			item, err := txn.Get(embeddingKey(nodeID, 1))
+			require.NoError(t, err)
+			return item.Value(func(val []byte) error {
+				emb, err := decodeEmbedding(val)
+				require.NoError(t, err)
+				assert.Equal(t, []float32{8, 8, 8}, emb)
+				return nil
+			})
+		}))
+
+		require.NoError(t, engine.replaceSeparateEmbeddingChunks(nodeID, nil))
+		require.Equal(t, 0, countChunks(t, engine, nodeID))
 	})
 }

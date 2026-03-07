@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
+	"github.com/stretchr/testify/require"
 )
 
 // =============================================================================
@@ -121,15 +124,6 @@ func (m *MockDB) ExecuteCypher(ctx context.Context, query string, params map[str
 		Columns: []string{},
 		Rows:    [][]interface{}{},
 	}, nil
-}
-
-func containsLabel(labels []string, label string) bool {
-	for _, l := range labels {
-		if l == label {
-			return true
-		}
-	}
-	return false
 }
 
 // =============================================================================
@@ -312,6 +306,320 @@ func TestHandleMCP_UnknownMethod(t *testing.T) {
 	}
 }
 
+func TestServerRouteAndWrapperHelpers(t *testing.T) {
+	t.Run("register routes and serve http", func(t *testing.T) {
+		server := NewServer(nil, nil)
+		mux := http.NewServeMux()
+		server.RegisterRoutes(mux)
+		require.False(t, server.started.IsZero())
+
+		req := httptest.NewRequest(http.MethodGet, "/mcp/health", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		rec = httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/does-not-exist", nil))
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("call tool wrapper", func(t *testing.T) {
+		server := NewServer(nil, nil)
+		result, err := server.CallTool(context.Background(), ToolRecall, map[string]interface{}{"id": "node-1"})
+		require.NoError(t, err)
+		recallResult, ok := result.(RecallResult)
+		require.True(t, ok)
+		require.Equal(t, 1, recallResult.Count)
+
+		_, err = server.CallTool(context.Background(), "missing-tool", nil)
+		require.Error(t, err)
+	})
+
+	t.Run("start and stop lifecycle", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.Address = "127.0.0.1"
+		cfg.Port = 0
+		server := NewServer(nil, cfg)
+		require.NoError(t, server.Start("127.0.0.1:0"))
+		require.NoError(t, server.Stop(context.Background()))
+
+		server.closed = true
+		require.Error(t, server.Start("127.0.0.1:0"))
+		require.NoError(t, server.Stop(context.Background()))
+	})
+}
+
+func TestMCPHTTPAndJSONRPCBranches(t *testing.T) {
+	server := NewServer(nil, nil)
+
+	t.Run("handleMCP rejects non-post", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+		rec := httptest.NewRecorder()
+		server.handleMCP(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+		require.Contains(t, rec.Body.String(), "POST required")
+	})
+
+	t.Run("handleMCP parse error", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString("{"))
+		rec := httptest.NewRecorder()
+		server.handleMCP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "Parse error")
+	})
+
+	t.Run("handleMCP tools list", func(t *testing.T) {
+		body := `{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		server.handleMCP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"tools"`)
+	})
+
+	t.Run("handleMCP tools call wraps tool errors", func(t *testing.T) {
+		body := `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"store","arguments":{"content":"persist me"}}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		server.handleMCP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"isError":true`)
+		require.Contains(t, rec.Body.String(), "no database executor available")
+	})
+
+	t.Run("handleMCP tools call success", func(t *testing.T) {
+		db, err := nornicdb.Open("", nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		dbServer := NewServer(db, nil)
+		body := `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"store","arguments":{"content":"json rpc store"}}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		dbServer.handleMCP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"jsonrpc":"2.0"`)
+		require.Contains(t, rec.Body.String(), `json rpc store`)
+		require.NotContains(t, rec.Body.String(), `"isError":true`)
+	})
+
+	t.Run("handleInitialize invalid json", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/mcp/initialize", bytes.NewBufferString("{"))
+		rec := httptest.NewRecorder()
+		server.handleInitialize(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "invalid request body")
+	})
+
+	t.Run("handleInitialize success", func(t *testing.T) {
+		body := `{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"clientInfo":{"name":"tester","version":"1.0"}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp/initialize", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		server.handleInitialize(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "NornicDB MCP Server")
+	})
+
+	t.Run("handleInitialize rejects non-post", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/mcp/initialize", nil)
+		rec := httptest.NewRecorder()
+		server.handleInitialize(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("handleListTools rejects unsupported method", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/mcp/tools/list", nil)
+		rec := httptest.NewRecorder()
+		server.handleListTools(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("handleCallTool invalid json", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/mcp/tools/call", bytes.NewBufferString("{"))
+		rec := httptest.NewRecorder()
+		server.handleCallTool(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "invalid request body")
+	})
+
+	t.Run("handleCallTool rejects non-post", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/mcp/tools/call", nil)
+		rec := httptest.NewRecorder()
+		server.handleCallTool(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+		require.Contains(t, rec.Body.String(), "POST required")
+	})
+
+	t.Run("handleCallTool succeeds with database", func(t *testing.T) {
+		db, err := nornicdb.Open("", nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		dbServer := NewServer(db, nil)
+		body := `{"name":"store","arguments":{"content":"http tool content","type":"Note"}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp/tools/call", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		dbServer.handleCallTool(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `http tool content`)
+		require.NotContains(t, rec.Body.String(), `"isError":true`)
+	})
+
+	t.Run("servehttp dispatches mcp routes", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp/tools/list", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":9,"method":"initialize","params":{}}`))
+		server.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"jsonrpc":"2.0"`)
+
+		rec = httptest.NewRecorder()
+		callReq := httptest.NewRequest(http.MethodPost, "/mcp/tools/call", bytes.NewBufferString(`{"name":"recall","arguments":{"id":"node-1"}}`))
+		server.ServeHTTP(rec, callReq)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		rec = httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp/health", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "healthy")
+	})
+}
+
+func TestServerStorageAndExecutorHelpers(t *testing.T) {
+	t.Run("database scoped executor unavailable", func(t *testing.T) {
+		server := NewServer(nil, nil)
+		var calledDB string
+		server.SetDatabaseScopedExecutor(func(dbName string) (*cypher.StorageExecutor, func(context.Context, string) (*nornicdb.Node, error), error) {
+			calledDB = dbName
+			return nil, nil, nil
+		})
+
+		_, _, err := server.getExecutorAndGetNode(ContextWithDatabase(context.Background(), "tenant_a"))
+		require.Error(t, err)
+		require.Equal(t, "tenant_a", calledDB)
+	})
+
+	t.Run("database scoped storage and related nodes", func(t *testing.T) {
+		server := NewServer(nil, nil)
+		engine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = engine.Close() })
+
+		_, err := engine.CreateNode(&storage.Node{ID: "tenant_a:1", Labels: []string{"Memory"}, Properties: map[string]interface{}{"title": "Root"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&storage.Node{ID: "tenant_a:2", Labels: []string{"Task"}, Properties: map[string]interface{}{"name": "Neighbor"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&storage.Node{ID: "tenant_a:3", Labels: []string{"Doc"}, Properties: map[string]interface{}{"title": "Incoming"}})
+		require.NoError(t, err)
+		require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "tenant_a:e1", StartNode: "tenant_a:1", EndNode: "tenant_a:2", Type: "RELATES_TO"}))
+		require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "tenant_a:e2", StartNode: "tenant_a:3", EndNode: "tenant_a:1", Type: "REFERENCES"}))
+
+		var calledDB string
+		server.SetDatabaseScopedStorage(func(dbName string) (storage.Engine, error) {
+			calledDB = dbName
+			return engine, nil
+		})
+
+		store, err := server.storageForContext(ContextWithDatabase(context.Background(), "tenant_a"))
+		require.NoError(t, err)
+		require.NotNil(t, store)
+		require.Equal(t, "tenant_a", calledDB)
+
+		related := server.getRelatedNodes(ContextWithDatabase(context.Background(), "tenant_a"), "tenant_a:1", 2)
+		require.Len(t, related, 2)
+		require.ElementsMatch(t, []string{"outgoing", "incoming"}, []string{related[0].Direction, related[1].Direction})
+		require.ElementsMatch(t, []string{"Task", "Doc"}, []string{related[0].Type, related[1].Type})
+
+		require.Nil(t, server.getRelatedNodes(context.Background(), "tenant_a:1", 1))
+		require.Nil(t, server.getRelatedNodes(context.Background(), "", 2))
+	})
+
+	t.Run("default database fallback and direct db helpers", func(t *testing.T) {
+		db, err := nornicdb.Open("", nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		server := NewServer(db, nil)
+		exec := db.GetCypherExecutor()
+		require.NotNil(t, exec)
+
+		createResult, err := exec.Execute(context.Background(),
+			"CREATE (n:Memory {title: 'helper node'}) RETURN elementId(n) AS id", nil)
+		require.NoError(t, err)
+		nodeID, _ := createResult.Rows[0][0].(string)
+
+		gotExec, getNode, err := server.getExecutorAndGetNode(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, gotExec)
+		require.NotNil(t, getNode)
+
+		node, err := getNode(context.Background(), nodeID)
+		require.NoError(t, err)
+		require.Equal(t, "helper node", node.Properties["title"])
+
+		var scopedExecDB string
+		server.SetDatabaseScopedExecutor(func(dbName string) (*cypher.StorageExecutor, func(context.Context, string) (*nornicdb.Node, error), error) {
+			scopedExecDB = dbName
+			return gotExec, getNode, nil
+		})
+		_, _, err = server.getExecutorAndGetNode(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, server.DefaultDatabaseName(), scopedExecDB)
+
+		store, err := server.storageForContext(ContextWithDatabase(context.Background(), "tenant_b"))
+		require.NoError(t, err)
+		ns, ok := store.(*storage.NamespacedEngine)
+		require.True(t, ok)
+		require.Equal(t, "tenant_b", ns.Namespace())
+
+		var scopedStorageDB string
+		server.SetDatabaseScopedStorage(func(dbName string) (storage.Engine, error) {
+			scopedStorageDB = dbName
+			return store, nil
+		})
+		_, err = server.storageForContext(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, server.DefaultDatabaseName(), scopedStorageDB)
+	})
+
+	t.Run("nil database storage returns nil", func(t *testing.T) {
+		server := NewServer(nil, nil)
+		store, err := server.storageForContext(context.Background())
+		require.NoError(t, err)
+		require.Nil(t, store)
+	})
+}
+
+func TestServerUtilityHelpers(t *testing.T) {
+	args := map[string]interface{}{"database": " tenant_a ", "db": "tenant_b"}
+	require.Equal(t, "tenant_a", extractDatabaseArg(args))
+	require.NotContains(t, args, "database")
+	require.NotContains(t, args, "db")
+
+	require.Equal(t, "4:nornicdb:node-1", normalizeNodeElementID("node-1"))
+	require.Equal(t, "4:tenant:node-1", normalizeNodeElementID("4:tenant:node-1"))
+	require.Equal(t, "node-1", localNodeIDFromAny("4:nornicdb:node-1"))
+	require.Equal(t, "node-2", localNodeIDFromAny("4:tenant:node-2"))
+	require.Equal(t, "", localNodeIDFromAny(" "))
+
+	props := map[string]interface{}{"tags": []interface{}{"a", "b", 3}}
+	require.Equal(t, []string{"a", "b"}, getStringSliceProp(props, "tags"))
+	require.Equal(t, []string{"x", "y"}, getStringSliceProp(map[string]interface{}{"tags": []string{"x", "y"}}, "tags"))
+	require.Nil(t, getStringSliceProp(nil, "tags"))
+
+	out := toInterfaceMap(map[string]any{"score": 1, "title": "x"})
+	require.Equal(t, map[string]interface{}{"score": 1, "title": "x"}, out)
+	require.Nil(t, toInterfaceMap(nil))
+
+	require.Equal(t, []string{"a", "b"}, getStringSlice(map[string]interface{}{"tags": []interface{}{"a", "b"}}, "tags"))
+	require.Equal(t, 3.0, getFloat64(map[string]interface{}{"score": 3}, "score", 1.5))
+	require.Equal(t, 1.5, getFloat64(map[string]interface{}{}, "score", 1.5))
+	require.Equal(t, map[string]interface{}{"k": "v"}, getMap(map[string]interface{}{"meta": map[string]interface{}{"k": "v"}}, "meta"))
+	require.Nil(t, getMap(map[string]interface{}{"meta": "bad"}, "meta"))
+}
+
 // =============================================================================
 // Tool Handler Tests (without database - fallback mode)
 // =============================================================================
@@ -338,6 +646,50 @@ func TestHandleStore_NoDB(t *testing.T) {
 	}
 }
 
+func TestHandleStore_WithDB(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	server := NewServer(db, nil)
+	ctx := context.Background()
+
+	result, err := server.handleStore(ctx, map[string]interface{}{
+		"content": "First line\nSecond line should not become title",
+		"type":    "Note",
+		"tags":    []interface{}{"alpha", "beta"},
+		"metadata": map[string]interface{}{
+			"owner":     "alice",
+			"embedding": []float32{1, 2, 3},
+			"vector":    "drop-me",
+		},
+	})
+	require.NoError(t, err)
+
+	store := result.(StoreResult)
+	require.NotEmpty(t, store.ID)
+	require.Equal(t, "First line", store.Title)
+	require.True(t, store.Embedded)
+
+	node, err := db.GetNode(ctx, localNodeIDFromAny(store.ID))
+	require.NoError(t, err)
+	require.Contains(t, node.Labels, "Note")
+	require.Equal(t, "First line", node.Properties["title"])
+	require.Equal(t, "First line\nSecond line should not become title", node.Properties["content"])
+	require.Equal(t, "alice", node.Properties["owner"])
+	require.ElementsMatch(t, []string{"alpha", "beta"}, getStringSliceProp(toInterfaceMap(node.Properties), "tags"))
+	_, hasEmbedding := node.Properties["embedding"]
+	require.False(t, hasEmbedding)
+	_, hasVector := node.Properties["vector"]
+	require.False(t, hasVector)
+
+	_, err = server.handleStore(ctx, map[string]interface{}{
+		"content": "bad",
+		"type":    "123bad",
+	})
+	require.ErrorContains(t, err, "invalid node type")
+}
+
 func TestHandleRecall_NoDB(t *testing.T) {
 	server := NewServer(nil, nil)
 	ctx := context.Background()
@@ -353,6 +705,96 @@ func TestHandleRecall_NoDB(t *testing.T) {
 	if recallResult.Count != 1 {
 		t.Errorf("Expected count=1, got %d", recallResult.Count)
 	}
+}
+
+func TestHandleRecall_WithDB(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	exec := db.GetCypherExecutor()
+	require.NotNil(t, exec)
+
+	ctx := context.Background()
+	createNode := func(label, title, content, createdAt string, tags []string) string {
+		result, err := exec.Execute(ctx,
+			"CREATE (n:"+label+" {title: $title, content: $content, created_at: $createdAt, tags: $tags}) RETURN elementId(n) AS id",
+			map[string]interface{}{
+				"title":     title,
+				"content":   content,
+				"createdAt": createdAt,
+				"tags":      tags,
+			},
+		)
+		require.NoError(t, err)
+		id, ok := result.Rows[0][0].(string)
+		require.True(t, ok)
+		return id
+	}
+
+	targetID := createNode("Memory", "Recent Memory", "important content", "2026-03-01T10:00:00Z", []string{"alpha", "beta"})
+	_ = createNode("Task", "Old Task", "older content", "2025-01-01T10:00:00Z", []string{"beta"})
+
+	server := NewServer(db, nil)
+
+	t.Run("recalls node by id from database", func(t *testing.T) {
+		result, err := server.handleRecall(ctx, map[string]interface{}{"id": targetID})
+		require.NoError(t, err)
+
+		recall := result.(RecallResult)
+		require.Equal(t, 1, recall.Count)
+		require.Len(t, recall.Nodes, 1)
+		require.Equal(t, targetID, recall.Nodes[0].ID)
+		require.Equal(t, "Memory", recall.Nodes[0].Type)
+		require.Equal(t, "Recent Memory", recall.Nodes[0].Title)
+		require.Equal(t, "important content", recall.Nodes[0].Content)
+	})
+
+	t.Run("returns error when requested id does not exist", func(t *testing.T) {
+		_, err := server.handleRecall(ctx, map[string]interface{}{"id": "missing"})
+		require.ErrorContains(t, err, "node not found")
+	})
+
+	t.Run("filters recalled nodes by type", func(t *testing.T) {
+		result, err := server.handleRecall(ctx, map[string]interface{}{
+			"type":  []interface{}{"Memory"},
+			"limit": 5,
+		})
+		require.NoError(t, err)
+
+		recall := result.(RecallResult)
+		require.Equal(t, 1, recall.Count)
+		require.Len(t, recall.Nodes, 1)
+		require.Equal(t, targetID, recall.Nodes[0].ID)
+		require.Equal(t, "Recent Memory", recall.Nodes[0].Title)
+		require.Equal(t, "important content", recall.Nodes[0].Content)
+	})
+
+	t.Run("filters recalled nodes by tags", func(t *testing.T) {
+		result, err := server.handleRecall(ctx, map[string]interface{}{
+			"tags":  []interface{}{"alpha"},
+			"limit": 5,
+		})
+		require.NoError(t, err)
+
+		recall := result.(RecallResult)
+		require.Equal(t, 1, recall.Count)
+		require.Len(t, recall.Nodes, 1)
+		require.Equal(t, targetID, recall.Nodes[0].ID)
+	})
+
+	t.Run("filters recalled nodes by since timestamp", func(t *testing.T) {
+		result, err := server.handleRecall(ctx, map[string]interface{}{
+			"since": "2026-01-01T00:00:00Z",
+			"limit": 5,
+		})
+		require.NoError(t, err)
+
+		recall := result.(RecallResult)
+		require.Equal(t, 1, recall.Count)
+		require.Len(t, recall.Nodes, 1)
+		require.Equal(t, targetID, recall.Nodes[0].ID)
+	})
 }
 
 func TestHandleDiscover_NoDB(t *testing.T) {
@@ -416,6 +858,199 @@ func TestHandleDiscover_ChunksLongQueryForEmbedding(t *testing.T) {
 			t.Errorf("expected chunk %d to be <= ~512 tokens, got %d", i, util.CountApproxTokens(c))
 		}
 	}
+
+	result, err := server.handleDiscover(ctx, map[string]interface{}{
+		"query": longQuery,
+		"limit": 10,
+	})
+	if err != nil {
+		t.Fatalf("second handleDiscover() error = %v", err)
+	}
+	discoverResult := result.(DiscoverResult)
+	require.Equal(t, "vector", discoverResult.Method)
+}
+
+func TestHandleDiscover_WithDBKeywordResults(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	exec := db.GetCypherExecutor()
+	require.NotNil(t, exec)
+	ctx := context.Background()
+
+	rootResult, err := exec.Execute(ctx,
+		"CREATE (n:Memory {title: $title, content: $content}) RETURN elementId(n) AS id",
+		map[string]interface{}{"title": "Alpha Root", "content": "alpha unique keyword content"},
+	)
+	require.NoError(t, err)
+	rootID, _ := rootResult.Rows[0][0].(string)
+
+	neighborResult, err := exec.Execute(ctx,
+		"CREATE (n:Task {title: $title, content: $content}) RETURN elementId(n) AS id",
+		map[string]interface{}{"title": "Neighbor Task", "content": "supporting context"},
+	)
+	require.NoError(t, err)
+	neighborID, _ := neighborResult.Rows[0][0].(string)
+
+	_, err = exec.Execute(ctx,
+		"MATCH (a), (b) WHERE elementId(a) = $from AND elementId(b) = $to CREATE (a)-[:RELATES_TO]->(b)",
+		map[string]interface{}{"from": rootID, "to": neighborID},
+	)
+	require.NoError(t, err)
+
+	server := NewServer(db, nil)
+	result, err := server.handleDiscover(ctx, map[string]interface{}{
+		"query": "alpha unique keyword",
+		"depth": 2,
+		"limit": 5,
+	})
+	require.NoError(t, err)
+
+	discover := result.(DiscoverResult)
+	require.Equal(t, "keyword", discover.Method)
+	require.NotZero(t, discover.Total)
+	require.NotEmpty(t, discover.Results)
+	require.Equal(t, "Alpha Root", discover.Results[0].Title)
+	require.Equal(t, "Memory", discover.Results[0].Type)
+	require.NotEmpty(t, discover.Results[0].Related)
+}
+
+func TestHandleDiscover_VectorBranchWithManualEmbeddings(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	engine := db.GetStorage()
+	vector := make([]float32, 1024)
+	vector[0] = 1.0
+
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "vector-node",
+		Labels: []string{"Memory"},
+		Properties: map[string]interface{}{
+			"title":   "Vector Match",
+			"content": "manual embedded content",
+		},
+		ChunkEmbeddings: [][]float32{vector},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BuildSearchIndexes(context.Background()))
+
+	embedder := &mockEmbedder{batchTexts: nil}
+	serverCfg := DefaultServerConfig()
+	serverCfg.Embedder = embedder
+	serverCfg.EmbeddingEnabled = true
+	server := NewServer(db, serverCfg)
+
+	result, err := server.handleDiscover(context.Background(), map[string]interface{}{
+		"query": "manual embedded content",
+		"limit": 5,
+		"depth": 0,
+	})
+	require.NoError(t, err)
+	discover := result.(DiscoverResult)
+	require.Equal(t, "vector", discover.Method)
+}
+
+func TestHandleDiscover_StorageError(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	server := NewServer(db, nil)
+	server.SetDatabaseScopedStorage(func(dbName string) (storage.Engine, error) {
+		return nil, context.Canceled
+	})
+
+	_, err = server.handleDiscover(ContextWithDatabase(context.Background(), "tenant_a"), map[string]interface{}{
+		"query": "alpha",
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestServerDefaultDatabaseName(t *testing.T) {
+	var nilServer *Server
+	require.Equal(t, "", nilServer.DefaultDatabaseName())
+
+	server := NewServer(nil, nil)
+	require.Equal(t, "", server.DefaultDatabaseName())
+
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	server = NewServer(db, nil)
+	require.Equal(t, "nornic", server.DefaultDatabaseName())
+}
+
+func TestResolveNodeForLink(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	exec := db.GetCypherExecutor()
+	require.NotNil(t, exec)
+
+	ctx := context.Background()
+	createNode := func(title, externalID string) string {
+		result, err := exec.Execute(ctx,
+			"CREATE (n:Memory {title: $title, id: $externalID}) RETURN elementId(n) AS id",
+			map[string]interface{}{"title": title, "externalID": externalID},
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Rows)
+		id, ok := result.Rows[0][0].(string)
+		require.True(t, ok)
+		require.NotEmpty(t, id)
+		return id
+	}
+
+	elementID := createNode("first", "external-1")
+	otherElementID := createNode("second", "external-2")
+
+	server := NewServer(db, nil)
+	getNode := func(ctx context.Context, id string) (*nornicdb.Node, error) {
+		return db.GetNode(ctx, localNodeIDFromAny(id))
+	}
+
+	t.Run("returns blank id as not found", func(t *testing.T) {
+		node, resolvedID, err := server.resolveNodeForLink(ctx, exec, getNode, "   ")
+		require.ErrorIs(t, err, nornicdb.ErrNotFound)
+		require.Nil(t, node)
+		require.Equal(t, "", resolvedID)
+	})
+
+	t.Run("prefers direct getNode by element id", func(t *testing.T) {
+		node, resolvedID, err := server.resolveNodeForLink(ctx, exec, getNode, elementID)
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.Equal(t, elementID, resolvedID)
+		require.Equal(t, "first", node.Properties["title"])
+	})
+
+	t.Run("falls back to internal id query", func(t *testing.T) {
+		node, resolvedID, err := server.resolveNodeForLink(ctx, exec, nil, localNodeIDFromAny(otherElementID))
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.Equal(t, otherElementID, resolvedID)
+		require.Equal(t, "second", node.Properties["title"])
+	})
+
+	t.Run("falls back to node id property", func(t *testing.T) {
+		node, resolvedID, err := server.resolveNodeForLink(ctx, exec, nil, "external-1")
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.Equal(t, elementID, resolvedID)
+		require.Equal(t, "external-1", node.Properties["id"])
+	})
+
+	t.Run("returns normalized id when node not found", func(t *testing.T) {
+		node, resolvedID, err := server.resolveNodeForLink(ctx, exec, nil, "missing-id")
+		require.ErrorIs(t, err, nornicdb.ErrNotFound)
+		require.Nil(t, node)
+		require.Equal(t, normalizeNodeElementID("missing-id"), resolvedID)
+	})
 }
 
 func TestHandleLink_NoDB(t *testing.T) {
@@ -453,6 +1088,85 @@ func TestHandleLink_NoDB(t *testing.T) {
 	}
 }
 
+func TestHandleLink_WithDB(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	exec := db.GetCypherExecutor()
+	require.NotNil(t, exec)
+	ctx := context.Background()
+
+	createNode := func(title, externalID string) string {
+		result, err := exec.Execute(ctx,
+			"CREATE (n:Memory {title: $title, id: $externalID}) RETURN elementId(n) AS id",
+			map[string]interface{}{"title": title, "externalID": externalID},
+		)
+		require.NoError(t, err)
+		id, ok := result.Rows[0][0].(string)
+		require.True(t, ok)
+		return id
+	}
+
+	fromID := createNode("Source Node", "source-ext")
+	toID := createNode("Target Node", "target-ext")
+
+	server := NewServer(db, nil)
+
+	result, err := server.handleLink(ctx, map[string]interface{}{
+		"from":     "source-ext",
+		"to":       "target-ext",
+		"relation": "relates_to",
+		"strength": 0.75,
+	})
+	require.NoError(t, err)
+
+	link := result.(LinkResult)
+	require.NotEmpty(t, link.EdgeID)
+	require.Equal(t, fromID, link.From.ID)
+	require.Equal(t, "Memory", link.From.Type)
+	require.Equal(t, "Source Node", link.From.Title)
+	require.Equal(t, toID, link.To.ID)
+	require.Equal(t, "Target Node", link.To.Title)
+
+	edgeResult, err := exec.Execute(ctx,
+		"MATCH (a)-[r:RELATES_TO]->(b) WHERE elementId(a) = $from AND elementId(b) = $to RETURN elementId(r), r.strength",
+		map[string]interface{}{"from": fromID, "to": toID},
+	)
+	require.NoError(t, err)
+	require.Len(t, edgeResult.Rows, 1)
+	require.Equal(t, link.EdgeID, edgeResult.Rows[0][0])
+	require.Equal(t, 0.75, edgeResult.Rows[0][1])
+
+	_, err = server.handleLink(ctx, map[string]interface{}{
+		"from":     "missing",
+		"to":       "target-ext",
+		"relation": "relates_to",
+	})
+	require.ErrorContains(t, err, "source node not found")
+
+	_, err = server.handleLink(ctx, map[string]interface{}{
+		"from":     "source-ext",
+		"to":       "missing",
+		"relation": "relates_to",
+	})
+	require.ErrorContains(t, err, "target node not found")
+}
+
+func TestHandleLink_ScopedExecutorError(t *testing.T) {
+	server := NewServer(nil, nil)
+	server.SetDatabaseScopedExecutor(func(dbName string) (*cypher.StorageExecutor, func(context.Context, string) (*nornicdb.Node, error), error) {
+		return nil, nil, context.DeadlineExceeded
+	})
+
+	_, err := server.handleLink(ContextWithDatabase(context.Background(), "tenant_a"), map[string]interface{}{
+		"from":     "a",
+		"to":       "b",
+		"relation": "relates_to",
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 // Note: TestHandleIndex_NoDB and TestHandleUnindex_NoDB removed
 // These handlers were removed - file indexing is handled by Mimir
 
@@ -477,6 +1191,203 @@ func TestHandleTask_NoDB(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for missing title")
 	}
+
+	result, err = server.handleTask(ctx, map[string]interface{}{
+		"id":     "task-123",
+		"status": "active",
+	})
+	require.NoError(t, err)
+	taskResult = result.(TaskResult)
+	require.Equal(t, normalizeNodeElementID("task-123"), taskResult.Task.ID)
+	require.Equal(t, "active", taskResult.Task.Properties["status"])
+
+	result, err = server.handleTask(ctx, map[string]interface{}{
+		"id":     "task-123",
+		"delete": true,
+	})
+	require.NoError(t, err)
+	taskResult = result.(TaskResult)
+	require.Equal(t, "Task deleted.", taskResult.NextAction)
+}
+
+func TestHandleTaskAndTasks_WithDB(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	server := NewServer(db, nil)
+	ctx := context.Background()
+
+	makeTask := func(args map[string]interface{}) TaskResult {
+		result, err := server.handleTask(ctx, args)
+		require.NoError(t, err)
+		taskResult := result.(TaskResult)
+		require.NotEmpty(t, taskResult.Task.ID)
+		return taskResult
+	}
+
+	dependency := makeTask(map[string]interface{}{
+		"title":    "Dependency",
+		"status":   "active",
+		"priority": "high",
+		"assign":   "alice",
+	})
+
+	mainTask := makeTask(map[string]interface{}{
+		"title":       "Main Task",
+		"description": "needs dependency",
+		"priority":    "medium",
+		"assign":      "alice",
+		"depends_on":  []interface{}{dependency.Task.ID},
+	})
+	require.Equal(t, "pending", mainTask.Task.Properties["status"])
+
+	completedTask := makeTask(map[string]interface{}{
+		"title":    "Completed Task",
+		"status":   "done",
+		"priority": "low",
+		"assign":   "bob",
+	})
+	require.Equal(t, "completed", completedTask.Task.Properties["status"])
+
+	updatedRaw, err := server.handleTask(ctx, map[string]interface{}{
+		"id":          mainTask.Task.ID,
+		"title":       "Main Task Updated",
+		"description": "updated description",
+		"priority":    "critical",
+		"assign":      "carol",
+	})
+	require.NoError(t, err)
+	updated := updatedRaw.(TaskResult)
+	require.Equal(t, "Main Task Updated", updated.Task.Title)
+	require.Equal(t, "updated description", updated.Task.Content)
+	require.Equal(t, "active", updated.Task.Properties["status"])
+	require.Equal(t, "critical", updated.Task.Properties["priority"])
+	require.Equal(t, "carol", updated.Task.Properties["assigned_to"])
+
+	completedRaw, err := server.handleTask(ctx, map[string]interface{}{
+		"id":       mainTask.Task.ID,
+		"complete": true,
+	})
+	require.NoError(t, err)
+	completedMain := completedRaw.(TaskResult)
+	require.Equal(t, "completed", completedMain.Task.Properties["status"])
+
+	listRaw, err := server.handleTasks(ctx, map[string]interface{}{
+		"status":      []interface{}{"done"},
+		"assigned_to": "bob",
+		"priority":    []interface{}{"low"},
+		"limit":       10,
+	})
+	require.NoError(t, err)
+	list := listRaw.(TasksResult)
+	require.Len(t, list.Tasks, 1)
+	require.Equal(t, completedTask.Task.ID, list.Tasks[0].ID)
+	require.Equal(t, 1, list.Stats.Total)
+	require.Equal(t, 1, list.Stats.ByStatus["completed"])
+	require.Equal(t, 1, list.Stats.ByPriority["low"])
+
+	unblockedRaw, err := server.handleTasks(ctx, map[string]interface{}{
+		"unblocked_only": true,
+		"limit":          10,
+	})
+	require.NoError(t, err)
+	unblocked := unblockedRaw.(TasksResult)
+	require.NotEmpty(t, unblocked.Tasks)
+	for _, task := range unblocked.Tasks {
+		require.NotEqual(t, mainTask.Task.ID, task.ID)
+	}
+
+	deletedRaw, err := server.handleTask(ctx, map[string]interface{}{
+		"id":     dependency.Task.ID,
+		"delete": true,
+	})
+	require.NoError(t, err)
+	deleted := deletedRaw.(TaskResult)
+	require.Equal(t, dependency.Task.ID, deleted.Task.ID)
+	require.Equal(t, "Deleted 1 task(s).", deleted.NextAction)
+
+	toggleTask := makeTask(map[string]interface{}{
+		"title": "Toggle Task",
+	})
+	toggledRaw, err := server.handleTask(ctx, map[string]interface{}{
+		"id": toggleTask.Task.ID,
+	})
+	require.NoError(t, err)
+	toggled := toggledRaw.(TaskResult)
+	require.Equal(t, "active", toggled.Task.Properties["status"])
+
+	toggledRaw, err = server.handleTask(ctx, map[string]interface{}{
+		"id": toggleTask.Task.ID,
+	})
+	require.NoError(t, err)
+	toggled = toggledRaw.(TaskResult)
+	require.Equal(t, "completed", toggled.Task.Properties["status"])
+
+	fallbackServer := NewServer(nil, nil)
+	fallbackRaw, err := fallbackServer.handleTask(ctx, map[string]interface{}{
+		"id":       "task-fallback",
+		"complete": true,
+	})
+	require.NoError(t, err)
+	fallback := fallbackRaw.(TaskResult)
+	require.Equal(t, "completed", fallback.Task.Properties["status"])
+
+	_, err = server.handleTask(ctx, map[string]interface{}{
+		"id": "missing-task",
+	})
+	require.ErrorContains(t, err, "task not found")
+
+	_, err = server.handleTask(ctx, map[string]interface{}{
+		"delete": true,
+	})
+	require.ErrorContains(t, err, "id is required for delete")
+}
+
+func TestTaskHasIncompleteDependencies(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	exec := db.GetCypherExecutor()
+	require.NotNil(t, exec)
+	ctx := context.Background()
+
+	createTask := func(title, status string) string {
+		result, err := exec.Execute(ctx,
+			"CREATE (t:Task {title: $title, status: $status}) RETURN elementId(t) AS id",
+			map[string]interface{}{"title": title, "status": status},
+		)
+		require.NoError(t, err)
+		id, _ := result.Rows[0][0].(string)
+		return id
+	}
+
+	blockedID := createTask("blocked", "pending")
+	depID := createTask("dependency", "active")
+	doneID := createTask("done", "completed")
+
+	_, err = exec.Execute(ctx,
+		"MATCH (a:Task), (b:Task) WHERE elementId(a) = $a AND elementId(b) = $b CREATE (a)-[:DEPENDS_ON]->(b)",
+		map[string]interface{}{"a": blockedID, "b": depID},
+	)
+	require.NoError(t, err)
+
+	blocked, err := taskHasIncompleteDependencies(ctx, exec, blockedID)
+	require.NoError(t, err)
+	require.True(t, blocked)
+
+	blocked, err = taskHasIncompleteDependencies(ctx, exec, doneID)
+	require.NoError(t, err)
+	require.False(t, blocked)
+
+	blocked, err = taskHasIncompleteDependencies(ctx, nil, blockedID)
+	require.NoError(t, err)
+	require.False(t, blocked)
+
+	blocked, err = taskHasIncompleteDependencies(ctx, exec, "")
+	require.NoError(t, err)
+	require.False(t, blocked)
 }
 
 func TestHandleTasks_NoDB(t *testing.T) {
@@ -575,6 +1486,13 @@ func TestHasAnyTag(t *testing.T) {
 	if hasAnyTag([]string{"a", "b"}, []string{"x", "y"}) {
 		t.Error("Expected no match")
 	}
+}
+
+func TestHasAllTags(t *testing.T) {
+	require.True(t, hasAllTags([]string{"a", "b"}, nil))
+	require.False(t, hasAllTags(nil, []string{"a"}))
+	require.True(t, hasAllTags([]string{"a", "b", "c"}, []string{"a", "c"}))
+	require.False(t, hasAllTags([]string{"a", "b"}, []string{"a", "z"}))
 }
 
 // =============================================================================

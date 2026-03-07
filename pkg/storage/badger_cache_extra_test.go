@@ -51,6 +51,15 @@ func TestBadgerCache_NodeCreateUpdateDelete_Extra(t *testing.T) {
 	assert.EqualValues(t, 0, b.nodeCount.Load())
 	_, ok = b.nodeCache[n.ID]
 	assert.False(t, ok)
+
+	b.edgeCount.Store(3)
+	b.edgeTypeCache["knows"] = []*Edge{{ID: EdgeID(prefixTestID("edge-del")), Type: "KNOWS"}}
+	b.cacheOnNodeCreated(&Node{ID: NodeID(prefixTestID("tenant_cache:n2")), Labels: []string{"Person"}, Properties: map[string]interface{}{}})
+	beforeEdges := b.edgeCount.Load()
+	b.cacheOnNodeDeleted(NodeID(prefixTestID("tenant_cache:n2")), 2)
+	assert.EqualValues(t, beforeEdges-2, b.edgeCount.Load())
+	_, ok = b.edgeTypeCache["knows"]
+	assert.False(t, ok)
 }
 
 func TestBadgerCache_EdgeCreateUpdateDelete_Extra(t *testing.T) {

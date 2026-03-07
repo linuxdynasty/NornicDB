@@ -53,6 +53,9 @@ func (a *APOCStorageAdapter) UpdateNode(id int64, properties map[string]interfac
 	if err != nil {
 		return apocstorage.ErrNodeNotFound
 	}
+	if node.Properties == nil {
+		node.Properties = make(map[string]interface{})
+	}
 	for k, v := range properties {
 		node.Properties[k] = v
 	}
@@ -136,6 +139,9 @@ func (a *APOCStorageAdapter) UpdateRelationship(id int64, properties map[string]
 	edge, err := a.engine.GetEdge(edgeID)
 	if err != nil {
 		return apocstorage.ErrRelationshipNotFound
+	}
+	if edge.Properties == nil {
+		edge.Properties = make(map[string]interface{})
 	}
 	for k, v := range properties {
 		edge.Properties[k] = v

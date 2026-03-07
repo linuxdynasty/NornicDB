@@ -188,3 +188,62 @@ func TestBadgerEngine_GetSchema(t *testing.T) {
 	sm := b.GetSchema()
 	assert.NotNil(t, sm)
 }
+
+func TestBadgerEngine_EventSetterCallbacks(t *testing.T) {
+	b := createTestBadgerEngine(t)
+
+	nodeUpdated := func(n *Node) {}
+	edgeCreated := func(e *Edge) {}
+	edgeUpdated := func(e *Edge) {}
+	edgeDeleted := func(id EdgeID) {}
+
+	b.OnNodeUpdated(nodeUpdated)
+	b.OnEdgeCreated(edgeCreated)
+	b.OnEdgeUpdated(edgeUpdated)
+	b.OnEdgeDeleted(edgeDeleted)
+
+	b.callbackMu.RLock()
+	defer b.callbackMu.RUnlock()
+	assert.NotNil(t, b.onNodeUpdated)
+	assert.NotNil(t, b.onEdgeCreated)
+	assert.NotNil(t, b.onEdgeUpdated)
+	assert.NotNil(t, b.onEdgeDeleted)
+}
+
+func TestBadgerEngine_LabelBatchAndStatsHelpers(t *testing.T) {
+	b := createTestBadgerEngine(t)
+	_, _ = b.CreateNode(&Node{ID: NodeID(prefixTestID("lbl-1")), Labels: []string{"Person"}})
+	_, _ = b.CreateNode(&Node{ID: NodeID(prefixTestID("lbl-2")), Labels: []string{"Other"}})
+
+	result, err := b.HasLabelBatch([]NodeID{
+		NodeID(prefixTestID("lbl-1")),
+		NodeID(prefixTestID("lbl-2")),
+		"",
+		NodeID(prefixTestID("missing")),
+	}, "Person")
+	require.NoError(t, err)
+	assert.Equal(t, map[NodeID]bool{
+		NodeID(prefixTestID("lbl-1")): true,
+	}, result)
+
+	result, err = b.HasLabelBatch(nil, "Person")
+	require.NoError(t, err)
+	assert.Empty(t, result)
+
+	b.InvalidatePendingEmbeddingsIndex()
+
+	assert.True(t, hasPrefix([]byte("tenant_a:node"), []byte("tenant_a:")))
+	assert.False(t, hasPrefix([]byte("tenant_a:node"), []byte("tenant_b:")))
+	assert.True(t, hasPrefix([]byte("x"), nil))
+}
+
+func TestBadgerEngine_ListNamespaces(t *testing.T) {
+	b := createTestBadgerEngine(t)
+	_, _ = b.CreateNode(&Node{ID: "tenant_a:n1", Labels: []string{"Person"}})
+	_, _ = b.CreateNode(&Node{ID: "tenant_b:n2", Labels: []string{"Person"}})
+	_ = b.CreateEdge(&Edge{ID: "tenant_b:e1", StartNode: "tenant_b:n2", EndNode: "tenant_b:n2", Type: "SELF"})
+
+	namespaces := b.ListNamespaces()
+	assert.Contains(t, namespaces, "tenant_a")
+	assert.Contains(t, namespaces, "tenant_b")
+}

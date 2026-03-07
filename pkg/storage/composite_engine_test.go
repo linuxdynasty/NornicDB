@@ -2,11 +2,75 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type compositeStreamEngine struct {
+	Engine
+	streamNodeErr error
+	streamEdgeErr error
+	chunkErr      error
+}
+
+func (e *compositeStreamEngine) StreamNodes(_ context.Context, fn func(node *Node) error) error {
+	if e.streamNodeErr != nil {
+		return e.streamNodeErr
+	}
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *compositeStreamEngine) StreamEdges(_ context.Context, fn func(edge *Edge) error) error {
+	if e.streamEdgeErr != nil {
+		return e.streamEdgeErr
+	}
+	edges, err := e.Engine.AllEdges()
+	if err != nil {
+		return err
+	}
+	for _, edge := range edges {
+		if err := fn(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *compositeStreamEngine) StreamNodeChunks(_ context.Context, chunkSize int, fn func(nodes []*Node) error) error {
+	if e.chunkErr != nil {
+		return e.chunkErr
+	}
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for i := 0; i < len(nodes); i += chunkSize {
+		end := i + chunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := fn(nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func TestCompositeEngine_RoutingSetters(t *testing.T) {
 	engine1 := NewMemoryEngine()
@@ -68,6 +132,170 @@ func TestCompositeEngine_StreamingAPIs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, chunkCount)
+}
+
+func TestCompositeEngine_StreamingFallbackAndErrors(t *testing.T) {
+	t.Run("streaming engines propagate wrapped errors", func(t *testing.T) {
+		base1 := NewMemoryEngine()
+		base2 := NewMemoryEngine()
+		t.Cleanup(func() { _ = base1.Close() })
+		t.Cleanup(func() { _ = base2.Close() })
+		engine1 := &compositeStreamEngine{Engine: base1}
+		engine2 := &compositeStreamEngine{Engine: base2}
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine1, "db2": engine2},
+			map[string]string{"db1": "db1", "db2": "db2"},
+			map[string]string{"db1": "read_write", "db2": "read_write"},
+		)
+
+		_, err := base1.CreateNode(&Node{ID: NodeID(prefixTestID("stream-n1")), Labels: []string{"A"}})
+		require.NoError(t, err)
+		_, err = base1.CreateNode(&Node{ID: NodeID(prefixTestID("stream-n2")), Labels: []string{"A"}})
+		require.NoError(t, err)
+		require.NoError(t, base1.CreateEdge(&Edge{ID: EdgeID(prefixTestID("stream-e1")), StartNode: NodeID(prefixTestID("stream-n1")), EndNode: NodeID(prefixTestID("stream-n2")), Type: "REL"}))
+
+		errBoom := errors.New("node callback failed")
+		err = composite.StreamNodes(context.Background(), func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("edge callback failed")
+		err = composite.StreamEdges(context.Background(), func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("chunk callback failed")
+		err = composite.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		engine1.streamNodeErr = errors.New("stream nodes failed")
+		err = composite.StreamNodes(context.Background(), func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "error streaming from constituent 'db1'")
+
+		engine1.streamNodeErr = nil
+		engine1.streamEdgeErr = errors.New("stream edges failed")
+		err = composite.StreamEdges(context.Background(), func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "error streaming from constituent 'db1'")
+
+		engine1.streamEdgeErr = nil
+		engine1.chunkErr = errors.New("stream chunks failed")
+		err = composite.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return nil })
+		require.ErrorContains(t, err, "error streaming from constituent 'db1'")
+	})
+
+	t.Run("fallback engines use allnodes and alledges", func(t *testing.T) {
+		base1 := NewMemoryEngine()
+		base2 := NewMemoryEngine()
+		t.Cleanup(func() { _ = base1.Close() })
+		t.Cleanup(func() { _ = base2.Close() })
+		engine1 := &nonStreamingCountEngine{Engine: base1}
+		engine2 := &nonStreamingCountEngine{Engine: base2}
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine1, "db2": engine2},
+			map[string]string{"db1": "db1", "db2": "db2"},
+			map[string]string{"db1": "read_write", "db2": "read_write"},
+		)
+
+		_, err := base1.CreateNode(&Node{ID: NodeID(prefixTestID("fallback-n1")), Labels: []string{"A"}})
+		require.NoError(t, err)
+		_, err = base2.CreateNode(&Node{ID: NodeID(prefixTestID("fallback-n2")), Labels: []string{"B"}})
+		require.NoError(t, err)
+		require.NoError(t, base1.CreateEdge(&Edge{ID: EdgeID(prefixTestID("fallback-e1")), StartNode: NodeID(prefixTestID("fallback-n1")), EndNode: NodeID(prefixTestID("fallback-n1")), Type: "REL"}))
+		require.NoError(t, base2.CreateEdge(&Edge{ID: EdgeID(prefixTestID("fallback-e2")), StartNode: NodeID(prefixTestID("fallback-n2")), EndNode: NodeID(prefixTestID("fallback-n2")), Type: "REL"}))
+
+		var nodeCount int
+		err = composite.StreamNodes(context.Background(), func(node *Node) error {
+			nodeCount++
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, nodeCount)
+
+		var edgeCount int
+		err = composite.StreamEdges(context.Background(), func(edge *Edge) error {
+			edgeCount++
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, edgeCount)
+
+		var chunkCount int
+		err = composite.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error {
+			chunkCount += len(nodes)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, chunkCount)
+
+		errBoom := errors.New("fallback node callback failed")
+		err = composite.StreamNodes(context.Background(), func(node *Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("fallback edge callback failed")
+		err = composite.StreamEdges(context.Background(), func(edge *Edge) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		errBoom = errors.New("fallback chunk callback failed")
+		err = composite.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return errBoom })
+		require.ErrorIs(t, err, errBoom)
+
+		engine1.allNodesErr = errors.New("all nodes failed")
+		err = composite.StreamNodes(context.Background(), func(node *Node) error { return nil })
+		require.ErrorContains(t, err, "error querying constituent 'db1'")
+
+		engine1.allNodesErr = nil
+		engine1.allEdgesErr = errors.New("all edges failed")
+		err = composite.StreamEdges(context.Background(), func(edge *Edge) error { return nil })
+		require.ErrorContains(t, err, "error querying constituent 'db1'")
+
+		engine1.allEdgesErr = nil
+		engine1.allNodesErr = errors.New("chunk nodes failed")
+		err = composite.StreamNodeChunks(context.Background(), 1, func(nodes []*Node) error { return nil })
+		require.ErrorContains(t, err, "error querying constituent 'db1'")
+	})
+}
+
+func TestCompositeEngine_FlushAsyncEngine(t *testing.T) {
+	composite := NewCompositeEngine(map[string]Engine{}, map[string]string{}, map[string]string{})
+
+	t.Run("no-op for non async engine", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		defer engine.Close()
+		composite.flushAsyncEngine(engine)
+	})
+
+	t.Run("flushes direct async engine", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		defer engine.Close()
+		async := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: time.Hour})
+		defer async.Close()
+
+		_, err := async.CreateNode(&Node{ID: NodeID(prefixTestID("flush-async")), Labels: []string{"Doc"}})
+		require.NoError(t, err)
+		require.True(t, async.HasPendingWrites())
+
+		composite.flushAsyncEngine(async)
+
+		assert.False(t, async.HasPendingWrites())
+		_, err = engine.GetNode(NodeID(prefixTestID("flush-async")))
+		require.NoError(t, err)
+	})
+
+	t.Run("flushes async engine wrapped by namespaced engine", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		defer engine.Close()
+		async := NewAsyncEngine(engine, &AsyncEngineConfig{FlushInterval: time.Hour})
+		defer async.Close()
+		namespaced := NewNamespacedEngine(async, "tenant_a")
+
+		_, err := namespaced.CreateNode(&Node{ID: "flush-ns", Labels: []string{"Doc"}})
+		require.NoError(t, err)
+		require.True(t, async.HasPendingWrites())
+
+		composite.flushAsyncEngine(namespaced)
+
+		assert.False(t, async.HasPendingWrites())
+		_, err = engine.GetNode("tenant_a:flush-ns")
+		require.NoError(t, err)
+	})
 }
 
 func TestCompositeEngine_ReadWriteSelectorsAndDeleteByPrefix(t *testing.T) {
@@ -218,6 +446,94 @@ func TestCompositeEngine_CreateEdge(t *testing.T) {
 	assert.Equal(t, edge.ID, retrieved.ID)
 	assert.Equal(t, edge.StartNode, retrieved.StartNode)
 	assert.Equal(t, edge.EndNode, retrieved.EndNode)
+}
+
+func TestCompositeEngine_CreateEdge_ValidationPaths(t *testing.T) {
+	t.Run("rejects nil edge and no writable constituents", func(t *testing.T) {
+		engine := NewMemoryEngine()
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine},
+			map[string]string{"db1": "db1"},
+			map[string]string{"db1": "read"},
+		)
+
+		err := composite.CreateEdge(nil)
+		require.ErrorContains(t, err, "edge cannot be nil")
+
+		err = composite.CreateEdge(&Edge{ID: EdgeID(prefixTestID("edge-no-write")), StartNode: NodeID(prefixTestID("n1")), EndNode: NodeID(prefixTestID("n2")), Type: "REL"})
+		require.ErrorContains(t, err, "no writable constituents available")
+	})
+
+	t.Run("returns not found when endpoints do not exist anywhere", func(t *testing.T) {
+		engine1 := NewMemoryEngine()
+		engine2 := NewMemoryEngine()
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine1, "db2": engine2},
+			map[string]string{"db1": "db1", "db2": "db2"},
+			map[string]string{"db1": "read_write", "db2": "read_write"},
+		)
+
+		err := composite.CreateEdge(&Edge{
+			ID:        EdgeID(prefixTestID("missing-edge")),
+			StartNode: NodeID(prefixTestID("missing-1")),
+			EndNode:   NodeID(prefixTestID("missing-2")),
+			Type:      "REL",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "start node not found in any constituent")
+	})
+
+	t.Run("uses transaction state when both nodes map to same namespaced constituent", func(t *testing.T) {
+		base1 := NewMemoryEngine()
+		base2 := NewMemoryEngine()
+		t.Cleanup(func() { _ = base1.Close() })
+		t.Cleanup(func() { _ = base2.Close() })
+		engine1 := NewNamespacedEngine(base1, "db1")
+		engine2 := NewNamespacedEngine(base2, "db2")
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine1, "db2": engine2},
+			map[string]string{"db1": "db1", "db2": "db2"},
+			map[string]string{"db1": "read_write", "db2": "read_write"},
+		)
+
+		_, err := engine1.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+		_, err = engine1.CreateNode(&Node{ID: "n2", Labels: []string{"Person"}})
+		require.NoError(t, err)
+
+		composite.mu.Lock()
+		composite.nodeToConstituent["db1:n1"] = "db1"
+		composite.nodeToConstituent["db1:n2"] = "db1"
+		composite.mu.Unlock()
+
+		err = composite.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"})
+		require.NoError(t, err)
+
+		edge, err := engine1.GetEdge("e1")
+		require.NoError(t, err)
+		assert.Equal(t, EdgeID("e1"), edge.ID)
+	})
+
+	t.Run("returns read-only constituent error when start node only exists there", func(t *testing.T) {
+		base1 := NewMemoryEngine()
+		base2 := NewMemoryEngine()
+		t.Cleanup(func() { _ = base1.Close() })
+		t.Cleanup(func() { _ = base2.Close() })
+		engine1 := NewNamespacedEngine(base1, "db1")
+		engine2 := NewNamespacedEngine(base2, "db2")
+		composite := NewCompositeEngine(
+			map[string]Engine{"db1": engine1, "db2": engine2},
+			map[string]string{"db1": "db1", "db2": "db2"},
+			map[string]string{"db1": "read", "db2": "read_write"},
+		)
+
+		_, err := engine1.CreateNode(&Node{ID: "n1", Labels: []string{"Person"}})
+		require.NoError(t, err)
+
+		err = composite.CreateEdge(&Edge{ID: "e-readonly", StartNode: "n1", EndNode: "missing", Type: "KNOWS"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "start node found in read-only constituent 'db1'")
+	})
 }
 
 func TestCompositeEngine_BulkCreateNodes(t *testing.T) {
@@ -1470,6 +1786,42 @@ func TestCompositeEngine_routeWrite_PropertiesWithoutDatabaseID(t *testing.T) {
 	}
 	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
+}
+
+func TestCompositeEngine_hashValue(t *testing.T) {
+	assert.Equal(t, hashString("abc"), hashValue("abc"))
+	assert.Equal(t, 42, hashValue(int64(42)))
+	assert.Equal(t, 42, hashValue(int64(-42)))
+	assert.Equal(t, 7, hashValue(7))
+	assert.Equal(t, 7, hashValue(-7))
+	assert.Equal(t, 9, hashValue(int32(9)))
+	assert.Equal(t, 9, hashValue(int32(-9)))
+	assert.Equal(t, hashString("true"), hashValue(true))
+}
+
+func TestCompositeEngine_routeWrite_DirectBranches(t *testing.T) {
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": NewMemoryEngine(), "db2": NewMemoryEngine()},
+		map[string]string{"db1": "primary", "db2": "analytics"},
+		map[string]string{"db1": "read_write", "db2": "read_write"},
+	)
+	composite.SetLabelRouting("Person", []string{"db2"})
+	composite.SetPropertyRouting("tenant", "t1", "db1")
+	composite.SetPropertyDefault("tenant", "db2")
+
+	assert.Equal(t, "", composite.routeWrite("create", nil, nil, nil))
+	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"database_id": "db1"}, []string{"db1", "db2"}))
+	assert.Equal(t, "db2", composite.routeWrite("create", nil, map[string]interface{}{"database_id": "analytics"}, []string{"db1", "db2"}))
+	assert.Equal(t, "db2", composite.routeWrite("create", []string{"Person"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "db1", composite.routeWrite("create", []string{"db1"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "t1"}, []string{"db1", "db2"}))
+	assert.Equal(t, "db2", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "unknown"}, []string{"db1", "db2"}))
+
+	expectedHashRoute := []string{"db1", "db2"}[hashValue(int32(3))%2]
+	assert.Equal(t, expectedHashRoute, composite.routeWrite("create", nil, map[string]interface{}{"database_id": int32(3)}, []string{"db1", "db2"}))
+
+	assert.Equal(t, []string{"db1", "db2"}[hashString("Other")%2], composite.routeWrite("create", []string{"Other"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"other": "value"}, []string{"db1", "db2"}))
 }
 
 func TestCompositeEngine_CreateNode_NoWritableConstituents(t *testing.T) {
