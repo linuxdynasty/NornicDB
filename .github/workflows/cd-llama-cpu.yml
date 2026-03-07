@@ -71,6 +71,9 @@ jobs:
             echo "Failed to determine LLAMA_VERSION from Makefile" >&2
             exit 1
           fi
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            VERSION_TAG="${LLAMA_VERSION}"
+          fi
           echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
           echo "llama_version=${LLAMA_VERSION}" >> "$GITHUB_OUTPUT"
