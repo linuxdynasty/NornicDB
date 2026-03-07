@@ -6,7 +6,6 @@ on:
       - "main"
     paths:
       - "docker/Dockerfile.llama-cuda"
-      - "Makefile"
   workflow_dispatch:
     inputs:
       source_ref:

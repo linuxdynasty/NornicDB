@@ -6,7 +6,6 @@ on:
       - "main"
     paths:
       - "docker/Dockerfile.llama-cpu"
-      - "Makefile"
   workflow_dispatch:
     inputs:
       source_ref:
