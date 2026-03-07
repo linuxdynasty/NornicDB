@@ -243,7 +243,7 @@ func TestBadgerEngine_validateBulkNodeConstraints(t *testing.T) {
 		assert.Equal(t, ConstraintUnique, violation.Type)
 
 		err = b.validateBulkNodeConstraints([]*Node{
-			{ID: NodeID(prefixTestID("u3")), Labels: []string{"User"}, Properties: map[string]any{"tenant": "t1"}},
+			{ID: NodeID(prefixTestID("u3")), Labels: []string{"User"}, Properties: map[string]any{"tenant": "t1", "name": "Alice"}},
 		})
 		require.ErrorAs(t, err, &violation)
 		assert.Equal(t, ConstraintNodeKey, violation.Type)
