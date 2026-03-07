@@ -1,0 +1,230 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Existing branch, tag, or commit SHA to build from and use as the Docker tag"
+        required: true
+        default: "main"
+        type: string
+
+env:
+  DOCKERHUB_USERNAME: timothyswt
+
+jobs:
+  meta:
+    name: Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      docker_repo: ${{ steps.meta.outputs.docker_repo }}
+      llama_cuda_image: ${{ steps.meta.outputs.llama_cuda_image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION_INPUT="${{ inputs.ref }}"
+          else
+            VERSION_INPUT="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${VERSION_INPUT}" >> "$GITHUB_OUTPUT"
+          echo "docker_repo=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
+          echo "llama_cuda_image=${DOCKERHUB_USERNAME}/llama-cuda-libs:${VERSION_INPUT}" >> "$GITHUB_OUTPUT"
+
+  build-general-images:
+    name: Build and Push ${{ matrix.image_name }}
+    runs-on: ubuntu-latest
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: nornicdb-arm64-metal
+            dockerfile: docker/Dockerfile.arm64-metal
+            image_repo: nornicdb-arm64-metal
+            platforms: linux/arm64
+            build_args: ""
+          - image_name: nornicdb-arm64-metal-bge
+            dockerfile: docker/Dockerfile.arm64-metal
+            image_repo: nornicdb-arm64-metal-bge
+            platforms: linux/arm64
+            build_args: |
+              EMBED_MODEL=true
+          - image_name: nornicdb-arm64-metal-bge-heimdall
+            dockerfile: docker/Dockerfile.arm64-metal-heimdall
+            image_repo: nornicdb-arm64-metal-bge-heimdall
+            platforms: linux/arm64
+            build_args: ""
+          - image_name: nornicdb-arm64-metal-headless
+            dockerfile: docker/Dockerfile.arm64-metal
+            image_repo: nornicdb-arm64-metal-headless
+            platforms: linux/arm64
+            build_args: |
+              HEADLESS=true
+          - image_name: nornicdb-amd64-cpu
+            dockerfile: docker/Dockerfile.amd64-cpu
+            image_repo: nornicdb-amd64-cpu
+            platforms: linux/amd64
+            build_args: ""
+          - image_name: nornicdb-amd64-cpu-headless
+            dockerfile: docker/Dockerfile.amd64-cpu
+            image_repo: nornicdb-amd64-cpu-headless
+            platforms: linux/amd64
+            build_args: |
+              HEADLESS=true
+          - image_name: nornicdb-cpu-bge
+            dockerfile: docker/Dockerfile.cpu-bge
+            image_repo: nornicdb-cpu-bge
+            platforms: linux/amd64,linux/arm64
+            build_args: ""
+          - image_name: nornicdb-cpu-bge-headless
+            dockerfile: docker/Dockerfile.cpu-bge
+            image_repo: nornicdb-cpu-bge-headless
+            platforms: linux/amd64,linux/arm64
+            build_args: |
+              HEADLESS=true
+          - image_name: nornicdb-amd64-vulkan
+            dockerfile: docker/Dockerfile.amd64-vulkan
+            image_repo: nornicdb-amd64-vulkan
+            platforms: linux/amd64
+            build_args: ""
+          - image_name: nornicdb-amd64-vulkan-bge
+            dockerfile: docker/Dockerfile.amd64-vulkan
+            image_repo: nornicdb-amd64-vulkan-bge
+            platforms: linux/amd64
+            build_args: |
+              EMBED_MODEL=true
+          - image_name: nornicdb-amd64-vulkan-headless
+            dockerfile: docker/Dockerfile.amd64-vulkan
+            image_repo: nornicdb-amd64-vulkan-headless
+            platforms: linux/amd64
+            build_args: |
+              HEADLESS=true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          provenance: false
+          tags: ${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}:${{ needs.meta.outputs.version }}
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-llama-cuda-libs:
+    name: Build and Push llama-cuda-libs
+    runs-on: ubuntu-latest
+    needs: meta
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Build and push CUDA prerequisite image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.llama-cuda
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ needs.meta.outputs.llama_cuda_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-cuda-images:
+    name: Build and Push ${{ matrix.image_name }}
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - build-llama-cuda-libs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: nornicdb-amd64-cuda
+            dockerfile: docker/Dockerfile.amd64-cuda
+            image_repo: nornicdb-amd64-cuda
+            build_args: ""
+          - image_name: nornicdb-amd64-cuda-bge
+            dockerfile: docker/Dockerfile.amd64-cuda
+            image_repo: nornicdb-amd64-cuda-bge
+            build_args: |
+              EMBED_MODEL=true
+          - image_name: nornicdb-amd64-cuda-bge-heimdall
+            dockerfile: docker/Dockerfile.amd64-cuda-heimdall
+            image_repo: nornicdb-amd64-cuda-bge-heimdall
+            build_args: ""
+          - image_name: nornicdb-amd64-cuda-headless
+            dockerfile: docker/Dockerfile.amd64-cuda
+            image_repo: nornicdb-amd64-cuda-headless
+            build_args: |
+              HEADLESS=true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Build and push CUDA image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ needs.meta.outputs.docker_repo }}/${{ matrix.image_repo }}:${{ needs.meta.outputs.version }}
+          build-args: |
+            LLAMA_CUDA_IMAGE=${{ needs.meta.outputs.llama_cuda_image }}
+            ${{ matrix.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

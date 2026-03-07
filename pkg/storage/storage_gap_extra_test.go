@@ -838,3 +838,137 @@ func TestSeparateEmbeddingChunkHelpers(t *testing.T) {
 		require.Equal(t, 0, countChunks(t, engine, nodeID))
 	})
 }
+
+func TestBadgerConstraintValidationHelpers(t *testing.T) {
+	t.Run("compareValues handles numeric and typed comparisons", func(t *testing.T) {
+		assert.True(t, compareValues(int(3), int(3)))
+		assert.True(t, compareValues(int64(4), int64(4)))
+		assert.True(t, compareValues(float64(1.5), float64(1.5)))
+		assert.True(t, compareValues("x", "x"))
+		assert.True(t, compareValues(true, true))
+		assert.True(t, compareValues(int(3), int64(3)))
+		assert.True(t, compareValues(float64(3), int64(3)))
+		assert.False(t, compareValues("x", "y"))
+	})
+
+	t.Run("validateNodeConstraintsInTxn covers nil malformed and violation branches", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		require.NoError(t, engine.GetSchemaForNamespace("test").AddPropertyTypeConstraint("user_age_type", "User", "age", PropertyTypeInteger))
+
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			schema := NewSchemaManager()
+			require.NoError(t, schema.AddConstraint(Constraint{
+				Name:       "ignored_multi_unique",
+				Type:       ConstraintUnique,
+				Label:      "User",
+				Properties: []string{"a", "b"},
+			}))
+			require.NoError(t, engine.validateNodeConstraintsInTxn(txn, nil, schema, "test", ""))
+			require.NoError(t, engine.validateNodeConstraintsInTxn(txn, &Node{ID: "test:u0", Labels: []string{"User"}}, nil, "test", ""))
+
+			err := engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u1",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"name": "ok"},
+			}, schema, "test", "")
+			require.NoError(t, err)
+			return nil
+		}))
+
+		_, err := engine.CreateNode(&Node{
+			ID:         "test:existing-user",
+			Labels:     []string{"User"},
+			Properties: map[string]any{"email": "dup@example.com", "tenant": "t1", "username": "alice", "name": "Alice", "account": "acct", "from": time.Date(2026, 3, 7, 10, 0, 0, 0, time.UTC), "to": time.Date(2026, 3, 7, 11, 0, 0, 0, time.UTC), "age": int64(30)},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			schema := NewSchemaManager()
+			require.NoError(t, schema.AddUniqueConstraint("user_email", "User", "email"))
+			require.NoError(t, schema.AddConstraint(Constraint{
+				Name:       "user_key",
+				Type:       ConstraintNodeKey,
+				Label:      "User",
+				Properties: []string{"tenant", "username"},
+			}))
+			require.NoError(t, schema.AddConstraint(Constraint{
+				Name:       "user_name_exists",
+				Type:       ConstraintExists,
+				Label:      "User",
+				Properties: []string{"name"},
+			}))
+			require.NoError(t, schema.AddConstraint(Constraint{
+				Name:       "user_temporal",
+				Type:       ConstraintTemporal,
+				Label:      "User",
+				Properties: []string{"account", "from", "to"},
+			}))
+			require.NoError(t, schema.AddPropertyTypeConstraint("user_age_type", "User", "age", PropertyTypeInteger))
+
+			err := engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u2",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "dup@example.com", "tenant": "t2", "username": "bob", "name": "Bob", "account": "acct-2", "from": time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), "to": time.Date(2026, 3, 7, 13, 0, 0, 0, time.UTC), "age": int64(31)},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u3",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "other@example.com", "tenant": "t1", "name": "Bob", "account": "acct-3", "from": time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), "to": time.Date(2026, 3, 7, 13, 0, 0, 0, time.UTC), "age": int64(31)},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u4",
+				Labels:     []string{"User"},
+				Properties: nil,
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u5",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "other@example.com", "tenant": "t5", "username": "eve", "name": "Eve"},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u6",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "other@example.com", "tenant": "t6", "username": "mallory", "name": "Mallory", "account": "acct-6", "from": "bad", "to": time.Date(2026, 3, 7, 13, 0, 0, 0, time.UTC), "age": int64(31)},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u7",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "other@example.com", "tenant": "t7", "username": "trent", "name": "Trent", "account": "acct", "from": time.Date(2026, 3, 7, 10, 30, 0, 0, time.UTC), "to": time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), "age": int64(31)},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			err = engine.validateNodeConstraintsInTxn(txn, &Node{
+				ID:         "test:u8",
+				Labels:     []string{"User"},
+				Properties: map[string]any{"email": "other@example.com", "tenant": "t8", "username": "oscar", "name": "Oscar", "account": "acct-8", "from": time.Date(2026, 3, 7, 14, 0, 0, 0, time.UTC), "to": time.Date(2026, 3, 7, 15, 0, 0, 0, time.UTC), "age": "old"},
+			}, schema, "test", "")
+			require.Error(t, err)
+
+			return nil
+		}))
+	})
+
+	t.Run("encode and decode edge helpers validate payloads", func(t *testing.T) {
+		data, err := encodeEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL", Properties: map[string]any{"ok": "yes"}})
+		require.NoError(t, err)
+		edge, err := decodeEdge(data)
+		require.NoError(t, err)
+		assert.Equal(t, EdgeID("e1"), edge.ID)
+
+		_, err = encodeEdge(&Edge{ID: "e2", StartNode: "n1", EndNode: "n2", Type: "REL", Properties: map[string]any{"bad": func() {}}})
+		require.Error(t, err)
+
+		_, err = decodeEdge([]byte("not-an-edge"))
+		require.Error(t, err)
+	})
+}

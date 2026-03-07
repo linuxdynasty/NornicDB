@@ -89,24 +89,19 @@ COPY --from=builder /build/apoc/built-plugins /app/plugins/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
-# Model embedding: only copy when EMBED_MODEL=true (BGE + BGE-Reranker)
+# Model embedding: download during build when EMBED_MODEL=true.
 ARG EMBED_MODEL=false
 ARG HEADLESS=false
-RUN --mount=type=bind,source=models,target=/models,ro \
+ARG BGE_MODEL_URL=https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
+ARG BGE_RERANKER_URL=https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
+RUN \
     if [ "$EMBED_MODEL" = "true" ]; then \
-      if [ -f /models/bge-m3.gguf ]; then \
-        cp /models/bge-m3.gguf /app/models/ && \
-        echo "✓ Embedded bge-m3.gguf model ($(du -h /app/models/bge-m3.gguf | cut -f1))"; \
-      else \
-        echo "ERROR: EMBED_MODEL=true but models/bge-m3.gguf not found" && exit 1; \
-      fi && \
-      if [ -f /models/bge-reranker-v2-m3.gguf ]; then \
-        cp /models/bge-reranker-v2-m3.gguf /app/models/ && echo "✓ Embedded bge-reranker-v2-m3.gguf"; \
-      elif [ -f /models/bge-reranker-v2-m3-Q4_K_M.gguf ]; then \
-        cp /models/bge-reranker-v2-m3-Q4_K_M.gguf /app/models/bge-reranker-v2-m3.gguf && echo "✓ Embedded bge-reranker-v2-m3.gguf (from Q4_K_M)"; \
-      else \
-        echo "ERROR: EMBED_MODEL=true but models/bge-reranker-v2-m3.gguf (or Q4_K_M) not found" && exit 1; \
-      fi; \
+      echo "Downloading BGE-M3 model from Hugging Face..." && \
+      wget -q --show-progress -O /app/models/bge-m3.gguf "$BGE_MODEL_URL" && \
+      echo "✓ Downloaded bge-m3.gguf ($(du -h /app/models/bge-m3.gguf | cut -f1))" && \
+      echo "Downloading BGE reranker model from Hugging Face..." && \
+      wget -q --show-progress -O /app/models/bge-reranker-v2-m3.gguf "$BGE_RERANKER_URL" && \
+      echo "✓ Downloaded bge-reranker-v2-m3.gguf ($(du -h /app/models/bge-reranker-v2-m3.gguf | cut -f1))"; \
     else \
       echo "→ BYOM mode (no embedded model)"; \
     fi && \

@@ -128,21 +128,17 @@ COPY --from=builder /build/lib/llama/*.so /app/lib/llama/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
-# Model embedding: only copy when EMBED_MODEL=true
+# Model embedding: download during build when EMBED_MODEL=true.
 ARG EMBED_MODEL=false
 ARG HEADLESS=false
-RUN --mount=type=bind,source=models,target=/models,ro \
+ARG BGE_MODEL_URL=https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
+ARG QWEN_MODEL_URL=https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
+RUN \
     if [ "$EMBED_MODEL" = "true" ]; then \
-      if [ -f /models/bge-m3.gguf ]; then \
-        cp /models/bge-m3.gguf /app/models/ && \
-        echo "✓ Embedded bge-m3.gguf model ($(du -h /app/models/bge-m3.gguf | cut -f1))"; \
-      else \
-        echo "ERROR: EMBED_MODEL=true but models/bge-m3.gguf not found" && exit 1; \
-      fi && \
-      if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
-        cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
-        echo "✓ Embedded Heimdall model ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
-      fi; \
+      wget -q --show-progress -O /app/models/bge-m3.gguf "$BGE_MODEL_URL" && \
+      echo "✓ Downloaded bge-m3.gguf ($(du -h /app/models/bge-m3.gguf | cut -f1))" && \
+      wget -q --show-progress -O /app/models/qwen3-0.6b-instruct.gguf "$QWEN_MODEL_URL" && \
+      echo "✓ Downloaded Heimdall model ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
     else \
       echo "→ BYOM mode (no embedded model)"; \
     fi && \

@@ -116,22 +116,17 @@ COPY --from=builder /build/apoc/built-plugins /app/plugins/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
-# Always embed BGE + BGE-Reranker for this image variant (CPU + embeddings + reranker)
+# Always download and embed BGE + BGE-Reranker for this image variant.
 ARG HEADLESS=false
-RUN --mount=type=bind,source=models,target=/models,ro \
-    if [ -f /models/bge-m3.gguf ]; then \
-      cp /models/bge-m3.gguf /app/models/ && \
-      echo "✓ Embedded bge-m3.gguf model ($(du -h /app/models/bge-m3.gguf | cut -f1))"; \
-    else \
-      echo "ERROR: models/bge-m3.gguf not found - run 'make download-bge' first" && exit 1; \
-    fi && \
-    if [ -f /models/bge-reranker-v2-m3.gguf ]; then \
-      cp /models/bge-reranker-v2-m3.gguf /app/models/ && echo "✓ Embedded bge-reranker-v2-m3.gguf"; \
-    elif [ -f /models/bge-reranker-v2-m3-Q4_K_M.gguf ]; then \
-      cp /models/bge-reranker-v2-m3-Q4_K_M.gguf /app/models/bge-reranker-v2-m3.gguf && echo "✓ Embedded bge-reranker-v2-m3.gguf (from Q4_K_M)"; \
-    else \
-      echo "ERROR: models/bge-reranker-v2-m3.gguf or bge-reranker-v2-m3-Q4_K_M.gguf not found - run 'make download-bge-reranker'" && exit 1; \
-    fi && \
+ARG BGE_MODEL_URL=https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
+ARG BGE_RERANKER_URL=https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
+RUN \
+    echo "Downloading BGE-M3 model from Hugging Face..." && \
+    wget -q --show-progress -O /app/models/bge-m3.gguf "$BGE_MODEL_URL" && \
+    echo "✓ Downloaded bge-m3.gguf ($(du -h /app/models/bge-m3.gguf | cut -f1))" && \
+    echo "Downloading BGE reranker model from Hugging Face..." && \
+    wget -q --show-progress -O /app/models/bge-reranker-v2-m3.gguf "$BGE_RERANKER_URL" && \
+    echo "✓ Downloaded bge-reranker-v2-m3.gguf ($(du -h /app/models/bge-reranker-v2-m3.gguf | cut -f1))" && \
     if [ "$HEADLESS" = "true" ]; then \
       echo "✓ Headless mode enabled (no UI)"; \
     fi && \

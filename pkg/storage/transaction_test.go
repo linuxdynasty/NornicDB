@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewTransaction(t *testing.T) {
@@ -997,6 +998,74 @@ func TestTransaction_DeleteEdgesWithPrefixBuffered(t *testing.T) {
 		_, _, err = tx.deleteEdgesWithPrefixBuffered(outgoingIndexPrefix(nodeID))
 		if err == nil {
 			t.Fatal("expected corrupt edge payload error")
+		}
+	})
+}
+
+func TestTransaction_DeleteNodeBuffered(t *testing.T) {
+	t.Run("returns not found and buffers pending embedding cleanup for missing node", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		tx, err := engine.BeginTransaction()
+		if err != nil {
+			t.Fatalf("BeginTransaction failed: %v", err)
+		}
+		defer tx.Rollback()
+
+		count, ids, err := tx.deleteNodeBuffered(NodeID(prefixTestID("missing-node")), nil)
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+		if count != 0 || len(ids) != 0 {
+			t.Fatalf("unexpected delete result for missing node: count=%d ids=%v", count, ids)
+		}
+		if !tx.pendingDeletes[string(pendingEmbedKey(NodeID(prefixTestID("missing-node"))))] {
+			t.Fatal("expected pending embedding key cleanup to be buffered")
+		}
+	})
+
+	t.Run("uses provided old node and buffers node label and edge cleanup", func(t *testing.T) {
+		engine := createTestBadgerEngine(t)
+		nodeID := NodeID(prefixTestID("buffered-node"))
+		otherID := NodeID(prefixTestID("buffered-other"))
+		_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Person", "Employee"}})
+		if err != nil {
+			t.Fatalf("CreateNode failed: %v", err)
+		}
+		_, err = engine.CreateNode(&Node{ID: otherID, Labels: []string{"Person"}})
+		if err != nil {
+			t.Fatalf("CreateNode other failed: %v", err)
+		}
+		edge := &Edge{ID: EdgeID(prefixTestID("buffered-edge")), StartNode: nodeID, EndNode: otherID, Type: "KNOWS"}
+		if err := engine.CreateEdge(edge); err != nil {
+			t.Fatalf("CreateEdge failed: %v", err)
+		}
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			emb, err := encodeEmbedding([]float32{1, 2})
+			if err != nil {
+				return err
+			}
+			return txn.Set(embeddingKey(nodeID, 0), emb)
+		}))
+
+		tx, err := engine.BeginTransaction()
+		if err != nil {
+			t.Fatalf("BeginTransaction failed: %v", err)
+		}
+		defer tx.Rollback()
+
+		count, ids, err := tx.deleteNodeBuffered(nodeID, &Node{ID: nodeID, Labels: []string{"Person", "Employee"}})
+		if err != nil {
+			t.Fatalf("deleteNodeBuffered failed: %v", err)
+		}
+		if count != 1 || len(ids) != 1 || ids[0] != edge.ID {
+			t.Fatalf("unexpected edge cleanup result: count=%d ids=%v", count, ids)
+		}
+		if !tx.pendingDeletes[string(labelIndexKey("Person", nodeID))] ||
+			!tx.pendingDeletes[string(labelIndexKey("Employee", nodeID))] ||
+			!tx.pendingDeletes[string(nodeKey(nodeID))] ||
+			!tx.pendingDeletes[string(pendingEmbedKey(nodeID))] ||
+			!tx.pendingDeletes[string(embeddingKey(nodeID, 0))] {
+			t.Fatal("expected node, label, pending embedding, and embedding chunk deletes to be buffered")
 		}
 	})
 }
