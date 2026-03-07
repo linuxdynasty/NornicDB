@@ -66,3 +66,71 @@ func TestRoleStore_RenameRole(t *testing.T) {
 		t.Error("newname should exist after rename")
 	}
 }
+
+func TestRoleStore_ErrorAndLoadPaths(t *testing.T) {
+	ctx := context.Background()
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID(rolePrefix + "loadedrole"),
+		Labels: []string{roleLabel, roleSystems},
+	})
+	if err != nil {
+		t.Fatalf("create role node: %v", err)
+	}
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("system:bad-role-node"),
+		Labels: []string{roleLabel},
+	})
+	if err != nil {
+		t.Fatalf("create invalid role node: %v", err)
+	}
+
+	store := NewRoleStore(eng)
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !store.Exists("loadedrole") {
+		t.Fatalf("expected loaded role to exist")
+	}
+
+	if err := store.CreateRole(ctx, "   "); err != ErrInvalidRoleName {
+		t.Fatalf("expected ErrInvalidRoleName, got %v", err)
+	}
+	if err := store.CreateRole(ctx, "LoadedRole"); err != ErrRoleExists {
+		t.Fatalf("expected ErrRoleExists for duplicate role, got %v", err)
+	}
+	if err := store.CreateRole(ctx, "  MixedCase "); err != nil {
+		t.Fatalf("CreateRole normalized role: %v", err)
+	}
+	if !store.Exists("mixedcase") {
+		t.Fatalf("normalized role should exist")
+	}
+
+	if err := store.DeleteRole(ctx, "missing"); err != ErrRoleNotFound {
+		t.Fatalf("expected ErrRoleNotFound, got %v", err)
+	}
+
+	if err := store.RenameRole(ctx, "admin", "custom"); err != ErrCannotDeleteBuiltinRole {
+		t.Fatalf("expected built-in rename error, got %v", err)
+	}
+	if err := store.RenameRole(ctx, "mixedcase", "viewer"); err != ErrRoleExists {
+		t.Fatalf("expected ErrRoleExists for built-in rename target, got %v", err)
+	}
+	if err := store.RenameRole(ctx, "mixedcase", ""); err != ErrRoleExists {
+		t.Fatalf("expected ErrRoleExists for empty new name, got %v", err)
+	}
+	if err := store.RenameRole(ctx, "missing", "other"); err != ErrRoleNotFound {
+		t.Fatalf("expected ErrRoleNotFound, got %v", err)
+	}
+	if err := store.RenameRole(ctx, "mixedcase", "loadedrole"); err != ErrRoleExists {
+		t.Fatalf("expected ErrRoleExists for duplicate rename target, got %v", err)
+	}
+	if !store.Exists("  MIXEDCASE  ") {
+		t.Fatalf("Exists should normalize user-defined role names")
+	}
+	if !store.Exists("  ADMIN  ") {
+		t.Fatalf("Exists should recognize normalized built-in roles")
+	}
+}

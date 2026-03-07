@@ -167,6 +167,65 @@ func TestRoleEntitlementParsingHelpers(t *testing.T) {
 	}
 }
 
+func TestRoleEntitlementsStore_LoadAndUpdatePaths(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID(roleEntitlementPrefix + "loaded"),
+		Labels: []string{roleEntitlementLabel, roleEntitlementSystems},
+		Properties: map[string]any{
+			"entitlements": `["read"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create entitlement node: %v", err)
+	}
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("system:bad-entitlement"),
+		Labels: []string{roleEntitlementLabel},
+	})
+	if err != nil {
+		t.Fatalf("create invalid entitlement node: %v", err)
+	}
+
+	store := NewRoleEntitlementsStore(eng)
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("load entitlements: %v", err)
+	}
+	if !reflect.DeepEqual(store.Get("loaded"), []string{"read"}) {
+		t.Fatalf("unexpected loaded entitlements: %#v", store.Get("loaded"))
+	}
+
+	if err := store.Set(ctx, "ephemeral", nil); err != nil {
+		t.Fatalf("empty set on missing role should no-op: %v", err)
+	}
+
+	if err := store.Set(ctx, "loaded", []string{"write"}); err != nil {
+		t.Fatalf("update loaded role entitlements: %v", err)
+	}
+	if !reflect.DeepEqual(store.Get("loaded"), []string{"write"}) {
+		t.Fatalf("expected updated entitlements, got %#v", store.Get("loaded"))
+	}
+
+	node, err := eng.GetNode(storage.NodeID(roleEntitlementPrefix + "loaded"))
+	if err != nil {
+		t.Fatalf("get loaded entitlement node: %v", err)
+	}
+	createdAt := node.CreatedAt
+	if err := store.Set(ctx, "loaded", []string{"read", "write"}); err != nil {
+		t.Fatalf("second entitlement update failed: %v", err)
+	}
+	node2, err := eng.GetNode(storage.NodeID(roleEntitlementPrefix + "loaded"))
+	if err != nil {
+		t.Fatalf("get updated entitlement node: %v", err)
+	}
+	if !node2.CreatedAt.Equal(createdAt) {
+		t.Fatalf("Set should preserve CreatedAt on update")
+	}
+}
+
 func TestPrivilegesStore_SaveLoadResolveAndPutMatrix(t *testing.T) {
 	eng := storage.NewMemoryEngine()
 	defer eng.Close()
@@ -235,5 +294,68 @@ func TestPrivilegesParsingHelpers(t *testing.T) {
 	}
 	if got := privFromProperties(map[string]any{"read": float64(0), "write": float64(1)}); got.Read || !got.Write {
 		t.Fatalf("unexpected numeric property conversion: %#v", got)
+	}
+}
+
+func TestPrivilegesStore_LoadAndUpdatePaths(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID(dbPrivPrefix + "loaded:neo4j"),
+		Labels: []string{dbPrivLabel, dbPrivSystems},
+		Properties: map[string]any{
+			"read":  true,
+			"write": false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create privilege node: %v", err)
+	}
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("system:bad-privilege"),
+		Labels: []string{dbPrivLabel},
+	})
+	if err != nil {
+		t.Fatalf("create invalid privilege node: %v", err)
+	}
+
+	store := NewPrivilegesStore(eng)
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("load privileges: %v", err)
+	}
+	if got := store.Resolve([]string{"loaded"}, "neo4j"); !got.Read || got.Write {
+		t.Fatalf("unexpected loaded privilege resolution: %#v", got)
+	}
+
+	if err := store.SavePrivilege(ctx, " Loaded ", "neo4j", true, true); err != nil {
+		t.Fatalf("update privilege: %v", err)
+	}
+	if got := store.Resolve([]string{"loaded"}, "neo4j"); !got.Read || !got.Write {
+		t.Fatalf("expected updated privilege resolution, got %#v", got)
+	}
+
+	node, err := eng.GetNode(storage.NodeID(dbPrivPrefix + "loaded:neo4j"))
+	if err != nil {
+		t.Fatalf("get loaded privilege node: %v", err)
+	}
+	createdAt := node.CreatedAt
+	if err := store.SavePrivilege(ctx, "loaded", "neo4j", false, true); err != nil {
+		t.Fatalf("second privilege update failed: %v", err)
+	}
+	node2, err := eng.GetNode(storage.NodeID(dbPrivPrefix + "loaded:neo4j"))
+	if err != nil {
+		t.Fatalf("get updated privilege node: %v", err)
+	}
+	if !node2.CreatedAt.Equal(createdAt) {
+		t.Fatalf("SavePrivilege should preserve CreatedAt on update")
+	}
+
+	if err := store.PutMatrix(ctx, nil); err != nil {
+		t.Fatalf("put empty matrix: %v", err)
+	}
+	if matrix := store.Matrix(); len(matrix) != 0 {
+		t.Fatalf("expected empty matrix after clear, got %#v", matrix)
 	}
 }

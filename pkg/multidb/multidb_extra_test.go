@@ -26,6 +26,30 @@ func TestDefaultLimits(t *testing.T) {
 	assert.NotNil(t, limits)
 }
 
+func TestLimitsHelpers(t *testing.T) {
+	t.Run("query limits max results handles nil and value", func(t *testing.T) {
+		var q *QueryLimits
+		assert.Equal(t, int64(0), q.GetMaxResults())
+
+		q = &QueryLimits{MaxResults: 25}
+		assert.Equal(t, int64(25), q.GetMaxResults())
+	})
+
+	t.Run("limits unlimited and max results helpers", func(t *testing.T) {
+		var limits *Limits
+		assert.True(t, limits.IsUnlimited())
+		assert.Equal(t, int64(0), limits.GetMaxResults())
+
+		limits = DefaultLimits()
+		assert.True(t, limits.IsUnlimited())
+		assert.Equal(t, int64(0), limits.GetMaxResults())
+
+		limits.Query.MaxResults = 50
+		assert.False(t, limits.IsUnlimited())
+		assert.Equal(t, int64(50), limits.GetMaxResults())
+	})
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	assert.NotNil(t, cfg)

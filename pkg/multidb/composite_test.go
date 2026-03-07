@@ -34,6 +34,36 @@ func TestCreateCompositeDatabase(t *testing.T) {
 	assert.Equal(t, "db2", info.Constituents[1].DatabaseName)
 }
 
+func TestCreateCompositeDatabase_EdgeCases(t *testing.T) {
+	t.Run("empty name rejected", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		err := manager.CreateCompositeDatabase("", nil)
+		assert.ErrorIs(t, err, ErrInvalidDatabaseName)
+	})
+
+	t.Run("remote constituents not yet supported", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		require.NoError(t, manager.CreateDatabase("db1"))
+
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{DatabaseName: "db1", Alias: "db1", Type: "remote", AccessMode: "read_write"},
+		})
+		require.ErrorContains(t, err, "not yet supported")
+	})
+
+	t.Run("constituent aliases resolve to actual databases", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		require.NoError(t, manager.CreateDatabase("db1"))
+		require.NoError(t, manager.CreateAlias("db1_alias", "db1"))
+
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{DatabaseName: "db1_alias", Alias: "alias1", Type: "local", AccessMode: "read"},
+		})
+		require.NoError(t, err)
+		assert.True(t, manager.IsCompositeDatabase("composite1"))
+	})
+}
+
 func TestCreateCompositeDatabase_InvalidConstituent(t *testing.T) {
 	manager, _ := setupTestManager(t)
 
@@ -124,6 +154,16 @@ func TestDropCompositeDatabase(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDropCompositeDatabase_Errors(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+
+	err := manager.DropCompositeDatabase("missing")
+	assert.ErrorIs(t, err, ErrDatabaseNotFound)
+
+	err = manager.DropCompositeDatabase(dbName)
+	require.ErrorContains(t, err, "not a composite database")
+}
+
 func TestAddConstituent(t *testing.T) {
 	manager, _ := setupTestManager(t)
 
@@ -190,6 +230,48 @@ func TestAddConstituent_DuplicateAlias(t *testing.T) {
 	assert.Contains(t, err.Error(), "already exists")
 }
 
+func TestAddConstituent_Errors(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	require.NoError(t, manager.CreateDatabase("db1"))
+
+	err := manager.AddConstituent("missing", ConstituentRef{
+		DatabaseName: "db1",
+		Alias:        "db1",
+		Type:         "local",
+		AccessMode:   "read_write",
+	})
+	assert.ErrorIs(t, err, ErrDatabaseNotFound)
+
+	err = manager.AddConstituent(dbName, ConstituentRef{
+		DatabaseName: "db1",
+		Alias:        "db1",
+		Type:         "local",
+		AccessMode:   "read_write",
+	})
+	require.ErrorContains(t, err, "not a composite database")
+
+	require.NoError(t, manager.CreateDatabase("db2"))
+	require.NoError(t, manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+		{DatabaseName: "db1", Alias: "db1", Type: "local", AccessMode: "read_write"},
+	}))
+
+	err = manager.AddConstituent("composite1", ConstituentRef{
+		DatabaseName: "db2",
+		Alias:        "",
+		Type:         "local",
+		AccessMode:   "read_write",
+	})
+	require.ErrorContains(t, err, "alias cannot be empty")
+
+	err = manager.AddConstituent("composite1", ConstituentRef{
+		DatabaseName: "missing",
+		Alias:        "missing",
+		Type:         "local",
+		AccessMode:   "read_write",
+	})
+	require.ErrorContains(t, err, "not found")
+}
+
 func TestRemoveConstituent(t *testing.T) {
 	manager, _ := setupTestManager(t)
 
@@ -248,6 +330,12 @@ func TestRemoveConstituent_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+func TestRemoveConstituent_NotComposite(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	err := manager.RemoveConstituent(dbName, "anything")
+	require.ErrorContains(t, err, "not a composite database")
+}
+
 func TestListConstituents(t *testing.T) {
 	manager, _ := setupTestManager(t)
 
@@ -290,6 +378,26 @@ func TestListConstituents_NotFound(t *testing.T) {
 	_, err := manager.GetCompositeConstituents("nonexistent")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestGetCompositeConstituents_CopyAndTypeChecks(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	require.NoError(t, manager.CreateDatabase("db1"))
+	require.NoError(t, manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+		{DatabaseName: "db1", Alias: "alias1", Type: "local", AccessMode: "read_write"},
+	}))
+
+	_, err := manager.GetCompositeConstituents(dbName)
+	require.ErrorContains(t, err, "not a composite database")
+
+	list, err := manager.GetCompositeConstituents("composite1")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	list[0].Alias = "mutated"
+
+	listAgain, err := manager.GetCompositeConstituents("composite1")
+	require.NoError(t, err)
+	assert.Equal(t, "alias1", listAgain[0].Alias)
 }
 
 func TestConstituentRef_Validate(t *testing.T) {

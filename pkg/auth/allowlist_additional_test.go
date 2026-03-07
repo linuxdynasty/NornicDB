@@ -77,3 +77,114 @@ func TestAllowlistDatabaseAccessMode_NormalizationPaths(t *testing.T) {
 		t.Fatalf("empty role allowlist entry should mean all databases")
 	}
 }
+
+func TestAllowlistStore_CopyAndSeedSkipPaths(t *testing.T) {
+	ctx := context.Background()
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	store := NewAllowlistStore(eng)
+	if err := store.SaveRoleDatabases(ctx, "analyst", []string{"neo4j"}); err != nil {
+		t.Fatalf("save analyst allowlist failed: %v", err)
+	}
+
+	alist := store.Allowlist()
+	alist["analyst"][0] = "mutated"
+	if got := store.Allowlist()["analyst"][0]; got != "neo4j" {
+		t.Fatalf("allowlist should return copies, got %q", got)
+	}
+
+	if err := store.SeedIfEmpty(ctx, []string{"neo4j", "system"}); err != nil {
+		t.Fatalf("seed should skip when data exists: %v", err)
+	}
+	if _, ok := store.Allowlist()["admin"]; ok {
+		t.Fatalf("seed should not add builtin roles when allowlist already has data")
+	}
+
+	if err := store.SaveRoleDatabases(ctx, "global", nil); err != nil {
+		t.Fatalf("save nil databases failed: %v", err)
+	}
+	if got := store.Allowlist()["global"]; got != nil {
+		t.Fatalf("expected nil database list for global role, got %#v", got)
+	}
+
+	node, err := eng.GetNode(storage.NodeID(roleDbAccessPrefix + "analyst"))
+	if err != nil {
+		t.Fatalf("get analyst allowlist node: %v", err)
+	}
+	createdAt := node.CreatedAt
+	if err := store.SaveRoleDatabases(ctx, "analyst", []string{"system"}); err != nil {
+		t.Fatalf("update analyst allowlist failed: %v", err)
+	}
+	node2, err := eng.GetNode(storage.NodeID(roleDbAccessPrefix + "analyst"))
+	if err != nil {
+		t.Fatalf("get updated analyst allowlist node: %v", err)
+	}
+	if !node2.CreatedAt.Equal(createdAt) {
+		t.Fatalf("SaveRoleDatabases should preserve CreatedAt")
+	}
+}
+
+func TestAllowlistStore_LoadAndHasDataHelpers(t *testing.T) {
+	ctx := context.Background()
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	store := NewAllowlistStore(eng)
+	has, err := store.HasAllowlistData(ctx)
+	if err != nil {
+		t.Fatalf("HasAllowlistData on empty store: %v", err)
+	}
+	if has {
+		t.Fatalf("expected no allowlist data on empty store")
+	}
+
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("role_db_access:reader"),
+		Labels: []string{roleDbAccessLabel, roleDbAccessSystems},
+		Properties: map[string]any{
+			"databases": `["neo4j","system"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create allowlist node: %v", err)
+	}
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("system:bad-node"),
+		Labels: []string{roleDbAccessLabel},
+		Properties: map[string]any{
+			"databases": `["ignored"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create invalid allowlist node: %v", err)
+	}
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("role_db_access:other"),
+		Labels: []string{"Other"},
+		Properties: map[string]any{
+			"databases": `["ignored"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create unlabeled node: %v", err)
+	}
+
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := store.Allowlist()["reader"]; !reflect.DeepEqual(got, []string{"neo4j", "system"}) {
+		t.Fatalf("unexpected loaded reader allowlist: %#v", got)
+	}
+	if got := databasesFromProperties(map[string]any{"databases": 123}); got != nil {
+		t.Fatalf("expected nil for wrong databases type, got %#v", got)
+	}
+
+	has, err = store.HasAllowlistData(ctx)
+	if err != nil {
+		t.Fatalf("HasAllowlistData with store data: %v", err)
+	}
+	if !has {
+		t.Fatalf("expected allowlist data to be detected")
+	}
+}

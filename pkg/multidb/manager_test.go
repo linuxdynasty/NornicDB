@@ -512,6 +512,37 @@ func TestDatabaseManager_GetStorage(t *testing.T) {
 	store2, err := manager.GetStorage("nornic")
 	require.NoError(t, err)
 	assert.Equal(t, store, store2) // Should be same instance (cached)
+
+	t.Run("composite storage resolves aliases and is not cached as namespaced engine", func(t *testing.T) {
+		require.NoError(t, manager.CreateDatabase("tenant_a"))
+		require.NoError(t, manager.CreateDatabase("tenant_b"))
+		require.NoError(t, manager.CreateAlias("tenant_b_alias", "tenant_b"))
+
+		tenantAStore, err := manager.GetStorage("tenant_a")
+		require.NoError(t, err)
+		_, err = tenantAStore.CreateNode(&storage.Node{ID: "node-a", Labels: []string{"Shared"}})
+		require.NoError(t, err)
+
+		tenantBStore, err := manager.GetStorage("tenant_b")
+		require.NoError(t, err)
+		_, err = tenantBStore.CreateNode(&storage.Node{ID: "node-b", Labels: []string{"Shared"}})
+		require.NoError(t, err)
+
+		err = manager.CreateCompositeDatabase("composite_db", []ConstituentRef{
+			{DatabaseName: "tenant_a", Alias: "a", Type: "local", AccessMode: "read_write"},
+			{DatabaseName: "tenant_b_alias", Alias: "b", Type: "local", AccessMode: "read"},
+		})
+		require.NoError(t, err)
+
+		compositeStore, err := manager.GetStorage("composite_db")
+		require.NoError(t, err)
+		_, ok := compositeStore.(*storage.CompositeEngine)
+		assert.True(t, ok)
+
+		compositeStore2, err := manager.GetStorage("composite_db")
+		require.NoError(t, err)
+		assert.NotSame(t, compositeStore, compositeStore2)
+	})
 }
 
 func TestDatabaseManager_GetStorage_NotFound(t *testing.T) {
@@ -678,6 +709,70 @@ func TestDatabaseManager_GetDefaultStorage(t *testing.T) {
 	storage2, err := manager.GetStorage("nornic")
 	require.NoError(t, err)
 	assert.Equal(t, storage, storage2)
+}
+
+func TestDatabaseManager_InternalStorageAndAliasHelpers(t *testing.T) {
+	inner := storage.NewMemoryEngine()
+	defer inner.Close()
+
+	manager, err := NewDatabaseManager(inner, nil)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	t.Run("getStorageInternal handles cache not found and offline", func(t *testing.T) {
+		require.NoError(t, manager.CreateDatabase("tenant_a"))
+		manager.mu.Lock()
+		engine1, err := manager.getStorageInternal("tenant_a")
+		require.NoError(t, err)
+		engine2, err := manager.getStorageInternal("tenant_a")
+		require.NoError(t, err)
+		manager.mu.Unlock()
+		assert.Same(t, engine1, engine2)
+
+		manager.mu.Lock()
+		_, err = manager.getStorageInternal("missing")
+		require.ErrorIs(t, err, ErrDatabaseNotFound)
+		manager.databases["tenant_a"].Status = "offline"
+		delete(manager.engines, "tenant_a")
+		_, err = manager.getStorageInternal("tenant_a")
+		require.ErrorIs(t, err, ErrDatabaseOffline)
+		manager.mu.Unlock()
+	})
+
+	t.Run("default database name and alias validation branches", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DefaultDatabase = cfg.SystemDatabase
+		manager2, err := NewDatabaseManager(storage.NewMemoryEngine(), cfg)
+		require.NoError(t, err)
+		defer manager2.Close()
+		assert.Equal(t, "nornic", manager2.DefaultDatabaseName())
+
+		require.ErrorIs(t, manager.validateAliasName(""), ErrInvalidAliasName)
+		require.ErrorContains(t, manager.validateAliasName("bad alias"), "whitespace")
+		require.ErrorContains(t, manager.validateAliasName("system"), "reserved")
+		require.ErrorContains(t, manager.validateAliasName("nornic"), "reserved")
+		require.NoError(t, manager.validateAliasName("tenant_alias"))
+	})
+
+	t.Run("list aliases all databases and decrement size underflow", func(t *testing.T) {
+		require.NoError(t, manager.CreateDatabase("tenant_b"))
+		require.NoError(t, manager.CreateAlias("alias_a", "nornic"))
+		require.NoError(t, manager.CreateAlias("alias_b", "tenant_b"))
+
+		allAliases := manager.ListAliases("")
+		assert.Equal(t, "nornic", allAliases["alias_a"])
+		assert.Equal(t, "tenant_b", allAliases["alias_b"])
+		assert.Empty(t, manager.ListAliases("missing"))
+
+		manager.IncrementStorageSize("tenant_b", 100, 50)
+		manager.DecrementStorageSize("tenant_b", 200, 100)
+		total, nodeSize, edgeSize := manager.GetStorageSize("tenant_b")
+		assert.Zero(t, total)
+		assert.Zero(t, nodeSize)
+		assert.Zero(t, edgeSize)
+
+		manager.DecrementStorageSize("missing", 10, 10)
+	})
 }
 
 func TestDatabaseManager_MetadataPersistence(t *testing.T) {
