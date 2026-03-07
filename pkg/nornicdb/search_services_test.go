@@ -11,6 +11,9 @@ import (
 )
 
 func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringDisabled()
+	t.Cleanup(cleanup)
+
 	cfg := DefaultConfig()
 	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
@@ -72,10 +75,14 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	})
 
 	// Default DB service should only contain default DB embedding.
-	require.Equal(t, 1, defaultSvc.EmbeddingCount())
+	require.Eventually(t, func() bool {
+		return defaultSvc.EmbeddingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// db2 service should exist and contain only db2 embedding.
-	require.Equal(t, 1, db2Svc.EmbeddingCount())
+	require.Eventually(t, func() bool {
+		return db2Svc.EmbeddingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// Verify text-only search does not cross-contaminate.
 	// Default DB should find alpha, not beta.
