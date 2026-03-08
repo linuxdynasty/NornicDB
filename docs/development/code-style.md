@@ -4,11 +4,19 @@
 
 ## Go Formatting
 
-Use `gofmt` or `goimports`:
+Use `gofmt -s` or `goimports`:
 
 ```bash
-gofmt -w .
+gofmt -w -s .
 goimports -w .
+```
+
+The repository also includes a tracked pre-commit hook at `.githooks/pre-commit`
+that automatically runs `gofmt -w -s` on staged Go files before the commit is
+created. Install it once per clone:
+
+```bash
+make install-hooks
 ```
 
 ## Naming Conventions

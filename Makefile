@@ -104,7 +104,7 @@ BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/reso
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cpu push-llama-cpu deploy-llama-cpu ensure-llama-cpu
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda ensure-llama-cuda
-.PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
+.PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test install-hooks clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen download-bge-reranker check-models
 .PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
 
@@ -801,6 +801,9 @@ else
 	go test -timeout 30m ./...
 endif
 
+install-hooks:
+	bash scripts/install-git-hooks.sh
+
 # Test with limited parallelism (useful on Windows with memory constraints)
 test-serial:
 ifeq ($(HOST_OS),windows)
@@ -1097,6 +1100,7 @@ else
 	@echo "  make build-localllm          Build with local LLM support"
 endif
 	@echo "  make build-localllm-headless Build headless with local LLM"
+	@echo "  make install-hooks           Install repository Git hooks"
 	@echo ""
 	@echo "Cross-Compilation (from macOS to other platforms):"
 	@echo "  make cross-linux-amd64       Linux x86_64 (servers, VPS)"

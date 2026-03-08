@@ -52,6 +52,29 @@ func TestNewDevice(t *testing.T) {
 		d2.Release()
 		d2.Release() // Should not panic
 	})
+
+	t.Run("released device rejects new buffers", func(t *testing.T) {
+		d2, err := NewDevice()
+		if err != nil {
+			t.Fatalf("NewDevice() error = %v", err)
+		}
+		d2.Release()
+
+		_, err = d2.NewBuffer([]float32{1, 2, 3}, StorageShared)
+		if err == nil {
+			t.Error("expected error creating buffer on released device")
+		}
+
+		_, err = d2.NewBufferNoCopy([]float32{1, 2, 3}, StorageShared)
+		if err == nil {
+			t.Error("expected error creating no-copy buffer on released device")
+		}
+
+		_, err = d2.NewEmptyBuffer(16, StorageShared)
+		if err == nil {
+			t.Error("expected error creating empty buffer on released device")
+		}
+	})
 }
 
 func TestNewBuffer(t *testing.T) {
@@ -214,6 +237,15 @@ func TestNewEmptyBuffer(t *testing.T) {
 			t.Errorf("expected size 1024, got %d", buf.Size())
 		}
 	})
+
+	t.Run("buffer release is safe twice", func(t *testing.T) {
+		buf, err := device.NewEmptyBuffer(16, StorageShared)
+		if err != nil {
+			t.Fatalf("NewEmptyBuffer() error = %v", err)
+		}
+		buf.Release()
+		buf.Release()
+	})
 }
 
 func TestBufferReadUint32(t *testing.T) {
@@ -320,6 +352,19 @@ func TestBufferWriteFloat32(t *testing.T) {
 		err := buf.WriteFloat32([]float32{}, 0)
 		if err != nil {
 			t.Errorf("empty write should succeed, got error: %v", err)
+		}
+	})
+
+	t.Run("invalid buffer returns error or nil reads", func(t *testing.T) {
+		buf := Buffer{size: 4}
+		if got := buf.ReadFloat32(1); got != nil {
+			t.Errorf("expected nil ReadFloat32 on invalid buffer, got %v", got)
+		}
+		if got := buf.ReadUint32(1); got != nil {
+			t.Errorf("expected nil ReadUint32 on invalid buffer, got %v", got)
+		}
+		if err := buf.WriteFloat32([]float32{1}, 0); err != ErrInvalidBuffer {
+			t.Errorf("expected ErrInvalidBuffer, got %v", err)
 		}
 	})
 }
@@ -598,6 +643,24 @@ func TestSearch(t *testing.T) {
 			t.Errorf("expected 2 results, got %d", len(results))
 		}
 	})
+
+	t.Run("search fails for invalid query buffer creation", func(t *testing.T) {
+		embeddings := []float32{1, 0, 0, 0}
+		embBuf, _ := device.NewBuffer(embeddings, StorageShared)
+		defer embBuf.Release()
+
+		_, err := device.Search(embBuf, []float32{}, 1, 4, 1, false)
+		if err == nil {
+			t.Error("expected error for empty query")
+		}
+	})
+
+	t.Run("search fails when compute kernel receives invalid embeddings", func(t *testing.T) {
+		_, err := device.Search(&Buffer{}, []float32{1, 0, 0, 0}, 1, 4, 1, false)
+		if err == nil {
+			t.Error("expected error for invalid embeddings buffer")
+		}
+	})
 }
 
 func TestStorageModeConstants(t *testing.T) {
@@ -628,6 +691,30 @@ func TestErrors(t *testing.T) {
 		if err.Error() == "" {
 			t.Errorf("error message should not be empty: %v", err)
 		}
+	}
+}
+
+func TestKernelOperations_InvalidBuffersReturnErrors(t *testing.T) {
+	if !IsAvailable() {
+		t.Skip("Metal not available")
+	}
+
+	device, err := NewDevice()
+	if err != nil {
+		t.Fatalf("NewDevice() error = %v", err)
+	}
+	defer device.Release()
+
+	invalid := &Buffer{}
+
+	if err := device.ComputeCosineSimilarity(invalid, invalid, invalid, 1, 4, false); err == nil {
+		t.Error("expected ComputeCosineSimilarity error for invalid buffers")
+	}
+	if err := device.ComputeTopK(invalid, invalid, invalid, 1, 1); err == nil {
+		t.Error("expected ComputeTopK error for invalid buffers")
+	}
+	if err := device.NormalizeVectors(invalid, 1, 4); err == nil {
+		t.Error("expected NormalizeVectors error for invalid buffers")
 	}
 }
 

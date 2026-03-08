@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+staged_go_files=()
+while IFS= read -r -d '' file; do
+    staged_go_files+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.go')
+
+if [ "${#staged_go_files[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+orig_stash_ref="$(git rev-parse -q --verify refs/stash 2>/dev/null || true)"
+created_stash=0
+
+restore_unstaged() {
+    local exit_code=$?
+
+    if [ "$created_stash" -eq 1 ]; then
+        if ! git stash pop --quiet >/dev/null 2>&1; then
+            echo "pre-commit: formatted staged Go files, but failed to restore unstaged changes cleanly." >&2
+            echo "pre-commit: resolve the stash pop manually, then re-run commit." >&2
+            exit 1
+        fi
+    fi
+
+    exit "$exit_code"
+}
+
+trap restore_unstaged EXIT
+
+if ! git diff --quiet -- . || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    git stash push --quiet --keep-index --include-untracked -m "pre-commit-gofmt"
+    new_stash_ref="$(git rev-parse -q --verify refs/stash 2>/dev/null || true)"
+    if [ -n "$new_stash_ref" ] && [ "$new_stash_ref" != "$orig_stash_ref" ]; then
+        created_stash=1
+    fi
+fi
+
+gofmt -w -s "${staged_go_files[@]}"
+git add -- "${staged_go_files[@]}"

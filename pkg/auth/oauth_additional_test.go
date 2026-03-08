@@ -99,9 +99,9 @@ func TestOAuthManager_HandleCallbackAndRefreshFlow(t *testing.T) {
 	}
 
 	oauthUser := &User{Username: "oauthuser", Metadata: map[string]string{
-		"auth_method":        "oauth",
-		"oauth_access_token": "invalid",
-		"oauth_token_expiry": time.Now().Add(time.Hour).Format(time.RFC3339),
+		"auth_method":         "oauth",
+		"oauth_access_token":  "invalid",
+		"oauth_token_expiry":  time.Now().Add(time.Hour).Format(time.RFC3339),
 		"oauth_refresh_token": "rt-1",
 	}}
 	if err := mgr.ValidateOAuthToken(oauthUser); err != nil {
@@ -141,9 +141,9 @@ func TestOAuthManager_RefreshAndValidationErrors(t *testing.T) {
 	}
 
 	u := &User{Username: "x", Metadata: map[string]string{
-		"auth_method":        "oauth",
-		"oauth_access_token": "bad",
-		"oauth_token_expiry": time.Now().Add(-time.Hour).Format(time.RFC3339),
+		"auth_method":         "oauth",
+		"oauth_access_token":  "bad",
+		"oauth_token_expiry":  time.Now().Add(-time.Hour).Format(time.RFC3339),
 		"oauth_refresh_token": "rt-bad",
 	}}
 	if err := mgr.ValidateOAuthToken(u); err == nil {

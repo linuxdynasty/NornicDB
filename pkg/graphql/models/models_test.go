@@ -277,7 +277,7 @@ type enumAdapter struct {
 	marshal func(w interface{ Write([]byte) (int, error) })
 }
 
-func (e *enumAdapter) IsValid() bool { return e.isValid() }
+func (e *enumAdapter) IsValid() bool  { return e.isValid() }
 func (e *enumAdapter) String() string { return e.str() }
 func (e *enumAdapter) MarshalGQL(w interface{ Write([]byte) (int, error) }) {
 	e.marshal(w)

@@ -10,6 +10,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/graphql/models"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -880,5 +881,267 @@ func TestDbEdgeToModel(t *testing.T) {
 		assert.Equal(t, "target-id", result.EndNodeID)
 		assert.Equal(t, "KNOWS", result.Type)
 		assert.Equal(t, "2020", result.Properties["since"])
+	})
+}
+
+func TestGraphQLQueryAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	qr := &queryResolver{resolver}
+
+	alice := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Alice", "role": "Engineer"})
+	bob := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Bob", "role": "Engineer"})
+	company := createNodeViaCypher(t, resolver, []string{"Company"}, map[string]interface{}{"name": "Acme"})
+	knows := createEdgeViaCypher(t, resolver, alice.ID, bob.ID, "KNOWS", map[string]interface{}{"since": "2020"})
+	createEdgeViaCypher(t, resolver, alice.ID, company.ID, "WORKS_AT", map[string]interface{}{"since": "2021"})
+
+	t.Run("query nodes by label and relationships by type", func(t *testing.T) {
+		nodes, err := qr.queryNodesByLabel(ctx, "Person", nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, nodes, 2)
+
+		rels, err := qr.queryAllRelationships(ctx, []string{"KNOWS"}, nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, rels, 1)
+		assert.Equal(t, "KNOWS", rels[0].Type)
+
+		rels, err = qr.queryRelationshipsByType(ctx, "WORKS_AT", nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, rels, 1)
+		assert.Equal(t, "WORKS_AT", rels[0].Type)
+	})
+
+	t.Run("relationship count schema and relationship types", func(t *testing.T) {
+		total, err := qr.queryRelationshipCount(ctx, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 2, total)
+
+		typ := "KNOWS"
+		byType, err := qr.queryRelationshipCount(ctx, &typ)
+		require.NoError(t, err)
+		assert.Equal(t, 1, byType)
+
+		schema, err := qr.querySchema(ctx)
+		require.NoError(t, err)
+		assert.Contains(t, schema.NodeLabels, "Person")
+		assert.Contains(t, schema.RelationshipTypes, "KNOWS")
+
+		types, err := qr.queryRelationshipTypes(ctx)
+		require.NoError(t, err)
+		assert.Contains(t, types, "KNOWS")
+		assert.Contains(t, types, "WORKS_AT")
+	})
+
+	t.Run("search and search by property", func(t *testing.T) {
+		searchResp, err := qr.querySearch(ctx, "Alice", &models.SearchOptions{})
+		require.NoError(t, err)
+		require.NotNil(t, searchResp)
+		assert.GreaterOrEqual(t, searchResp.TotalCount, 0)
+
+		propertyMatches, err := qr.querySearchByProperty(ctx, "name", models.JSON{"value": "Alice"}, nil, nil)
+		require.NoError(t, err)
+		assert.NotNil(t, propertyMatches)
+	})
+
+	t.Run("all paths wraps shortest path result", func(t *testing.T) {
+		paths, err := qr.queryAllPaths(ctx, alice.ID, bob.ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, paths, 1)
+		assert.Len(t, paths[0], 2)
+
+		isolated := createNodeViaCypher(t, resolver, []string{"Isolated"}, map[string]interface{}{"name": "Solo"})
+		emptyPaths, err := qr.queryAllPaths(ctx, bob.ID, isolated.ID, nil, nil)
+		require.NoError(t, err)
+		assert.Empty(t, emptyPaths)
+	})
+
+	t.Run("query relationship returns created edge", func(t *testing.T) {
+		rel, err := qr.queryRelationship(ctx, knows.ID)
+		require.NoError(t, err)
+		require.NotNil(t, rel)
+		assert.Equal(t, knows.ID, rel.ID)
+	})
+}
+
+func TestGraphQLMutationAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	mr := &mutationResolver{resolver}
+
+	t.Run("update relationship bulk operations and merge relationship", func(t *testing.T) {
+		start := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Start"})
+		mid := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Mid"})
+		end := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "End"})
+		edge := createEdgeViaCypher(t, resolver, start.ID, mid.ID, "KNOWS", map[string]interface{}{"since": "2020"})
+
+		updated, err := mr.mutationUpdateRelationship(ctx, models.UpdateRelationshipInput{
+			ID:         edge.ID,
+			Properties: models.JSON{"since": "2025", "strength": "high"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+		assert.Equal(t, "high", updated.Properties["strength"])
+
+		bulkCreate, err := mr.mutationBulkCreateRelationships(ctx, models.BulkCreateRelationshipsInput{
+			Relationships: []*models.CreateRelationshipInput{
+				{StartNodeID: start.ID, EndNodeID: end.ID, Type: "WORKS_WITH", Properties: models.JSON{"active": true}},
+				{StartNodeID: start.ID, EndNodeID: "missing-node", Type: "BROKEN"},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, bulkCreate.Created)
+		assert.Equal(t, 1, bulkCreate.Skipped)
+		assert.Len(t, bulkCreate.Errors, 1)
+
+		merged, err := mr.mutationMergeRelationship(ctx, start.ID, end.ID, "WORKS_WITH", models.JSON{"active": false, "weight": 2})
+		require.NoError(t, err)
+		require.NotNil(t, merged)
+		assert.Equal(t, false, merged.Properties["active"])
+		assert.EqualValues(t, 2, merged.Properties["weight"])
+
+		created, err := mr.mutationMergeRelationship(ctx, mid.ID, end.ID, "KNOWS", models.JSON{"since": "2024"})
+		require.NoError(t, err)
+		require.NotNil(t, created)
+		assert.Equal(t, "KNOWS", created.Type)
+
+		bulkDelete, err := mr.mutationBulkDeleteRelationships(ctx, []string{updated.ID, "missing-relationship"})
+		require.NoError(t, err)
+		assert.Equal(t, 2, bulkDelete.Deleted)
+		assert.Empty(t, bulkDelete.NotFound)
+	})
+
+	t.Run("trigger embedding and run decay paths", func(t *testing.T) {
+		status, err := mr.mutationTriggerEmbedding(ctx, nil)
+		require.NoError(t, err)
+		require.NotNil(t, status)
+		assert.GreaterOrEqual(t, status.Total, 0)
+
+		regen := true
+		status, err = mr.mutationTriggerEmbedding(ctx, &regen)
+		require.NoError(t, err)
+		require.NotNil(t, status)
+
+		decay, err := mr.mutationRunDecay(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, decay)
+		assert.Equal(t, 0, decay.NodesProcessed)
+	})
+}
+
+func TestGraphQLNodeAndSubscriptionAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	nr := &nodeResolver{resolver}
+
+	source := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Source"})
+	target := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Target"})
+	createEdgeViaCypher(t, resolver, source.ID, target.ID, "KNOWS", nil)
+
+	t.Run("outgoing incoming and similar wrappers", func(t *testing.T) {
+		node := &models.Node{ID: source.ID}
+		outgoing, err := nr.nodeOutgoing(ctx, node, nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, outgoing, 1)
+
+		incomingNode := &models.Node{ID: target.ID}
+		incoming, err := nr.nodeIncoming(ctx, incomingNode, nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, incoming, 1)
+
+		similar, err := nr.nodeSimilar(ctx, node, nil, nil)
+		require.ErrorContains(t, err, "no embedding")
+		assert.Nil(t, similar)
+	})
+
+	t.Run("subscription helpers validate broker and delegate", func(t *testing.T) {
+		empty := &subscriptionResolver{&Resolver{}}
+
+		_, err := empty.subscriptionNodeCreated(ctx, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+		_, err = empty.subscriptionNodeUpdated(ctx, nil, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+		_, err = empty.subscriptionNodeDeleted(ctx, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+		_, err = empty.subscriptionRelationshipCreated(ctx, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+		_, err = empty.subscriptionRelationshipUpdated(ctx, nil, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+		_, err = empty.subscriptionRelationshipDeleted(ctx, nil)
+		require.ErrorContains(t, err, "event broker not initialized")
+
+		real := &subscriptionResolver{resolver}
+		nodeCreated, err := real.subscriptionNodeCreated(ctx, []string{"Person"})
+		require.NoError(t, err)
+		require.NotNil(t, nodeCreated)
+
+		nodeUpdated, err := real.subscriptionNodeUpdated(ctx, nil, []string{"Person"})
+		require.NoError(t, err)
+		require.NotNil(t, nodeUpdated)
+
+		nodeDeleted, err := real.subscriptionNodeDeleted(ctx, []string{"Person"})
+		require.NoError(t, err)
+		require.NotNil(t, nodeDeleted)
+
+		relCreated, err := real.subscriptionRelationshipCreated(ctx, []string{"KNOWS"})
+		require.NoError(t, err)
+		require.NotNil(t, relCreated)
+
+		relUpdated, err := real.subscriptionRelationshipUpdated(ctx, nil, []string{"KNOWS"})
+		require.NoError(t, err)
+		require.NotNil(t, relUpdated)
+
+		relDeleted, err := real.subscriptionRelationshipDeleted(ctx, []string{"KNOWS"})
+		require.NoError(t, err)
+		require.NotNil(t, relDeleted)
+
+		_, err = real.subscriptionSearchStream(ctx, "alice", nil)
+		require.ErrorContains(t, err, "not yet implemented")
+	})
+}
+
+func TestStorageModelConversionHelpers(t *testing.T) {
+	t.Run("storage node conversion handles nil and values", func(t *testing.T) {
+		assert.Nil(t, storageNodeToModel(nil))
+
+		now := time.Now()
+		node := &storage.Node{
+			ID:        "storage-node",
+			Labels:    []string{"Doc"},
+			CreatedAt: now,
+			Properties: map[string]interface{}{
+				"title": "hello",
+			},
+		}
+		model := storageNodeToModel(node)
+		require.NotNil(t, model)
+		assert.Equal(t, "storage-node", model.ID)
+		assert.Equal(t, "hello", model.Properties["title"])
+	})
+
+	t.Run("storage edge conversion handles nil and values", func(t *testing.T) {
+		assert.Nil(t, storageEdgeToModel(nil))
+
+		now := time.Now()
+		edge := &storage.Edge{
+			ID:        "storage-edge",
+			StartNode: "a",
+			EndNode:   "b",
+			Type:      "LINKS",
+			CreatedAt: now,
+			Properties: map[string]interface{}{
+				"weight": 1,
+			},
+		}
+		model := storageEdgeToModel(edge)
+		require.NotNil(t, model)
+		assert.Equal(t, "storage-edge", model.ID)
+		assert.Equal(t, "LINKS", model.Type)
+		assert.EqualValues(t, 1, model.Properties["weight"])
 	})
 }

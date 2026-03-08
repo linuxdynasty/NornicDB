@@ -50,7 +50,8 @@ make build-all                        # All variants for your architecture
 ### Code Style
 
 - Follow Go conventions
-- Use `gofmt` for formatting
+- Use `gofmt -s` for formatting
+- Install the repo hook with `make install-hooks`
 - Write godoc comments
 - Include examples
 

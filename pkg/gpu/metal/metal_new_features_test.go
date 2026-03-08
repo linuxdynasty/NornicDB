@@ -349,6 +349,33 @@ func TestMPSMatrixVectorMultiply(t *testing.T) {
 	})
 }
 
+func TestMPSFunctions_InvalidBuffersReturnErrors(t *testing.T) {
+	if !IsAvailable() {
+		t.Skip("Metal not available")
+	}
+	if !MPSIsSupported() {
+		t.Skip("MPS not supported")
+	}
+
+	device, err := NewDevice()
+	if err != nil {
+		t.Fatalf("NewDevice() error = %v", err)
+	}
+	defer device.Release()
+
+	invalid := &Buffer{}
+
+	if err := device.MPSMatrixMultiply(invalid, invalid, invalid, 1, 1, 1, 1.0, 0.0); err == nil {
+		t.Error("expected MPSMatrixMultiply error for invalid buffers")
+	}
+	if err := device.MPSMatrixVectorMultiply(invalid, invalid, invalid, 1, 1, 1.0, 0.0); err == nil {
+		t.Error("expected MPSMatrixVectorMultiply error for invalid buffers")
+	}
+	if err := device.MPSBatchCosineSimilarity(invalid, invalid, invalid, 1, 1); err == nil {
+		t.Error("expected MPSBatchCosineSimilarity error for invalid buffers")
+	}
+}
+
 func TestMPSBatchCosineSimilarity(t *testing.T) {
 	if !IsAvailable() {
 		t.Skip("Metal not available")

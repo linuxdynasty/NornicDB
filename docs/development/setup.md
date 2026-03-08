@@ -184,6 +184,18 @@ Recommended extensions:
 }
 ```
 
+## Git Hooks
+
+Install the repository's tracked Git hooks after cloning:
+
+```bash
+make install-hooks
+```
+
+The pre-commit hook auto-formats staged Go files with `gofmt -w -s` before the
+commit is written, so formatting fixes are included in the commit instead of
+being left behind as dangling working tree changes.
+
 ### GoLand
 
 1. Open project root
