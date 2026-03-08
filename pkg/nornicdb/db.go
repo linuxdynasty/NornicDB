@@ -1494,6 +1494,24 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	if db.embedderCreate == nil {
 		db.embedderCreate = make(map[string]chan struct{})
 	}
+	// Re-check the registry after entering the single-flight section. A concurrent
+	// creator may have completed after our optimistic registry lookup above but
+	// before we acquired embedderCreateMu, in which case starting a new creation
+	// would duplicate work.
+	db.embedderRegistryMu.RLock()
+	if e, ok := db.embedderRegistry[key]; ok {
+		db.embedderRegistryMu.RUnlock()
+		db.embedderCreateMu.Unlock()
+		return e, nil
+	}
+	if key == defaultKey && defaultKey != "" {
+		if e, ok := db.embedderRegistry[defaultKey]; ok {
+			db.embedderRegistryMu.RUnlock()
+			db.embedderCreateMu.Unlock()
+			return e, nil
+		}
+	}
+	db.embedderRegistryMu.RUnlock()
 	if ch, ok := db.embedderCreate[key]; ok {
 		db.embedderCreateMu.Unlock()
 		<-ch
