@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/auth"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/graphql/models"
 	"github.com/orneryd/nornicdb/pkg/multidb"
@@ -386,6 +387,19 @@ func TestQueryShortestPath(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Empty(t, path)
 	})
+
+	t.Run("respects relationship type filter and max depth", func(t *testing.T) {
+		a := createNodeViaCypher(t, resolver, []string{"Node"}, map[string]interface{}{"name": "A2"})
+		b := createNodeViaCypher(t, resolver, []string{"Node"}, map[string]interface{}{"name": "B2"})
+		c := createNodeViaCypher(t, resolver, []string{"Node"}, map[string]interface{}{"name": "C2"})
+		createEdgeViaCypher(t, resolver, a.ID, b.ID, "KNOWS", nil)
+		createEdgeViaCypher(t, resolver, b.ID, c.ID, "WORKS_WITH", nil)
+
+		depth := 1
+		path, err := qr.queryShortestPath(ctx, a.ID, c.ID, &depth, []string{"KNOWS"})
+		assert.NoError(t, err)
+		assert.Empty(t, path)
+	})
 }
 
 func TestQueryNeighborhood(t *testing.T) {
@@ -411,6 +425,28 @@ func TestQueryNeighborhood(t *testing.T) {
 		require.NotNil(t, subgraph)
 		assert.Len(t, subgraph.Nodes, 4)         // center + 3 leaves
 		assert.Len(t, subgraph.Relationships, 3) // 3 edges
+	})
+
+	t.Run("filters by relationship type label and limit", func(t *testing.T) {
+		center := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Center"})
+		friend := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Friend"})
+		company := createNodeViaCypher(t, resolver, []string{"Company"}, map[string]interface{}{"name": "Company"})
+		createEdgeViaCypher(t, resolver, center.ID, friend.ID, "KNOWS", nil)
+		createEdgeViaCypher(t, resolver, center.ID, company.ID, "WORKS_AT", nil)
+
+		depth := 2
+		limit := 2
+		subgraph, err := qr.queryNeighborhood(ctx, center.ID, &depth, []string{"KNOWS"}, []string{"Person"}, &limit)
+		require.NoError(t, err)
+		require.NotNil(t, subgraph)
+		assert.Len(t, subgraph.Nodes, 2)
+		assert.Len(t, subgraph.Relationships, 1)
+		assert.Equal(t, "KNOWS", subgraph.Relationships[0].Type)
+		for _, node := range subgraph.Nodes {
+			if node.ID != center.ID {
+				assert.Contains(t, node.Labels, "Person")
+			}
+		}
 	})
 }
 
@@ -776,6 +812,24 @@ func TestNodeNeighbors(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, neighbors, 1)
 		assert.Contains(t, neighbors[0].Labels, "Person")
+	})
+
+	t.Run("filters by direction and limit", func(t *testing.T) {
+		center := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Center"})
+		out1 := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Out1"})
+		out2 := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Out2"})
+		in1 := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "In1"})
+		createEdgeViaCypher(t, resolver, center.ID, out1.ID, "KNOWS", nil)
+		createEdgeViaCypher(t, resolver, center.ID, out2.ID, "KNOWS", nil)
+		createEdgeViaCypher(t, resolver, in1.ID, center.ID, "KNOWS", nil)
+
+		node := &models.Node{ID: center.ID}
+		dir := models.RelationshipDirectionOutgoing
+		limit := 1
+		neighbors, err := nr.nodeNeighbors(ctx, node, &dir, []string{"KNOWS"}, nil, &limit)
+		require.NoError(t, err)
+		assert.Len(t, neighbors, 1)
+		assert.NotEqual(t, "In1", neighbors[0].Properties["name"])
 	})
 }
 
@@ -1144,4 +1198,289 @@ func TestStorageModelConversionHelpers(t *testing.T) {
 		assert.Equal(t, "LINKS", model.Type)
 		assert.EqualValues(t, 1, model.Properties["weight"])
 	})
+}
+
+func TestQuerySimilarAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	qr := &queryResolver{resolver}
+
+	mem1, err := db.Store(ctx, &nornicdb.Memory{
+		Content:         "dog",
+		ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0}},
+	})
+	require.NoError(t, err)
+	_, err = db.Store(ctx, &nornicdb.Memory{
+		Content:         "puppy",
+		ChunkEmbeddings: [][]float32{{0.95, 0.05, 0.0}},
+	})
+	require.NoError(t, err)
+	_, err = db.Store(ctx, &nornicdb.Memory{
+		Content:         "cat",
+		ChunkEmbeddings: [][]float32{{0.0, 1.0, 0.0}},
+	})
+	require.NoError(t, err)
+
+	limit := 2
+	results, err := qr.querySimilar(ctx, mem1.ID, &limit, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	for _, result := range results {
+		assert.NotNil(t, result.Node)
+		assert.NotEmpty(t, result.Node.ID)
+		assert.GreaterOrEqual(t, result.Similarity, -1.0)
+		assert.LessOrEqual(t, result.Similarity, 1.0)
+	}
+
+	nr := &nodeResolver{resolver}
+	nodeResults, err := nr.nodeSimilar(ctx, &models.Node{ID: mem1.ID}, &limit, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, nodeResults)
+}
+
+func TestNamespacedCypherHelperAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+
+	t.Run("create edge reports missing node diagnostics", func(t *testing.T) {
+		source := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Source"})
+
+		_, err := resolver.createEdgeViaCypher(ctx, source.ID, "missing-target", "KNOWS", nil)
+		require.Error(t, err)
+		assert.NotEmpty(t, err.Error())
+	})
+
+	t.Run("direct edge helpers cover lookup and listing paths", func(t *testing.T) {
+		source := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Source2"})
+		target := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Target2"})
+		incoming := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Incoming2"})
+
+		outEdge := createEdgeViaCypher(t, resolver, source.ID, target.ID, "KNOWS", map[string]interface{}{"since": "2024"})
+		createEdgeViaCypher(t, resolver, incoming.ID, source.ID, "REPORTS_TO", nil)
+
+		got, err := resolver.getEdgeViaCypher(ctx, outEdge.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, outEdge.ID, got.ID)
+		assert.Equal(t, "KNOWS", got.Type)
+
+		edges, err := resolver.getEdgesForNodeViaCypher(ctx, source.ID)
+		require.NoError(t, err)
+		assert.Len(t, edges, 2)
+
+		listed, err := resolver.listEdgesViaCypher(ctx, "KNOWS", 10, 0)
+		require.NoError(t, err)
+		require.NotEmpty(t, listed)
+		assert.Equal(t, "KNOWS", listed[0].Type)
+
+		_, err = resolver.getEdgeViaCypher(ctx, "missing-edge")
+		require.ErrorContains(t, err, "edge not found")
+	})
+
+	t.Run("extract node handles element id top-level properties and errors", func(t *testing.T) {
+		node, err := extractNodeFromResult(map[string]interface{}{
+			"elementId": "4:nornicdb:node-123",
+			"labels":    []interface{}{"Person", "Employee"},
+			"name":      "Alice",
+			"age":       30,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		assert.Equal(t, "node-123", node.ID)
+		assert.Contains(t, node.Labels, "Person")
+		assert.Equal(t, "Alice", node.Properties["name"])
+		assert.EqualValues(t, 30, node.Properties["age"])
+
+		_, err = extractNodeFromResult(struct{}{})
+		require.ErrorContains(t, err, "unexpected node format")
+
+		_, err = extractNodeFromResult(map[string]interface{}{"labels": []string{"NoID"}})
+		require.ErrorContains(t, err, "node missing ID field")
+	})
+
+	t.Run("extract edge handles fallback sources element ids and errors", func(t *testing.T) {
+		edge, err := extractEdgeFromResult([]interface{}{
+			&storage.Edge{
+				ID:         "edge-1",
+				StartNode:  "start-a",
+				EndNode:    "end-b",
+				Type:       "KNOWS",
+				Properties: map[string]interface{}{"since": "2020"},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "start-a", edge.Source)
+		assert.Equal(t, "end-b", edge.Target)
+
+		edge, err = extractEdgeFromResult([]interface{}{
+			map[string]interface{}{
+				"elementId": "5:nornicdb:edge-2",
+				"type":      "WORKS_WITH",
+				"startNode": "left",
+				"endNode":   "right",
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "edge-2", edge.ID)
+		assert.Equal(t, "left", edge.Source)
+		assert.Equal(t, "right", edge.Target)
+		assert.Empty(t, edge.Properties)
+
+		edge, err = extractEdgeFromResult([]interface{}{
+			map[string]interface{}{
+				"_edgeId":    "edge-3",
+				"type":       "REPORTS_TO",
+				"properties": map[string]interface{}{"active": true},
+			},
+			&storage.Node{ID: "manager"},
+			map[string]interface{}{"id": "employee"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "manager", edge.Source)
+		assert.Equal(t, "employee", edge.Target)
+		assert.Equal(t, "REPORTS_TO", edge.Type)
+		assert.Equal(t, true, edge.Properties["active"])
+
+		_, err = extractEdgeFromResult([]interface{}{})
+		require.ErrorContains(t, err, "insufficient edge data")
+
+		_, err = extractEdgeFromResult([]interface{}{42})
+		require.ErrorContains(t, err, "unexpected edge format")
+
+		_, err = extractEdgeFromResult([]interface{}{map[string]interface{}{"type": "BROKEN"}})
+		require.ErrorContains(t, err, "edge missing ID field")
+	})
+}
+
+func TestResolverAccessControlAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+
+	t.Run("cypher executor enforces database access mode", func(t *testing.T) {
+		deniedCtx := auth.WithRequestDatabaseAccessMode(ctx, auth.DenyAllDatabaseAccessMode)
+		_, err := resolver.getCypherExecutor(deniedCtx, "nornic")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not allowed")
+	})
+
+	t.Run("cypher executor errors for missing database", func(t *testing.T) {
+		_, err := resolver.getCypherExecutor(ctx, "missing-db")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("execute cypher enforces write access for mutations", func(t *testing.T) {
+		deniedCtx := auth.WithRequestResolvedAccessResolver(ctx, func(string) auth.ResolvedAccess {
+			return auth.ResolvedAccess{Read: true, Write: false}
+		})
+		_, err := resolver.executeCypher(deniedCtx, "CREATE (n:Denied)", nil, "", true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "write on database")
+	})
+
+	t.Run("execute cypher allows write when resolver grants access", func(t *testing.T) {
+		allowedCtx := auth.WithRequestResolvedAccessResolver(ctx, func(string) auth.ResolvedAccess {
+			return auth.ResolvedAccess{Read: true, Write: true}
+		})
+		result, err := resolver.executeCypher(allowedCtx, "CREATE (n:Allowed {name: 'ok'}) RETURN n", nil, "", true)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotEmpty(t, result.Rows)
+	})
+}
+
+func TestQuerySearchAndStatsAdditionalCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	qr := &queryResolver{resolver}
+
+	stored, err := db.Store(ctx, &nornicdb.Memory{
+		Content:         "Alice builds graph search systems",
+		Title:           "Alice Memory",
+		ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+
+	_, err = db.Store(ctx, &nornicdb.Memory{
+		Content:         "Bob maintains retrieval pipelines",
+		Title:           "Bob Memory",
+		ChunkEmbeddings: [][]float32{{0.9, 0.1, 0.0}},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, db.BuildSearchIndexes(ctx))
+
+	t.Run("query search exposes metadata for matches", func(t *testing.T) {
+		limit := 5
+		resp, err := qr.querySearch(ctx, "Alice graph", &models.SearchOptions{Limit: &limit})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotEmpty(t, resp.Results)
+		assert.GreaterOrEqual(t, resp.TotalCount, 1)
+		assert.GreaterOrEqual(t, resp.ExecutionTimeMs, float64(0))
+		assert.NotNil(t, resp.Results[0].Node)
+		assert.NotEmpty(t, resp.Results[0].FoundBy)
+	})
+
+	t.Run("query stats reports labels relationships and embedded node count", func(t *testing.T) {
+		source := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Source"})
+		target := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Target"})
+		createEdgeViaCypher(t, resolver, source.ID, target.ID, "KNOWS", nil)
+
+		stats, err := qr.queryStats(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, stats)
+		assert.GreaterOrEqual(t, stats.NodeCount, 2)
+		assert.GreaterOrEqual(t, stats.RelationshipCount, 1)
+		assert.GreaterOrEqual(t, stats.EmbeddedNodeCount, 1)
+		assert.Greater(t, stats.UptimeSeconds, float64(0))
+
+		var sawMemory, sawKnows bool
+		for _, label := range stats.Labels {
+			if label.Label == "Memory" {
+				sawMemory = true
+			}
+		}
+		for _, relType := range stats.RelationshipTypes {
+			if relType.Type == "KNOWS" {
+				sawKnows = true
+			}
+		}
+		assert.True(t, sawMemory)
+		assert.True(t, sawKnows)
+	})
+}
+
+func TestEventBrokerCloseAdditionalCoverage(t *testing.T) {
+	broker := NewEventBroker()
+	nodeCreated := broker.SubscribeNodeCreated(context.Background(), nil)
+	nodeUpdated := broker.SubscribeNodeUpdated(context.Background(), nil, nil)
+	nodeDeleted := broker.SubscribeNodeDeleted(context.Background(), nil)
+	relCreated := broker.SubscribeRelationshipCreated(context.Background(), nil)
+	relUpdated := broker.SubscribeRelationshipUpdated(context.Background(), nil, nil)
+	relDeleted := broker.SubscribeRelationshipDeleted(context.Background(), nil)
+
+	broker.Close()
+
+	_, ok := <-nodeCreated
+	assert.False(t, ok)
+	_, ok = <-nodeUpdated
+	assert.False(t, ok)
+	_, ok = <-nodeDeleted
+	assert.False(t, ok)
+	_, ok = <-relCreated
+	assert.False(t, ok)
+	_, ok = <-relUpdated
+	assert.False(t, ok)
+	_, ok = <-relDeleted
+	assert.False(t, ok)
 }

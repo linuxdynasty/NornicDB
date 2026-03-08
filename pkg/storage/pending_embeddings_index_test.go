@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -503,6 +505,111 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 
 		// Should be removed from pending index
 		assert.Equal(t, 0, engine.PendingEmbeddingsCount())
+	})
+
+	t.Run("RefreshPendingEmbeddingsIndex_removes_manual_system_namespace_entries", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+
+		err := engine.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(pendingEmbedKey(NodeID("system:settings")), []byte{})
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, engine.PendingEmbeddingsCount())
+
+		added := engine.RefreshPendingEmbeddingsIndex()
+		assert.Equal(t, 0, added)
+		assert.Equal(t, 0, engine.PendingEmbeddingsCount())
+		assert.Nil(t, engine.FindNodeNeedingEmbedding())
+	})
+
+	t.Run("StreamNodeChunks covers default size stop and cancellation", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+
+		for _, id := range []string{"chunk-a", "chunk-b", "chunk-c"} {
+			_, err := engine.CreateNode(&Node{
+				ID:              NodeID(prefixTestID(id)),
+				Labels:          []string{"Chunked"},
+				Properties:      map[string]interface{}{"name": id},
+				ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+			})
+			require.NoError(t, err)
+		}
+
+		chunksSeen := 0
+		err := engine.StreamNodeChunks(context.Background(), 0, func(nodes []*Node) error {
+			chunksSeen++
+			require.NotEmpty(t, nodes)
+			return ErrIterationStopped
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, chunksSeen)
+
+		errBoom := errors.New("stop on visitor error")
+		err = engine.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error {
+			return errBoom
+		})
+		require.ErrorIs(t, err, errBoom)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err = engine.StreamNodeChunks(ctx, 2, func(nodes []*Node) error { return nil })
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("ClearAllEmbeddingsForPrefix only clears matching namespace", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+
+		_, err := engine.CreateNode(&Node{
+			ID:              "tenant_a:doc-1",
+			Labels:          []string{"Doc"},
+			Properties:      map[string]interface{}{"content": "a"},
+			ChunkEmbeddings: [][]float32{{1, 2, 3}},
+		})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{
+			ID:              "tenant_b:doc-1",
+			Labels:          []string{"Doc"},
+			Properties:      map[string]interface{}{"content": "b"},
+			ChunkEmbeddings: [][]float32{{4, 5, 6}},
+		})
+		require.NoError(t, err)
+
+		cleared, err := engine.ClearAllEmbeddingsForPrefix("tenant_a:")
+		require.NoError(t, err)
+		assert.Equal(t, 1, cleared)
+		assert.Equal(t, 1, engine.PendingEmbeddingsCount())
+
+		tenantA, err := engine.GetNode("tenant_a:doc-1")
+		require.NoError(t, err)
+		assert.Nil(t, tenantA.ChunkEmbeddings)
+
+		tenantB, err := engine.GetNode("tenant_b:doc-1")
+		require.NoError(t, err)
+		require.Len(t, tenantB.ChunkEmbeddings, 1)
+		require.Len(t, tenantB.ChunkEmbeddings[0], 3)
+	})
+
+	t.Run("closed engine helpers return safe results", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+		require.NoError(t, engine.Close())
+
+		require.Error(t, engine.Sync())
+		require.Error(t, engine.RunGC())
+		assert.Equal(t, 0, engine.PendingEmbeddingsCount())
+		assert.Equal(t, 0, engine.RefreshPendingEmbeddingsIndex())
+		assert.Nil(t, engine.FindNodeNeedingEmbedding())
+
+		lsm, vlog := engine.Size()
+		assert.Equal(t, int64(0), lsm)
+		assert.Equal(t, int64(0), vlog)
+
+		_, err := engine.ClearAllEmbeddingsForPrefix("tenant_a:")
+		require.Error(t, err)
+
+		err = engine.StreamNodeChunks(context.Background(), 2, func(nodes []*Node) error { return nil })
+		require.Error(t, err)
+
+		engine.InvalidatePendingEmbeddingsIndex()
 	})
 }
 

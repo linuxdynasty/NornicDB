@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -819,6 +822,131 @@ func TestStatusEndpointWithAuth(t *testing.T) {
 	}
 }
 
+func TestHandleGenerateAPIToken(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+
+	makeReq := func(method string, body string, claims *auth.JWTClaims) (*httptest.ResponseRecorder, map[string]interface{}) {
+		t.Helper()
+		req := httptest.NewRequest(method, "/auth/api-token", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if claims != nil {
+			req = req.WithContext(context.WithValue(req.Context(), contextKeyClaims, claims))
+		}
+		rec := httptest.NewRecorder()
+		server.handleGenerateAPIToken(rec, req)
+
+		var payload map[string]interface{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		return rec, payload
+	}
+
+	t.Run("requires post", func(t *testing.T) {
+		rec, payload := makeReq(http.MethodGet, "", nil)
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+		assert.Equal(t, "POST required", payload["message"])
+	})
+
+	t.Run("requires configured authenticator", func(t *testing.T) {
+		original := server.auth
+		server.auth = nil
+		defer func() { server.auth = original }()
+
+		rec, payload := makeReq(http.MethodPost, `{}`, nil)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "authentication not configured", payload["message"])
+	})
+
+	t.Run("requires authenticated claims", func(t *testing.T) {
+		rec, payload := makeReq(http.MethodPost, `{}`, nil)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "not authenticated", payload["message"])
+	})
+
+	t.Run("requires admin role", func(t *testing.T) {
+		rec, payload := makeReq(http.MethodPost, `{}`, &auth.JWTClaims{
+			Sub:      "reader-id",
+			Username: "reader",
+			Roles:    []string{string(auth.RoleViewer)},
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "admin role required to generate API tokens", payload["message"])
+	})
+
+	t.Run("validates request body and expiry", func(t *testing.T) {
+		adminClaims := &auth.JWTClaims{
+			Sub:      "admin-id",
+			Username: "admin",
+			Email:    "admin@example.com",
+			Roles:    []string{string(auth.RoleAdmin)},
+		}
+
+		rec, payload := makeReq(http.MethodPost, `{"subject":`, adminClaims)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "invalid request body", payload["message"])
+
+		rec, payload = makeReq(http.MethodPost, `{"expires_in":"xyz"}`, adminClaims)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, payload["message"], "invalid expires_in format")
+
+		rec, payload = makeReq(http.MethodPost, `{"expires_in":"abcd"}`, adminClaims)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "invalid expires_in format", payload["message"])
+	})
+
+	t.Run("returns signed token with defaults and day parsing", func(t *testing.T) {
+		adminClaims := &auth.JWTClaims{
+			Sub:      "admin-id",
+			Username: "admin",
+			Email:    "admin@example.com",
+			Roles:    []string{string(auth.RoleAdmin)},
+		}
+
+		rec, payload := makeReq(http.MethodPost, `{"expires_in":"7d"}`, adminClaims)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "api-token", payload["subject"])
+		assert.Equal(t, []interface{}{string(auth.RoleAdmin)}, payload["roles"])
+
+		token, _ := payload["token"].(string)
+		if token == "" {
+			t.Fatal("expected token in response")
+		}
+		claims, err := authenticator.ValidateToken(token)
+		if err != nil {
+			t.Fatalf("ValidateToken failed: %v", err)
+		}
+		assert.Equal(t, "admin-id", claims.Sub)
+		assert.Equal(t, "admin", claims.Username)
+		assert.Contains(t, claims.Roles, string(auth.RoleAdmin))
+
+		expiresIn, ok := payload["expires_in"].(float64)
+		if !ok {
+			t.Fatal("expected expires_in in response")
+		}
+		assert.InDelta(t, 7*24*60*60, expiresIn, 2)
+		_, ok = payload["expires_at"].(string)
+		assert.True(t, ok)
+	})
+
+	t.Run("supports never-expiring tokens", func(t *testing.T) {
+		adminClaims := &auth.JWTClaims{
+			Sub:      "admin-id",
+			Username: "admin",
+			Email:    "admin@example.com",
+			Roles:    []string{string(auth.RoleAdmin)},
+		}
+
+		rec, payload := makeReq(http.MethodPost, `{"subject":"mcp","expires_in":"0"}`, adminClaims)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "mcp", payload["subject"])
+		if _, ok := payload["expires_in"]; ok {
+			t.Fatal("did not expect expires_in for never-expiring token")
+		}
+		if _, ok := payload["expires_at"]; ok {
+			t.Fatal("did not expect expires_at for never-expiring token")
+		}
+	})
+}
+
 func TestMetricsEndpointWithAuth(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
@@ -829,6 +957,140 @@ func TestMetricsEndpointWithAuth(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected status 200 for /metrics with auth, got %d", resp.Code)
 	}
+}
+
+func TestHandleSearchAdditionalErrorCoverage(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	makeSearchReq := func(body string, claims *auth.JWTClaims) (*httptest.ResponseRecorder, map[string]interface{}) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/nornicdb/search", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if claims != nil {
+			req = req.WithContext(context.WithValue(req.Context(), contextKeyClaims, claims))
+		}
+		rec := httptest.NewRecorder()
+		server.handleSearch(rec, req)
+		var payload map[string]interface{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		return rec, payload
+	}
+
+	t.Run("forbidden when request has no database access", func(t *testing.T) {
+		rec, payload := makeSearchReq(`{"query":"hello"}`, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+
+		errors, ok := payload["errors"].([]interface{})
+		if !ok || len(errors) == 0 {
+			t.Fatalf("expected Neo4j error payload, got %v", payload)
+		}
+	})
+
+	t.Run("returns not found for missing database", func(t *testing.T) {
+		rec, payload := makeSearchReq(`{"database":"missing-db","query":"hello"}`, &auth.JWTClaims{
+			Sub:      "admin-id",
+			Username: "admin",
+			Roles:    []string{string(auth.RoleAdmin)},
+		})
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Contains(t, payload["message"], "Database 'missing-db' not found")
+	})
+
+	t.Run("returns service unavailable while database search is not ready", func(t *testing.T) {
+		requireErr := server.dbManager.CreateDatabase("colddb")
+		if requireErr != nil {
+			t.Fatalf("CreateDatabase failed: %v", requireErr)
+		}
+
+		rec, payload := makeSearchReq(`{"database":"colddb","query":"hello"}`, &auth.JWTClaims{
+			Sub:      "admin-id",
+			Username: "admin",
+			Roles:    []string{string(auth.RoleAdmin)},
+		})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "colddb", payload["database"])
+		assert.Equal(t, true, payload["retryable"])
+		assert.Equal(t, "search_not_ready", payload["request_status"])
+	})
+}
+
+func TestNewAdditionalInitializationCoverage(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "nornicdb-server-new-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbConfig := nornicdb.DefaultConfig()
+	dbConfig.Memory.DecayEnabled = false
+	dbConfig.Memory.AutoLinksEnabled = false
+	dbConfig.Database.AsyncWritesEnabled = false
+
+	db, err := nornicdb.Open(tmpDir, dbConfig)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	authConfig := auth.AuthConfig{
+		SecurityEnabled: true,
+		JWTSecret:       []byte("test-secret-key-for-testing-only-32b"),
+	}
+	authenticator, err := auth.NewAuthenticator(authConfig, storage.NewMemoryEngine())
+	if err != nil {
+		t.Fatalf("failed to create authenticator: %v", err)
+	}
+
+	t.Run("auth disabled uses full database access", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EmbeddingEnabled = false
+		cfg.MCPEnabled = false
+
+		server, err := New(db, nil, cfg)
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		if server.oauthManager != nil {
+			t.Fatal("oauthManager should be nil without authenticator")
+		}
+		if server.databaseAccessMode == nil || !server.databaseAccessMode.CanAccessDatabase("nornic") {
+			t.Fatal("expected full database access mode when auth disabled")
+		}
+	})
+
+	t.Run("rate limiter oauth and slow query logger initialize", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EmbeddingEnabled = false
+		cfg.MCPEnabled = false
+		cfg.RateLimitEnabled = true
+		cfg.RateLimitPerMinute = 5
+		cfg.RateLimitPerHour = 10
+		cfg.RateLimitBurst = 2
+		cfg.SlowQueryEnabled = true
+		cfg.SlowQueryThreshold = 50 * time.Millisecond
+		cfg.SlowQueryLogFile = filepath.Join(t.TempDir(), "slow.log")
+
+		server, err := New(db, authenticator, cfg)
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		if server.rateLimiter == nil {
+			t.Fatal("expected rate limiter to be initialized")
+		}
+		defer server.rateLimiter.Stop()
+		if server.oauthManager == nil {
+			t.Fatal("expected oauthManager with authenticator")
+		}
+		if server.databaseAccessMode == nil || server.databaseAccessMode.CanAccessDatabase("nornic") {
+			t.Fatal("expected deny-all access mode before allowlist resolution when auth enabled")
+		}
+		if server.slowQueryLogger == nil {
+			t.Fatal("expected slow query logger when file configured")
+		}
+		if server.dbManager == nil || server.dbConfigStore == nil {
+			t.Fatal("expected database manager and db config store to be initialized")
+		}
+	})
 }
 
 // TestStripCypherComments tests the stripCypherComments function.

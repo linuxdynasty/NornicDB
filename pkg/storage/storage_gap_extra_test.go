@@ -298,6 +298,61 @@ func TestSchemaDefinitionPersistenceHelpers(t *testing.T) {
 		sm := NewSchemaManager()
 		require.NoError(t, sm.ReplaceFromDefinition(nil))
 	})
+
+	t.Run("export definition is sorted and deep copied", func(t *testing.T) {
+		sm := NewSchemaManager()
+		require.NoError(t, sm.AddConstraint(Constraint{
+			Name:       "b_exists",
+			Type:       ConstraintExists,
+			Label:      "User",
+			Properties: []string{"name"},
+		}))
+		require.NoError(t, sm.AddUniqueConstraint("a_unique", "User", "email"))
+		require.NoError(t, sm.AddPropertyTypeConstraint("b_type", "User", "age", PropertyTypeInteger))
+		require.NoError(t, sm.AddPropertyTypeConstraint("a_type", "Account", "age", PropertyTypeInteger))
+		require.NoError(t, sm.AddPropertyIndex("b_prop_idx", "User", []string{"name"}))
+		require.NoError(t, sm.AddPropertyIndex("a_prop_idx", "Account", []string{"name"}))
+		require.NoError(t, sm.AddCompositeIndex("b_comp_idx", "User", []string{"city", "country"}))
+		require.NoError(t, sm.AddCompositeIndex("a_comp_idx", "Account", []string{"tenant", "email"}))
+		require.NoError(t, sm.AddFulltextIndex("z_fulltext", []string{"User"}, []string{"bio", "title"}))
+		require.NoError(t, sm.AddFulltextIndex("a_fulltext", []string{"Account"}, []string{"notes"}))
+		require.NoError(t, sm.AddVectorIndex("z_vector", "User", "embedding", 3, "cosine"))
+		require.NoError(t, sm.AddVectorIndex("a_vector", "Account", "embedding", 4, "euclidean"))
+		require.NoError(t, sm.AddRangeIndex("z_range", "User", "age"))
+		require.NoError(t, sm.AddRangeIndex("a_range", "Account", "score"))
+
+		def := sm.ExportDefinition()
+		require.NotNil(t, def)
+		require.Len(t, def.Constraints, 2)
+		require.Equal(t, "a_unique", def.Constraints[0].Name)
+		require.Equal(t, "b_exists", def.Constraints[1].Name)
+		require.Len(t, def.PropertyTypeConstraints, 2)
+		require.Equal(t, "a_type", def.PropertyTypeConstraints[0].Name)
+		require.Equal(t, "b_type", def.PropertyTypeConstraints[1].Name)
+		require.Equal(t, "a_prop_idx", def.PropertyIndexes[0].Name)
+		require.Equal(t, "b_prop_idx", def.PropertyIndexes[1].Name)
+		require.Equal(t, "a_comp_idx", def.CompositeIndexes[0].Name)
+		require.Equal(t, "b_comp_idx", def.CompositeIndexes[1].Name)
+		require.Equal(t, "a_fulltext", def.FulltextIndexes[0].Name)
+		require.Equal(t, "z_fulltext", def.FulltextIndexes[1].Name)
+		require.Equal(t, "a_vector", def.VectorIndexes[0].Name)
+		require.Equal(t, "z_vector", def.VectorIndexes[1].Name)
+		require.Equal(t, "a_range", def.RangeIndexes[0].Name)
+		require.Equal(t, "z_range", def.RangeIndexes[1].Name)
+
+		def.Constraints[0].Properties[0] = "mutated"
+		def.PropertyIndexes[0].Properties[0] = "mutated"
+		def.CompositeIndexes[0].Properties[0] = "mutated"
+		def.FulltextIndexes[0].Labels[0] = "Mutated"
+		def.FulltextIndexes[0].Properties[0] = "mutated"
+
+		fresh := sm.ExportDefinition()
+		require.Equal(t, "email", fresh.Constraints[0].Properties[0])
+		require.Equal(t, "name", fresh.PropertyIndexes[0].Properties[0])
+		require.Equal(t, "tenant", fresh.CompositeIndexes[0].Properties[0])
+		require.Equal(t, "Account", fresh.FulltextIndexes[0].Labels[0])
+		require.Equal(t, "notes", fresh.FulltextIndexes[0].Properties[0])
+	})
 }
 
 func TestBadgerSchemaHelpers(t *testing.T) {
