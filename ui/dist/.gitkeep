@@ -1,0 +1,2 @@
+This placeholder keeps ui/dist present for Go embed in CI.
+Real UI assets are produced by the frontend build pipeline.
