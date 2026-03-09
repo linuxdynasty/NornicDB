@@ -3,5 +3,6 @@ dist
 !dist/
 dist/*
 !dist/.gitkeep
+!dist/index.html
 .DS_Store
 *.local
