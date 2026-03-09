@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,11 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/cypher"
+	"github.com/orneryd/nornicdb/pkg/gpu"
+	"github.com/orneryd/nornicdb/pkg/heimdall"
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
@@ -1372,6 +1379,548 @@ func TestHandleSearchRebuild(t *testing.T) {
 	}
 }
 
+func TestHandleSearchAdditionalDirectBranches(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Method not allowed.
+	req := httptest.NewRequest(http.MethodGet, "/nornicdb/search", nil)
+	rec := httptest.NewRecorder()
+	server.handleSearch(rec, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+	// Invalid JSON.
+	req = httptest.NewRequest(http.MethodPost, "/nornicdb/search", strings.NewReader("{"))
+	rec = httptest.NewRecorder()
+	server.handleSearch(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// Forbidden (auth enabled + no claims).
+	req = httptest.NewRequest(http.MethodPost, "/nornicdb/search", strings.NewReader(`{"query":"x"}`))
+	rec = httptest.NewRecorder()
+	server.handleSearch(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Search-not-ready branch.
+	server.db.ResetSearchService(server.dbManager.DefaultDatabaseName())
+	resp := makeRequest(t, server, http.MethodPost, "/nornicdb/search", map[string]interface{}{
+		"query": "x",
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusServiceUnavailable, resp.Code)
+}
+
+func TestRegisterMCPRoutes_AllEndpoints(t *testing.T) {
+	server, authn := setupTestServer(t)
+	token := getAuthToken(t, authn, "admin")
+	mux := http.NewServeMux()
+	server.registerMCPRoutes(mux)
+
+	paths := []string{
+		"/mcp",
+		"/mcp/initialize",
+		"/mcp/tools/list",
+		"/mcp/tools/call",
+		"/mcp/health",
+	}
+
+	for _, p := range paths {
+		// Unauthorized branch for auth-wrapped endpoints (except health).
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if p == "/mcp/health" {
+			require.Equal(t, http.StatusOK, rec.Code)
+		} else {
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+		}
+
+		// Authorized branch.
+		req = httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		require.NotEqual(t, http.StatusUnauthorized, rec.Code)
+	}
+}
+
+func TestNew_AsyncEmbeddingSuccessAndHeimdallMCPBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := nornicdb.DefaultConfig()
+	cfg.Memory.DecayEnabled = false
+	cfg.Database.AsyncWritesEnabled = false
+	db, err := nornicdb.Open(tmpDir, cfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Mock OpenAI embeddings endpoint used by async embedding init health check.
+	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3,0.4],"index":0}]}`))
+	}))
+	defer embedServer.Close()
+
+	serverCfg := DefaultConfig()
+	serverCfg.Port = 0
+	serverCfg.MCPEnabled = true
+	serverCfg.EmbeddingEnabled = true
+	serverCfg.EmbeddingProvider = "openai"
+	serverCfg.EmbeddingAPIURL = embedServer.URL
+	serverCfg.EmbeddingAPIKey = "test-key"
+	serverCfg.EmbeddingModel = "text-embedding-3-small"
+	serverCfg.EmbeddingDimensions = 4
+	serverCfg.EmbeddingCacheSize = 8
+	serverCfg.Features = &nornicConfig.FeatureFlagsConfig{
+		HeimdallEnabled:      true,
+		HeimdallProvider:     "openai",
+		HeimdallAPIKey:       "test-key",
+		HeimdallAPIURL:       "http://127.0.0.1:1",
+		HeimdallModel:        "gpt-4o-mini",
+		HeimdallMCPEnable:    true,
+		HeimdallMCPTools:     []string{"store", "recall"},
+		SearchRerankEnabled:  true,
+		SearchRerankProvider: "ollama",
+		SearchRerankAPIURL:   "http://127.0.0.1:1/rerank",
+	}
+	serverCfg.PluginsDir = t.TempDir()
+	serverCfg.HeimdallPluginsDir = t.TempDir()
+
+	srv, err := New(db, nil, serverCfg)
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	defer srv.Stop(context.Background())
+
+	// Wait for async embedding init success path to wire embedder into DB.
+	require.Eventually(t, func() bool {
+		_, e := db.EmbedQuery(context.Background(), "health")
+		return e == nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Wait for async Heimdall init to set handler.
+	require.Eventually(t, func() bool {
+		return srv.getHeimdallHandler() != nil
+	}, 2*time.Second, 50*time.Millisecond)
+}
+
+func TestHeimdallExecutorForDatabase_CacheAndFallbackBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	router := newHeimdallDBRouter(server.db, server.dbManager, nil)
+
+	dbName := server.dbManager.DefaultDatabaseName()
+	name1, exec1, _, err := router.executorForDatabase(dbName)
+	require.NoError(t, err)
+	require.Equal(t, dbName, name1)
+	require.NotNil(t, exec1)
+
+	// Cached executor fast-path should return same pointer.
+	name2, exec2, _, err := router.executorForDatabase(dbName)
+	require.NoError(t, err)
+	require.Equal(t, dbName, name2)
+	require.Equal(t, exec1, exec2)
+
+	// dbManager nil fallback storage path.
+	routerNoMgr := newHeimdallDBRouter(server.db, nil, nil)
+	_, exec3, _, err := routerNoMgr.executorForDatabase("")
+	require.NoError(t, err)
+	require.NotNil(t, exec3)
+}
+
+func TestHandleSearchRebuild_WriteForbiddenBranch(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	// Reader can access nornic but should not have write privilege for rebuild.
+	req := httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"`+dbName+`"}`))
+	req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "reader",
+		Roles:    []string{"viewer"},
+	}))
+	rec := httptest.NewRecorder()
+	server.handleSearchRebuild(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestHandleCommitTransaction_AdditionalBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	// Open transaction as admin claim.
+	openReq := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx", strings.NewReader(`{"statements":[]}`))
+	openReq = openReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	}))
+	openRec := httptest.NewRecorder()
+	server.handleOpenTransaction(openRec, openReq, dbName)
+	require.Equal(t, http.StatusCreated, openRec.Code)
+
+	var openResp map[string]interface{}
+	require.NoError(t, json.NewDecoder(openRec.Body).Decode(&openResp))
+	commitURL, _ := openResp["commit"].(string)
+	require.NotEmpty(t, commitURL)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+	require.NotEmpty(t, txID)
+
+	// Commit with invalid final statement to exercise rollback-on-errors branch.
+	commitReq := httptest.NewRequest(http.MethodPost, commitURL, strings.NewReader(`{"statements":[{"statement":"INVALID CYPHER"}]}`))
+	commitReq = commitReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	}))
+	commitRec := httptest.NewRecorder()
+	server.handleCommitTransaction(commitRec, commitReq, dbName, txID)
+	require.Equal(t, http.StatusOK, commitRec.Code)
+
+	var commitResp map[string]interface{}
+	require.NoError(t, json.NewDecoder(commitRec.Body).Decode(&commitResp))
+	if errs, ok := commitResp["errors"].([]interface{}); ok {
+		require.NotEmpty(t, errs)
+	}
+}
+
+func TestHandleMetrics_BranchesWithAndWithoutEmbedQueue(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	// Baseline metrics response.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	server.handleMetrics(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "nornicdb_info")
+
+	// Ensure embed-worker metrics path is present once embedder is configured.
+	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	server.handleMetrics(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "nornicdb_embedding_worker_running")
+}
+
+func TestNornicDBHandlers_AdditionalCoverage(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	})
+
+	t.Run("embed stats and decay", func(t *testing.T) {
+		// Embed stats when auto-embed is disabled (nil stats branch).
+		req := httptest.NewRequest(http.MethodGet, "/nornicdb/embed/stats", nil)
+		rec := httptest.NewRecorder()
+		server.handleEmbedStats(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		// Enable embedder then check enabled stats branch.
+		server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+		req = httptest.NewRequest(http.MethodGet, "/nornicdb/embed/stats", nil)
+		rec = httptest.NewRecorder()
+		server.handleEmbedStats(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		req = httptest.NewRequest(http.MethodGet, "/nornicdb/decay", nil)
+		rec = httptest.NewRecorder()
+		server.handleDecay(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("embed clear and trigger", func(t *testing.T) {
+		// embed clear method not allowed
+		req := httptest.NewRequest(http.MethodGet, "/nornicdb/embed/clear", nil)
+		rec := httptest.NewRecorder()
+		server.handleEmbedClear(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		req = httptest.NewRequest(http.MethodDelete, "/nornicdb/embed/clear", nil)
+		rec = httptest.NewRecorder()
+		server.handleEmbedClear(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		// trigger method not allowed
+		req = httptest.NewRequest(http.MethodGet, "/nornicdb/embed/trigger", nil)
+		rec = httptest.NewRecorder()
+		server.handleEmbedTrigger(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		// trigger with embed queue not enabled
+		serverNoEmbed, _ := setupTestServer(t)
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil)
+		rec = httptest.NewRecorder()
+		serverNoEmbed.handleEmbedTrigger(rec, req)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+
+	t.Run("similar handler branches", func(t *testing.T) {
+		// method not allowed
+		req := httptest.NewRequest(http.MethodGet, "/nornicdb/similar", nil)
+		rec := httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		// invalid json
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader("{"))
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		// forbidden with no claims
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader(`{"node_id":"n1"}`))
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusForbidden, rec.Code)
+
+		// db not found
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader(`{"database":"missing","node_id":"n1"}`)).WithContext(adminCtx)
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+
+		// node not found
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader(`{"database":"`+dbName+`","node_id":"missing"}`)).WithContext(adminCtx)
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+
+		// target node without embedding
+		st, err := server.dbManager.GetStorage(dbName)
+		require.NoError(t, err)
+		_, _ = st.CreateNode(&storage.Node{ID: "no-emb-node", Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "x"}})
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader(`{"database":"`+dbName+`","node_id":"no-emb-node"}`)).WithContext(adminCtx)
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		// success path with embeddings.
+		embA := make([]float32, 16)
+		embA[0] = 1
+		embB := make([]float32, 16)
+		embB[0] = 0.9
+		_, _ = st.CreateNode(&storage.Node{ID: "target-emb-node", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{embA}})
+		_, _ = st.CreateNode(&storage.Node{ID: "other-emb-node", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{embB}})
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/similar", strings.NewReader(`{"database":"`+dbName+`","node_id":"target-emb-node","limit":1}`)).WithContext(adminCtx)
+		rec = httptest.NewRecorder()
+		server.handleSimilar(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
+func TestGPUHandlers_SuccessPathsWithManager(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	// Create a CPU-only manager object to satisfy type checks.
+	gm, err := gpu.NewManager(&gpu.Config{Enabled: false, FallbackOnError: true})
+	require.NoError(t, err)
+	server.db.SetGPUManager(gm)
+
+	// Seed nodes with embeddings so FindSimilar can run.
+	st, err := server.dbManager.GetStorage(dbName)
+	require.NoError(t, err)
+	vecA := make([]float32, 8)
+	vecA[0] = 1
+	vecB := make([]float32, 8)
+	vecB[0] = 0.95
+	_, _ = st.CreateNode(&storage.Node{ID: "gpu_target", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{vecA}})
+	_, _ = st.CreateNode(&storage.Node{ID: "gpu_other", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{vecB}})
+
+	// status happy path with manager set
+	req := httptest.NewRequest(http.MethodGet, "/admin/gpu/status", nil)
+	rec := httptest.NewRecorder()
+	server.handleGPUStatus(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// disable happy path
+	req = httptest.NewRequest(http.MethodPost, "/admin/gpu/disable", nil)
+	rec = httptest.NewRecorder()
+	server.handleGPUDisable(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// test handler success with mode auto and cpu
+	req = httptest.NewRequest(http.MethodPost, "/admin/gpu/test", strings.NewReader(`{"node_id":"gpu_target","limit":1,"mode":"auto"}`))
+	rec = httptest.NewRecorder()
+	server.handleGPUTest(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/admin/gpu/test", strings.NewReader(`{"node_id":"gpu_target","limit":1,"mode":"cpu"}`))
+	rec = httptest.NewRecorder()
+	server.handleGPUTest(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestHandleSearch_LongChunkedBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	server.auth = nil // Full DB access for branch-focused direct handler tests
+
+	require.NoError(t, server.dbManager.CreateDatabase("translations"))
+	st, err := server.dbManager.GetStorage("translations")
+	require.NoError(t, err)
+
+	// Seed vectors so vectorSearchUsable=true.
+	seed := make([]float32, 1024)
+	seed[0] = 1
+	_, _ = st.CreateNode(&storage.Node{
+		ID:              "t_seed",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]interface{}{"title": "seed"},
+		ChunkEmbeddings: [][]float32{seed},
+	})
+
+	// Ensure search service exists and is ready for the database.
+	svc, err := server.db.GetOrCreateSearchService("translations", st)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+	require.NoError(t, svc.BuildIndexes(context.Background()))
+
+	// Use embedder so chunked vector path is exercised.
+	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+	server.config.Features = &nornicConfig.FeatureFlagsConfig{
+		SearchRerankEnabled: true,
+	}
+	t.Setenv("NORNICDB_SEARCH_DIAG_TIMINGS", "true")
+
+	// > 32 chunks to trigger maxQueryChunks cap and high limit to hit perChunkLimit > 100 path.
+	longQuery := strings.Repeat("This is a long query block for chunking. ", 1200)
+	body := map[string]interface{}{
+		"database": "translations",
+		"query":    longQuery,
+		"labels":   []string{"Doc"},
+		"limit":    1000,
+	}
+	resp := makeRequest(t, server, http.MethodPost, "/nornicdb/search", body, "")
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+}
+
+func TestOAuthRedirectAndCallback_SuccessFlow(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	// Mock OAuth provider.
+	oauthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/v1/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"oauth-at","token_type":"Bearer","expires_in":3600,"refresh_token":"oauth-rt"}`))
+		case "/oauth2/v1/userinfo":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sub":"oauth-sub","email":"oauth@example.com","preferred_username":"oauthuser","roles":["viewer"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer oauthSrv.Close()
+
+	t.Setenv("NORNICDB_AUTH_PROVIDER", "oauth")
+	t.Setenv("NORNICDB_OAUTH_ISSUER", oauthSrv.URL)
+	t.Setenv("NORNICDB_OAUTH_CLIENT_ID", "cid")
+	t.Setenv("NORNICDB_OAUTH_CLIENT_SECRET", "csecret")
+	t.Setenv("NORNICDB_OAUTH_CALLBACK_URL", "http://localhost:7474/auth/oauth/callback")
+
+	// Redirect step generates and stores state.
+	req := httptest.NewRequest(http.MethodGet, "/auth/oauth/redirect", nil)
+	req.Host = "localhost:7474"
+	rec := httptest.NewRecorder()
+	server.handleOAuthRedirect(rec, req)
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	location := rec.Header().Get("Location")
+	require.NotEmpty(t, location)
+	parsed, err := url.Parse(location)
+	require.NoError(t, err)
+	state := parsed.Query().Get("state")
+	require.NotEmpty(t, state)
+
+	// Callback step validates state and issues app token/cookie.
+	cbReq := httptest.NewRequest(http.MethodGet, "/auth/oauth/callback?code=test-code&state="+url.QueryEscape(state), nil)
+	cbRec := httptest.NewRecorder()
+	server.handleOAuthCallback(cbRec, cbReq)
+	require.Equal(t, http.StatusFound, cbRec.Code)
+	require.Equal(t, "/", cbRec.Header().Get("Location"))
+}
+
+func TestHandleImplicitTransaction_BranchMatrix(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader("{"))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("mutation denied without claims", func(t *testing.T) {
+		body := `{"statements":[{"statement":"CREATE (n:Doc {name:'x'})"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("use missing database returns 404", func(t *testing.T) {
+		body := `{"statements":[{"statement":":USE missing_db RETURN 1 AS n"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+			Username: "admin",
+			Roles:    []string{"admin"},
+		}))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("comment-only statement yields empty result and includeStats", func(t *testing.T) {
+		body := `{"statements":[{"statement":"// comment only","includeStats":true},{"statement":"RETURN 1 AS n","includeStats":true}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+			Username: "admin",
+			Roles:    []string{"admin"},
+		}))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var payload map[string]interface{}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+		results, ok := payload["results"].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, results)
+	})
+}
+
+func TestHandleImplicitTransaction_AsyncWriteAccepted(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbCfg := nornicdb.DefaultConfig()
+	dbCfg.Memory.DecayEnabled = false
+	dbCfg.Database.AsyncWritesEnabled = true
+	db, err := nornicdb.Open(tmpDir, dbCfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	authn, err := auth.NewAuthenticator(auth.AuthConfig{
+		SecurityEnabled: true,
+		JWTSecret:       []byte("test-secret-key-for-testing-only-32b"),
+	}, storage.NewMemoryEngine())
+	require.NoError(t, err)
+	_, _ = authn.CreateUser("admin", "password123", []auth.Role{auth.RoleAdmin})
+
+	cfg := DefaultConfig()
+	cfg.Port = 0
+	srv, err := New(db, authn, cfg)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", strings.NewReader(`{"statements":[{"statement":"CREATE (n:Doc {name:'async'})"}]}`))
+	req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	}))
+	rec := httptest.NewRecorder()
+	srv.handleImplicitTransaction(rec, req, "nornic")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Equal(t, "eventual", rec.Header().Get("X-NornicDB-Consistency"))
+}
+
 func TestHandleSimilar(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
@@ -2542,4 +3091,692 @@ func TestSimilarInvalidJSON(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400 for invalid JSON, got %d", recorder.Code)
 	}
+}
+
+func TestBuildEmbedConfigFromResolved_Branches(t *testing.T) {
+	require.Nil(t, buildEmbedConfigFromResolved(map[string]string{}, nil))
+
+	fallback := DefaultConfig()
+	fallback.EmbeddingProvider = ""
+	fallback.EmbeddingDimensions = 0
+	fallback.ModelsDir = "/tmp/models"
+
+	cfg := buildEmbedConfigFromResolved(map[string]string{}, fallback)
+	require.NotNil(t, cfg)
+	require.Equal(t, "openai", cfg.Provider)
+	require.Equal(t, "/v1/embeddings", cfg.APIPath)
+	require.Equal(t, 1024, cfg.Dimensions)
+
+	cfg = buildEmbedConfigFromResolved(map[string]string{
+		"NORNICDB_EMBEDDING_PROVIDER":   "ollama",
+		"NORNICDB_EMBEDDING_DIMENSIONS": "1536",
+		"NORNICDB_EMBEDDING_GPU_LAYERS": "12",
+	}, fallback)
+	require.Equal(t, "ollama", cfg.Provider)
+	require.Equal(t, "/api/embeddings", cfg.APIPath)
+	require.Equal(t, 1536, cfg.Dimensions)
+	require.Equal(t, 12, cfg.GPULayers)
+
+	cfg = buildEmbedConfigFromResolved(map[string]string{
+		"NORNICDB_EMBEDDING_PROVIDER":   "local",
+		"NORNICDB_EMBEDDING_DIMENSIONS": "-1",
+		"NORNICDB_EMBEDDING_GPU_LAYERS": "not-an-int",
+	}, fallback)
+	require.Equal(t, "local", cfg.Provider)
+	require.Equal(t, "", cfg.APIPath)
+	require.Equal(t, 1024, cfg.Dimensions)
+	require.Equal(t, 0, cfg.GPULayers)
+
+	cfg = buildEmbedConfigFromResolved(map[string]string{
+		"NORNICDB_EMBEDDING_PROVIDER": "custom-provider",
+	}, fallback)
+	require.Equal(t, "/api/embeddings", cfg.APIPath)
+}
+
+func TestEnsureSearchBuildStartedForKnownDatabases_NilAndNoopBranches(t *testing.T) {
+	var nilServer *Server
+	nilServer.ensureSearchBuildStartedForKnownDatabases()
+
+	server, _ := setupTestServer(t)
+	server.ensureSearchBuildStartedForKnownDatabases()
+
+	origDB := server.db
+	server.db = nil
+	server.ensureSearchBuildStartedForKnownDatabases()
+	server.db = origDB
+
+	origMgr := server.dbManager
+	server.dbManager = nil
+	server.ensureSearchBuildStartedForKnownDatabases()
+	server.dbManager = origMgr
+}
+
+func TestIPRateLimiter_ResetAndCleanupLoopBranches(t *testing.T) {
+	rl := NewIPRateLimiter(2, 2, 1)
+	defer rl.Stop()
+
+	require.True(t, rl.Allow("10.0.0.1"))
+	require.True(t, rl.Allow("10.0.0.1"))
+	require.False(t, rl.Allow("10.0.0.1"))
+
+	rl.mu.RLock()
+	c := rl.counters["10.0.0.1"]
+	rl.mu.RUnlock()
+	require.NotNil(t, c)
+
+	c.mu.Lock()
+	c.minuteCount = 999
+	c.hourCount = 1
+	c.minuteReset = time.Now().Add(-time.Second)
+	c.hourReset = time.Now().Add(time.Hour)
+	c.mu.Unlock()
+	require.True(t, rl.Allow("10.0.0.1"))
+
+	c.mu.Lock()
+	c.hourCount = 999
+	c.hourReset = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+	require.True(t, rl.Allow("10.0.0.1"))
+
+	manual := &IPRateLimiter{
+		counters:        map[string]*ipRateLimitCounter{},
+		perMinute:       10,
+		perHour:         10,
+		burst:           1,
+		cleanupInterval: 5 * time.Millisecond,
+		stopCleanup:     make(chan struct{}),
+	}
+	manual.counters["stale"] = &ipRateLimitCounter{
+		hourReset:   time.Now().Add(-time.Second),
+		minuteReset: time.Now().Add(time.Minute),
+	}
+	go manual.cleanupLoop()
+	require.Eventually(t, func() bool {
+		manual.mu.RLock()
+		defer manual.mu.RUnlock()
+		_, ok := manual.counters["stale"]
+		return !ok
+	}, 250*time.Millisecond, 10*time.Millisecond)
+	manual.Stop()
+}
+
+func TestServerAuthAndAuxHandlers_AdditionalBranches(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	_, adminUser, err := authenticator.Authenticate("admin", "password123", "127.0.0.1", "test")
+	require.NoError(t, err)
+	require.NotNil(t, adminUser)
+	require.NotEmpty(t, adminUser.ID)
+
+	withClaims := func(r *http.Request, claims *auth.JWTClaims) *http.Request {
+		return r.WithContext(context.WithValue(r.Context(), contextKeyClaims, claims))
+	}
+
+	t.Run("handleMe oauth env inference", func(t *testing.T) {
+		t.Setenv("NORNICDB_AUTH_PROVIDER", "oauth")
+		t.Setenv("NORNICDB_OAUTH_ISSUER", "https://issuer.example")
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req = withClaims(req, &auth.JWTClaims{
+			Sub:      adminUser.ID,
+			Username: "admin",
+			Roles:    []string{"admin"},
+		})
+		rec := httptest.NewRecorder()
+		server.handleMe(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "\"auth_method\":\"oauth\"")
+		require.Contains(t, rec.Body.String(), "\"oauth_provider\":\"https://issuer.example\"")
+	})
+
+	t.Run("change password fallback user lookup branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/change-password", strings.NewReader(`{"old_password":"password123","new_password":"newPass123!"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = withClaims(req, &auth.JWTClaims{
+			Sub:      adminUser.ID,
+			Username: "",
+			Roles:    []string{"admin"},
+		})
+		rec := httptest.NewRecorder()
+		server.handleChangePassword(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPost, "/auth/change-password", strings.NewReader(`{"old_password":"x","new_password":"y"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = withClaims(req, &auth.JWTClaims{
+			Sub:      "missing-user-id",
+			Username: "",
+			Roles:    []string{"admin"},
+		})
+		rec = httptest.NewRecorder()
+		server.handleChangePassword(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("roles and role-by-id success and conflict branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/auth/roles", nil)
+		rec := httptest.NewRecorder()
+		server.handleRoles(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPost, "/auth/roles", strings.NewReader(`{"name":"analyst"}`))
+		rec = httptest.NewRecorder()
+		server.handleRoles(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		_ = server.auth.UpdateRoles("reader", []auth.Role{auth.Role("analyst")})
+
+		req = httptest.NewRequest(http.MethodDelete, "/auth/roles/analyst", nil)
+		rec = httptest.NewRecorder()
+		server.handleRoleByID(rec, req)
+		require.Equal(t, http.StatusConflict, rec.Code)
+
+		_ = server.auth.UpdateRoles("reader", []auth.Role{auth.RoleViewer})
+		req = httptest.NewRequest(http.MethodDelete, "/auth/roles/analyst", nil)
+		rec = httptest.NewRecorder()
+		server.handleRoleByID(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("oauth redirect bad method and not configured", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/oauth/redirect", nil)
+		rec := httptest.NewRecorder()
+		server.handleOAuthRedirect(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		orig := server.oauthManager
+		server.oauthManager = nil
+		req = httptest.NewRequest(http.MethodGet, "/auth/oauth/redirect", nil)
+		rec = httptest.NewRecorder()
+		server.handleOAuthRedirect(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		server.oauthManager = orig
+	})
+}
+
+func TestDbConfigGPUAndMiddleware_AdditionalBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	t.Run("db config prefix method not allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/admin/databases/nornic/config", nil)
+		rec := httptest.NewRecorder()
+		server.handleDbConfigPrefix(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("gpu test mode gpu branch", func(t *testing.T) {
+		gm, err := gpu.NewManager(&gpu.Config{Enabled: false, FallbackOnError: true})
+		require.NoError(t, err)
+		server.db.SetGPUManager(gm)
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/gpu/test", strings.NewReader(`{"node_id":"missing","mode":"gpu"}`))
+		rec := httptest.NewRecorder()
+		server.handleGPUTest(rec, req)
+		// Either GPU enable fails (500) or similar lookup fails (500) depending on environment.
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+	})
+
+	t.Run("recovery middleware debug stack path", func(t *testing.T) {
+		t.Setenv("NORNICDB_DEBUG", "true")
+		h := server.recoveryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			panic("boom-debug")
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+	})
+}
+
+func TestNeo4jConversionAndTxHelpers_AdditionalBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	require.Nil(t, server.nodeToNeo4jHTTPFormat(nil))
+	require.Nil(t, server.edgeToNeo4jHTTPFormat(nil))
+
+	converted := server.convertValueToNeo4jFormat(map[string]interface{}{
+		"_pathResult": "drop",
+		"node": &storage.Node{
+			ID:         "cv-node",
+			Labels:     []string{"Doc"},
+			Properties: map[string]interface{}{"k": "v"},
+		},
+		"vals": []interface{}{
+			&storage.Edge{ID: "cv-edge", StartNode: "a", EndNode: "b", Type: "REL"},
+			"text",
+		},
+	})
+	m, ok := converted.(map[string]interface{})
+	require.True(t, ok)
+	require.NotContains(t, m, "_pathResult")
+	require.Contains(t, m, "node")
+	require.Contains(t, m, "vals")
+
+	withProps := server.mapNodeToNeo4jHTTPFormat("n-props", map[string]interface{}{
+		"labels":     []string{"Doc"},
+		"properties": map[string]interface{}{"title": "t"},
+	})
+	props, ok := withProps["properties"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "t", props["title"])
+
+	withMixedLabels := server.mapNodeToNeo4jHTTPFormat("n-mixed", map[string]interface{}{
+		"labels": []interface{}{"A", 123, "B"},
+		"name":   "mixed",
+	})
+	labels, ok := withMixedLabels["labels"].([]string)
+	require.True(t, ok)
+	require.Equal(t, "A", labels[0])
+	require.Equal(t, "", labels[1])
+	require.Equal(t, "B", labels[2])
+
+	server.config.Address = "0.0.0.0"
+	commitURL := server.transactionCommitURL("nornic", "tx-1")
+	require.Contains(t, commitURL, "http://localhost:")
+
+	resp := &TransactionResponse{Results: make([]QueryResult, 0)}
+	server.appendStatementResult(resp, &cypher.ExecuteResult{
+		Columns: []string{"n"},
+		Rows:    [][]interface{}{{map[string]interface{}{"elementId": "4:nornicdb:abc"}}},
+		Metadata: map[string]interface{}{
+			"receipt": map[string]interface{}{"writes": 1},
+		},
+	})
+	require.Len(t, resp.Results, 1)
+	require.NotNil(t, resp.Receipt)
+}
+
+func TestTransactionHandlers_AdditionalErrorBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	_ = server.dbManager.CreateDatabase("private")
+
+	adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/db/missing_db/tx", strings.NewReader(`{"statements":[]}`)).WithContext(adminCtx)
+	rec := httptest.NewRecorder()
+	server.handleOpenTransaction(rec, req, "missing_db")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/db/private/tx", strings.NewReader(`{"statements":[]}`))
+	rec = httptest.NewRecorder()
+	server.handleOpenTransaction(rec, req, "private")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/db/nornic/tx/nope/commit", strings.NewReader(`{"statements":[]}`)).WithContext(adminCtx)
+	rec = httptest.NewRecorder()
+	server.handleCommitTransaction(rec, req, "nornic", "nope")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/db/private/tx/nope/commit", strings.NewReader(`{"statements":[]}`))
+	rec = httptest.NewRecorder()
+	server.handleCommitTransaction(rec, req, "private", "nope")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/db/nornic/tx/nope", strings.NewReader(`{"statements":[]}`)).WithContext(adminCtx)
+	rec = httptest.NewRecorder()
+	server.handleExecuteInTransaction(rec, req, "nornic", "nope")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	req = httptest.NewRequest(http.MethodDelete, "/db/private/tx/nope", nil)
+	rec = httptest.NewRecorder()
+	server.handleRollbackTransaction(rec, req, "private", "nope")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestDbConfigStatusAndHeimdallRoutes_AdditionalBranches(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/databases/config/keys", nil)
+	rec := httptest.NewRecorder()
+	server.handleDbConfigPrefix(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/databases/nornic/config", strings.NewReader("{"))
+	rec = httptest.NewRecorder()
+	server.handlePutDbConfig(rec, req, "nornic")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/databases/nornic/config", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	server.handlePutDbConfig(rec, req, "nornic")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.dbManager.CreateDatabase("status_db"))
+	st, err := server.dbManager.GetStorage("status_db")
+	require.NoError(t, err)
+	_, _ = st.CreateNode(&storage.Node{ID: "s1", Labels: []string{"Doc"}})
+	_, _ = st.CreateNode(&storage.Node{ID: "s2", Labels: []string{"Doc"}})
+	_ = st.CreateEdge(&storage.Edge{ID: "e1", StartNode: "s1", EndNode: "s2", Type: "REL"})
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
+	statusRec := httptest.NewRecorder()
+	server.handleStatus(statusRec, statusReq)
+	require.Equal(t, http.StatusOK, statusRec.Code)
+	require.Contains(t, statusRec.Body.String(), "\"database\"")
+
+	server.config.Features.HeimdallEnabled = false
+	mux := http.NewServeMux()
+	server.registerHeimdallRoutes(mux)
+	disabledReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
+	disabledReq.Header.Set("Authorization", "Bearer "+token)
+	disabledRec := httptest.NewRecorder()
+	mux.ServeHTTP(disabledRec, disabledReq)
+	require.Equal(t, http.StatusServiceUnavailable, disabledRec.Code)
+
+	server.config.Features.HeimdallEnabled = true
+	server.setHeimdallHandler(nil)
+	initReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
+	initReq.Header.Set("Authorization", "Bearer "+token)
+	initRec := httptest.NewRecorder()
+	mux.ServeHTTP(initRec, initReq)
+	require.Equal(t, http.StatusServiceUnavailable, initRec.Code)
+
+	router := newHeimdallDBRouter(server.db, server.dbManager, server.config.Features)
+	h := heimdall.NewHandler(&heimdall.Manager{}, heimdall.Config{Enabled: true, Model: "test"}, router, &heimdallMetricsReader{})
+	server.setHeimdallHandler(h)
+	okReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/autocomplete", nil)
+	okReq.Header.Set("Authorization", "Bearer "+token)
+	okRec := httptest.NewRecorder()
+	mux.ServeHTTP(okRec, okReq)
+	require.NotEqual(t, http.StatusServiceUnavailable, okRec.Code)
+}
+
+func TestAuthHandlers_BranchExpansion(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	adminUser, err := authenticator.GetUser("admin")
+	require.NoError(t, err)
+
+	withClaims := func(r *http.Request, claims *auth.JWTClaims) *http.Request {
+		return r.WithContext(context.WithValue(r.Context(), contextKeyClaims, claims))
+	}
+
+	t.Run("logout with claims", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		req = withClaims(req, &auth.JWTClaims{Sub: adminUser.ID, Username: "admin", Roles: []string{"admin"}})
+		rec := httptest.NewRecorder()
+		server.handleLogout(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("token invalid body and unsupported grant type", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader("{"))
+		rec := httptest.NewRecorder()
+		server.handleToken(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(`{"username":"admin","password":"password123","grant_type":"client_credentials"}`))
+		rec = httptest.NewRecorder()
+		server.handleToken(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("token locked account path", func(t *testing.T) {
+		for i := 0; i < 6; i++ {
+			_, _, _ = server.auth.Authenticate("reader", "bad-pass", "127.0.0.1", "test")
+		}
+		req := httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(`{"username":"reader","password":"bad-pass","grant_type":"password"}`))
+		rec := httptest.NewRecorder()
+		server.handleToken(rec, req)
+		require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	})
+
+	t.Run("change password validation error branch", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/change-password", strings.NewReader(`{"old_password":"password123","new_password":"x"}`))
+		req = withClaims(req, &auth.JWTClaims{Sub: adminUser.ID, Username: "admin", Roles: []string{"admin"}})
+		rec := httptest.NewRecorder()
+		server.handleChangePassword(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("update profile fallback-not-found and update error", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/auth/profile", strings.NewReader(`{"email":"x@example.com","metadata":{"a":"b"}}`))
+		req = withClaims(req, &auth.JWTClaims{Sub: "missing-id", Username: "", Roles: []string{"admin"}})
+		rec := httptest.NewRecorder()
+		server.handleUpdateProfile(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPut, "/auth/profile", strings.NewReader(`{"email":"x@example.com"}`))
+		req = withClaims(req, &auth.JWTClaims{Sub: adminUser.ID, Username: "does-not-exist", Roles: []string{"admin"}})
+		rec = httptest.NewRecorder()
+		server.handleUpdateProfile(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("user by id not found branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/auth/users/definitely-missing", nil)
+		rec := httptest.NewRecorder()
+		server.handleUserByID(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+
+		req = httptest.NewRequest(http.MethodDelete, "/auth/users/definitely-missing", nil)
+		rec = httptest.NewRecorder()
+		server.handleUserByID(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("role handlers default and rename propagation branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/auth/role-entitlements", nil)
+		rec := httptest.NewRecorder()
+		server.handleRoleEntitlements(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPost, "/auth/roles", strings.NewReader(`{"name":"role_src"}`))
+		rec = httptest.NewRecorder()
+		server.handleRoles(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		require.NoError(t, server.auth.UpdateRoles("reader", []auth.Role{auth.Role("role_src")}))
+
+		req = httptest.NewRequest(http.MethodPatch, "/auth/roles/role_src", strings.NewReader(`{"name":"role_dst"}`))
+		rec = httptest.NewRecorder()
+		server.handleRoleByID(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		user, err := server.auth.GetUser("reader")
+		require.NoError(t, err)
+		var hasRoleDst bool
+		for _, r := range user.Roles {
+			if string(r) == "role_dst" {
+				hasRoleDst = true
+			}
+		}
+		require.True(t, hasRoleDst)
+
+		req = httptest.NewRequest(http.MethodGet, "/auth/roles/role_dst", nil)
+		rec = httptest.NewRecorder()
+		server.handleRoleByID(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("access handlers additional invalid/method branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/auth/access/databases", nil)
+		rec := httptest.NewRecorder()
+		server.handleAccessDatabases(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPut, "/auth/access/databases", strings.NewReader(`{"databases":["nornic"]}`))
+		rec = httptest.NewRecorder()
+		server.handleAccessDatabases(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPut, "/auth/access/databases", strings.NewReader(`{"mappings":[{"role":"viewer","databases":["nornic"]}]}`))
+		rec = httptest.NewRecorder()
+		server.handleAccessDatabases(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPut, "/auth/access/privileges", strings.NewReader("{"))
+		rec = httptest.NewRecorder()
+		server.handleAccessPrivileges(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		req = httptest.NewRequest(http.MethodPut, "/auth/access/privileges", strings.NewReader(`[{"role":"viewer","database":"nornic","read":true,"write":false}]`))
+		rec = httptest.NewRecorder()
+		server.handleAccessPrivileges(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		req = httptest.NewRequest(http.MethodDelete, "/auth/access/privileges", nil)
+		rec = httptest.NewRecorder()
+		server.handleAccessPrivileges(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+}
+
+func TestEmbedTriggerAndRBACHelpers_AdditionalBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	baseReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
+	sameReq := server.withBifrostRBAC(baseReq)
+	require.Equal(t, baseReq, sameReq)
+	require.Nil(t, auth.RequestPrincipalRolesFromContext(sameReq.Context()))
+
+	claimedReq := baseReq.WithContext(context.WithValue(baseReq.Context(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	}))
+	enriched := server.withBifrostRBAC(claimedReq)
+	require.NotNil(t, auth.RequestPrincipalRolesFromContext(enriched.Context()))
+	require.NotNil(t, auth.RequestDatabaseAccessModeFromContext(enriched.Context()))
+	resolver := auth.RequestResolvedAccessResolverFromContext(enriched.Context())
+	require.NotNil(t, resolver)
+	_ = resolver(server.dbManager.DefaultDatabaseName())
+
+	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+
+	req := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger?regenerate=true", nil)
+	rec := httptest.NewRecorder()
+	server.handleEmbedTrigger(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil)
+	rec = httptest.NewRecorder()
+	server.handleEmbedTrigger(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	req = httptest.NewRequest(http.MethodDelete, "/nornicdb/embed/clear", nil)
+	rec = httptest.NewRecorder()
+	server.handleEmbedClear(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestNew_SearchRerankProviderBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := nornicdb.Open(tmpDir, nornicdb.DefaultConfig())
+	require.NoError(t, err)
+	defer db.Close()
+
+	t.Run("ollama provider defaults api url and model", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EmbeddingEnabled = false
+		cfg.MCPEnabled = false
+		cfg.Features = &nornicConfig.FeatureFlagsConfig{
+			SearchRerankEnabled:  true,
+			SearchRerankProvider: "ollama",
+		}
+		s, err := New(db, nil, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, s)
+	})
+
+	t.Run("external provider with missing api url logs disabled path", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EmbeddingEnabled = false
+		cfg.MCPEnabled = false
+		cfg.Features = &nornicConfig.FeatureFlagsConfig{
+			SearchRerankEnabled:  true,
+			SearchRerankProvider: "cohere",
+		}
+		s, err := New(db, nil, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, s)
+	})
+}
+
+func TestUIAndStringHelpers_AdditionalBranches(t *testing.T) {
+	require.Equal(t, "value", getString(map[string]interface{}{"k": "value"}, "k"))
+	require.Equal(t, "", getString(map[string]interface{}{"k": 42}, "k"))
+	require.Equal(t, "", getString(map[string]interface{}{}, "missing"))
+
+	origEnabled := UIEnabled
+	origAssets := UIAssets
+	defer func() {
+		UIEnabled = origEnabled
+		UIAssets = origAssets
+	}()
+
+	UIEnabled = false
+	h, err := newUIHandler()
+	require.NoError(t, err)
+	require.Nil(t, h)
+
+	UIEnabled = true
+	UIAssets = embed.FS{}
+	h, err = newUIHandler()
+	require.Error(t, err)
+	require.Nil(t, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
+	require.False(t, isUIRequest(req))
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	require.True(t, isUIRequest(req))
+}
+
+func TestNornicDBRebuildAndEmbedTrigger_ErrorBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	rebuildReq := httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`))
+	rebuildRec := httptest.NewRecorder()
+	server.handleSearchRebuild(rebuildRec, rebuildReq)
+	require.Equal(t, http.StatusForbidden, rebuildRec.Code)
+
+	adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	})
+	cancelCtx, cancelRebuild := context.WithCancel(adminCtx)
+	cancelRebuild()
+	rebuildReq = httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`)).WithContext(cancelCtx)
+	rebuildRec = httptest.NewRecorder()
+	server.handleSearchRebuild(rebuildRec, rebuildReq)
+	require.Equal(t, http.StatusInternalServerError, rebuildRec.Code)
+
+	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	triggerReq := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil).WithContext(ctx)
+	triggerRec := httptest.NewRecorder()
+	server.handleEmbedTrigger(triggerRec, triggerReq)
+	require.Equal(t, http.StatusOK, triggerRec.Code)
+}
+
+func TestEnsureSearchBuildStartedForKnownDatabases_CompositeStorageMissBranch(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ref := multidb.ConstituentRef{
+		Alias:        server.dbManager.DefaultDatabaseName(),
+		DatabaseName: server.dbManager.DefaultDatabaseName(),
+		Type:         "local",
+		AccessMode:   "read_write",
+	}
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("cmp_search_cov", []multidb.ConstituentRef{ref}))
+	server.ensureSearchBuildStartedForKnownDatabases()
+	require.NoError(t, server.dbManager.DropCompositeDatabase("cmp_search_cov"))
+}
+
+func TestAuthUtilityBranches_MinorGaps(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/oauth/callback?code=x&state=y", nil)
+	rec := httptest.NewRecorder()
+	server.oauthManager = nil
+	server.handleOAuthCallback(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	require.False(t, isHTTPSRequest(nil))
+
+	roleEntReq := httptest.NewRequest(http.MethodPut, "/auth/role-entitlements", strings.NewReader(`{"mappings":[{"role":"   ","entitlements":["read"]}]}`))
+	roleEntRec := httptest.NewRecorder()
+	server.handleRoleEntitlements(roleEntRec, roleEntReq)
+	require.Equal(t, http.StatusOK, roleEntRec.Code)
 }
