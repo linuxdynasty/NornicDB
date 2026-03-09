@@ -301,16 +301,7 @@ func (b *ASTBuilder) Build(cypher string) (*AST, error) {
 	clauses := b.splitIntoClauses(cypher)
 
 	for _, clauseInfo := range clauses {
-		clause, err := b.parseClause(clauseInfo.clauseType, clauseInfo.text, clauseInfo.startPos)
-		if err != nil {
-			// For robustness, store raw text even if parsing fails
-			clause = &ASTClause{
-				Type:     clauseInfo.clauseType,
-				RawText:  clauseInfo.text,
-				StartPos: clauseInfo.startPos,
-				EndPos:   clauseInfo.startPos + len(clauseInfo.text),
-			}
-		}
+		clause := b.parseClause(clauseInfo.clauseType, clauseInfo.text, clauseInfo.startPos)
 		ast.Clauses = append(ast.Clauses, *clause)
 	}
 
@@ -480,7 +471,7 @@ func findKeywordPosition(s, keyword string) int {
 }
 
 // parseClause parses a single clause into its structured form.
-func (b *ASTBuilder) parseClause(clauseType ASTClauseType, text string, startPos int) (*ASTClause, error) {
+func (b *ASTBuilder) parseClause(clauseType ASTClauseType, text string, startPos int) *ASTClause {
 	clause := &ASTClause{
 		Type:     clauseType,
 		RawText:  text,
@@ -519,7 +510,7 @@ func (b *ASTBuilder) parseClause(clauseType ASTClauseType, text string, startPos
 		clause.Call = b.parseCall(text)
 	}
 
-	return clause, nil
+	return clause
 }
 
 // parseMatch parses a MATCH clause.
@@ -1001,6 +992,29 @@ func (b *ASTBuilder) parseExpression(text string) ASTExpression {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				expr.List = append(expr.List, b.parseExpression(p))
+			}
+		}
+		return expr
+	}
+
+	// Map literal
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
+		expr.Type = ASTExprMap
+		expr.Map = make(map[string]ASTExpression)
+		inner := strings.TrimSpace(text[1 : len(text)-1])
+		if inner == "" {
+			return expr
+		}
+		parts := splitOutsideBrackets(inner, ',')
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if colonIdx := strings.Index(part, ":"); colonIdx > 0 {
+				key := strings.TrimSpace(part[:colonIdx])
+				value := strings.TrimSpace(part[colonIdx+1:])
+				expr.Map[key] = b.parseExpression(value)
 			}
 		}
 		return expr

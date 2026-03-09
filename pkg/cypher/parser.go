@@ -194,7 +194,10 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 	}
 
 	// Tokenize and parse
-	tokens := tokenize(cypher)
+	tokens, err := tokenize(cypher)
+	if err != nil {
+		return nil, err
+	}
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("empty query")
 	}
@@ -206,64 +209,45 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 
 		switch token {
 		case "MATCH":
-			clause, newPos, err := p.parseMatch(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseMatch(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryMatch
 
 		case "OPTIONAL":
 			if pos+1 < len(tokens) && strings.EqualFold(tokens[pos+1], "MATCH") {
-				clause, newPos, err := p.parseMatch(tokens, pos+1)
-				if err != nil {
-					return nil, err
-				}
+				clause, newPos := p.parseMatch(tokens, pos+1)
 				clause.Optional = true
 				query.Clauses = append(query.Clauses, clause)
 				pos = newPos
+			} else {
+				return nil, fmt.Errorf("OPTIONAL must be followed by MATCH")
 			}
 
 		case "CREATE":
-			clause, newPos, err := p.parseCreate(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseCreate(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryCreate
 
 		case "RETURN":
-			clause, newPos, err := p.parseReturn(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseReturn(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 
 		case "WHERE":
-			clause, newPos, err := p.parseWhere(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseWhere(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 
 		case "SET":
-			clause, newPos, err := p.parseSet(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseSet(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QuerySet
 
 		case "DELETE", "DETACH":
-			clause, newPos, err := p.parseDelete(tokens, pos)
-			if err != nil {
-				return nil, err
-			}
+			clause, newPos := p.parseDelete(tokens, pos)
 			query.Clauses = append(query.Clauses, clause)
 			pos = newPos
 			query.Type = QueryDelete
@@ -277,7 +261,7 @@ func (p *Parser) Parse(cypher string) (*Query, error) {
 }
 
 // parseMatch parses a MATCH clause.
-func (p *Parser) parseMatch(tokens []string, pos int) (*MatchClause, int, error) {
+func (p *Parser) parseMatch(tokens []string, pos int) (*MatchClause, int) {
 	// Skip MATCH keyword
 	pos++
 
@@ -286,43 +270,43 @@ func (p *Parser) parseMatch(tokens []string, pos int) (*MatchClause, int, error)
 	// Parse pattern (simplified)
 	// TODO: Full pattern parsing
 
-	return clause, pos, nil
+	return clause, pos
 }
 
 // parseCreate parses a CREATE clause.
-func (p *Parser) parseCreate(tokens []string, pos int) (*CreateClause, int, error) {
+func (p *Parser) parseCreate(tokens []string, pos int) (*CreateClause, int) {
 	pos++
 	clause := &CreateClause{}
-	return clause, pos, nil
+	return clause, pos
 }
 
 // parseReturn parses a RETURN clause.
-func (p *Parser) parseReturn(tokens []string, pos int) (*ReturnClause, int, error) {
+func (p *Parser) parseReturn(tokens []string, pos int) (*ReturnClause, int) {
 	pos++
 	clause := &ReturnClause{
 		Items: make([]ReturnItem, 0),
 	}
-	return clause, pos, nil
+	return clause, pos
 }
 
 // parseWhere parses a WHERE clause.
-func (p *Parser) parseWhere(tokens []string, pos int) (*WhereClause, int, error) {
+func (p *Parser) parseWhere(tokens []string, pos int) (*WhereClause, int) {
 	pos++
 	clause := &WhereClause{}
-	return clause, pos, nil
+	return clause, pos
 }
 
 // parseSet parses a SET clause.
-func (p *Parser) parseSet(tokens []string, pos int) (*SetClause, int, error) {
+func (p *Parser) parseSet(tokens []string, pos int) (*SetClause, int) {
 	pos++
 	clause := &SetClause{
 		Items: make([]SetItem, 0),
 	}
-	return clause, pos, nil
+	return clause, pos
 }
 
 // parseDelete parses a DELETE clause.
-func (p *Parser) parseDelete(tokens []string, pos int) (*DeleteClause, int, error) {
+func (p *Parser) parseDelete(tokens []string, pos int) (*DeleteClause, int) {
 	clause := &DeleteClause{}
 
 	if strings.EqualFold(tokens[pos], "DETACH") {
@@ -331,11 +315,11 @@ func (p *Parser) parseDelete(tokens []string, pos int) (*DeleteClause, int, erro
 	}
 	pos++ // Skip DELETE
 
-	return clause, pos, nil
+	return clause, pos
 }
 
 // tokenize splits Cypher into tokens.
-func tokenize(cypher string) []string {
+func tokenize(cypher string) ([]string, error) {
 	// Simple tokenizer - will need improvement
 	tokens := make([]string, 0)
 	current := strings.Builder{}
@@ -376,11 +360,15 @@ func tokenize(cypher string) []string {
 		}
 	}
 
+	if inString {
+		return nil, fmt.Errorf("unterminated string literal")
+	}
+
 	if current.Len() > 0 {
 		tokens = append(tokens, current.String())
 	}
 
-	return tokens
+	return tokens, nil
 }
 
 // Executor executes Cypher queries.

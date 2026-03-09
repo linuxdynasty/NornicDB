@@ -229,7 +229,10 @@ func TestTokenize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokens := tokenize(tt.input)
+			tokens, err := tokenize(tt.input)
+			if err != nil {
+				t.Fatalf("tokenize() error = %v", err)
+			}
 			if len(tokens) != len(tt.expected) {
 				t.Errorf("expected %d tokens, got %d: %v", len(tt.expected), len(tokens), tokens)
 				return
