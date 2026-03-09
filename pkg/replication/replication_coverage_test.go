@@ -219,6 +219,8 @@ func TestReplicatedEngine_MethodCoverage(t *testing.T) {
 	require.NoError(t, decodeGob(mock.applied[9].Data, &[]storage.EdgeID{}))
 
 	mock.applyErr = errors.New("replicate failed")
+	_, err = engine.CreateNode(&storage.Node{ID: "n-fail-create", Labels: []string{"L"}})
+	require.ErrorContains(t, err, "replicate failed")
 	err = engine.DeleteNode("n-fail")
 	require.ErrorContains(t, err, "replicate failed")
 	_, _, err = engine.DeleteByPrefix("db-fail:")
@@ -226,6 +228,14 @@ func TestReplicatedEngine_MethodCoverage(t *testing.T) {
 	require.ErrorContains(t, engine.DeleteEdge("e-fail"), "replicate failed")
 	require.ErrorContains(t, engine.BulkDeleteNodes([]storage.NodeID{"n-fail"}), "replicate failed")
 	require.ErrorContains(t, engine.BulkDeleteEdges([]storage.EdgeID{"e-fail"}), "replicate failed")
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "n-bad-encode",
+		Labels: []string{"L"},
+		Properties: map[string]any{
+			"bad": make(chan int),
+		},
+	})
+	require.ErrorContains(t, err, "encode node")
 
 	require.ErrorContains(t, engine.BulkCreateNodes([]*storage.Node{nil}), "encode node")
 	require.ErrorContains(t, engine.BulkCreateEdges([]*storage.Edge{nil}), "encode edge")
@@ -933,6 +943,44 @@ func TestHAStandbyReplicator_Start_DefaultTransportInitFailure(t *testing.T) {
 	assert.True(t, r.started.Load())
 }
 
+func TestHAStandbyReplicator_Start_DefaultTransportSuccessPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("primary with default transport", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = ModeHAStandby
+		cfg.NodeID = "ha-default-primary"
+		cfg.BindAddr = "127.0.0.1:0"
+		cfg.AdvertiseAddr = "127.0.0.1:0"
+		cfg.HAStandby.Role = "primary"
+		cfg.HAStandby.PeerAddr = "127.0.0.1:65534"
+		cfg.HAStandby.SyncMode = SyncAsync
+
+		r, err := NewHAStandbyReplicator(cfg, NewMockStorage())
+		require.NoError(t, err)
+		err = r.Start(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, r.Shutdown())
+	})
+
+	t.Run("standby with default transport", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = ModeHAStandby
+		cfg.NodeID = "ha-default-standby"
+		cfg.BindAddr = "127.0.0.1:0"
+		cfg.AdvertiseAddr = "127.0.0.1:0"
+		cfg.HAStandby.Role = "standby"
+		cfg.HAStandby.PeerAddr = "127.0.0.1:65534"
+		cfg.HAStandby.SyncMode = SyncAsync
+
+		r, err := NewHAStandbyReplicator(cfg, NewMockStorage())
+		require.NoError(t, err)
+		err = r.Start(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, r.Shutdown())
+	})
+}
+
 func TestStorageAdapter_RestoreSnapshot_ErrorPaths(t *testing.T) {
 	t.Parallel()
 
@@ -1105,6 +1153,56 @@ func TestClusterTransport_SendMethods_DecodeAndErrorBranches(t *testing.T) {
 	require.ErrorContains(t, err, "leader apply failed")
 }
 
+func TestClusterTransport_SendMethods_SendRPCErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	server := NewClusterTransport(&ClusterTransportConfig{
+		NodeID:   "server-rpc-err",
+		BindAddr: "127.0.0.1:0",
+	})
+	go func() {
+		_ = server.Listen(ctx, server.bindAddr, nil)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var boundAddr string
+	for time.Now().Before(deadline) {
+		server.mu.RLock()
+		ln := server.listener
+		boundAddr = server.bindAddr
+		server.mu.RUnlock()
+		if ln != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	client := NewClusterTransport(&ClusterTransportConfig{NodeID: "client-rpc-err"})
+	conn, err := client.Connect(context.Background(), boundAddr)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.True(t, waitForConnected(conn, 2*time.Second))
+	cc := conn.(*ClusterConnection)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = cc.SendWALBatch(cancelCtx, []*WALEntry{{Position: 1}})
+	require.Error(t, err)
+	_, err = cc.SendHeartbeat(cancelCtx, &HeartbeatRequest{NodeID: "n1"})
+	require.Error(t, err)
+	_, err = cc.SendFence(cancelCtx, &FenceRequest{Reason: "r"})
+	require.Error(t, err)
+	_, err = cc.SendPromote(cancelCtx, &PromoteRequest{Reason: "r"})
+	require.Error(t, err)
+	_, err = cc.SendRaftVote(cancelCtx, &RaftVoteRequest{Term: 1})
+	require.Error(t, err)
+	_, err = cc.SendRaftAppendEntries(cancelCtx, &RaftAppendEntriesRequest{Term: 1})
+	require.Error(t, err)
+	err = cc.SendForwardApply(cancelCtx, &Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}, 100*time.Millisecond)
+	require.Error(t, err)
+}
+
 func TestHAStandby_HelperBranches(t *testing.T) {
 	t.Parallel()
 
@@ -1145,6 +1243,27 @@ func TestHAStandby_HelperBranches(t *testing.T) {
 
 	assert.Equal(t, 5*time.Millisecond, min(5*time.Millisecond, 10*time.Millisecond))
 	assert.Equal(t, 10*time.Millisecond, min(20*time.Millisecond, 10*time.Millisecond))
+}
+
+func TestHAStandbyReplicator_Apply_TraceWritesPath(t *testing.T) {
+	t.Setenv("NORNICDB_CLUSTER_TRACE_WRITES", "1")
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeHAStandby
+	cfg.NodeID = "ha-trace"
+	cfg.AdvertiseAddr = "127.0.0.1:17220"
+	cfg.HAStandby.Role = "primary"
+	cfg.HAStandby.PeerAddr = "127.0.0.1:17221"
+	cfg.HAStandby.SyncMode = SyncAsync
+
+	store := NewMockStorage()
+	r, err := NewHAStandbyReplicator(cfg, store)
+	require.NoError(t, err)
+	r.started.Store(true)
+	r.isPrimary.Store(true)
+
+	err = r.Apply(&Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}, 100*time.Millisecond)
+	require.NoError(t, err)
 }
 
 func TestCodec_DecodePayloadErrorPaths(t *testing.T) {
@@ -1190,11 +1309,47 @@ func TestStorageAdapter_ApplyHelpers_ErrorAndFallbackBranches(t *testing.T) {
 	badEdgePayload := encodeGobForTest(t, [][]byte{[]byte("bad-edge")})
 	require.Error(t, adapter.applyBulkCreateEdges(badEdgePayload))
 
+	// Edge create should fail when endpoints don't exist.
+	validEdgeBytes := encodeEdgeForTest(t, &storage.Edge{ID: "edge-missing-nodes", StartNode: "no-a", EndNode: "no-b", Type: "REL"})
+	edgeOnlyBatch := encodeGobForTest(t, struct {
+		Nodes [][]byte
+		Edges [][]byte
+	}{
+		Edges: [][]byte{validEdgeBytes},
+	})
+	require.Error(t, adapter.applyBatchWrite(edgeOnlyBatch))
+
 	emptyCypherPayload := encodeGobForTest(t, struct {
 		Query  string
 		Params map[string]interface{}
 	}{})
 	require.ErrorContains(t, adapter.applyCypher(emptyCypherPayload), "cypher query is empty")
+}
+
+func TestStorageAdapter_GetWALEntries_ReadErrorPath(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	// Force persistent WAL read failure branch (path is not a directory).
+	adapter.walDir = "/dev/null"
+	_, err := adapter.GetWALEntries(0, 10)
+	require.ErrorContains(t, err, "failed to read WAL entries")
+}
+
+func TestStorageAdapter_Close_WhenWALAlreadyNil(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	adapter.walMu.Lock()
+	if adapter.wal != nil {
+		_ = adapter.wal.Close()
+		adapter.wal = nil
+	}
+	adapter.walMu.Unlock()
+
+	require.NoError(t, adapter.Close())
 }
 
 func TestStorageAdapter_WriteSnapshot_WriterError(t *testing.T) {
@@ -1207,9 +1362,40 @@ func TestStorageAdapter_WriteSnapshot_WriterError(t *testing.T) {
 	require.ErrorContains(t, err, "write failed")
 }
 
+func TestStorageAdapter_WriteSnapshot_EncodeError(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	adapter.engine = &snapshotEncodeErrorEngine{}
+	err := adapter.WriteSnapshot(&bytes.Buffer{})
+	require.ErrorContains(t, err, "encode snapshot")
+}
+
 type errWriter struct{ err error }
 
 func (w *errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+type snapshotEncodeErrorEngine struct {
+	storage.Engine
+}
+
+func (e *snapshotEncodeErrorEngine) AllNodes() ([]*storage.Node, error) {
+	return []*storage.Node{
+		{
+			ID:     "bad-node",
+			Labels: []string{"L"},
+			Properties: map[string]any{
+				"bad": make(chan int),
+			},
+		},
+	}, nil
+}
+
+func (e *snapshotEncodeErrorEngine) AllEdges() ([]*storage.Edge, error) {
+	return nil, nil
+}
 
 func TestTransport_WireReadWriteHelpers(t *testing.T) {
 	t.Parallel()
@@ -1250,6 +1436,9 @@ func TestTransport_WireReadWriteHelpers(t *testing.T) {
 	badPayload.Write(payload)
 	_, err = readClusterMessage(bufio.NewReader(bytes.NewReader(badPayload.Bytes())), 1024)
 	require.Error(t, err)
+
+	cc := &ClusterConnection{}
+	require.NoError(t, cc.Close())
 }
 
 func TestRaftReplicator_ProcessApply_AndPeerMaintenance(t *testing.T) {
@@ -1285,6 +1474,87 @@ func TestRaftReplicator_ProcessApply_AndPeerMaintenance(t *testing.T) {
 	assert.True(t, conn.IsConnected())
 }
 
+func TestRaftReplicator_HandleAppendEntriesRequest_Branches(t *testing.T) {
+	t.Parallel()
+
+	r, _ := newCoverageRaftReplicator(t)
+	r.currentTerm = 5
+	r.log = []*RaftLogEntry{
+		{Index: 0, Term: 0},
+		{Index: 1, Term: 2, Command: &Command{Type: CmdCreateNode, Data: []byte("a"), Timestamp: time.Now()}},
+		{Index: 2, Term: 2, Command: &Command{Type: CmdUpdateNode, Data: []byte("b"), Timestamp: time.Now()}},
+	}
+
+	// Stale term is rejected.
+	resp := r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         4,
+		LeaderID:     "l1",
+		LeaderAddr:   "addr",
+		PrevLogIndex: 2,
+		PrevLogTerm:  2,
+	})
+	assert.False(t, resp.Success)
+	assert.Equal(t, uint64(5), resp.Term)
+
+	// Conflict index when prev log index is missing.
+	resp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         6,
+		LeaderID:     "l1",
+		LeaderAddr:   "addr",
+		PrevLogIndex: 99,
+		PrevLogTerm:  2,
+	})
+	assert.False(t, resp.Success)
+	assert.Equal(t, uint64(len(r.log)), resp.ConflictIndex)
+
+	// Conflict term/index when prev term mismatches.
+	resp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         6,
+		LeaderID:     "l1",
+		LeaderAddr:   "addr",
+		PrevLogIndex: 2,
+		PrevLogTerm:  99,
+	})
+	assert.False(t, resp.Success)
+	assert.Equal(t, uint64(2), resp.ConflictTerm)
+	assert.GreaterOrEqual(t, resp.ConflictIndex, uint64(1))
+
+	// Overwrite conflicting entry and commit with leaderCommit < lastNewIndex.
+	resp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         7,
+		LeaderID:     "l1",
+		LeaderAddr:   "addr",
+		PrevLogIndex: 1,
+		PrevLogTerm:  2,
+		Entries: []*RaftLogEntry{
+			{Index: 2, Term: 7, Command: &Command{Type: CmdDeleteNode, Data: []byte("c"), Timestamp: time.Now()}},
+			{Index: 3, Term: 7, Command: &Command{Type: CmdCreateEdge, Data: []byte("d"), Timestamp: time.Now()}},
+		},
+		LeaderCommit: 2,
+	})
+	assert.True(t, resp.Success)
+	assert.Equal(t, uint64(3), resp.MatchIndex)
+	require.GreaterOrEqual(t, len(r.log), 4)
+	assert.Equal(t, uint64(7), r.log[2].Term)
+	assert.Equal(t, uint64(2), r.commitIndex)
+
+	// Commit with leaderCommit > lastNewIndex should clamp to lastNewIndex.
+	resp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         7,
+		LeaderID:     "l1",
+		LeaderAddr:   "addr",
+		PrevLogIndex: 3,
+		PrevLogTerm:  7,
+		Entries: []*RaftLogEntry{
+			{Index: 4, Term: 7, Command: &Command{Type: CmdUpdateEdge, Data: []byte("e"), Timestamp: time.Now()}},
+		},
+		LeaderCommit: 100,
+	})
+	assert.True(t, resp.Success)
+	assert.Equal(t, uint64(4), resp.MatchIndex)
+	assert.Equal(t, uint64(4), r.commitIndex)
+}
+
 func TestRaftReplicator_ListenForPeers(t *testing.T) {
 	t.Parallel()
 
@@ -1312,4 +1582,96 @@ func TestRaftReplicator_ListenForPeers(t *testing.T) {
 	cancel()
 	_ = mt.Close()
 	r.wg.Wait()
+}
+
+func TestApplyBatchWrappers_SuccessAndErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("standalone apply batch returns apply error", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = ModeStandalone
+		cfg.NodeID = "solo-batch"
+		store := NewMockStorage()
+		store.SetApplyError(errors.New("apply fail"))
+		r := NewStandaloneReplicator(cfg, store)
+		require.NoError(t, r.Start(context.Background()))
+		err := r.ApplyBatch([]*Command{{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}}, time.Second)
+		require.ErrorContains(t, err, "apply fail")
+	})
+
+	t.Run("ha apply batch success", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = ModeHAStandby
+		cfg.NodeID = "ha-batch"
+		cfg.HAStandby.Role = "primary"
+		cfg.HAStandby.PeerAddr = "peer:7000"
+		cfg.HAStandby.SyncMode = SyncAsync
+		store := NewMockStorage()
+		r, err := NewHAStandbyReplicator(cfg, store)
+		require.NoError(t, err)
+		r.started.Store(true)
+		r.isPrimary.Store(true)
+		err = r.ApplyBatch([]*Command{
+			{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()},
+			{Type: CmdUpdateNode, Data: []byte("y"), Timestamp: time.Now()},
+		}, 100*time.Millisecond)
+		require.NoError(t, err)
+	})
+
+	t.Run("raft apply batch success", func(t *testing.T) {
+		r, _ := newCoverageRaftReplicator(t)
+		r.started.Store(true)
+		r.state = StateLeader
+		r.config.Raft.Peers = nil
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r.wg.Add(1)
+		go r.runApplyLoop(ctx)
+		defer func() {
+			cancel()
+			r.wg.Wait()
+		}()
+
+		err := r.ApplyBatch([]*Command{
+			{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()},
+			{Type: CmdUpdateNode, Data: []byte("y"), Timestamp: time.Now()},
+		}, time.Second)
+		require.NoError(t, err)
+	})
+
+	t.Run("multi-region apply batch success", func(t *testing.T) {
+		local, _ := newCoverageRaftReplicator(t)
+		local.started.Store(true)
+		local.state = StateLeader
+		local.config.Raft.Peers = nil
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		local.wg.Add(1)
+		go local.runApplyLoop(ctx)
+		defer func() {
+			cancel()
+			local.wg.Wait()
+		}()
+
+		cfg := DefaultConfig()
+		cfg.Mode = ModeMultiRegion
+		cfg.NodeID = "mr-batch"
+		cfg.MultiRegion.RegionID = "us-east"
+		r := &MultiRegionReplicator{
+			config:      cfg,
+			storage:     NewMockStorage(),
+			localRaft:   local,
+			stopCh:      make(chan struct{}),
+			remoteConns: make(map[string]PeerConnection),
+		}
+		r.started.Store(true)
+
+		err := r.ApplyBatch([]*Command{
+			{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()},
+			{Type: CmdUpdateNode, Data: []byte("y"), Timestamp: time.Now()},
+		}, time.Second)
+		require.NoError(t, err)
+	})
 }
