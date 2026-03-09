@@ -2,6 +2,7 @@ package qdrantgrpc
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/multidb"
@@ -242,4 +243,395 @@ func TestPointsService_RecommendAndGroupsAndFieldIndex(t *testing.T) {
 		FieldName:      "category",
 	})
 	require.NoError(t, err)
+
+	_, err = svc.CreateFieldIndex(ctx, &qpb.CreateFieldIndexCollection{
+		CollectionName: "",
+		FieldName:      "category",
+	})
+	require.Error(t, err)
+	_, err = svc.CreateFieldIndex(ctx, &qpb.CreateFieldIndexCollection{
+		CollectionName: "test_collection",
+		FieldName:      "",
+	})
+	require.Error(t, err)
+	_, err = svc.CreateFieldIndex(ctx, &qpb.CreateFieldIndexCollection{
+		CollectionName: "missing_collection",
+		FieldName:      "x",
+	})
+	require.Error(t, err)
+
+	_, err = svc.DeleteFieldIndex(ctx, &qpb.DeleteFieldIndexCollection{
+		CollectionName: "",
+		FieldName:      "category",
+	})
+	require.Error(t, err)
+	_, err = svc.DeleteFieldIndex(ctx, &qpb.DeleteFieldIndexCollection{
+		CollectionName: "test_collection",
+		FieldName:      "",
+	})
+	require.Error(t, err)
+	_, err = svc.DeleteFieldIndex(ctx, &qpb.DeleteFieldIndexCollection{
+		CollectionName: "missing_collection",
+		FieldName:      "x",
+	})
+	require.Error(t, err)
+}
+
+func TestVectorIndexCache_BruteIndexOperations(t *testing.T) {
+	t.Parallel()
+
+	cache := newVectorIndexCache()
+	idx := cache.getOrCreate("c1", "v1", 3, qpb.Distance_Dot)
+	require.NotNil(t, idx)
+	require.Equal(t, 3, idx.dimensions())
+	require.Equal(t, qpb.Distance_Dot, idx.distance())
+
+	// Wrong-dimension upsert is ignored.
+	idx.upsert("p-bad", []float32{1, 2})
+
+	idx.upsert("p1", []float32{1, 0, 0})
+	idx.upsert("p2", []float32{0, 1, 0})
+	results := idx.search(context.Background(), []float32{1, 0, 0}, 5, -1, 0)
+	require.NotEmpty(t, results)
+
+	idx.remove("p1")
+	results = idx.search(context.Background(), []float32{1, 0, 0}, 5, -1, 0)
+	for _, r := range results {
+		require.NotEqual(t, "p1", r.ID)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Nil(t, idx.search(cancelCtx, []float32{1, 0, 0}, 5, -1, 0))
+
+	// Cache-level helpers.
+	require.NotNil(t, cache.search(context.Background(), "c1", 3, qpb.Distance_Dot, "v1", []float32{1, 0, 0}, 3, -1, 0))
+	cache.deletePoint("c1", "p2", []string{"v1"})
+	cache.deleteCollection("c1")
+
+	// search validation branches
+	require.Nil(t, cache.search(context.Background(), "c1", 3, qpb.Distance_Dot, "v1", []float32{1, 0}, 3, -1, 0))
+	require.Nil(t, cache.search(context.Background(), "c1", 3, qpb.Distance_Dot, "v1", []float32{1, 0, 0}, 0, -1, 0))
+
+	// hnsw nil receiver and nil index branches
+	var hNil *hnswVectorIndex
+	hNil.Clear()
+	hNil.remove("x")
+	hNil.upsert("x", []float32{1, 0, 0})
+	require.Nil(t, hNil.search(context.Background(), []float32{1, 0, 0}, 1, -1, 0))
+
+	h := &hnswVectorIndex{dim: 3, dist: qpb.Distance_Cosine}
+	h.remove("x")
+	h.upsert("x", []float32{1, 0, 0})
+	require.Nil(t, h.search(context.Background(), []float32{1, 0, 0}, 1, -1, 0))
+
+	require.Equal(t, "qdrant:point:x", expandPointID("qdrant:point:x"))
+}
+
+func TestVectorScoreHelpers(t *testing.T) {
+	t.Parallel()
+
+	a := []float32{1, 0, 0}
+	b := []float32{1, 0, 0}
+
+	require.Greater(t, scoreVectorIndex(qpb.Distance_Dot, a, b), 0.9)
+	require.Greater(t, scoreVectorIndex(qpb.Distance_Cosine, a, b), 0.9)
+	require.Greater(t, scoreVectorIndex(qpb.Distance_Euclid, a, b), 0.9)
+	require.Greater(t, scoreVectorIndex(qpb.Distance_UnknownDistance, a, b), 0.9)
+}
+
+func TestFilterAndVectorCacheHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	node := &storage.Node{
+		ID: "qdrant:point:10",
+		Properties: map[string]any{
+			"s": "x",
+			"i": int64(5),
+			"f": float64(4.5),
+			"b": true,
+		},
+	}
+	require.True(t, matchesCondition(node, nil))
+	require.True(t, matchesFilter(node, nil))
+
+	require.False(t, matchesCondition(node, &qpb.Condition{
+		ConditionOneOf: &qpb.Condition_Filter{Filter: &qpb.Filter{
+			Must: []*qpb.Condition{
+				{ConditionOneOf: &qpb.Condition_Field{
+					Field: &qpb.FieldCondition{
+						Key:   "s",
+						Match: &qpb.Match{MatchValue: &qpb.Match_Keyword{Keyword: "nope"}},
+					},
+				}},
+			},
+		}},
+	}))
+
+	require.False(t, matchesFilter(node, &qpb.Filter{
+		MustNot: []*qpb.Condition{
+			{ConditionOneOf: &qpb.Condition_Field{
+				Field: &qpb.FieldCondition{
+					Key:   "s",
+					Match: &qpb.Match{MatchValue: &qpb.Match_Keyword{Keyword: "x"}},
+				},
+			}},
+		},
+	}))
+
+	require.False(t, matchesFilter(node, &qpb.Filter{
+		Should: []*qpb.Condition{
+			{ConditionOneOf: &qpb.Condition_Field{
+				Field: &qpb.FieldCondition{
+					Key:   "s",
+					Match: &qpb.Match{MatchValue: &qpb.Match_Keyword{Keyword: "none"}},
+				},
+			}},
+		},
+	}))
+
+	require.False(t, pointIDsEqual(&qpb.PointId{}, &qpb.PointId{}))
+	require.True(t, pointIDsEqual(
+		&qpb.PointId{PointIdOptions: &qpb.PointId_Uuid{Uuid: "u1"}},
+		&qpb.PointId{PointIdOptions: &qpb.PointId_Uuid{Uuid: "u1"}},
+	))
+	require.False(t, matchesFieldCondition(nil, nil))
+	require.False(t, matchesFieldCondition(&storage.Node{}, nil))
+	require.False(t, matchesFieldCondition(&storage.Node{Properties: map[string]any{}}, &qpb.FieldCondition{Key: "missing"}))
+
+	cache := newVectorIndexCache()
+	// Search input validation branches.
+	require.Nil(t, cache.search(context.Background(), "c", 3, qpb.Distance_Dot, "", []float32{1, 0}, 3, -1, 0))
+	require.Nil(t, cache.search(context.Background(), "c", 3, qpb.Distance_Dot, "", []float32{1, 0, 0}, 0, -1, 0))
+
+	// replacePoint validation branch.
+	err := cache.replacePoint("c", 3, qpb.Distance_Dot, "p", []string{"a"}, []string{"a", "b"}, [][]float32{{1, 0, 0}})
+	require.Error(t, err)
+}
+
+func TestPointVectorHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, uint64(42), pointIDFromCompactString("42").GetNum())
+	require.Equal(t, "not-a-number", pointIDFromCompactString("not-a-number").GetUuid())
+
+	n := &storage.Node{}
+	upsertNodeVectors(nil, []string{""}, [][]float32{{1}})
+	upsertNodeVectors(n, nil, nil)
+	upsertNodeVectors(n, []string{""}, [][]float32{{1, 0}})
+	require.Equal(t, []float32{1, 0}, n.NamedEmbeddings["default"])
+	upsertNodeVectors(n, []string{"a"}, [][]float32{{0, 1}})
+	require.Equal(t, []float32{0, 1}, n.NamedEmbeddings["a"])
+
+	out := vectorsOutputFromNode(nil, nil)
+	require.Nil(t, out)
+	out = vectorsOutputFromNode(&storage.Node{}, nil)
+	require.Nil(t, out)
+
+	onlyDefault := &storage.Node{NamedEmbeddings: map[string][]float32{"default": {1, 0}}}
+	out = vectorsOutputFromNode(onlyDefault, nil)
+	require.NotNil(t, out.GetVector())
+	require.NotNil(t, out.GetVector().GetDense())
+
+	named := &storage.Node{NamedEmbeddings: map[string][]float32{"a": {1, 0}, "b": {0, 1}}}
+	out = vectorsOutputFromNode(named, []string{"a"})
+	require.NotNil(t, out.GetVectors())
+	require.Contains(t, out.GetVectors().Vectors, "a")
+	require.NotContains(t, out.GetVectors().Vectors, "b")
+
+	deleteNodeVectors(nil, []string{"a"})
+	deleteNodeVectors(named, nil)
+	deleteNodeVectors(named, []string{"a", "b"})
+	require.Nil(t, named.NamedEmbeddings)
+
+	require.False(t, matchesRange(int64(5), &qpb.Range{Lt: ptrF64(5)}))
+	require.False(t, matchesRange(int64(5), &qpb.Range{Gt: ptrF64(5)}))
+	require.False(t, matchesRange(int64(5), &qpb.Range{Gte: ptrF64(6)}))
+	require.False(t, matchesRange(int64(5), &qpb.Range{Lte: ptrF64(4)}))
+
+	// ID conversion helper branches.
+	require.Equal(t, storage.NodeID("qdrant:point:9"), pointIDToNodeID(&qpb.PointId{PointIdOptions: &qpb.PointId_Num{Num: 9}}))
+	require.Equal(t, "raw-id", nodeIDToPointID(storage.NodeID("raw-id")).GetUuid())
+	require.Equal(t, uint64(77), nodeIDToPointID(storage.NodeID("qdrant:point:77")).GetNum())
+
+	// extractVectors branches.
+	_, _, err := extractVectors(nil)
+	require.Error(t, err)
+	_, _, err = extractVectors(&qpb.Vectors{})
+	require.Error(t, err)
+	_, _, err = extractVectors(&qpb.Vectors{
+		VectorsOptions: &qpb.Vectors_Vectors{
+			Vectors: &qpb.NamedVectors{Vectors: map[string]*qpb.Vector{}},
+		},
+	})
+	require.Error(t, err)
+	_, _, err = extractVectors(&qpb.Vectors{
+		VectorsOptions: &qpb.Vectors_Vectors{
+			Vectors: &qpb.NamedVectors{
+				Vectors: map[string]*qpb.Vector{
+					"bad": {},
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+}
+
+func TestBruteVectorIndex_SearchBranches(t *testing.T) {
+	t.Parallel()
+
+	var nilIdx *bruteVectorIndex
+	require.Nil(t, nilIdx.search(context.Background(), []float32{1, 0}, 1, -1, 0))
+
+	idx := newBruteVectorIndex(2, qpb.Distance_Dot)
+	idx.upsert("a", []float32{1, 0})
+	idx.upsert("b", []float32{0, 1})
+	idx.upsert("c", []float32{1, 1})
+
+	require.Nil(t, idx.search(context.Background(), []float32{1, 0}, 0, -1, 0))
+	require.Nil(t, idx.search(context.Background(), []float32{1, 0, 0}, 1, -1, 0))
+
+	// minScore branch prunes low scores.
+	out := idx.search(context.Background(), []float32{1, 0}, 2, 1.5, 0)
+	require.Empty(t, out)
+
+	// top replacement branch with limited top-k.
+	out = idx.search(context.Background(), []float32{1, 0}, 1, -1, 0)
+	require.Len(t, out, 1)
+
+	// Cosine normalization branch + canceled context branch.
+	cos := newBruteVectorIndex(2, qpb.Distance_Cosine)
+	cos.upsert("c1", []float32{1, 1})
+	out = cos.search(context.Background(), []float32{1, 1}, 1, -1, 0)
+	require.Len(t, out, 1)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Nil(t, cos.search(cancelCtx, []float32{1, 1}, 1, -1, 0))
+}
+
+func TestPointsService_ScrollBatchAndGroupsBranches(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := setupExtendedPointsService(t)
+
+	scrollResp, err := svc.Scroll(ctx, &qpb.ScrollPoints{
+		CollectionName: "test_collection",
+		Limit:          ptrU32Ext(1),
+	})
+	require.NoError(t, err)
+	require.Len(t, scrollResp.Result, 1)
+	require.NotNil(t, scrollResp.NextPageOffset)
+
+	scrollResp, err = svc.Scroll(ctx, &qpb.ScrollPoints{
+		CollectionName: "test_collection",
+		Limit:          ptrU32Ext(1),
+		Offset:         scrollResp.NextPageOffset,
+	})
+	require.NoError(t, err)
+	require.Len(t, scrollResp.Result, 1)
+
+	// Offset not found branch.
+	scrollResp, err = svc.Scroll(ctx, &qpb.ScrollPoints{
+		CollectionName: "test_collection",
+		Limit:          ptrU32Ext(1),
+		Offset:         &qpb.PointId{PointIdOptions: &qpb.PointId_Uuid{Uuid: "missing"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, scrollResp.Result, 1)
+
+	// SearchBatch with nil item.
+	sb, err := svc.SearchBatch(ctx, &qpb.SearchBatchPoints{
+		CollectionName: "test_collection",
+		SearchPoints: []*qpb.SearchPoints{
+			nil,
+			{Vector: []float32{1, 0, 0, 0}, Limit: 1},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, sb.Result, 2)
+	require.Nil(t, sb.Result[0].Result)
+
+	// SearchGroups default group limit/size and payload/group key handling.
+	grp, err := svc.SearchGroups(ctx, &qpb.SearchPointGroups{
+		CollectionName: "test_collection",
+		Vector:         []float32{1, 0, 0, 0},
+		GroupBy:        "missing_field",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, grp.Result)
+}
+
+func ptrU32Ext(v uint32) *uint32 { return &v }
+
+func TestPointsService_RecommendQueryVectorBranches(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := setupExtendedPointsService(t)
+
+	_, err := svc.recommendQueryVector(ctx, "missing_collection", "", nil, nil, nil, nil)
+	require.Error(t, err)
+
+	// Positive + negative dimension mismatch branch.
+	_, err = svc.recommendQueryVector(ctx, "test_collection", "",
+		nil, nil,
+		[]*qpb.Vector{{Data: []float32{1, 0, 0, 0}}},
+		[]*qpb.Vector{{Data: []float32{1, 0, 0}}},
+	)
+	require.Error(t, err)
+
+	// vectorFromVector unsupported vector kind branch via recommendQueryVector.
+	_, err = svc.recommendQueryVector(ctx, "test_collection", "",
+		nil, nil,
+		[]*qpb.Vector{{}},
+		nil,
+	)
+	require.Error(t, err)
+
+	// ID-based positive/negative branches.
+	vec, err := svc.recommendQueryVector(ctx, "test_collection", "",
+		[]*qpb.PointId{{PointIdOptions: &qpb.PointId_Uuid{Uuid: "point1"}}},
+		[]*qpb.PointId{
+			{PointIdOptions: &qpb.PointId_Uuid{Uuid: "point2"}},
+			{PointIdOptions: &qpb.PointId_Uuid{Uuid: "missing-id"}},
+		},
+		nil, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, vec, 4)
+}
+
+func TestPointsService_VectorFromInputMoreBranches(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := setupExtendedPointsService(t)
+
+	// Missing named vector on existing point.
+	_, err := svc.vectorFromInput(ctx, "test_collection", "missing_name", &qpb.VectorInput{
+		Variant: &qpb.VectorInput_Id{
+			Id: &qpb.PointId{PointIdOptions: &qpb.PointId_Uuid{Uuid: "point1"}},
+		},
+	})
+	require.Error(t, err)
+
+	// Embedder error branch.
+	svc.config.EmbedQuery = func(ctx context.Context, text string) ([]float32, error) {
+		_ = ctx
+		_ = text
+		return nil, errors.New("embed failed")
+	}
+	_, err = svc.vectorFromInput(ctx, "test_collection", "", &qpb.VectorInput{
+		Variant: &qpb.VectorInput_Document{
+			Document: &qpb.Document{Text: "boom"},
+		},
+	})
+	require.Error(t, err)
+
+	// Unimplemented variant branch (nil variant in message).
+	_, err = svc.vectorFromInput(ctx, "test_collection", "", &qpb.VectorInput{})
+	require.Error(t, err)
+
+	_, err = svc.vectorFromInput(ctx, "test_collection", "", &qpb.VectorInput{
+		Variant: &qpb.VectorInput_Sparse{
+			Sparse: &qpb.SparseVector{},
+		},
+	})
+	require.Error(t, err)
 }

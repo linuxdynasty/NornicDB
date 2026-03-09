@@ -14,6 +14,40 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+type backupEngine struct {
+	storage.Engine
+	backupErr error
+	called    bool
+}
+
+func (b *backupEngine) Backup(path string) error {
+	b.called = true
+	if b.backupErr != nil {
+		return b.backupErr
+	}
+	return os.WriteFile(path, []byte("backup"), 0644)
+}
+
+type snapshotErrEngine struct {
+	storage.Engine
+	nodesErr error
+	edgesErr error
+}
+
+func (e *snapshotErrEngine) AllNodes() ([]*storage.Node, error) {
+	if e.nodesErr != nil {
+		return nil, e.nodesErr
+	}
+	return e.Engine.AllNodes()
+}
+
+func (e *snapshotErrEngine) AllEdges() ([]*storage.Edge, error) {
+	if e.edgesErr != nil {
+		return nil, e.edgesErr
+	}
+	return e.Engine.AllEdges()
+}
+
 func setupSnapshotsTest(t *testing.T) (*SnapshotsService, *PointsService, CollectionStore, string, func()) {
 	base := storage.NewMemoryEngine()
 	dbm, err := multidb.NewDatabaseManager(base, nil)
@@ -218,6 +252,50 @@ func TestSnapshotsService_CreateFull(t *testing.T) {
 		_, err = os.Stat(snapshotPath)
 		assert.NoError(t, err)
 	})
+
+	t.Run("error when base storage missing", func(t *testing.T) {
+		nilBase := NewSnapshotsService(service.config, service.collections, nil, snapshotDir, nil)
+		_, err := nilBase.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.Error(t, err)
+	})
+
+	t.Run("backup interface success and error", func(t *testing.T) {
+		eng := &backupEngine{Engine: storage.NewMemoryEngine()}
+		backupSvc := NewSnapshotsService(service.config, service.collections, eng, snapshotDir, nil)
+		resp, err := backupSvc.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.SnapshotDescription)
+		require.True(t, eng.called)
+
+		engFail := &backupEngine{Engine: storage.NewMemoryEngine(), backupErr: os.ErrPermission}
+		backupSvcFail := NewSnapshotsService(service.config, service.collections, engFail, snapshotDir, nil)
+		_, err = backupSvcFail.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.Error(t, err)
+	})
+
+	t.Run("error creating full snapshot directory", func(t *testing.T) {
+		filePath := filepath.Join(snapshotDir, "as-file")
+		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0644))
+		badDirSvc := NewSnapshotsService(service.config, service.collections, service.baseStorage, filePath, nil)
+		_, err := badDirSvc.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.Error(t, err)
+	})
+
+	t.Run("fallback allnodes/alledges errors", func(t *testing.T) {
+		nodesErrSvc := NewSnapshotsService(service.config, service.collections, &snapshotErrEngine{
+			Engine:   storage.NewMemoryEngine(),
+			nodesErr: os.ErrPermission,
+		}, snapshotDir, nil)
+		_, err := nodesErrSvc.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.Error(t, err)
+
+		edgesErrSvc := NewSnapshotsService(service.config, service.collections, &snapshotErrEngine{
+			Engine:   storage.NewMemoryEngine(),
+			edgesErr: os.ErrPermission,
+		}, snapshotDir, nil)
+		_, err = edgesErrSvc.CreateFull(ctx, &qpb.CreateFullSnapshotRequest{})
+		require.Error(t, err)
+	})
 }
 
 func TestSnapshotsService_ListFull(t *testing.T) {
@@ -279,4 +357,32 @@ func TestSnapshotsService_DeleteFull(t *testing.T) {
 		})
 		assert.Error(t, err)
 	})
+}
+
+func TestSnapshotsService_AccessCheckerPath(t *testing.T) {
+	service, _, collections, snapshotDir, cleanup := setupSnapshotsTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	blocked := NewSnapshotsService(service.config, collections, service.baseStorage, snapshotDir, denyChecker{})
+	_, err := blocked.Create(ctx, &qpb.CreateSnapshotRequest{CollectionName: "test_collection"})
+	require.Error(t, err)
+	_, err = blocked.List(ctx, &qpb.ListSnapshotsRequest{CollectionName: "test_collection"})
+	require.Error(t, err)
+	_, err = blocked.Delete(ctx, &qpb.DeleteSnapshotRequest{
+		CollectionName: "test_collection",
+		SnapshotName:   "no.snapshot",
+	})
+	require.Error(t, err)
+}
+
+func TestSnapshotsService_DefaultSnapshotDirBranch(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	collections, err := NewDatabaseCollectionStore(dbm, newVectorIndexCache())
+	require.NoError(t, err)
+
+	svc := NewSnapshotsService(DefaultConfig(), collections, base, "", nil)
+	require.NotEmpty(t, svc.snapshotDir)
 }
