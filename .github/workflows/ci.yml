@@ -91,10 +91,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          go list ./pkg/... \
-            | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$|github.com/orneryd/nornicdb/pkg/localllm$|github.com/orneryd/nornicdb/pkg/gpu($|/)|github.com/orneryd/nornicdb/pkg/graphql/generated$' \
-            | xargs go test -coverprofile=coverage.raw.out
-          bash scripts/filter-generated-coverage.sh coverage.raw.out coverage.out
+          bash scripts/generate-coverage.sh coverage.raw.out coverage.out
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
