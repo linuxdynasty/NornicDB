@@ -1,8 +1,10 @@
 package replication
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -177,22 +179,27 @@ func TestReplicatedEngine_MethodCoverage(t *testing.T) {
 	require.ErrorContains(t, engine.CreateEdge(nil), "nil edge")
 	require.ErrorContains(t, engine.UpdateEdge(nil), "nil edge")
 
+	createdID, err := engine.CreateNode(&storage.Node{ID: storage.NodeID("created-1"), Labels: []string{"Person"}})
+	require.NoError(t, err)
+	assert.Equal(t, storage.NodeID("created-1"), createdID)
+
 	node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Person"}}
 	require.NoError(t, engine.UpdateNode(node))
 	require.NoError(t, engine.DeleteNode("n1"))
-	require.Len(t, mock.applied, 2)
-	assert.Equal(t, CmdUpdateNode, mock.applied[0].Type)
-	assert.Equal(t, CmdDeleteNode, mock.applied[1].Type)
+	require.Len(t, mock.applied, 3)
+	assert.Equal(t, CmdCreateNode, mock.applied[0].Type)
+	assert.Equal(t, CmdUpdateNode, mock.applied[1].Type)
+	assert.Equal(t, CmdDeleteNode, mock.applied[2].Type)
 	assert.Equal(t, 30*time.Second, mock.lastTimeout)
 
 	edge := &storage.Edge{ID: storage.EdgeID("e1"), StartNode: "n1", EndNode: "n2", Type: "KNOWS"}
 	require.NoError(t, engine.CreateEdge(edge))
 	require.NoError(t, engine.UpdateEdge(edge))
 	require.NoError(t, engine.DeleteEdge("e1"))
-	require.Len(t, mock.applied, 5)
-	assert.Equal(t, CmdCreateEdge, mock.applied[2].Type)
-	assert.Equal(t, CmdUpdateEdge, mock.applied[3].Type)
-	assert.Equal(t, CmdDeleteEdge, mock.applied[4].Type)
+	require.Len(t, mock.applied, 6)
+	assert.Equal(t, CmdCreateEdge, mock.applied[3].Type)
+	assert.Equal(t, CmdUpdateEdge, mock.applied[4].Type)
+	assert.Equal(t, CmdDeleteEdge, mock.applied[5].Type)
 
 	require.NoError(t, engine.BulkCreateNodes([]*storage.Node{
 		{ID: storage.NodeID("n3"), Labels: []string{"L"}},
@@ -206,14 +213,19 @@ func TestReplicatedEngine_MethodCoverage(t *testing.T) {
 	_, _, err = engine.DeleteByPrefix("db1:")
 	require.NoError(t, err)
 
-	require.NoError(t, decodeGob(mock.applied[5].Data, &[][]byte{}))
 	require.NoError(t, decodeGob(mock.applied[6].Data, &[][]byte{}))
-	require.NoError(t, decodeGob(mock.applied[7].Data, &[]storage.NodeID{}))
-	require.NoError(t, decodeGob(mock.applied[8].Data, &[]storage.EdgeID{}))
+	require.NoError(t, decodeGob(mock.applied[7].Data, &[][]byte{}))
+	require.NoError(t, decodeGob(mock.applied[8].Data, &[]storage.NodeID{}))
+	require.NoError(t, decodeGob(mock.applied[9].Data, &[]storage.EdgeID{}))
 
 	mock.applyErr = errors.New("replicate failed")
 	err = engine.DeleteNode("n-fail")
 	require.ErrorContains(t, err, "replicate failed")
+	_, _, err = engine.DeleteByPrefix("db-fail:")
+	require.ErrorContains(t, err, "replicate failed")
+	require.ErrorContains(t, engine.DeleteEdge("e-fail"), "replicate failed")
+	require.ErrorContains(t, engine.BulkDeleteNodes([]storage.NodeID{"n-fail"}), "replicate failed")
+	require.ErrorContains(t, engine.BulkDeleteEdges([]storage.EdgeID{"e-fail"}), "replicate failed")
 
 	require.ErrorContains(t, engine.BulkCreateNodes([]*storage.Node{nil}), "encode node")
 	require.ErrorContains(t, engine.BulkCreateEdges([]*storage.Edge{nil}), "encode edge")
@@ -970,3 +982,334 @@ func TestRaftReplicator_WaitForCommitCancelAndStop(t *testing.T) {
 type errReader struct{ err error }
 
 func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestStorageAdapter_ApplyCommand_SyncWALFallbackPath(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	// Force the non-blocking queue send to hit default: path, exercising
+	// the synchronous WAL append fallback branch.
+	adapter.walQueue = make(chan *walWriteRequest)
+
+	cmd := &Command{
+		Type:      CmdCreateNode,
+		Data:      encodeNodeForTest(t, &storage.Node{ID: "fallback-n1", Labels: []string{"L"}}),
+		Timestamp: time.Now(),
+	}
+	require.NoError(t, adapter.ApplyCommand(cmd))
+
+	_, err := adapter.engine.GetNode("fallback-n1")
+	require.NoError(t, err)
+}
+
+func TestStorageAdapter_ApplyCommand_SyncWALFallbackError(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	// Force fallback branch and make WAL append fail.
+	adapter.walQueue = make(chan *walWriteRequest)
+	require.NoError(t, adapter.wal.Close())
+
+	cmd := &Command{
+		Type:      CmdCreateNode,
+		Data:      encodeNodeForTest(t, &storage.Node{ID: "fallback-fail", Labels: []string{"L"}}),
+		Timestamp: time.Now(),
+	}
+	err := adapter.ApplyCommand(cmd)
+	if err != nil {
+		require.ErrorContains(t, err, "failed to append to WAL")
+		return
+	}
+	_, getErr := adapter.engine.GetNode("fallback-fail")
+	require.NoError(t, getErr)
+}
+
+func TestClusterTransport_SendMethods_DecodeAndErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewClusterTransport(&ClusterTransportConfig{
+		NodeID:   "server-decode",
+		BindAddr: "127.0.0.1:0",
+	})
+
+	// Return intentionally invalid payloads to exercise decode error paths.
+	server.RegisterHandler(ClusterMsgWALBatch, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgWALBatchResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgHeartbeat, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgHeartbeatResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgFence, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgFenceResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgPromote, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgPromoteResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgVoteRequest, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgVoteResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgAppendEntries, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		return &ClusterMessage{Type: ClusterMsgAppendEntriesResponse, Payload: []byte("bad")}, nil
+	})
+	server.RegisterHandler(ClusterMsgForwardApply, func(context.Context, string, *ClusterMessage) (*ClusterMessage, error) {
+		payload, err := encodeGob(forwardApplyResponse{Err: "leader apply failed"})
+		require.NoError(t, err)
+		return &ClusterMessage{Type: ClusterMsgForwardApplyResponse, Payload: payload}, nil
+	})
+
+	go func() {
+		_ = server.Listen(ctx, server.bindAddr, nil)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var boundAddr string
+	for time.Now().Before(deadline) {
+		server.mu.RLock()
+		ln := server.listener
+		boundAddr = server.bindAddr
+		server.mu.RUnlock()
+		if ln != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	client := NewClusterTransport(&ClusterTransportConfig{NodeID: "client-decode"})
+	conn, err := client.Connect(ctx, boundAddr)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.True(t, waitForConnected(conn, 2*time.Second))
+	cc := conn.(*ClusterConnection)
+
+	_, err = cc.SendWALBatch(ctx, []*WALEntry{{Position: 1}})
+	require.ErrorContains(t, err, "decode")
+	_, err = cc.SendHeartbeat(ctx, &HeartbeatRequest{NodeID: "n1"})
+	require.ErrorContains(t, err, "decode")
+	_, err = cc.SendFence(ctx, &FenceRequest{Reason: "r"})
+	require.ErrorContains(t, err, "decode")
+	_, err = cc.SendPromote(ctx, &PromoteRequest{Reason: "r"})
+	require.ErrorContains(t, err, "decode")
+	_, err = cc.SendRaftVote(ctx, &RaftVoteRequest{Term: 1})
+	require.ErrorContains(t, err, "decode")
+	_, err = cc.SendRaftAppendEntries(ctx, &RaftAppendEntriesRequest{Term: 1})
+	require.ErrorContains(t, err, "decode")
+
+	err = cc.SendForwardApply(ctx, &Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}, 100*time.Millisecond)
+	require.ErrorContains(t, err, "leader apply failed")
+}
+
+func TestHAStandby_HelperBranches(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeHAStandby
+	cfg.NodeID = "ha-helper"
+	cfg.AdvertiseAddr = "127.0.0.1:17210"
+	cfg.HAStandby.Role = "standby"
+	cfg.HAStandby.PeerAddr = "127.0.0.1:17211"
+	cfg.HAStandby.SyncMode = SyncQuorum
+
+	store := NewMockStorage()
+	r, err := NewHAStandbyReplicator(cfg, store)
+	require.NoError(t, err)
+	r.transport = NewMockTransport()
+	r.stopCh = make(chan struct{})
+
+	// LeaderAddr branch for standby and primary.
+	r.isPrimary.Store(false)
+	assert.Equal(t, cfg.HAStandby.PeerAddr, r.LeaderAddr())
+	r.isPrimary.Store(true)
+	assert.Equal(t, cfg.AdvertiseAddr, r.LeaderAddr())
+
+	// Default-timeout branch (timeout<=0) with quorum mode and no ack.
+	r.walStreamer = NewWALStreamer(store, 8)
+	err = r.waitForReplicationAck(1, 0)
+	require.ErrorContains(t, err, "replication ack timeout")
+
+	// triggerAutoFailover failure path: Promote fails because WAL flush fails.
+	r.isPrimary.Store(false)
+	r.isPromoted.Store(false)
+	store.SetApplyError(errors.New("flush failed"))
+	r.walApplier.pendingBatch = []*WALEntry{
+		{Position: 1, Command: &Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}},
+	}
+	r.triggerAutoFailover(context.Background())
+	assert.False(t, r.isPromoted.Load())
+
+	assert.Equal(t, 5*time.Millisecond, min(5*time.Millisecond, 10*time.Millisecond))
+	assert.Equal(t, 10*time.Millisecond, min(20*time.Millisecond, 10*time.Millisecond))
+}
+
+func TestCodec_DecodePayloadErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	_, err := decodeNodePayload([]byte("bad-node-payload"))
+	require.Error(t, err)
+
+	_, err = decodeEdgePayload([]byte("bad-edge-payload"))
+	require.Error(t, err)
+}
+
+func TestStorageAdapter_ApplyHelpers_ErrorAndFallbackBranches(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	require.ErrorContains(t, adapter.applyCreateNode([]byte("bad")), "decode node")
+	require.ErrorContains(t, adapter.applyUpdateNode([]byte("bad")), "decode node")
+	require.ErrorContains(t, adapter.applyCreateEdge([]byte("bad")), "decode edge")
+	require.ErrorContains(t, adapter.applyUpdateEdge([]byte("bad")), "decode edge")
+	require.ErrorContains(t, adapter.applyDeleteEdge([]byte("bad")), "decode delete edge request")
+	require.ErrorContains(t, adapter.applySetProperty([]byte("bad")), "decode set property request")
+	require.ErrorContains(t, adapter.applyDeleteByPrefix([]byte("bad")), "decode delete by prefix request")
+	require.ErrorContains(t, adapter.applyBulkCreateNodes([]byte("bad")), "decode bulk create nodes")
+	require.ErrorContains(t, adapter.applyBulkCreateEdges([]byte("bad")), "decode bulk create edges")
+	require.ErrorContains(t, adapter.applyBulkDeleteNodes([]byte("bad")), "decode bulk delete nodes")
+	require.ErrorContains(t, adapter.applyBulkDeleteEdges([]byte("bad")), "decode bulk delete edges")
+
+	_, err := adapter.engine.CreateNode(&storage.Node{ID: "raw-fallback-node", Labels: []string{"L"}})
+	require.NoError(t, err)
+	require.NoError(t, adapter.applyDeleteNode([]byte("raw-fallback-node")))
+	_, err = adapter.engine.GetNode("raw-fallback-node")
+	require.ErrorIs(t, err, storage.ErrNotFound)
+
+	emptyPrefixPayload := encodeGobForTest(t, struct{ Prefix string }{Prefix: ""})
+	require.ErrorContains(t, adapter.applyDeleteByPrefix(emptyPrefixPayload), "prefix is required")
+
+	badNodePayload := encodeGobForTest(t, [][]byte{[]byte("bad-node")})
+	require.Error(t, adapter.applyBulkCreateNodes(badNodePayload))
+
+	badEdgePayload := encodeGobForTest(t, [][]byte{[]byte("bad-edge")})
+	require.Error(t, adapter.applyBulkCreateEdges(badEdgePayload))
+
+	emptyCypherPayload := encodeGobForTest(t, struct {
+		Query  string
+		Params map[string]interface{}
+	}{})
+	require.ErrorContains(t, adapter.applyCypher(emptyCypherPayload), "cypher query is empty")
+}
+
+func TestStorageAdapter_WriteSnapshot_WriterError(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	err := adapter.WriteSnapshot(&errWriter{err: errors.New("write failed")})
+	require.ErrorContains(t, err, "write failed")
+}
+
+type errWriter struct{ err error }
+
+func (w *errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestTransport_WireReadWriteHelpers(t *testing.T) {
+	t.Parallel()
+
+	msg := &ClusterMessage{Type: ClusterMsgHeartbeat, Payload: []byte("ok")}
+
+	var out bytes.Buffer
+	bw := bufio.NewWriter(&out)
+	require.NoError(t, writeClusterMessage(bw, msg))
+	require.NoError(t, bw.Flush())
+
+	readMsg, err := readClusterMessage(bufio.NewReader(bytes.NewReader(out.Bytes())), 1024)
+	require.NoError(t, err)
+	require.Equal(t, ClusterMsgHeartbeat, readMsg.Type)
+	require.Equal(t, []byte("ok"), readMsg.Payload)
+
+	errBuf := bufio.NewWriter(&errWriter{err: errors.New("write boom")})
+	require.NoError(t, writeClusterMessage(errBuf, msg))
+	require.ErrorContains(t, errBuf.Flush(), "write boom")
+
+	_, err = readClusterMessage(bufio.NewReader(bytes.NewReader(nil)), 1024)
+	require.Error(t, err)
+
+	var tooLarge bytes.Buffer
+	require.NoError(t, binary.Write(&tooLarge, binary.BigEndian, uint32(4096)))
+	_, err = readClusterMessage(bufio.NewReader(bytes.NewReader(tooLarge.Bytes())), 64)
+	require.ErrorContains(t, err, "message too large")
+
+	var truncated bytes.Buffer
+	require.NoError(t, binary.Write(&truncated, binary.BigEndian, uint32(8)))
+	truncated.Write([]byte{1, 2, 3})
+	_, err = readClusterMessage(bufio.NewReader(bytes.NewReader(truncated.Bytes())), 1024)
+	require.Error(t, err)
+
+	var badPayload bytes.Buffer
+	payload := []byte("not-gob")
+	require.NoError(t, binary.Write(&badPayload, binary.BigEndian, uint32(len(payload))))
+	badPayload.Write(payload)
+	_, err = readClusterMessage(bufio.NewReader(bytes.NewReader(badPayload.Bytes())), 1024)
+	require.Error(t, err)
+}
+
+func TestRaftReplicator_ProcessApply_AndPeerMaintenance(t *testing.T) {
+	t.Parallel()
+
+	r, store := newCoverageRaftReplicator(t)
+
+	// Non-leader apply path.
+	r.state = StateFollower
+	f1 := &applyFuture{cmd: &Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}, errCh: make(chan error, 1)}
+	r.processApply(context.Background(), f1)
+	require.ErrorIs(t, <-f1.errCh, ErrNotLeader)
+
+	// Leader single-node immediate commit/apply path.
+	r.state = StateLeader
+	r.currentTerm = 2
+	r.config.Raft.Peers = nil
+	f2 := &applyFuture{cmd: &Command{Type: CmdCreateNode, Data: []byte("y"), Timestamp: time.Now()}, errCh: make(chan error, 1)}
+	r.processApply(context.Background(), f2)
+	require.NoError(t, <-f2.errCh)
+	assert.GreaterOrEqual(t, r.commitIndex, uint64(1))
+	assert.GreaterOrEqual(t, r.lastApplied, uint64(1))
+	assert.Equal(t, 1, store.GetApplyCount())
+
+	// Peer maintenance path: reconnect disconnected peer.
+	r.config.Raft.Peers = []PeerConfig{{ID: "p1", Addr: "127.0.0.1:17300"}}
+	r.peerConns["p1"] = &raftCoveragePeerConn{connected: false}
+	r.transport = &raftCoverageTransport{conn: &raftCoveragePeerConn{connected: true}}
+	r.maintainPeerConnections(context.Background())
+
+	conn := r.peerConns["p1"]
+	require.NotNil(t, conn)
+	assert.True(t, conn.IsConnected())
+}
+
+func TestRaftReplicator_ListenForPeers(t *testing.T) {
+	t.Parallel()
+
+	r, _ := newCoverageRaftReplicator(t)
+	mt := NewMockTransport()
+	r.transport = mt
+	r.config.AdvertiseAddr = "127.0.0.1:17310"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.wg.Add(1)
+	go r.listenForPeers(ctx)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mt.mu.RLock()
+		active := mt.listenAddr != ""
+		mt.mu.RUnlock()
+		if active {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mt.SimulateIncomingConnection()
+	cancel()
+	_ = mt.Close()
+	r.wg.Wait()
+}
