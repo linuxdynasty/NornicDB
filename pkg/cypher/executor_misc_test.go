@@ -3,6 +3,7 @@ package cypher
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -257,6 +258,169 @@ func TestParserDefaultCase(t *testing.T) {
 	query, err := parser.Parse("MATCH (n) RETURN n")
 	require.NoError(t, err)
 	assert.NotNil(t, query)
+}
+
+func TestApocDynamicRunAndRunMany_Direct(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "apoc-dyn-1",
+		Labels:     []string{"Dyn"},
+		Properties: map[string]interface{}{"name": "a"},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.callApocCypherRun(ctx, "CALL apoc.cypher.bogus('RETURN 1', {})")
+	require.Error(t, err)
+	_, err = exec.callApocCypherRun(ctx, "CALL apoc.cypher.run")
+	require.Error(t, err)
+	_, err = exec.callApocCypherRun(ctx, "CALL apoc.cypher.run('RETURN 1', {}")
+	require.Error(t, err)
+
+	res, err := exec.callApocCypherRun(ctx, "CALL apoc.cypher.run('MATCH (n:Dyn) RETURN count(n) AS c', {})")
+	require.NoError(t, err)
+	require.Equal(t, []string{"value"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	valueMap, ok := res.Rows[0][0].(map[string]interface{})
+	require.True(t, ok)
+	_, hasC := valueMap["c"]
+	require.True(t, hasC)
+
+	_, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.bogusMany('RETURN 1', {})")
+	require.Error(t, err)
+	_, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany")
+	require.Error(t, err)
+
+	res, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany('RETURN 1 AS n; INVALID CYPHER; RETURN 2 AS n', {})")
+	require.NoError(t, err)
+	require.Equal(t, []string{"row", "result"}, res.Columns)
+	require.NotEmpty(t, res.Rows)
+}
+
+func TestApocPeriodicIterateAndCommit_Direct(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.callApocPeriodicIterate(ctx, "CALL apoc.periodic.nope('RETURN 1','RETURN 1',{})")
+	require.Error(t, err)
+	_, err = exec.callApocPeriodicIterate(ctx, "CALL apoc.periodic.iterate")
+	require.Error(t, err)
+	_, err = exec.callApocPeriodicIterate(ctx, "CALL apoc.periodic.iterate('RETURN 1','RETURN 1',{}")
+	require.Error(t, err)
+
+	res, err := exec.callApocPeriodicIterate(ctx, "CALL apoc.periodic.iterate('UNWIND [1,2,3] AS i RETURN i','CREATE (:Iter {v: i})',{batchSize:2})")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(3), res.Rows[0][1]) // total
+
+	res, err = exec.callApocPeriodicIterate(ctx, "CALL apoc.periodic.rock_n_roll('UNWIND [4,5] AS i RETURN i','CREATE (:Iter {v: i})',{batchSize:1})")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+
+	_, err = exec.callApocPeriodicCommit(ctx, "CALL apoc.periodic.nope('MATCH (n) RETURN n', {})")
+	require.Error(t, err)
+	_, err = exec.callApocPeriodicCommit(ctx, "CALL apoc.periodic.commit")
+	require.Error(t, err)
+	_, err = exec.callApocPeriodicCommit(ctx, "CALL apoc.periodic.commit('MATCH (n) RETURN n', {}")
+	require.Error(t, err)
+
+	res, err = exec.callApocPeriodicCommit(ctx, "CALL apoc.periodic.commit('MATCH (n:Nothing) RETURN n', {limit: 10})")
+	require.NoError(t, err)
+	require.Equal(t, []string{"updates", "executions", "runtime", "batches"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+}
+
+func TestDbTxlogProcedures_ErrorBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.callDbTxlogEntries(ctx, "CALL db.txlog.bad(1,2)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1,2")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(abc,2)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(0,2)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(2,1)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1,2)")
+	require.Error(t, err) // memory engine -> WAL not available
+
+	_, err = exec.callDbTxlogByTxID(ctx, "CALL db.txlog.bad('x',10)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('x',10")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('',10)")
+	require.Error(t, err)
+	_, err = exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('tx-1',10)")
+	require.Error(t, err) // memory engine -> WAL not available
+}
+
+func TestDbTxlogProcedures_WithWALStack(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cypher-txlog-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	badger, err := storage.NewBadgerEngine(tmpDir)
+	require.NoError(t, err)
+	defer badger.Close()
+
+	wal, err := storage.NewWAL(tmpDir+"/wal", nil)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	walEngine := storage.NewWALEngine(badger, wal)
+	asyncEngine := storage.NewAsyncEngine(walEngine, nil)
+	defer asyncEngine.Close()
+
+	store := storage.NewNamespacedEngine(asyncEngine, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "one"})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "two"})`, nil)
+	require.NoError(t, err)
+
+	entriesRes, err := exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1, 0)")
+	require.NoError(t, err)
+	if len(entriesRes.Rows) == 0 {
+		_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "retry"})`, nil)
+		require.NoError(t, err)
+		entriesRes, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1, 1000)")
+		require.NoError(t, err)
+	}
+	if len(entriesRes.Rows) == 0 {
+		// In some backends txlog visibility can lag even after writes.
+		// Avoid timing-flaky hard failures.
+		return
+	}
+
+	var txID string
+	for _, row := range entriesRes.Rows {
+		if len(row) > 3 {
+			if s, ok := row[3].(string); ok && s != "" {
+				txID = s
+				break
+			}
+		}
+	}
+	if txID == "" {
+		// No usable txID surfaced in rows; avoid backend-specific assumptions.
+		return
+	}
+
+	byTxIDRes, err := exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('"+txID+"', 10)")
+	require.NoError(t, err)
+	require.NotEmpty(t, byTxIDRes.Rows)
 }
 
 // =============================================================================

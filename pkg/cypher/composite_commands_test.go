@@ -288,3 +288,115 @@ func TestExecuteAlterCompositeDatabase_InvalidSyntax(t *testing.T) {
 	_, err := exec.Execute(ctx, query, nil)
 	assert.Error(t, err)
 }
+
+type weirdConstituentAdapter struct {
+	*testDatabaseManagerAdapter
+}
+
+func (w *weirdConstituentAdapter) GetCompositeConstituents(compositeName string) ([]interface{}, error) {
+	return []interface{}{42}, nil
+}
+
+func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("create composite direct branches", func(t *testing.T) {
+		exec := &StorageExecutor{}
+		_, err := exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "database manager not available")
+
+		baseStore := storage.NewMemoryEngine()
+		inner := storage.NewMemoryEngine()
+		manager, _ := multidb.NewDatabaseManager(inner, nil)
+		adapter := &testDatabaseManagerAdapter{manager: manager}
+		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
+		exec.SetDatabaseManager(adapter)
+
+		require.NoError(t, adapter.CreateDatabase("db1"))
+		require.NoError(t, adapter.CreateDatabase("db2"))
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE")
+		require.Error(t, err)
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c1 ALIAS a1 db1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "FOR DATABASE expected")
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "at least one constituent")
+
+		res, err := exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c1 ALIAS a1 FOR DATABASE db1 ALIAS a2 FOR DATABASE db2")
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Equal(t, [][]interface{}{{"c1"}}, res.Rows)
+	})
+
+	t.Run("drop composite direct branches", func(t *testing.T) {
+		exec := &StorageExecutor{}
+		_, err := exec.executeDropCompositeDatabase(ctx, "DROP COMPOSITE DATABASE c")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "database manager not available")
+
+		baseStore := storage.NewMemoryEngine()
+		inner := storage.NewMemoryEngine()
+		manager, _ := multidb.NewDatabaseManager(inner, nil)
+		adapter := &testDatabaseManagerAdapter{manager: manager}
+		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
+		exec.SetDatabaseManager(adapter)
+
+		require.NoError(t, adapter.CreateDatabase("db1"))
+		constituents := []interface{}{
+			map[string]interface{}{"alias": "a1", "database_name": "db1", "type": "local", "access_mode": "read_write"},
+		}
+		require.NoError(t, adapter.CreateCompositeDatabase("c_drop", constituents))
+
+		_, err = exec.executeDropCompositeDatabase(ctx, "DROP COMPOSITE DATABASE")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "database name expected")
+
+		res, err := exec.executeDropCompositeDatabase(ctx, "DROP COMPOSITE DATABASE c_drop")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_drop"}}, res.Rows)
+	})
+
+	t.Run("show composite and constituents direct branches", func(t *testing.T) {
+		exec := &StorageExecutor{}
+		_, err := exec.executeShowCompositeDatabases(ctx, "SHOW COMPOSITE DATABASES")
+		require.Error(t, err)
+		_, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE x")
+		require.Error(t, err)
+
+		baseStore := storage.NewMemoryEngine()
+		inner := storage.NewMemoryEngine()
+		manager, _ := multidb.NewDatabaseManager(inner, nil)
+		adapter := &testDatabaseManagerAdapter{manager: manager}
+		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
+		exec.SetDatabaseManager(adapter)
+
+		require.NoError(t, adapter.CreateDatabase("db1"))
+		require.NoError(t, adapter.CreateCompositeDatabase("c_show", []interface{}{
+			map[string]interface{}{"alias": "a1", "database_name": "db1", "type": "local", "access_mode": "read_write"},
+		}))
+
+		res, err := exec.executeShowCompositeDatabases(ctx, "SHOW COMPOSITE DATABASES")
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Rows)
+
+		_, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "FOR COMPOSITE DATABASE name expected")
+
+		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE c_show")
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Rows)
+		require.Equal(t, []string{"alias", "database", "type", "access_mode"}, res.Columns)
+
+		weird := &weirdConstituentAdapter{testDatabaseManagerAdapter: adapter}
+		exec.SetDatabaseManager(weird)
+		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE c_show")
+		require.NoError(t, err)
+		require.Equal(t, []interface{}{"", "", "", ""}, res.Rows[0])
+	})
+}
