@@ -92,12 +92,9 @@ jobs:
       - name: Generate coverage report
         run: |
           go list ./pkg/... \
-            | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/graphql/generated$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$|github.com/orneryd/nornicdb/pkg/localllm$|github.com/orneryd/nornicdb/pkg/gpu($|/)' \
+            | grep -Ev 'github.com/orneryd/nornicdb/pkg/cypher/(fn|testutil)$|github.com/orneryd/nornicdb/pkg/nornicgrpc/gen$|github.com/orneryd/nornicdb/pkg/localllm$|github.com/orneryd/nornicdb/pkg/gpu($|/)' \
             | xargs go test -coverprofile=coverage.raw.out
-          {
-            echo "mode: set"
-            grep -Ev '^mode: |github.com/orneryd/nornicdb/pkg/cypher/antlr/(cypher_parser|cypher_lexer|cypherparser_listener|cypherparser_base_listener)\.go:' coverage.raw.out
-          } > coverage.out
+          bash scripts/filter-generated-coverage.sh coverage.raw.out coverage.out
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest

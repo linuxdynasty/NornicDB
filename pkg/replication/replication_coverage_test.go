@@ -1,0 +1,972 @@
+package replication
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func newCoverageRaftReplicator(t *testing.T) (*RaftReplicator, *MockStorage) {
+	t.Helper()
+	store := NewMockStorage()
+	cfg := DefaultConfig()
+	cfg.Mode = ModeRaft
+	cfg.NodeID = "raft-node"
+	cfg.AdvertiseAddr = "127.0.0.1:17000"
+	cfg.Raft.Bootstrap = true
+	r, err := NewRaftReplicator(cfg, store)
+	require.NoError(t, err)
+	return r, store
+}
+
+type coverageReplicator struct {
+	applyErr        error
+	forwardApplyErr error
+	isLeader        bool
+	nodeID          string
+
+	applied        []*Command
+	lastTimeout    time.Duration
+	lastForwardCmd *Command
+
+	walEntries   []*WALEntry
+	heartbeatReq *HeartbeatRequest
+	fenceReq     *FenceRequest
+	promoteReq   *PromoteRequest
+	voteReq      *RaftVoteRequest
+	appendReq    *RaftAppendEntriesRequest
+}
+
+type raftCoveragePeerConn struct {
+	connected  bool
+	voteResp   *RaftVoteResponse
+	voteErr    error
+	appendResp *RaftAppendEntriesResponse
+	appendErr  error
+}
+
+func (c *raftCoveragePeerConn) SendWALBatch(context.Context, []*WALEntry) (*WALBatchResponse, error) {
+	return &WALBatchResponse{}, nil
+}
+func (c *raftCoveragePeerConn) SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
+	return &HeartbeatResponse{}, nil
+}
+func (c *raftCoveragePeerConn) SendFence(context.Context, *FenceRequest) (*FenceResponse, error) {
+	return &FenceResponse{Fenced: true}, nil
+}
+func (c *raftCoveragePeerConn) SendPromote(context.Context, *PromoteRequest) (*PromoteResponse, error) {
+	return &PromoteResponse{Ready: true}, nil
+}
+func (c *raftCoveragePeerConn) SendRaftVote(context.Context, *RaftVoteRequest) (*RaftVoteResponse, error) {
+	if c.voteErr != nil {
+		return nil, c.voteErr
+	}
+	if c.voteResp != nil {
+		return c.voteResp, nil
+	}
+	return &RaftVoteResponse{Term: 1, VoteGranted: true, VoterID: "peer"}, nil
+}
+func (c *raftCoveragePeerConn) SendRaftAppendEntries(context.Context, *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error) {
+	if c.appendErr != nil {
+		return nil, c.appendErr
+	}
+	if c.appendResp != nil {
+		return c.appendResp, nil
+	}
+	return &RaftAppendEntriesResponse{Term: 1, Success: true, MatchIndex: 0, ResponderID: "peer"}, nil
+}
+func (c *raftCoveragePeerConn) Close() error      { c.connected = false; return nil }
+func (c *raftCoveragePeerConn) IsConnected() bool { return c.connected }
+
+type raftCoverageTransport struct {
+	conn       PeerConnection
+	connectErr error
+}
+
+func (t *raftCoverageTransport) Connect(context.Context, string) (PeerConnection, error) {
+	if t.connectErr != nil {
+		return nil, t.connectErr
+	}
+	return t.conn, nil
+}
+func (t *raftCoverageTransport) Listen(context.Context, string, ConnectionHandler) error { return nil }
+func (t *raftCoverageTransport) Close() error                                            { return nil }
+
+type raftForwardPeerConn struct {
+	raftCoveragePeerConn
+	forwardErr error
+}
+
+func (c *raftForwardPeerConn) SendForwardApply(context.Context, *Command, time.Duration) error {
+	return c.forwardErr
+}
+
+func (m *coverageReplicator) Start(context.Context) error { return nil }
+func (m *coverageReplicator) Apply(cmd *Command, timeout time.Duration) error {
+	m.applied = append(m.applied, cmd)
+	m.lastTimeout = timeout
+	return m.applyErr
+}
+func (m *coverageReplicator) ApplyBatch([]*Command, time.Duration) error { return nil }
+func (m *coverageReplicator) IsLeader() bool                             { return m.isLeader }
+func (m *coverageReplicator) LeaderAddr() string                         { return "" }
+func (m *coverageReplicator) LeaderID() string                           { return "leader" }
+func (m *coverageReplicator) Health() *HealthStatus                      { return &HealthStatus{} }
+func (m *coverageReplicator) WaitForLeader(context.Context) error        { return nil }
+func (m *coverageReplicator) Shutdown() error                            { return nil }
+func (m *coverageReplicator) Mode() ReplicationMode                      { return ModeStandalone }
+func (m *coverageReplicator) NodeID() string                             { return m.nodeID }
+func (m *coverageReplicator) HandleWALBatch(entries []*WALEntry) (*WALBatchResponse, error) {
+	m.walEntries = entries
+	return &WALBatchResponse{AckedPosition: 42, ReceivedPosition: 42}, nil
+}
+func (m *coverageReplicator) HandleHeartbeat(req *HeartbeatRequest) (*HeartbeatResponse, error) {
+	m.heartbeatReq = req
+	return &HeartbeatResponse{NodeID: "peer", Role: "primary"}, nil
+}
+func (m *coverageReplicator) HandleFence(req *FenceRequest) (*FenceResponse, error) {
+	m.fenceReq = req
+	return &FenceResponse{Fenced: true}, nil
+}
+func (m *coverageReplicator) HandlePromote(req *PromoteRequest) (*PromoteResponse, error) {
+	m.promoteReq = req
+	return &PromoteResponse{Ready: true}, nil
+}
+func (m *coverageReplicator) HandleRaftVote(req *RaftVoteRequest) (*RaftVoteResponse, error) {
+	m.voteReq = req
+	return &RaftVoteResponse{Term: req.Term, VoteGranted: true}, nil
+}
+func (m *coverageReplicator) HandleRaftAppendEntries(req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error) {
+	m.appendReq = req
+	return &RaftAppendEntriesResponse{Term: req.Term, Success: true, MatchIndex: req.PrevLogIndex}, nil
+}
+func (m *coverageReplicator) HandleForwardApply(cmd *Command, timeout time.Duration) error {
+	m.lastForwardCmd = cmd
+	m.lastTimeout = timeout
+	return m.forwardApplyErr
+}
+
+func TestReplicatedEngine_MethodCoverage(t *testing.T) {
+	t.Parallel()
+
+	var nilEngine *ReplicatedEngine
+	assert.True(t, nilEngine.IsLeader())
+
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+
+	noRepl := NewReplicatedEngine(base, nil, 0)
+	assert.True(t, noRepl.IsLeader())
+
+	mock := &coverageReplicator{isLeader: false}
+	engine := NewReplicatedEngine(base, mock, 0)
+	assert.False(t, engine.IsLeader())
+
+	_, err := engine.CreateNode(nil)
+	require.ErrorContains(t, err, "nil node")
+	require.ErrorContains(t, engine.UpdateNode(nil), "nil node")
+	require.ErrorContains(t, engine.CreateEdge(nil), "nil edge")
+	require.ErrorContains(t, engine.UpdateEdge(nil), "nil edge")
+
+	node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Person"}}
+	require.NoError(t, engine.UpdateNode(node))
+	require.NoError(t, engine.DeleteNode("n1"))
+	require.Len(t, mock.applied, 2)
+	assert.Equal(t, CmdUpdateNode, mock.applied[0].Type)
+	assert.Equal(t, CmdDeleteNode, mock.applied[1].Type)
+	assert.Equal(t, 30*time.Second, mock.lastTimeout)
+
+	edge := &storage.Edge{ID: storage.EdgeID("e1"), StartNode: "n1", EndNode: "n2", Type: "KNOWS"}
+	require.NoError(t, engine.CreateEdge(edge))
+	require.NoError(t, engine.UpdateEdge(edge))
+	require.NoError(t, engine.DeleteEdge("e1"))
+	require.Len(t, mock.applied, 5)
+	assert.Equal(t, CmdCreateEdge, mock.applied[2].Type)
+	assert.Equal(t, CmdUpdateEdge, mock.applied[3].Type)
+	assert.Equal(t, CmdDeleteEdge, mock.applied[4].Type)
+
+	require.NoError(t, engine.BulkCreateNodes([]*storage.Node{
+		{ID: storage.NodeID("n3"), Labels: []string{"L"}},
+		{ID: storage.NodeID("n4"), Labels: []string{"L"}},
+	}))
+	require.NoError(t, engine.BulkCreateEdges([]*storage.Edge{
+		{ID: storage.EdgeID("e2"), StartNode: "n3", EndNode: "n4", Type: "REL"},
+	}))
+	require.NoError(t, engine.BulkDeleteNodes([]storage.NodeID{"n3"}))
+	require.NoError(t, engine.BulkDeleteEdges([]storage.EdgeID{"e2"}))
+	_, _, err = engine.DeleteByPrefix("db1:")
+	require.NoError(t, err)
+
+	require.NoError(t, decodeGob(mock.applied[5].Data, &[][]byte{}))
+	require.NoError(t, decodeGob(mock.applied[6].Data, &[][]byte{}))
+	require.NoError(t, decodeGob(mock.applied[7].Data, &[]storage.NodeID{}))
+	require.NoError(t, decodeGob(mock.applied[8].Data, &[]storage.EdgeID{}))
+
+	mock.applyErr = errors.New("replicate failed")
+	err = engine.DeleteNode("n-fail")
+	require.ErrorContains(t, err, "replicate failed")
+
+	require.ErrorContains(t, engine.BulkCreateNodes([]*storage.Node{nil}), "encode node")
+	require.ErrorContains(t, engine.BulkCreateEdges([]*storage.Edge{nil}), "encode edge")
+}
+
+func TestRegisterClusterHandlers_AndDispatch(t *testing.T) {
+	t.Parallel()
+
+	tr := NewClusterTransport(&ClusterTransportConfig{NodeID: "node-a"})
+	mock := &coverageReplicator{isLeader: true, nodeID: "node-a"}
+
+	RegisterClusterHandlers(nil, mock)
+	RegisterClusterHandlers(tr, nil)
+
+	RegisterClusterHandlers(tr, mock)
+	require.Len(t, tr.handlers, 7)
+
+	walPayload, err := encodeGob([]*WALEntry{{Position: 7, Command: &Command{Type: CmdCreateNode}}})
+	require.NoError(t, err)
+	walResp, err := tr.handlers[ClusterMsgWALBatch](context.Background(), "peer-1", &ClusterMessage{Payload: walPayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgWALBatchResponse, walResp.Type)
+	require.Len(t, mock.walEntries, 1)
+	assert.Equal(t, uint64(7), mock.walEntries[0].Position)
+
+	heartbeatPayload, err := encodeGob(HeartbeatRequest{NodeID: "peer-1", Role: "standby"})
+	require.NoError(t, err)
+	heartbeatResp, err := tr.handlers[ClusterMsgHeartbeat](context.Background(), "peer-1", &ClusterMessage{Payload: heartbeatPayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgHeartbeatResponse, heartbeatResp.Type)
+	require.NotNil(t, mock.heartbeatReq)
+	assert.Equal(t, "peer-1", mock.heartbeatReq.NodeID)
+
+	_, err = tr.handlers[ClusterMsgHeartbeat](context.Background(), "peer-1", &ClusterMessage{Payload: []byte("bad")})
+	require.ErrorContains(t, err, "decode heartbeat")
+
+	fencePayload, err := encodeGob(FenceRequest{Reason: "failover"})
+	require.NoError(t, err)
+	fenceResp, err := tr.handlers[ClusterMsgFence](context.Background(), "peer-1", &ClusterMessage{Payload: fencePayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgFenceResponse, fenceResp.Type)
+	assert.Equal(t, "failover", mock.fenceReq.Reason)
+
+	promotePayload, err := encodeGob(PromoteRequest{Reason: "planned"})
+	require.NoError(t, err)
+	promoteResp, err := tr.handlers[ClusterMsgPromote](context.Background(), "peer-1", &ClusterMessage{Payload: promotePayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgPromoteResponse, promoteResp.Type)
+	assert.Equal(t, "planned", mock.promoteReq.Reason)
+
+	votePayload, err := encodeGob(RaftVoteRequest{Term: 5, CandidateID: "cand"})
+	require.NoError(t, err)
+	voteResp, err := tr.handlers[ClusterMsgVoteRequest](context.Background(), "peer-1", &ClusterMessage{Payload: votePayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgVoteResponse, voteResp.Type)
+	assert.Equal(t, uint64(5), mock.voteReq.Term)
+
+	appendPayload, err := encodeGob(RaftAppendEntriesRequest{Term: 7, LeaderID: "l1", PrevLogIndex: 9})
+	require.NoError(t, err)
+	appendResp, err := tr.handlers[ClusterMsgAppendEntries](context.Background(), "peer-1", &ClusterMessage{Payload: appendPayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgAppendEntriesResponse, appendResp.Type)
+	assert.Equal(t, uint64(9), mock.appendReq.PrevLogIndex)
+
+	forwardPayload, err := encodeGob(Command{Type: CmdCreateNode, Data: []byte("x")})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	forwardResp, err := tr.handlers[ClusterMsgForwardApply](ctx, "peer-1", &ClusterMessage{Payload: forwardPayload})
+	require.NoError(t, err)
+	assert.Equal(t, ClusterMsgForwardApplyResponse, forwardResp.Type)
+	require.NotNil(t, mock.lastForwardCmd)
+	assert.Equal(t, CmdCreateNode, mock.lastForwardCmd.Type)
+	assert.Positive(t, mock.lastTimeout)
+	assert.LessOrEqual(t, mock.lastTimeout, 30*time.Second)
+
+	mock.forwardApplyErr = errors.New("forward apply failed")
+	forwardResp, err = tr.handlers[ClusterMsgForwardApply](context.Background(), "peer-1", &ClusterMessage{Payload: forwardPayload})
+	require.NoError(t, err)
+	var fr forwardApplyResponse
+	require.NoError(t, decodeGob(forwardResp.Payload, &fr))
+	assert.Equal(t, "forward apply failed", fr.Err)
+}
+
+func TestStorageAdapter_ApplyCommand_UpdateEdgeAndBulkCommands(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	_, err := adapter.engine.CreateNode(&storage.Node{ID: "n1", Labels: []string{"L"}})
+	require.NoError(t, err)
+	_, err = adapter.engine.CreateNode(&storage.Node{ID: "n2", Labels: []string{"L"}})
+	require.NoError(t, err)
+	require.NoError(t, adapter.engine.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"}))
+
+	updatedEdge := &storage.Edge{
+		ID:         "e1",
+		StartNode:  "n1",
+		EndNode:    "n2",
+		Type:       "KNOWS",
+		Properties: map[string]any{"weight": float64(2)},
+	}
+	require.NoError(t, adapter.ApplyCommand(&Command{
+		Type:      CmdUpdateEdge,
+		Data:      encodeEdgeForTest(t, updatedEdge),
+		Timestamp: time.Now(),
+	}))
+	gotEdge, err := adapter.engine.GetEdge("e1")
+	require.NoError(t, err)
+	assert.Equal(t, float64(2), gotEdge.Properties["weight"])
+
+	nodeBytes1 := encodeNodeForTest(t, &storage.Node{ID: "n3", Labels: []string{"L"}})
+	nodeBytes2 := encodeNodeForTest(t, &storage.Node{ID: "n4", Labels: []string{"L"}})
+	bulkNodesPayload := encodeGobForTest(t, [][]byte{nodeBytes1, nodeBytes2})
+	require.NoError(t, adapter.ApplyCommand(&Command{
+		Type:      CmdBulkCreateNodes,
+		Data:      bulkNodesPayload,
+		Timestamp: time.Now(),
+	}))
+	_, err = adapter.engine.GetNode("n3")
+	require.NoError(t, err)
+	_, err = adapter.engine.GetNode("n4")
+	require.NoError(t, err)
+
+	edgeBytes := encodeEdgeForTest(t, &storage.Edge{ID: "e2", StartNode: "n3", EndNode: "n4", Type: "REL"})
+	bulkEdgesPayload := encodeGobForTest(t, [][]byte{edgeBytes})
+	require.NoError(t, adapter.ApplyCommand(&Command{
+		Type:      CmdBulkCreateEdges,
+		Data:      bulkEdgesPayload,
+		Timestamp: time.Now(),
+	}))
+	_, err = adapter.engine.GetEdge("e2")
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.ApplyCommand(&Command{
+		Type:      CmdBulkDeleteNodes,
+		Data:      encodeGobForTest(t, []storage.NodeID{"n4"}),
+		Timestamp: time.Now(),
+	}))
+	_, err = adapter.engine.GetNode("n4")
+	require.ErrorIs(t, err, storage.ErrNotFound)
+
+	require.NoError(t, adapter.ApplyCommand(&Command{
+		Type:      CmdBulkDeleteEdges,
+		Data:      encodeGobForTest(t, []storage.EdgeID{"e2"}),
+		Timestamp: time.Now(),
+	}))
+	_, err = adapter.engine.GetEdge("e2")
+	require.ErrorIs(t, err, storage.ErrNotFound)
+
+	err = adapter.ApplyCommand(&Command{Type: CmdBulkDeleteEdges, Data: []byte("bad"), Timestamp: time.Now()})
+	require.ErrorContains(t, err, "decode bulk delete edges")
+}
+
+func TestStandaloneReplicator_MetadataMethods(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeStandalone
+	cfg.NodeID = "solo-1"
+	r := NewStandaloneReplicator(cfg, NewMockStorage())
+
+	assert.Equal(t, "", r.LeaderAddr())
+	assert.Equal(t, "solo-1", r.LeaderID())
+	assert.Equal(t, "solo-1", r.NodeID())
+}
+
+func TestHAStandbyReplicator_UncoveredHelpers(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeHAStandby
+	cfg.NodeID = "ha-1"
+	cfg.AdvertiseAddr = "127.0.0.1:17001"
+	cfg.HAStandby.Role = "standby"
+	cfg.HAStandby.PeerAddr = "127.0.0.1:17002"
+	cfg.HAStandby.SyncMode = SyncAsync
+	cfg.HAStandby.AutoFailover = false
+	cfg.HAStandby.FailoverTimeout = 1 * time.Millisecond
+
+	store := NewMockStorage()
+	r, err := NewHAStandbyReplicator(cfg, store)
+	require.NoError(t, err)
+	r.transport = NewMockTransport()
+	r.started.Store(true)
+	r.stopCh = make(chan struct{})
+
+	cmds := []*Command{
+		{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()},
+		{Type: CmdUpdateNode, Data: []byte("y"), Timestamp: time.Now()},
+	}
+	require.Error(t, r.ApplyBatch(cmds, 50*time.Millisecond))
+
+	r.isPrimary.Store(true)
+	assert.Equal(t, cfg.NodeID, r.LeaderID())
+	assert.NoError(t, r.WaitForLeader(context.Background()))
+
+	r.isPrimary.Store(false)
+	assert.Equal(t, "", r.LeaderID())
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, r.WaitForLeader(waitCtx), context.DeadlineExceeded)
+
+	r.primaryHealthy.Store(true)
+	require.NoError(t, r.WaitForLeader(context.Background()))
+
+	resp, err := r.HandlePromote(&PromoteRequest{Reason: "manual"})
+	require.NoError(t, err)
+	assert.True(t, resp.Ready)
+
+	r.lastPrimaryHB = time.Now().Add(-time.Second)
+	r.primaryHealthy.Store(true)
+	r.checkPrimaryHealth(context.Background())
+	assert.False(t, r.primaryHealthy.Load())
+
+	mockConn := &MockPeerConn{connected: true}
+	r.primaryConn = mockConn
+	r.fenceOldPrimary(context.Background())
+	assert.Equal(t, 1, mockConn.fenceCalls)
+
+	cancelCtx, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	r.isPromoted.Store(false)
+	r.triggerAutoFailover(cancelCtx)
+	assert.True(t, r.isPromoted.Load())
+	assert.True(t, r.isPrimary.Load())
+
+	assert.NotNil(t, NewDefaultTransport(DefaultClusterTransportConfig()))
+}
+
+func TestRaftReplicator_UncoveredHandlersAndAdminMethods(t *testing.T) {
+	t.Parallel()
+
+	r, store := newCoverageRaftReplicator(t)
+
+	_, err := r.HandleRaftVote(nil)
+	require.ErrorContains(t, err, "nil vote request")
+	_, err = r.HandleRaftAppendEntries(nil)
+	require.ErrorContains(t, err, "nil append entries request")
+
+	r.currentTerm = 3
+	r.votedFor = ""
+	r.log = []*RaftLogEntry{
+		{Index: 0, Term: 0, Command: nil},
+		{Index: 1, Term: 2, Command: &Command{Type: CmdCreateNode, Data: []byte("a"), Timestamp: time.Now()}},
+	}
+	respVote := r.handleVoteRequest(&VoteRequest{Term: 2, CandidateID: "c1", LastLogIndex: 1, LastLogTerm: 2})
+	assert.False(t, respVote.VoteGranted)
+
+	respVote = r.handleVoteRequest(&VoteRequest{Term: 4, CandidateID: "c1", LastLogIndex: 1, LastLogTerm: 2})
+	assert.True(t, respVote.VoteGranted)
+	assert.Equal(t, uint64(4), respVote.Term)
+
+	respVote = r.handleVoteRequest(&VoteRequest{Term: 4, CandidateID: "c2", LastLogIndex: 1, LastLogTerm: 2})
+	assert.False(t, respVote.VoteGranted)
+
+	r.currentTerm = 5
+	appendResp := r.handleAppendEntriesRequest(&AppendEntriesRequest{Term: 4, LeaderID: "l1"})
+	assert.False(t, appendResp.Success)
+
+	r.currentTerm = 5
+	appendResp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         6,
+		LeaderID:     "l1",
+		LeaderAddr:   "127.0.0.1:17010",
+		PrevLogIndex: 99,
+		PrevLogTerm:  3,
+	})
+	assert.False(t, appendResp.Success)
+	assert.Greater(t, appendResp.ConflictIndex, uint64(0))
+
+	r.log = []*RaftLogEntry{
+		{Index: 0, Term: 0},
+		{Index: 1, Term: 2, Command: &Command{Type: CmdCreateNode, Data: []byte("n1"), Timestamp: time.Now()}},
+	}
+	r.commitIndex = 0
+	r.lastApplied = 0
+	appendResp = r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         7,
+		LeaderID:     "l1",
+		LeaderAddr:   "127.0.0.1:17010",
+		PrevLogIndex: 1,
+		PrevLogTerm:  2,
+		Entries: []*RaftLogEntry{
+			{Index: 2, Term: 7, Command: &Command{Type: CmdUpdateNode, Data: []byte("n1"), Timestamp: time.Now()}},
+		},
+		LeaderCommit: 2,
+	})
+	assert.True(t, appendResp.Success)
+	assert.Equal(t, uint64(2), appendResp.MatchIndex)
+	assert.Equal(t, 2, store.GetApplyCount())
+
+	r.started.Store(true)
+	r.state = StateFollower
+	r.leaderAddr = ""
+	assert.ErrorIs(t, r.HandleForwardApply(&Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}, 20*time.Millisecond), ErrNoLeader)
+	assert.ErrorIs(t, r.ApplyBatch([]*Command{{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}}, 20*time.Millisecond), ErrNoLeader)
+
+	r.state = StateLeader
+	assert.Equal(t, r.config.NodeID, r.LeaderID())
+	assert.Equal(t, r.config.NodeID, r.NodeID())
+
+	r.state = StateFollower
+	r.leaderID = "leader-2"
+	assert.Equal(t, "leader-2", r.LeaderID())
+
+	assert.ErrorIs(t, r.AddVoter("p1", "127.0.0.1:17011"), ErrNotLeader)
+	r.state = StateLeader
+	require.NoError(t, r.AddVoter("p1", "127.0.0.1:17011"))
+	require.NoError(t, r.AddVoter("p1", "127.0.0.1:17011"))
+	require.Len(t, r.config.Raft.Peers, 1)
+
+	r.peerConns["p1"] = &MockPeerConn{connected: true}
+	conf, err := r.GetConfiguration()
+	require.NoError(t, err)
+	require.Len(t, conf, 2)
+
+	require.NoError(t, r.RemoveServer("p1"))
+	require.Empty(t, r.config.Raft.Peers)
+}
+
+func TestMultiRegionReplicator_UncoveredWrapperMethods(t *testing.T) {
+	t.Parallel()
+
+	local, _ := newCoverageRaftReplicator(t)
+	local.started.Store(true)
+	local.state = StateFollower
+	local.leaderAddr = "127.0.0.1:17050"
+	local.leaderID = "leader-x"
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeMultiRegion
+	cfg.NodeID = "region-node-1"
+	cfg.MultiRegion.RegionID = "us-east"
+
+	r := &MultiRegionReplicator{
+		config:      cfg,
+		storage:     NewMockStorage(),
+		localRaft:   local,
+		stopCh:      make(chan struct{}),
+		remoteConns: make(map[string]PeerConnection),
+	}
+	r.started.Store(true)
+
+	assert.Equal(t, "127.0.0.1:17050", r.LeaderAddr())
+	assert.Equal(t, "leader-x", r.LeaderID())
+	assert.Equal(t, "region-node-1", r.NodeID())
+
+	err := r.ApplyBatch([]*Command{{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}}, 10*time.Millisecond)
+	require.ErrorIs(t, err, ErrNotLeader)
+
+	remote := &MockPeerConn{connected: true}
+	r.remoteConns["eu-west"] = remote
+	store := r.storage.(*MockStorage)
+	store.walPosition = 3
+	r.streamWALToRemoteRegions(context.Background())
+	assert.Equal(t, 1, remote.GetWALBatchCalls())
+	assert.Equal(t, uint64(3), r.walPosition)
+
+	r.notifyRegionsOfFailover(context.Background())
+	time.Sleep(25 * time.Millisecond)
+	assert.GreaterOrEqual(t, remote.GetHeartbeatCalls(), 1)
+}
+
+func TestStorageAdapter_PruneWALEntries(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	adapter.memWAL = []*WALEntry{
+		{Position: 1}, {Position: 2}, {Position: 3}, {Position: 4},
+	}
+
+	adapter.PruneWALEntries(2)
+	require.Len(t, adapter.memWAL, 2)
+	assert.Equal(t, uint64(3), adapter.memWAL[0].Position)
+
+	adapter.PruneWALEntries(10)
+	assert.Empty(t, adapter.memWAL)
+}
+
+func TestRaftReplicator_InternalCoverage(t *testing.T) {
+	t.Parallel()
+
+	r, store := newCoverageRaftReplicator(t)
+	r.started.Store(true)
+
+	voteReq := &VoteRequest{Term: 1, CandidateID: "c1", LastLogIndex: 0, LastLogTerm: 0}
+	voteConn := &raftCoveragePeerConn{connected: true, voteResp: &RaftVoteResponse{Term: 1, VoteGranted: true, VoterID: "peer-1"}}
+	voteResp, err := r.sendVoteRequestRPC(context.Background(), voteConn, voteReq)
+	require.NoError(t, err)
+	assert.True(t, voteResp.VoteGranted)
+
+	_, err = r.sendVoteRequestRPC(context.Background(), &raftCoveragePeerConn{connected: true, voteErr: errors.New("vote down")}, voteReq)
+	require.ErrorContains(t, err, "send vote request")
+
+	appendReq := &AppendEntriesRequest{Term: 1, LeaderID: "l1", PrevLogIndex: 0}
+	appendConn := &raftCoveragePeerConn{connected: true, appendResp: &RaftAppendEntriesResponse{Term: 1, Success: true, MatchIndex: 1, ResponderID: "peer-1"}}
+	appendResp, err := r.sendAppendEntriesRPC(context.Background(), appendConn, appendReq)
+	require.NoError(t, err)
+	assert.True(t, appendResp.Success)
+
+	_, err = r.sendAppendEntriesRPC(context.Background(), &raftCoveragePeerConn{connected: true, appendErr: errors.New("append down")}, appendReq)
+	require.ErrorContains(t, err, "send append entries")
+
+	peer := PeerConfig{ID: "p1", Addr: "127.0.0.1:17111"}
+	r.peerConns["p1"] = &raftCoveragePeerConn{connected: true}
+	gotConn, err := r.getOrConnectPeer(context.Background(), peer)
+	require.NoError(t, err)
+	require.NotNil(t, gotConn)
+
+	r.peerConns["p2"] = nil
+	_, err = r.getOrConnectPeer(context.Background(), PeerConfig{ID: "p2", Addr: "127.0.0.1:17112"})
+	require.ErrorContains(t, err, "no transport configured")
+
+	r.transport = &raftCoverageTransport{connectErr: errors.New("dial fail")}
+	_, err = r.getOrConnectPeer(context.Background(), PeerConfig{ID: "p2", Addr: "127.0.0.1:17112"})
+	require.ErrorContains(t, err, "connect to 127.0.0.1:17112")
+
+	newConn := &raftCoveragePeerConn{connected: true}
+	r.transport = &raftCoverageTransport{conn: newConn}
+	gotConn, err = r.getOrConnectPeer(context.Background(), PeerConfig{ID: "p2", Addr: "127.0.0.1:17112"})
+	require.NoError(t, err)
+	assert.Equal(t, newConn, gotConn)
+
+	r.state = StateCandidate
+	r.currentTerm = 2
+	r.log = []*RaftLogEntry{{Index: 0, Term: 0}}
+	votes := 1
+	var mu sync.Mutex
+	r.requestVoteFromPeer(context.Background(), peer, voteReq, 2, &mu, &votes, 2)
+	assert.Equal(t, 2, votes)
+
+	r.state = StateCandidate
+	r.currentTerm = 3
+	r.peerConns["p1"] = nil
+	r.transport = &raftCoverageTransport{conn: &raftCoveragePeerConn{connected: true, voteResp: &RaftVoteResponse{Term: 5, VoteGranted: false, VoterID: "peer-1"}}}
+	r.requestVoteFromPeer(context.Background(), peer, &VoteRequest{Term: 3}, 3, &mu, &votes, 3)
+	assert.Equal(t, StateFollower, r.state)
+	assert.Equal(t, uint64(5), r.currentTerm)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.state = StateCandidate
+	r.currentTerm = 7
+	r.config.Raft.Peers = []PeerConfig{{ID: "p3", Addr: "127.0.0.1:17113"}}
+	r.log = []*RaftLogEntry{{Index: 0, Term: 0}, {Index: 1, Term: 7}}
+	r.becomeLeader(cancelCtx, 7)
+	assert.Equal(t, StateLeader, r.state)
+	assert.Equal(t, r.config.NodeID, r.leaderID)
+
+	r.state = StateLeader
+	r.currentTerm = 9
+	r.matchIndex["p3"] = 0
+	r.nextIndex["p3"] = 1
+	r.handleAppendEntriesResponse("p3", 9, appendReq, &AppendEntriesResponse{Term: 9, Success: true, MatchIndex: 2})
+	assert.Equal(t, uint64(2), r.matchIndex["p3"])
+	assert.Equal(t, uint64(3), r.nextIndex["p3"])
+
+	r.handleAppendEntriesResponse("p3", 9, appendReq, &AppendEntriesResponse{Term: 9, Success: false, ConflictIndex: 1})
+	assert.Equal(t, uint64(1), r.nextIndex["p3"])
+
+	r.state = StateLeader
+	r.currentTerm = 10
+	r.handleAppendEntriesResponse("p3", 10, appendReq, &AppendEntriesResponse{Term: 11})
+	assert.Equal(t, StateFollower, r.state)
+	assert.Equal(t, uint64(11), r.currentTerm)
+
+	r.state = StateLeader
+	r.currentTerm = 12
+	r.config.Raft.Peers = []PeerConfig{{ID: "p3", Addr: "127.0.0.1:17113"}}
+	r.log = []*RaftLogEntry{
+		{Index: 0, Term: 0},
+		{Index: 1, Term: 12, Command: &Command{Type: CmdCreateNode, Data: []byte("a"), Timestamp: time.Now()}},
+	}
+	r.commitIndex = 0
+	r.lastApplied = 0
+	r.matchIndex["p3"] = 1
+	r.advanceCommitIndex()
+	assert.Equal(t, uint64(1), r.commitIndex)
+	assert.Equal(t, 1, store.GetApplyCount())
+
+	future := &applyFuture{index: 3, errCh: make(chan error, 1)}
+	r.config.Raft.CommitTimeout = 10 * time.Millisecond
+	r.waitForCommit(context.Background(), future)
+	require.ErrorContains(t, <-future.errCh, "commit timeout")
+
+	reqVotePayload, err := json.Marshal(VoteRequest{Term: 12, CandidateID: "cand", LastLogIndex: 1, LastLogTerm: 12})
+	require.NoError(t, err)
+	respCh := make(chan []byte, 1)
+	r.handleRPC(&rpcRequest{message: &RaftRPCMessage{Type: RPCVoteRequest, Payload: reqVotePayload}, respCh: respCh})
+	require.NotEmpty(t, <-respCh)
+
+	reqAppendPayload, err := json.Marshal(AppendEntriesRequest{Term: 12, LeaderID: "leader", LeaderAddr: "addr", PrevLogIndex: 1, PrevLogTerm: 12})
+	require.NoError(t, err)
+	respCh = make(chan []byte, 1)
+	r.handleRPC(&rpcRequest{message: &RaftRPCMessage{Type: RPCAppendEntries, Payload: reqAppendPayload}, respCh: respCh})
+	require.NotEmpty(t, <-respCh)
+
+	r.handleIncomingConnection(context.Background(), &raftCoveragePeerConn{connected: true})
+	select {
+	case <-r.heartbeatCh:
+	default:
+		t.Fatalf("expected heartbeat signal")
+	}
+}
+
+func TestHAStandbyReplicator_StartAndAckPaths(t *testing.T) {
+	t.Parallel()
+
+	primaryCfg := DefaultConfig()
+	primaryCfg.Mode = ModeHAStandby
+	primaryCfg.NodeID = "ha-primary"
+	primaryCfg.BindAddr = "127.0.0.1:17120"
+	primaryCfg.AdvertiseAddr = "127.0.0.1:17120"
+	primaryCfg.HAStandby.Role = "primary"
+	primaryCfg.HAStandby.PeerAddr = "127.0.0.1:17121"
+	primaryCfg.HAStandby.SyncMode = SyncQuorum
+
+	primaryStore := NewMockStorage()
+	primary, err := NewHAStandbyReplicator(primaryCfg, primaryStore)
+	require.NoError(t, err)
+	primary.SetTransport(NewMockTransport())
+	require.NoError(t, primary.Start(context.Background()))
+	require.NoError(t, primary.Start(context.Background()))
+	t.Cleanup(func() { _ = primary.Shutdown() })
+
+	primary.walStreamer = NewWALStreamer(primaryStore, 16)
+	primary.walStreamer.AcknowledgePosition(5)
+	require.NoError(t, primary.waitForReplicationAck(5, 20*time.Millisecond))
+
+	primary.walStreamer = NewWALStreamer(primaryStore, 16)
+	err = primary.waitForReplicationAck(10, 20*time.Millisecond)
+	require.ErrorContains(t, err, "replication ack timeout")
+
+	standbyCfg := DefaultConfig()
+	standbyCfg.Mode = ModeHAStandby
+	standbyCfg.NodeID = "ha-standby"
+	standbyCfg.BindAddr = "127.0.0.1:17122"
+	standbyCfg.AdvertiseAddr = "127.0.0.1:17122"
+	standbyCfg.HAStandby.Role = "standby"
+	standbyCfg.HAStandby.PeerAddr = "127.0.0.1:17120"
+
+	standbyStore := NewMockStorage()
+	standby, err := NewHAStandbyReplicator(standbyCfg, standbyStore)
+	require.NoError(t, err)
+	transport := NewMockTransport()
+	standby.SetTransport(transport)
+	require.NoError(t, standby.Start(context.Background()))
+	t.Cleanup(func() { _ = standby.Shutdown() })
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		transport.mu.RLock()
+		hasHandler := transport.handler != nil
+		transport.mu.RUnlock()
+		if hasHandler {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	transport.SimulateIncomingConnection()
+	time.Sleep(25 * time.Millisecond)
+	assert.True(t, standby.primaryHealthy.Load())
+}
+
+func TestRaftReplicator_ApplyBranchCoverage(t *testing.T) {
+	t.Parallel()
+
+	r, _ := newCoverageRaftReplicator(t)
+	cmd := &Command{Type: CmdCreateNode, Data: []byte("x"), Timestamp: time.Now()}
+
+	r.closed.Store(true)
+	require.ErrorIs(t, r.Apply(cmd, 10*time.Millisecond), ErrClosed)
+
+	r.closed.Store(false)
+	require.ErrorIs(t, r.Apply(cmd, 10*time.Millisecond), ErrNotReady)
+
+	r.started.Store(true)
+	r.state = StateFollower
+	r.leaderAddr = ""
+	require.ErrorIs(t, r.Apply(cmd, 10*time.Millisecond), ErrNoLeader)
+
+	r.leaderAddr = "127.0.0.1:17130"
+	r.transport = nil
+	require.ErrorIs(t, r.Apply(cmd, 10*time.Millisecond), ErrNotLeader)
+
+	r.transport = &raftCoverageTransport{connectErr: errors.New("dial failed")}
+	err := r.Apply(cmd, 10*time.Millisecond)
+	require.ErrorContains(t, err, "forward to leader")
+
+	fwdConn := &raftForwardPeerConn{raftCoveragePeerConn: raftCoveragePeerConn{connected: true}}
+	r.transport = &raftCoverageTransport{conn: fwdConn}
+	require.NoError(t, r.Apply(cmd, 10*time.Millisecond))
+
+	fwdConn.forwardErr = errors.New("leader rejected")
+	err = r.Apply(cmd, 10*time.Millisecond)
+	require.ErrorContains(t, err, "leader rejected")
+
+	r.state = StateLeader
+	r.applyCh = make(chan *applyFuture)
+	err = r.Apply(cmd, 10*time.Millisecond)
+	require.ErrorContains(t, err, "apply queue full")
+}
+
+func TestRaftReplicator_HandleTransportWrappers(t *testing.T) {
+	t.Parallel()
+
+	r, _ := newCoverageRaftReplicator(t)
+	r.currentTerm = 1
+	r.log = []*RaftLogEntry{{Index: 0, Term: 0}}
+
+	voteResp, err := r.HandleRaftVote(&RaftVoteRequest{
+		Term:         2,
+		CandidateID:  "cand",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+	require.NoError(t, err)
+	assert.True(t, voteResp.VoteGranted)
+
+	appendResp, err := r.HandleRaftAppendEntries(&RaftAppendEntriesRequest{
+		Term:         2,
+		LeaderID:     "leader",
+		LeaderAddr:   "127.0.0.1:17140",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+	})
+	require.NoError(t, err)
+	assert.True(t, appendResp.Success)
+}
+
+func TestStorageAdapter_ApplyBatchWriteBranches(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	_, err := adapter.engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"L"}})
+	require.NoError(t, err)
+	_, err = adapter.engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"L"}})
+	require.NoError(t, err)
+
+	nodeBytes := encodeNodeForTest(t, &storage.Node{ID: "n-batch", Labels: []string{"L"}})
+	edgeBytes := encodeEdgeForTest(t, &storage.Edge{ID: "e-batch", StartNode: "a", EndNode: "b", Type: "REL"})
+	batchPayload := encodeGobForTest(t, struct {
+		Nodes [][]byte
+		Edges [][]byte
+	}{Nodes: [][]byte{nodeBytes}, Edges: [][]byte{edgeBytes}})
+
+	require.NoError(t, adapter.applyBatchWrite(batchPayload))
+	_, err = adapter.engine.GetNode("n-batch")
+	require.NoError(t, err)
+	_, err = adapter.engine.GetEdge("e-batch")
+	require.NoError(t, err)
+
+	err = adapter.applyBatchWrite([]byte("bad"))
+	require.ErrorContains(t, err, "decode batch")
+}
+
+func TestNewDefaultTransportFromConfig_Branches(t *testing.T) {
+	t.Parallel()
+
+	tr, err := NewDefaultTransportFromConfig(nil)
+	require.NoError(t, err)
+	require.NotNil(t, tr)
+
+	cfg := DefaultConfig()
+	cfg.NodeID = "node-tls"
+	cfg.BindAddr = "127.0.0.1:17150"
+	cfg.ReplicationSecret = "secret"
+	tr, err = NewDefaultTransportFromConfig(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, tr)
+
+	cfg.TLS.Enabled = true
+	cfg.TLS.CertFile = "missing-cert.pem"
+	cfg.TLS.KeyFile = "missing-key.pem"
+	_, err = NewDefaultTransportFromConfig(cfg)
+	require.ErrorContains(t, err, "load TLS cert/key")
+}
+
+func TestHAStandbyReplicator_Start_DefaultTransportInitFailure(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeHAStandby
+	cfg.NodeID = "ha-fail"
+	cfg.HAStandby.Role = "primary"
+	cfg.HAStandby.PeerAddr = "127.0.0.1:17190"
+
+	store := NewMockStorage()
+	r, err := NewHAStandbyReplicator(cfg, store)
+	require.NoError(t, err)
+	r.transport = nil
+	r.config.TLS.Enabled = true
+	r.config.TLS.CertFile = "missing-cert.pem"
+	r.config.TLS.KeyFile = "missing-key.pem"
+
+	err = r.Start(context.Background())
+	require.ErrorContains(t, err, "init transport")
+	assert.True(t, r.started.Load())
+}
+
+func TestStorageAdapter_RestoreSnapshot_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	adapter, _ := setupTestAdapter(t)
+	t.Cleanup(func() { _ = adapter.Close() })
+
+	badReader := io.NopCloser(io.Reader(&errReader{err: errors.New("read boom")}))
+	err := adapter.RestoreSnapshot(badReader)
+	require.ErrorContains(t, err, "read snapshot")
+
+	err = adapter.RestoreSnapshot(io.NopCloser(bytes.NewBufferString("bad-snapshot")))
+	require.ErrorContains(t, err, "decode snapshot")
+
+	node := &storage.Node{ID: "n1", Labels: []string{"L"}}
+	snapshot := struct {
+		WALPosition uint64
+		Nodes       []*storage.Node
+		Edges       []*storage.Edge
+	}{
+		WALPosition: 3,
+		Nodes:       []*storage.Node{node, node},
+	}
+	payload, encErr := encodeGob(snapshot)
+	require.NoError(t, encErr)
+	err = adapter.RestoreSnapshot(io.NopCloser(bytes.NewReader(payload)))
+	require.ErrorContains(t, err, "restore node")
+}
+
+func TestRaftReplicator_WaitForCommitCancelAndStop(t *testing.T) {
+	t.Parallel()
+
+	r, _ := newCoverageRaftReplicator(t)
+	r.config.Raft.CommitTimeout = 100 * time.Millisecond
+
+	f1 := &applyFuture{index: 1, errCh: make(chan error, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.waitForCommit(ctx, f1)
+	require.ErrorIs(t, <-f1.errCh, context.Canceled)
+
+	f2 := &applyFuture{index: 1, errCh: make(chan error, 1)}
+	close(r.stopCh)
+	r.waitForCommit(context.Background(), f2)
+	require.ErrorIs(t, <-f2.errCh, ErrClosed)
+}
+
+type errReader struct{ err error }
+
+func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
