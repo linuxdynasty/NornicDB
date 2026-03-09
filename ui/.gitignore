@@ -7,5 +7,6 @@ dist/*
 !dist/assets/
 dist/assets/*
 !dist/assets/.gitkeep
+!dist/assets/placeholder.txt
 .DS_Store
 *.local
