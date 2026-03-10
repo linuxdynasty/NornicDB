@@ -102,7 +102,7 @@ func TestProcess_SetpointErrorBoosting(t *testing.T) {
 
 func TestProcess_NoisySignal(t *testing.T) {
 	k := NewKalman(DefaultConfig())
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	// Generate noisy signal around 50.0
 	trueValue := 50.0
@@ -110,7 +110,7 @@ func TestProcess_NoisySignal(t *testing.T) {
 	var filtered float64
 
 	for i := 0; i < 100; i++ {
-		noisy := trueValue + rand.NormFloat64()*noiseStd
+		noisy := trueValue + rng.NormFloat64()*noiseStd
 		filtered = k.Process(noisy, 0)
 	}
 
@@ -257,9 +257,9 @@ func TestUpdateAdaptiveR(t *testing.T) {
 	initialR := k.r
 
 	// Process noisy signal to build up innovations
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	for i := 0; i < 50; i++ {
-		k.Process(50.0+rand.NormFloat64()*20.0, 0)
+		k.Process(50.0+rng.NormFloat64()*20.0, 0)
 	}
 
 	k.UpdateAdaptiveR()
@@ -310,6 +310,7 @@ func TestConcurrentAccess(t *testing.T) {
 func TestDecayPrediction_ExponentialDecay(t *testing.T) {
 	// Simulate exponential decay like NornicDB's decay system
 	k := NewKalman(DecayPredictionConfig())
+	rng := rand.New(rand.NewSource(42))
 
 	// Initial score of 1.0, decaying by ~5% each step (gentler decay)
 	decayRate := 0.95
@@ -325,7 +326,7 @@ func TestDecayPrediction_ExponentialDecay(t *testing.T) {
 		actualValues = append(actualValues, currentScore)
 
 		// Filter observes the actual (with 5% noise)
-		noisy := currentScore * (1.0 + rand.NormFloat64()*0.05)
+		noisy := currentScore * (1.0 + rng.NormFloat64()*0.05)
 		filtered := k.Process(noisy, 0)
 		filteredValues = append(filteredValues, filtered)
 	}
@@ -426,12 +427,12 @@ func TestCoAccessConfidence_SteadyPattern(t *testing.T) {
 
 func TestCoAccessConfidence_SporadicPattern(t *testing.T) {
 	k := NewKalman(CoAccessConfig())
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	// Simulate sporadic co-access (should have lower filtered confidence)
 	for i := 0; i < 30; i++ {
 		// Random co-access observations
-		observed := rand.Float64()
+		observed := rng.Float64()
 		k.Process(observed, 0)
 	}
 
@@ -446,7 +447,7 @@ func TestCoAccessConfidence_SporadicPattern(t *testing.T) {
 
 func TestCoAccessConfidence_FilteringNoise(t *testing.T) {
 	k := NewKalman(CoAccessConfig())
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	// True confidence is 0.7, but observations are noisy
 	trueConfidence := 0.7
@@ -454,7 +455,7 @@ func TestCoAccessConfidence_FilteringNoise(t *testing.T) {
 	var rawValues, filteredValues []float64
 
 	for i := 0; i < 50; i++ {
-		raw := trueConfidence + rand.NormFloat64()*0.2
+		raw := trueConfidence + rng.NormFloat64()*0.2
 		raw = math.Max(0, math.Min(1, raw)) // Clamp to [0,1]
 		filtered := k.Process(raw, 0)
 
@@ -527,13 +528,13 @@ func TestSimilarityScoreSmoothing(t *testing.T) {
 
 	// Simulate repeated similarity queries with noise
 	trueSimilarity := 0.85
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	var rawScores []float64
 	var filteredScores []float64
 
 	for i := 0; i < 30; i++ {
-		raw := trueSimilarity + rand.NormFloat64()*0.1
+		raw := trueSimilarity + rng.NormFloat64()*0.1
 		raw = math.Max(0, math.Min(1, raw))
 		filtered := k.Process(raw, 0)
 
@@ -571,14 +572,14 @@ func TestVarianceTracker_Basic(t *testing.T) {
 
 func TestVarianceTracker_Noisy(t *testing.T) {
 	v := NewVarianceTracker(20)
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	// Add noisy values with known variance
 	targetMean := 100.0
 	targetStdDev := 10.0
 
 	for i := 0; i < 50; i++ {
-		sample := targetMean + rand.NormFloat64()*targetStdDev
+		sample := targetMean + rng.NormFloat64()*targetStdDev
 		v.Update(sample)
 	}
 
@@ -596,10 +597,10 @@ func TestVarianceTracker_Noisy(t *testing.T) {
 
 func TestVarianceTracker_AdaptiveNoise(t *testing.T) {
 	v := NewVarianceTracker(10)
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 
 	for i := 0; i < 20; i++ {
-		v.Update(rand.NormFloat64() * 5.0)
+		v.Update(rng.NormFloat64() * 5.0)
 	}
 
 	noise := v.AdaptiveNoise(10.0)

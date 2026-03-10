@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -64,6 +65,17 @@ type walEmbeddingDispatchEngine struct {
 
 type walCaptureLogger struct {
 	entries []map[string]any
+}
+
+type walErrWriter struct {
+	err error
+}
+
+func (w *walErrWriter) Write(p []byte) (int, error) {
+	if w.err == nil {
+		w.err = errors.New("writer failure")
+	}
+	return 0, w.err
 }
 
 func (e *walStreamErrorEngine) StreamNodes(_ context.Context, _ func(*Node) error) error {
@@ -520,6 +532,77 @@ func TestWAL_Config(t *testing.T) {
 		assert.Equal(t, dir, got.Dir)
 		assert.Equal(t, "immediate", got.SyncMode)
 		assert.Equal(t, 3, got.RetentionMaxSegments)
+	})
+}
+
+func TestWAL_InternalBranchErrors(t *testing.T) {
+	t.Run("new wal returns expected filesystem errors", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0644))
+		_, err := NewWAL(filePath, nil)
+		require.ErrorContains(t, err, "failed to create directory")
+
+		segRoot := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(segRoot, "segments"), []byte("x"), 0644))
+		_, err = NewWAL(segRoot, nil)
+		require.ErrorContains(t, err, "failed to create segments directory")
+
+		openRoot := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(openRoot, "wal.log"), 0755))
+		_, err = NewWAL(openRoot, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wal")
+	})
+
+	t.Run("append marshal and sync helper errors", func(t *testing.T) {
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		defer wal.Close()
+
+		cycle := map[string]any{}
+		cycle["self"] = cycle
+		_, err = marshalJSONCompact(bytes.NewBuffer(nil), cycle)
+		require.Error(t, err)
+
+		bad := &WAL{
+			config: &WALConfig{SyncMode: "none"},
+			writer: bufio.NewWriterSize(&walErrWriter{err: errors.New("flush boom")}, 16),
+		}
+		_, _ = bad.writer.Write([]byte("trigger flush"))
+		require.ErrorContains(t, bad.syncLocked(), "flush failed")
+
+	})
+
+	t.Run("rotation guard and failure branches", func(t *testing.T) {
+		cfg := &WALConfig{Dir: t.TempDir(), SyncMode: "none", MaxFileSize: 8}
+		w := &WAL{
+			config: cfg,
+			writer: bufio.NewWriterSize(bytes.NewBuffer(nil), 16),
+			file:   os.NewFile(^uintptr(0), "invalid"),
+		}
+
+		require.NoError(t, w.maybeRotateLocked(1))   // segmentEntries == 0 fast path
+		require.NoError(t, w.rotateSegmentLocked(1)) // segmentEntries == 0 fast path
+
+		w.segmentEntries = 1
+		w.segmentBytes = 10
+		err := w.maybeRotateLocked(2)
+		require.Error(t, err)
+	})
+
+	t.Run("loadLastSequence tolerates malformed manifest and returns zero sequence", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version: walManifestVersion,
+			Segments: []WALSegment{
+				{FirstSeq: 1, LastSeq: 1, Path: "../bad-segment.wal"},
+			},
+		}))
+
+		w := &WAL{config: &WALConfig{Dir: dir}}
+		seq, err := w.loadLastSequence()
+		require.NoError(t, err)
+		require.Zero(t, seq)
 	})
 }
 
@@ -1227,6 +1310,70 @@ func TestRecoverFromWAL(t *testing.T) {
 		node, err := recoveredNS.GetNode("ok-node")
 		require.NoError(t, err)
 		require.NotNil(t, node)
+	})
+}
+
+func TestRecoverFromWALWithResult_ErrorAndRoutingBranches(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("invalid snapshot payload returns load error", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+		require.NoError(t, os.WriteFile(snapshotPath, []byte("{invalid-json"), 0644))
+
+		_, _, err := RecoverFromWALWithResult(filepath.Join(dir, "wal"), snapshotPath)
+		require.ErrorContains(t, err, "failed to load snapshot")
+	})
+
+	t.Run("snapshot restore edge failures return explicit errors", func(t *testing.T) {
+		dir := t.TempDir()
+
+		edgeSnapshotPath := filepath.Join(dir, "snapshot-bad-edge.json")
+		require.NoError(t, SaveSnapshot(&Snapshot{
+			Sequence: 1, Timestamp: time.Now(), Version: "1.0",
+			Edges: []*Edge{
+				{ID: "tenant_x:e1", StartNode: "tenant_x:a", EndNode: "tenant_x:b", Type: "REL"},
+			},
+		}, edgeSnapshotPath))
+		_, _, err := RecoverFromWALWithResult(filepath.Join(dir, "wal-edge"), edgeSnapshotPath)
+		require.ErrorContains(t, err, "failed to restore edges")
+	})
+
+	t.Run("snapshot edge prefix selects namespace for restore", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot-prefixed.json")
+		require.NoError(t, SaveSnapshot(&Snapshot{
+			Sequence: 1, Timestamp: time.Now(), Version: "1.0",
+			Nodes: []*Node{
+				{ID: "tenant_pref:n1", Labels: []string{"Doc"}},
+				{ID: "tenant_pref:n2", Labels: []string{"Doc"}},
+			},
+			Edges: []*Edge{
+				{ID: "tenant_pref:e1", StartNode: "tenant_pref:n1", EndNode: "tenant_pref:n2", Type: "REL"},
+			},
+		}, snapshotPath))
+
+		engine, result, err := RecoverFromWALWithResult(filepath.Join(dir, "wal"), snapshotPath)
+		require.NoError(t, err)
+		require.Equal(t, 0, result.Failed)
+
+		ns := NewNamespacedEngine(engine, "tenant_pref")
+		node, getErr := ns.GetNode("n1")
+		require.NoError(t, getErr)
+		require.NotNil(t, node)
+	})
+
+	t.Run("invalid manifest path bubbles as read wal error", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version: walManifestVersion,
+			Segments: []WALSegment{
+				{FirstSeq: 1, LastSeq: 1, Path: "../escape.wal"},
+			},
+		}))
+		_, _, err := RecoverFromWALWithResult(dir, "")
+		require.ErrorContains(t, err, "failed to read WAL")
 	})
 }
 
@@ -1947,6 +2094,51 @@ func TestWAL_TruncateAfterSnapshot(t *testing.T) {
 		for _, e := range entries {
 			require.Greater(t, e.Sequence, snapshot.Sequence)
 		}
+	})
+
+	t.Run("truncate_corruption_with_no_salvage_starts_fresh", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{Node: &Node{ID: "n1"}}))
+		require.NoError(t, wal.Sync())
+
+		walPath := filepath.Join(walDir, "wal.log")
+		f, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0644)
+		require.NoError(t, err)
+		_, err = f.Write([]byte{0x00, 0x01, 0x02})
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		// Snapshot sequence beyond all valid entries -> salvage returns empty.
+		require.NoError(t, wal.TruncateAfterSnapshot(999))
+
+		entries, err := ReadWALEntries(walPath)
+		require.NoError(t, err)
+		require.Len(t, entries, 0)
+	})
+
+	t.Run("truncate_returns_temp_file_creation_error_when_dir_missing", func(t *testing.T) {
+		realDir := t.TempDir()
+		walPath := filepath.Join(realDir, "wal.log")
+		f, err := os.OpenFile(walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		require.NoError(t, err)
+
+		w := &WAL{
+			config: &WALConfig{
+				Dir:      filepath.Join(realDir, "missing-parent"),
+				SyncMode: "none",
+			},
+			file:   f,
+			writer: bufio.NewWriterSize(bytes.NewBuffer(nil), 16),
+		}
+
+		err = w.TruncateAfterSnapshot(0)
+		require.ErrorContains(t, err, "failed to create temp WAL")
 	})
 }
 

@@ -322,6 +322,78 @@ func TestSchemaManager_DropConstraintAndIndexHelpers(t *testing.T) {
 	})
 }
 
+func TestSchemaManager_PersistRollbackAndRangeDeleteBranches(t *testing.T) {
+	t.Run("AddConstraint rolls back both maps when persist fails", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.persist = func(def *SchemaDefinition) error {
+			return fmt.Errorf("persist failed")
+		}
+
+		err := sm.AddConstraint(Constraint{
+			Name:       "user_email_unique",
+			Type:       ConstraintUnique,
+			Label:      "User",
+			Properties: []string{"email"},
+		})
+		if err == nil {
+			t.Fatal("expected persist failure")
+		}
+		if len(sm.GetAllConstraints()) != 0 {
+			t.Fatal("constraint map should be rolled back on persist failure")
+		}
+		if len(sm.GetConstraints()) != 0 {
+			t.Fatal("unique constraints map should be rolled back on persist failure")
+		}
+	})
+
+	t.Run("AddRangeIndex and AddVectorIndex roll back on persist failure", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.persist = func(def *SchemaDefinition) error {
+			return fmt.Errorf("persist failed")
+		}
+
+		if err := sm.AddRangeIndex("ridx", "User", "age"); err == nil {
+			t.Fatal("expected range index persist failure")
+		}
+		if _, ok := sm.GetRangeIndex("ridx"); ok {
+			t.Fatal("range index should be rolled back on persist failure")
+		}
+
+		if err := sm.AddVectorIndex("vidx", "User", "embedding", 3, "cosine"); err == nil {
+			t.Fatal("expected vector index persist failure")
+		}
+		if _, ok := sm.GetVectorIndex("vidx"); ok {
+			t.Fatal("vector index should be rolled back on persist failure")
+		}
+	})
+
+	t.Run("RangeIndexDelete no-op path and deleteEntryLocked miss path", func(t *testing.T) {
+		sm := NewSchemaManager()
+		if err := sm.AddRangeIndex("age_idx", "User", "age"); err != nil {
+			t.Fatalf("AddRangeIndex failed: %v", err)
+		}
+
+		// Not present -> should be no-op.
+		if err := sm.RangeIndexDelete("age_idx", "missing"); err != nil {
+			t.Fatalf("RangeIndexDelete missing failed: %v", err)
+		}
+
+		if err := sm.RangeIndexInsert("age_idx", "u1", 10); err != nil {
+			t.Fatalf("RangeIndexInsert failed: %v", err)
+		}
+		idx, ok := sm.GetRangeIndex("age_idx")
+		if !ok || idx == nil {
+			t.Fatal("expected range index")
+		}
+		idx.mu.Lock()
+		removed := idx.deleteEntryLocked("nope", 10)
+		idx.mu.Unlock()
+		if removed {
+			t.Fatal("deleteEntryLocked should return false for non-existent nodeID")
+		}
+	})
+}
+
 func TestMemoryEngineConstraintIntegration(t *testing.T) {
 	t.Run("ConstraintEnforcementOnCreate", func(t *testing.T) {
 		store := NewMemoryEngine()

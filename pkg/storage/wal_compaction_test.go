@@ -85,6 +85,49 @@ func TestPruneOldSnapshotFiles(t *testing.T) {
 	assert.Equal(t, 2, count, "should keep only 2 snapshots")
 }
 
+func TestPruneOldSnapshotFiles_AdditionalBranches(t *testing.T) {
+	t.Run("nil config is no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot-a.json"), []byte(`{}`), 0644))
+		require.NoError(t, PruneOldSnapshotFiles(dir, nil))
+	})
+
+	t.Run("max age prunes stale snapshots", func(t *testing.T) {
+		dir := t.TempDir()
+		oldPath := filepath.Join(dir, "snapshot-old.json")
+		newPath := filepath.Join(dir, "snapshot-new.json")
+		require.NoError(t, os.WriteFile(oldPath, []byte(`{}`), 0644))
+		require.NoError(t, os.WriteFile(newPath, []byte(`{}`), 0644))
+		now := time.Now()
+		require.NoError(t, os.Chtimes(oldPath, now.Add(-48*time.Hour), now.Add(-48*time.Hour)))
+		require.NoError(t, os.Chtimes(newPath, now, now))
+
+		require.NoError(t, PruneOldSnapshotFiles(dir, &WALConfig{
+			SnapshotRetentionMaxAge:   24 * time.Hour,
+			SnapshotRetentionMaxCount: 10,
+		}))
+
+		_, oldErr := os.Stat(oldPath)
+		require.True(t, os.IsNotExist(oldErr))
+		_, newErr := os.Stat(newPath)
+		require.NoError(t, newErr)
+	})
+
+	t.Run("non-positive max count keeps all remaining snapshots", func(t *testing.T) {
+		dir := t.TempDir()
+		for i := 0; i < 3; i++ {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("snapshot-keep-%d.json", i)), []byte(`{}`), 0644))
+		}
+		require.NoError(t, PruneOldSnapshotFiles(dir, &WALConfig{
+			SnapshotRetentionMaxCount: 0,
+		}))
+
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+	})
+}
+
 // TestWALTruncateAfterSnapshot tests WAL truncation functionality.
 func TestWALTruncateAfterSnapshot(t *testing.T) {
 	config.EnableWAL()
