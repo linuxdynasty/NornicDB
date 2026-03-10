@@ -54,6 +54,14 @@ type walNamespaceListerEngine struct {
 	namespaces []string
 }
 
+type walEmbeddingDispatchEngine struct {
+	Engine
+	updateNodeCalls      int
+	updateEmbeddingCalls int
+	updateNodeErr        error
+	updateEmbeddingErr   error
+}
+
 type walCaptureLogger struct {
 	entries []map[string]any
 }
@@ -158,6 +166,25 @@ func (e *walStreamingCountEngine) StreamNodeChunks(ctx context.Context, chunkSiz
 
 func (e *walNamespaceListerEngine) ListNamespaces() []string {
 	return append([]string(nil), e.namespaces...)
+}
+
+func (e *walEmbeddingDispatchEngine) UpdateNode(node *Node) error {
+	e.updateNodeCalls++
+	if e.updateNodeErr != nil {
+		return e.updateNodeErr
+	}
+	return e.Engine.UpdateNode(node)
+}
+
+func (e *walEmbeddingDispatchEngine) UpdateNodeEmbedding(node *Node) error {
+	e.updateEmbeddingCalls++
+	if e.updateEmbeddingErr != nil {
+		return e.updateEmbeddingErr
+	}
+	if updater, ok := e.Engine.(interface{ UpdateNodeEmbedding(*Node) error }); ok {
+		return updater.UpdateNodeEmbedding(node)
+	}
+	return nil
 }
 
 func (l *walCaptureLogger) Log(level, msg string, fields map[string]any) {
@@ -1174,6 +1201,59 @@ func TestRecoverFromWAL(t *testing.T) {
 		count, _ := recovered.NodeCount()
 		assert.Equal(t, int64(0), count) // Empty engine
 	})
+
+	t.Run("recovery_with_failed_replay_entries_still_returns_engine", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+
+		// This update will fail during replay (node doesn't exist), which exercises
+		// RecoverFromWAL's failed-entry logging path while still returning an engine.
+		require.NoError(t, wal.AppendWithDatabase(OpUpdateNode, WALNodeData{
+			Node: &Node{ID: "missing", Labels: []string{"Missing"}},
+		}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OpCreateNode, WALNodeData{
+			Node: &Node{ID: "ok-node", Labels: []string{"Test"}},
+		}, "test"))
+		require.NoError(t, wal.Close())
+
+		recovered, err := RecoverFromWAL(walDir, "")
+		require.NoError(t, err)
+		recoveredNS := NewNamespacedEngine(recovered, "test")
+
+		node, err := recoveredNS.GetNode("ok-node")
+		require.NoError(t, err)
+		require.NotNil(t, node)
+	})
+}
+
+func TestSaveSnapshot_ErrorPaths(t *testing.T) {
+	t.Run("returns encode error for non-serializable data and cleans temp file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "snapshots", "snapshot.json")
+		snapshot := &Snapshot{
+			Sequence:  1,
+			Timestamp: time.Now(),
+			Nodes: []*Node{
+				{
+					ID:     "n1",
+					Labels: []string{"Test"},
+					Properties: map[string]interface{}{
+						"bad": make(chan int), // json cannot encode channel
+					},
+				},
+			},
+			Version: "1.0",
+		}
+
+		err := SaveSnapshot(snapshot, path)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to encode snapshot")
+		_, statErr := os.Stat(path + ".tmp")
+		require.True(t, os.IsNotExist(statErr))
+	})
 }
 
 func TestWALEngine(t *testing.T) {
@@ -1812,6 +1892,62 @@ func TestWAL_TruncateAfterSnapshot(t *testing.T) {
 		err = wal.Append(OpCreateNode, WALNodeData{Node: newNode})
 		require.NoError(t, err)
 	})
+
+	t.Run("truncate_on_closed_wal_returns_error", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+
+		err = wal.TruncateAfterSnapshot(1)
+		require.ErrorIs(t, err, ErrWALClosed)
+	})
+
+	t.Run("truncate_salvages_entries_when_wal_tail_is_corrupted", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		engine := NewMemoryEngine()
+		n1 := &Node{ID: NodeID(prefixTestID("n1")), Labels: []string{"BeforeSnapshot"}}
+		_, err = engine.CreateNode(n1)
+		require.NoError(t, err)
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{Node: n1}))
+
+		snapshot, err := wal.CreateSnapshot(engine)
+		require.NoError(t, err)
+		require.NoError(t, SaveSnapshot(snapshot, snapshotPath))
+
+		n2 := &Node{ID: NodeID(prefixTestID("n2")), Labels: []string{"AfterSnapshot"}}
+		_, err = engine.CreateNode(n2)
+		require.NoError(t, err)
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{Node: n2}))
+		require.NoError(t, wal.Sync())
+
+		// Corrupt tail so ReadWALEntriesFromDir fails and salvage branch is exercised.
+		walPath := filepath.Join(walDir, "wal.log")
+		f, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0644)
+		require.NoError(t, err)
+		_, err = f.Write([]byte{0x00, 0x01, 0x02, 0x03})
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		err = wal.TruncateAfterSnapshot(snapshot.Sequence)
+		require.NoError(t, err)
+
+		entries, err := ReadWALEntries(walPath)
+		require.NoError(t, err)
+		for _, e := range entries {
+			require.Greater(t, e.Sequence, snapshot.Sequence)
+		}
+	})
 }
 
 func TestWALEngine_AutoCompaction(t *testing.T) {
@@ -2436,6 +2572,77 @@ func TestWALEngine_HelperDelegatesAndFallbacks(t *testing.T) {
 		require.NoError(t, err)
 		lastWrite := walEngine.LastWriteTime()
 		assert.False(t, lastWrite.IsZero())
+
+		noLister := newWALEngine(t, &exportableOnlyEngine{Engine: base})
+		assert.Nil(t, noLister.ListNamespaces())
+	})
+
+	t.Run("update embedding dispatch and bulk database guards", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+
+		dispatch := &walEmbeddingDispatchEngine{Engine: base}
+		walEngine := newWALEngine(t, dispatch)
+		_, err := walEngine.CreateNode(&Node{
+			ID:         "tenant_a:embed-node",
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"k": "v1"},
+		})
+		require.NoError(t, err)
+
+		err = walEngine.UpdateNodeEmbedding(&Node{
+			ID:         "tenant_a:embed-node",
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"k": "v2"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, dispatch.updateEmbeddingCalls)
+		assert.Equal(t, 0, dispatch.updateNodeCalls)
+
+		dispatch.updateEmbeddingErr = errors.New("embed dispatch failed")
+		err = walEngine.UpdateNodeEmbedding(&Node{ID: "tenant_a:embed-node", Labels: []string{"Doc"}})
+		require.ErrorContains(t, err, "embed dispatch failed")
+
+		fallbackEngine := newWALEngine(t, &exportableOnlyEngine{Engine: base})
+		err = fallbackEngine.UpdateNodeEmbedding(&Node{
+			ID:         "tenant_a:embed-node",
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"k": "v3"},
+		})
+		require.NoError(t, err)
+
+		node, err := base.GetNode("tenant_a:embed-node")
+		require.NoError(t, err)
+		require.Equal(t, "v3", node.Properties["k"])
+
+		err = walEngine.BulkCreateNodes([]*Node{
+			{ID: "tenant_a:n1"},
+			{ID: "tenant_b:n2"},
+		})
+		require.ErrorContains(t, err, "multiple databases")
+
+		err = walEngine.BulkCreateNodes([]*Node{
+			{ID: "tenant_a:n3"},
+			nil,
+		})
+		require.ErrorIs(t, err, ErrInvalidData)
+
+		err = walEngine.BulkCreateEdges([]*Edge{
+			{ID: "tenant_a:e1", StartNode: "tenant_a:n1", EndNode: "tenant_a:n2", Type: "REL"},
+			{ID: "tenant_b:e2", StartNode: "tenant_b:n1", EndNode: "tenant_b:n2", Type: "REL"},
+		})
+		require.ErrorContains(t, err, "multiple databases")
+
+		err = walEngine.BulkCreateEdges([]*Edge{
+			{ID: "tenant_a:e3", StartNode: "tenant_b:n1", EndNode: "tenant_a:n2", Type: "REL"},
+		})
+		require.ErrorContains(t, err, "inconsistent database prefixes")
+
+		err = walEngine.BulkCreateEdges([]*Edge{
+			{ID: "tenant_a:e4", StartNode: "tenant_a:n1", EndNode: "tenant_a:n2", Type: "REL"},
+			nil,
+		})
+		require.ErrorIs(t, err, ErrInvalidData)
 	})
 
 	t.Run("delegate getters and bulk delete edges", func(t *testing.T) {

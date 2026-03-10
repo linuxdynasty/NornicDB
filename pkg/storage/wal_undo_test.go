@@ -501,6 +501,66 @@ func TestRecoverMixedTransactions(t *testing.T) {
 	}
 }
 
+func TestRecoverWithTransactions_ErrorAccountingPaths(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	dir := t.TempDir()
+	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
+	wal, err := NewWAL(dir, cfg)
+	require.NoError(t, err)
+
+	// Committed transaction with an operation that fails on replay (missing endpoint nodes).
+	require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-failed-commit"}, "test"))
+	require.NoError(t, wal.AppendWithDatabase(OpCreateEdge, WALEdgeData{
+		Edge: &Edge{
+			ID:        "failed-commit-edge",
+			StartNode: "missing-left",
+			EndNode:   "missing-right",
+			Type:      "REL",
+		},
+		TxID: "tx-failed-commit",
+	}, "test"))
+	require.NoError(t, wal.AppendWithDatabase(OpTxCommit, WALTxData{TxID: "tx-failed-commit"}, "test"))
+
+	// Incomplete transaction with an operation that cannot be undone cleanly.
+	require.NoError(t, wal.AppendWithDatabase(OpTxBegin, WALTxData{TxID: "tx-incomplete-undo-err"}, "test"))
+	require.NoError(t, wal.AppendWithDatabase(OpCreateEdge, WALEdgeData{
+		Edge: &Edge{
+			ID:        "missing-edge",
+			StartNode: "missing-a",
+			EndNode:   "missing-b",
+			Type:      "REL",
+		},
+		TxID: "tx-incomplete-undo-err",
+	}, "test"))
+	// No commit/abort -> incomplete tx path.
+
+	// Entry references unknown tx id (no TxBegin) -> treated as non-transactional.
+	require.NoError(t, wal.AppendWithDatabase(OpUpdateNode, WALNodeData{
+		Node: &Node{ID: "missing-orphan", Labels: []string{"Test"}},
+		TxID: "tx-orphan",
+	}, "test"))
+
+	// Explicit non-transactional failure path.
+	require.NoError(t, wal.AppendWithDatabase(OpDeleteNode, WALDeleteData{ID: "missing-delete"}, "test"))
+
+	require.NoError(t, wal.Close())
+
+	baseEngine, result, err := RecoverWithTransactions(dir, "")
+	require.NoError(t, err)
+	require.NotNil(t, baseEngine)
+
+	require.Equal(t, 1, result.CommittedTransactions)
+	require.Equal(t, 1, result.RolledBackTransactions)
+	require.Equal(t, 2, result.NonTxApplied)
+
+	require.Contains(t, result.FailedTransactions, "tx-failed-commit")
+	require.NotEmpty(t, result.UndoErrors)
+	require.NotEmpty(t, result.NonTxErrors)
+	require.True(t, result.HasErrors())
+}
+
 // TestRecoveryResultSummary verifies summary formatting.
 func TestRecoveryResultSummary(t *testing.T) {
 	result := &TransactionRecoveryResult{
