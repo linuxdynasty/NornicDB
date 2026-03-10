@@ -17,7 +17,7 @@ run_pkg_with_retry() {
 	local attempts=3
 
 	for attempt in $(seq 1 "$attempts"); do
-		if go test -coverprofile="$prof" "$pkg"; then
+		if go test -p 1 -parallel 4 -coverprofile="$prof" "$pkg"; then
 			return 0
 		fi
 		if [ "$attempt" -lt "$attempts" ]; then
