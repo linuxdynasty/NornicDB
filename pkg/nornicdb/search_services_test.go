@@ -227,6 +227,78 @@ func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
 	require.True(t, svc.IsClusteringEnabled())
 }
 
+func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Default DB with one embedding and completed build.
+	defaultStorage := db.storage
+	_, err = defaultStorage.CreateNode(&storage.Node{
+		ID:              storage.NodeID("alpha"),
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		Properties:      map[string]any{"content": "alpha"},
+	})
+	require.NoError(t, err)
+
+	buildCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defaultSvc, err := db.EnsureSearchIndexesBuilt(buildCtx, db.defaultDatabaseName(), defaultStorage)
+	require.NoError(t, err)
+	require.NotNil(t, defaultSvc)
+	require.Equal(t, 1, defaultSvc.EmbeddingCount())
+
+	// db2 service exists but intentionally remains unbuilt (not ready).
+	db2Svc, err := db.GetOrCreateSearchService("db2", nil)
+	require.NoError(t, err)
+	require.NotNil(t, db2Svc)
+	require.False(t, db2Svc.GetBuildProgress().Ready)
+
+	db.searchServicesMu.RLock()
+	defaultEntry := db.searchServices[db.defaultDatabaseName()]
+	db2Entry := db.searchServices["db2"]
+	db.searchServicesMu.RUnlock()
+	require.NotNil(t, defaultEntry)
+	require.NotNil(t, db2Entry)
+
+	// Seed non-zero state and ensure the function updates only the built/ready service.
+	defaultEntry.clusterMu.Lock()
+	defaultEntry.lastClusteredEmbedCount = 0
+	defaultEntry.clusterMu.Unlock()
+	db2Entry.clusterMu.Lock()
+	db2Entry.lastClusteredEmbedCount = 123
+	db2Entry.clusterMu.Unlock()
+
+	db.runClusteringOnceAllDatabases(context.Background())
+
+	defaultEntry.clusterMu.Lock()
+	defaultAfter := defaultEntry.lastClusteredEmbedCount
+	defaultEntry.clusterMu.Unlock()
+	db2Entry.clusterMu.Lock()
+	db2After := db2Entry.lastClusteredEmbedCount
+	db2Entry.clusterMu.Unlock()
+
+	require.Equal(t, 1, defaultAfter, "ready service should update clustered count")
+	require.Equal(t, 123, db2After, "not-ready service should be skipped")
+
+	// Canceled context should return immediately without mutating counters.
+	defaultEntry.clusterMu.Lock()
+	defaultEntry.lastClusteredEmbedCount = 77
+	defaultEntry.clusterMu.Unlock()
+	canceledCtx, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	db.runClusteringOnceAllDatabases(canceledCtx)
+	defaultEntry.clusterMu.Lock()
+	defer defaultEntry.clusterMu.Unlock()
+	require.Equal(t, 77, defaultEntry.lastClusteredEmbedCount)
+}
+
 func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Memory.EmbeddingDimensions = 3

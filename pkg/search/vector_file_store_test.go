@@ -302,3 +302,73 @@ func TestVectorFileStore_NewVectorFileStore_InvalidExistingHeader(t *testing.T) 
 		require.Contains(t, err.Error(), "dimensions")
 	})
 }
+
+func TestVectorFileStore_CompactIfNeeded_DecisionBranches(t *testing.T) {
+	t.Run("live_zero_and_no_obsolete_noop", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "vectors")
+		vfs, err := NewVectorFileStore(base, 2)
+		require.NoError(t, err)
+		defer func() { _ = vfs.Close() }()
+
+		compacted, err := vfs.CompactIfNeeded()
+		require.NoError(t, err)
+		require.False(t, compacted)
+	})
+
+	t.Run("live_zero_with_obsolete_rewrites_to_header_only", func(t *testing.T) {
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", "1")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", "0")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", "0")
+
+		base := filepath.Join(t.TempDir(), "vectors")
+		vfs, err := NewVectorFileStore(base, 2)
+		require.NoError(t, err)
+		defer func() { _ = vfs.Close() }()
+
+		require.NoError(t, vfs.Add("id-1", []float32{1, 0}))
+		require.True(t, vfs.Remove("id-1")) // obsoleteCount > 0, live == 0
+		compacted, err := vfs.CompactIfNeeded()
+		require.NoError(t, err)
+		require.True(t, compacted)
+
+		info, err := os.Stat(base + ".vec")
+		require.NoError(t, err)
+		require.Equal(t, int64(vecHeaderSize), info.Size())
+		require.Equal(t, 0, vfs.Count())
+	})
+
+	t.Run("obsolete_below_threshold_skips", func(t *testing.T) {
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", "50")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", "0")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", "0")
+
+		base := filepath.Join(t.TempDir(), "vectors")
+		vfs, err := NewVectorFileStore(base, 2)
+		require.NoError(t, err)
+		defer func() { _ = vfs.Close() }()
+
+		require.NoError(t, vfs.Add("id-1", []float32{1, 0}))
+		require.NoError(t, vfs.Add("id-1", []float32{0, 1})) // obsoleteCount = 1
+		compacted, err := vfs.CompactIfNeeded()
+		require.NoError(t, err)
+		require.False(t, compacted)
+		require.Equal(t, 1, vfs.Count())
+	})
+
+	t.Run("dead_ratio_below_threshold_skips", func(t *testing.T) {
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", "1")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", "0")
+		t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", "0.95")
+
+		base := filepath.Join(t.TempDir(), "vectors")
+		vfs, err := NewVectorFileStore(base, 2)
+		require.NoError(t, err)
+		defer func() { _ = vfs.Close() }()
+
+		require.NoError(t, vfs.Add("id-1", []float32{1, 0}))
+		require.NoError(t, vfs.Add("id-1", []float32{0, 1})) // one obsolete, one live => ratio 0.5
+		compacted, err := vfs.CompactIfNeeded()
+		require.NoError(t, err)
+		require.False(t, compacted)
+	})
+}

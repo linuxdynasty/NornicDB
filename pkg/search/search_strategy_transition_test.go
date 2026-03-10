@@ -110,17 +110,21 @@ func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *test
 	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
 
 	opts := DefaultSearchOptions()
-	opts.Limit = 20
-	resp, err := svc.vectorSearchOnly(context.Background(), []float32{0, 1, 0, 0}, opts)
-	require.NoError(t, err)
-	found := false
-	for _, r := range resp.Results {
-		if string(r.NodeID) == "late-node" {
-			found = true
-			break
+	// Use a large limit so HNSW candidate truncation does not make this assertion flaky
+	// when many vectors are near the query direction.
+	opts.Limit = 500
+	require.Eventually(t, func() bool {
+		resp, err := svc.vectorSearchOnly(context.Background(), []float32{0, 1, 0, 0}, opts)
+		if err != nil {
+			return false
 		}
-	}
-	require.True(t, found, "late-node must be searchable after transition replay")
+		for _, r := range resp.Results {
+			if string(r.NodeID) == "late-node" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "late-node must be searchable after transition replay")
 }
 
 func TestRuntimeStrategyTransition_HNSWToBruteClearsIndexMemory(t *testing.T) {

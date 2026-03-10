@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1515,6 +1516,114 @@ type pendingAdderEngine struct {
 	added []storage.NodeID
 }
 
+type queueBranchEngine struct {
+	storage.Engine
+	findNode           *storage.Node
+	findReturned       bool
+	getNodeErr         error
+	secondGetNodeErr   error
+	getNodeCalls       int
+	updateEmbeddingErr error
+	updateNodeErr      error
+	refreshCount       int
+	marked             []storage.NodeID
+	added              []storage.NodeID
+}
+
+func (e *queueBranchEngine) FindNodeNeedingEmbedding() *storage.Node {
+	if e.findNode == nil || e.findReturned {
+		return nil
+	}
+	e.findReturned = true
+	return storage.CopyNode(e.findNode)
+}
+
+func (e *queueBranchEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
+	e.getNodeCalls++
+	if e.getNodeCalls == 1 && e.getNodeErr != nil {
+		return nil, e.getNodeErr
+	}
+	if e.getNodeCalls > 1 && e.secondGetNodeErr != nil {
+		return nil, e.secondGetNodeErr
+	}
+	return e.Engine.GetNode(id)
+}
+
+func (e *queueBranchEngine) MarkNodeEmbedded(id storage.NodeID) {
+	e.marked = append(e.marked, id)
+}
+
+func (e *queueBranchEngine) RefreshPendingEmbeddingsIndex() int {
+	return e.refreshCount
+}
+
+func (e *queueBranchEngine) AddToPendingEmbeddings(id storage.NodeID) {
+	e.added = append(e.added, id)
+}
+
+func (e *queueBranchEngine) UpdateNodeEmbedding(*storage.Node) error {
+	return e.updateEmbeddingErr
+}
+
+func (e *queueBranchEngine) UpdateNode(node *storage.Node) error {
+	if e.updateNodeErr != nil {
+		return e.updateNodeErr
+	}
+	return e.Engine.UpdateNode(node)
+}
+
+type emptyBatchEmbedder struct {
+	dims int
+}
+
+func (e *emptyBatchEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return make([]float32, e.dims), nil
+}
+
+func (e *emptyBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	// Return one empty embedding (dim=0) to hit validation branch.
+	return [][]float32{{}}, nil
+}
+
+func (e *emptyBatchEmbedder) Model() string { return "empty" }
+
+func (e *emptyBatchEmbedder) Dimensions() int { return e.dims }
+
+type flakyBatchEmbedder struct {
+	mu         sync.Mutex
+	dims       int
+	failUntil  int
+	callCount  int
+	returnSize int
+}
+
+func (f *flakyBatchEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return make([]float32, f.dims), nil
+}
+
+func (f *flakyBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	f.mu.Lock()
+	f.callCount++
+	call := f.callCount
+	f.mu.Unlock()
+	if call <= f.failUntil {
+		return nil, errors.New("temporary embed failure")
+	}
+	size := len(texts)
+	if f.returnSize >= 0 {
+		size = f.returnSize
+	}
+	out := make([][]float32, size)
+	for i := range out {
+		out[i] = make([]float32, f.dims)
+	}
+	return out, nil
+}
+
+func (f *flakyBatchEmbedder) Model() string { return "flaky" }
+
+func (f *flakyBatchEmbedder) Dimensions() int { return f.dims }
+
 func (p *pendingAdderEngine) AddToPendingEmbeddings(id storage.NodeID) {
 	p.added = append(p.added, id)
 }
@@ -1550,5 +1659,159 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.Nil(t, averageEmbeddings(nil))
 		require.Equal(t, []float32{1, 2}, averageEmbeddings([][]float32{{1, 2}}))
 		require.Equal(t, []float32{2, 3}, averageEmbeddings([][]float32{{1, 2}, {3, 4}}))
+	})
+
+	t.Run("embedBatchWithRetry success after retry", func(t *testing.T) {
+		emb := &flakyBatchEmbedder{dims: 3, failUntil: 1, returnSize: -1}
+		ew := &EmbedWorker{
+			embedder: emb,
+			config:   &EmbedWorkerConfig{MaxRetries: 2},
+			ctx:      context.Background(),
+		}
+		out, err := ew.embedBatchWithRetry([]string{"a", "b"})
+		require.NoError(t, err)
+		require.Len(t, out, 2)
+		emb.mu.Lock()
+		defer emb.mu.Unlock()
+		require.Equal(t, 2, emb.callCount)
+	})
+
+	t.Run("embedBatchWithRetry returns context error", func(t *testing.T) {
+		emb := &flakyBatchEmbedder{dims: 3, failUntil: 10, returnSize: -1}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		ew := &EmbedWorker{
+			embedder: emb,
+			config:   &EmbedWorkerConfig{MaxRetries: 3},
+			ctx:      ctx,
+		}
+		out, err := ew.embedBatchWithRetry([]string{"a"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, out)
+	})
+
+	t.Run("embedChunksInBatches catches mismatch", func(t *testing.T) {
+		emb := &flakyBatchEmbedder{
+			dims:       3,
+			failUntil:  0,
+			returnSize: 1, // force mismatch when batch has >1 chunk
+		}
+		ew := &EmbedWorker{
+			embedder: emb,
+			config:   &EmbedWorkerConfig{EmbedBatchSize: 2, MaxRetries: 1},
+			ctx:      context.Background(),
+		}
+		out, err := ew.embedChunksInBatches([]string{"c1", "c2", "c3"}, storage.NodeID("n1"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "embedding count mismatch")
+		require.Nil(t, out)
+	})
+
+	t.Run("processNextBatch stale pending node is cleaned", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		qe := &queueBranchEngine{
+			Engine:     engine,
+			findNode:   &storage.Node{ID: storage.NodeID("missing")},
+			getNodeErr: storage.ErrNotFound,
+		}
+		ew := &EmbedWorker{
+			embedder: newMockEmbedder(),
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+		didWork := ew.processNextBatch()
+		require.False(t, didWork)
+		require.Equal(t, []storage.NodeID{"missing"}, qe.marked)
+	})
+
+	t.Run("processNextBatch requeues on embed failure", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		node := &storage.Node{
+			ID:         storage.NodeID("n1"),
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"content": "hello"},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		qe := &queueBranchEngine{
+			Engine:   engine,
+			findNode: &storage.Node{ID: storage.NodeID("n1")},
+		}
+		ew := &EmbedWorker{
+			embedder: &flakyBatchEmbedder{dims: 3, failUntil: 5, returnSize: -1},
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.True(t, didWork)
+		require.Equal(t, int64(1), ew.failed.Load())
+		require.Equal(t, []storage.NodeID{"n1"}, qe.added)
+	})
+
+	t.Run("processNextBatch empty embedding is treated as failure", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		node := &storage.Node{
+			ID:         storage.NodeID("n2"),
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"content": "hello"},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		qe := &queueBranchEngine{
+			Engine:   engine,
+			findNode: &storage.Node{ID: storage.NodeID("n2")},
+		}
+		ew := &EmbedWorker{
+			embedder: &emptyBatchEmbedder{dims: 3},
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.True(t, didWork)
+		require.Equal(t, int64(1), ew.failed.Load())
+		require.Equal(t, []storage.NodeID{"n2"}, qe.added)
+	})
+
+	t.Run("processNextBatch skips when update embedding reports not found", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		node := &storage.Node{
+			ID:         storage.NodeID("n3"),
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"content": "hello"},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		qe := &queueBranchEngine{
+			Engine:             engine,
+			findNode:           &storage.Node{ID: storage.NodeID("n3")},
+			updateEmbeddingErr: storage.ErrNotFound,
+		}
+		ew := &EmbedWorker{
+			embedder: newMockEmbedder(),
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.False(t, didWork)
+		require.Equal(t, []storage.NodeID{"n3", "n3"}, qe.marked)
 	})
 }
