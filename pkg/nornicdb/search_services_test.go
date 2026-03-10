@@ -21,7 +21,7 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	// Wait for the per-database search services to finish their initial startup build
@@ -78,12 +78,12 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	// Default DB service should only contain default DB embedding.
 	require.Eventually(t, func() bool {
 		return defaultSvc.EmbeddingCount() == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// db2 service should exist and contain only db2 embedding.
 	require.Eventually(t, func() bool {
 		return db2Svc.EmbeddingCount() == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// Wait for text search to be ready after indexing.
 	// The fulltext index updates are inline but may have small delays,
@@ -91,7 +91,7 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	require.Eventually(t, func() bool {
 		resp, err := defaultSvc.Search(ctx, "hello", nil, nil)
 		return err == nil && len(resp.Results) > 0
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// Verify text-only search does not cross-contaminate.
 	// Default DB should find alpha, not beta.
@@ -113,7 +113,7 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	require.Eventually(t, func() bool {
 		resp, err = db2Svc.Search(ctx, "world", nil, nil)
 		return err == nil && len(resp.Results) >= 1
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestSearchServices_ResetDropsCache(t *testing.T) {

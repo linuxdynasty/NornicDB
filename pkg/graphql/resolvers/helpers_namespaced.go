@@ -246,23 +246,11 @@ func (r *Resolver) getEdgeViaCypher(ctx context.Context, id string) (*nornicdb.G
 	// Fallback to id if _nodeId not available
 	row := result.Rows[0]
 	if len(row) >= 3 {
-		if sourceID, ok := row[1].(string); !ok || sourceID == "" {
-			if nodeMap, ok := row[1].(map[string]interface{}); ok {
-				if id, ok := nodeMap["id"].(string); ok {
-					row[1] = id
-				} else if id, ok := nodeMap["_nodeId"].(string); ok {
-					row[1] = id
-				}
-			}
+		if sourceID := coerceResultNodeID(row[1]); sourceID != "" {
+			row[1] = sourceID
 		}
-		if targetID, ok := row[2].(string); !ok || targetID == "" {
-			if nodeMap, ok := row[2].(map[string]interface{}); ok {
-				if id, ok := nodeMap["id"].(string); ok {
-					row[2] = id
-				} else if id, ok := nodeMap["_nodeId"].(string); ok {
-					row[2] = id
-				}
-			}
+		if targetID := coerceResultNodeID(row[2]); targetID != "" {
+			row[2] = targetID
 		}
 	}
 
@@ -291,29 +279,11 @@ func (r *Resolver) getEdgesForNodeViaCypher(ctx context.Context, nodeID string) 
 	// Process outgoing edges
 	for _, row := range outgoingResult.Rows {
 		if len(row) >= 3 {
-			// id() function returns string directly, so row[1] and row[2] should already be strings
-			// But handle case where they might be node objects
-			if sourceID, ok := row[1].(string); !ok || sourceID == "" {
-				if nodeMap, ok := row[1].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[1] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[1] = id
-					}
-				} else if storageNode, ok := row[1].(*storage.Node); ok {
-					row[1] = string(storageNode.ID)
-				}
+			if sourceID := coerceResultNodeID(row[1]); sourceID != "" {
+				row[1] = sourceID
 			}
-			if targetID, ok := row[2].(string); !ok || targetID == "" {
-				if nodeMap, ok := row[2].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[2] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[2] = id
-					}
-				} else if storageNode, ok := row[2].(*storage.Node); ok {
-					row[2] = string(storageNode.ID)
-				}
+			if targetID := coerceResultNodeID(row[2]); targetID != "" {
+				row[2] = targetID
 			}
 			if edge, err := extractEdgeFromResult(row); err == nil {
 				edges = append(edges, edge)
@@ -324,29 +294,11 @@ func (r *Resolver) getEdgesForNodeViaCypher(ctx context.Context, nodeID string) 
 	// Process incoming edges
 	for _, row := range incomingResult.Rows {
 		if len(row) >= 3 {
-			// id() function returns string directly, so row[1] and row[2] should already be strings
-			// But handle case where they might be node objects
-			if sourceID, ok := row[1].(string); !ok || sourceID == "" {
-				if nodeMap, ok := row[1].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[1] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[1] = id
-					}
-				} else if storageNode, ok := row[1].(*storage.Node); ok {
-					row[1] = string(storageNode.ID)
-				}
+			if sourceID := coerceResultNodeID(row[1]); sourceID != "" {
+				row[1] = sourceID
 			}
-			if targetID, ok := row[2].(string); !ok || targetID == "" {
-				if nodeMap, ok := row[2].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[2] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[2] = id
-					}
-				} else if storageNode, ok := row[2].(*storage.Node); ok {
-					row[2] = string(storageNode.ID)
-				}
+			if targetID := coerceResultNodeID(row[2]); targetID != "" {
+				row[2] = targetID
 			}
 			if edge, err := extractEdgeFromResult(row); err == nil {
 				edges = append(edges, edge)
@@ -378,29 +330,11 @@ func (r *Resolver) listEdgesViaCypher(ctx context.Context, relType string, limit
 	edges := make([]*nornicdb.GraphEdge, 0, len(result.Rows))
 	for _, row := range result.Rows {
 		if len(row) >= 3 {
-			// id() function returns string directly, so row[1] and row[2] should already be strings
-			// But handle case where they might be node objects
-			if sourceID, ok := row[1].(string); !ok || sourceID == "" {
-				if nodeMap, ok := row[1].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[1] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[1] = id
-					}
-				} else if storageNode, ok := row[1].(*storage.Node); ok {
-					row[1] = string(storageNode.ID)
-				}
+			if sourceID := coerceResultNodeID(row[1]); sourceID != "" {
+				row[1] = sourceID
 			}
-			if targetID, ok := row[2].(string); !ok || targetID == "" {
-				if nodeMap, ok := row[2].(map[string]interface{}); ok {
-					if id, ok := nodeMap["id"].(string); ok {
-						row[2] = id
-					} else if id, ok := nodeMap["_nodeId"].(string); ok {
-						row[2] = id
-					}
-				} else if storageNode, ok := row[2].(*storage.Node); ok {
-					row[2] = string(storageNode.ID)
-				}
+			if targetID := coerceResultNodeID(row[2]); targetID != "" {
+				row[2] = targetID
 			}
 			if edge, err := extractEdgeFromResult(row); err == nil {
 				edges = append(edges, edge)
@@ -509,6 +443,27 @@ func buildLabelsString(labels []string) string {
 		return ""
 	}
 	return ":" + strings.Join(labels, ":")
+}
+
+// coerceResultNodeID normalizes Cypher result values that represent a node ID.
+// Queries that use id(n) generally return strings, but this helper preserves
+// compatibility with map/*storage.Node shaped values.
+func coerceResultNodeID(v interface{}) string {
+	if id, ok := v.(string); ok {
+		return id
+	}
+	if nodeMap, ok := v.(map[string]interface{}); ok {
+		if id, ok := nodeMap["id"].(string); ok && id != "" {
+			return id
+		}
+		if id, ok := nodeMap["_nodeId"].(string); ok && id != "" {
+			return id
+		}
+	}
+	if storageNode, ok := v.(*storage.Node); ok {
+		return string(storageNode.ID)
+	}
+	return ""
 }
 
 func buildPropertiesString(properties map[string]interface{}) (string, map[string]interface{}) {

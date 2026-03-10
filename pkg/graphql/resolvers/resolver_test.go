@@ -1460,6 +1460,129 @@ func TestQuerySearchAndStatsAdditionalCoverage(t *testing.T) {
 	})
 }
 
+func TestResolverNamespacedErrorAndFallbackCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	qr := &queryResolver{resolver}
+
+	source := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Alice", "role": "Engineer"})
+	target := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{"name": "Bob", "role": "Engineer"})
+	createEdgeViaCypher(t, resolver, source.ID, target.ID, "KNOWS", map[string]interface{}{"since": "2024"})
+
+	t.Run("label helper returns labels via CALL path", func(t *testing.T) {
+		labels, err := resolver.getLabelsViaCypher(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, labels)
+		assert.Contains(t, labels, "Person")
+	})
+
+	t.Run("label helper fallback returns final access error", func(t *testing.T) {
+		deniedCtx := auth.WithRequestDatabaseAccessMode(ctx, auth.DenyAllDatabaseAccessMode)
+		_, err := resolver.getLabelsViaCypher(deniedCtx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not allowed")
+	})
+
+	t.Run("edge helpers surface access-control errors", func(t *testing.T) {
+		deniedCtx := auth.WithRequestDatabaseAccessMode(ctx, auth.DenyAllDatabaseAccessMode)
+
+		_, err := resolver.getEdgeViaCypher(deniedCtx, "edge-id")
+		require.Error(t, err)
+
+		_, err = resolver.getEdgesForNodeViaCypher(deniedCtx, source.ID)
+		require.Error(t, err)
+
+		_, err = resolver.listEdgesViaCypher(deniedCtx, "", 10, 0)
+		require.Error(t, err)
+	})
+
+	t.Run("query search by property covers labels+limit and parse branches", func(t *testing.T) {
+		metaNode := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{
+			"name": "MetaCarrier",
+			"meta": map[string]interface{}{"value": "Alice"},
+		})
+		require.NotNil(t, metaNode)
+
+		limit := 1
+		nodes, err := qr.querySearchByProperty(ctx, "meta", models.JSON{"value": "Alice"}, []string{"Person"}, &limit)
+		require.NoError(t, err)
+		assert.NotNil(t, nodes)
+		if len(nodes) > 0 {
+			assert.Equal(t, "MetaCarrier", nodes[0].Properties["name"])
+		}
+
+		none, err := qr.querySearchByProperty(ctx, "missing_key", models.JSON{"value": "x"}, nil, nil)
+		require.NoError(t, err)
+		assert.Empty(t, none)
+
+		deniedCtx := auth.WithRequestDatabaseAccessMode(ctx, auth.DenyAllDatabaseAccessMode)
+		_, err = qr.querySearchByProperty(deniedCtx, "meta", models.JSON{"value": "Alice"}, nil, nil)
+		require.Error(t, err)
+	})
+}
+
+func TestMutationAndRelationshipErrorCoverage(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+	mr := &mutationResolver{resolver}
+	rr := &relationshipResolver{resolver}
+
+	t.Run("mutation wrappers return surfaced errors", func(t *testing.T) {
+		_, err := mr.mutationCreateNode(ctx, models.CreateNodeInput{Labels: []string{"Person"}, Properties: nil})
+		require.NoError(t, err)
+
+		_, err = mr.mutationUpdateNode(ctx, models.UpdateNodeInput{
+			ID:         "missing-node",
+			Properties: models.JSON{"name": "x"},
+		})
+		require.Error(t, err)
+
+		ok, err := mr.mutationDeleteNode(ctx, "missing-node")
+		require.Error(t, err)
+		require.False(t, ok)
+
+		deniedCtx := auth.WithRequestDatabaseAccessMode(ctx, auth.DenyAllDatabaseAccessMode)
+		ok, err = mr.mutationDeleteRelationship(deniedCtx, "missing-edge")
+		require.Error(t, err)
+		require.False(t, ok)
+
+		ok, err = mr.mutationRebuildSearchIndex(ctx)
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		ok, err = mr.mutationClearAll(ctx, "wrong phrase")
+		require.Error(t, err)
+		require.False(t, ok)
+	})
+
+	t.Run("relationship resolvers return errors for missing endpoint nodes", func(t *testing.T) {
+		_, err := rr.relationshipStartNode(ctx, &models.Relationship{
+			StartNodeID: "missing-start",
+			EndNodeID:   "missing-end",
+		})
+		require.Error(t, err)
+
+		_, err = rr.relationshipEndNode(ctx, &models.Relationship{
+			StartNodeID: "missing-start",
+			EndNodeID:   "missing-end",
+		})
+		require.Error(t, err)
+	})
+}
+
+func TestCoerceResultNodeID(t *testing.T) {
+	assert.Equal(t, "node-1", coerceResultNodeID("node-1"))
+	assert.Equal(t, "node-2", coerceResultNodeID(map[string]interface{}{"id": "node-2"}))
+	assert.Equal(t, "node-3", coerceResultNodeID(map[string]interface{}{"_nodeId": "node-3"}))
+	assert.Equal(t, "node-4", coerceResultNodeID(&storage.Node{ID: "node-4"}))
+	assert.Equal(t, "", coerceResultNodeID(map[string]interface{}{"id": 123}))
+	assert.Equal(t, "", coerceResultNodeID(42))
+}
+
 func TestEventBrokerCloseAdditionalCoverage(t *testing.T) {
 	broker := NewEventBroker()
 	nodeCreated := broker.SubscribeNodeCreated(context.Background(), nil)
