@@ -270,6 +270,14 @@ func TestCooldownTableWithOptions(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, ct.GetLabelCooldown("relates_to"))
 }
 
+func TestCooldownTableWithDefaultCooldownOption(t *testing.T) {
+	ct := NewCooldownTableWithOptions(
+		WithDefaultCooldown(42 * time.Second),
+	)
+
+	assert.Equal(t, 42*time.Second, ct.GetLabelCooldown("unknown_label"))
+}
+
 func TestGlobalCooldownTable(t *testing.T) {
 	ResetGlobalCooldownTable()
 

@@ -1584,3 +1584,20 @@ func mustActionResultMessage(t *testing.T, result *ActionResult, err error) stri
 	require.NotNil(t, result)
 	return result.Message
 }
+
+func TestCoverageExtra_NoOpAsyncAndDefaultLogger(t *testing.T) {
+	noop := &NoOpHeimdallInvoker{}
+	noop.InvokeActionAsync("ignored", map[string]interface{}{"k": "v"})
+	noop.SendPromptAsync("ignored")
+
+	res, err := noop.InvokeAction("ignored", nil)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.False(t, res.Success)
+
+	logger := NewDefaultLogger("cov")
+	logger.Debug("debug", "k", "v")
+	logger.Info("info")
+	logger.Warn("warn")
+	logger.Error("error")
+}

@@ -3,6 +3,7 @@ package nornicdb
 import (
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -32,4 +33,42 @@ func TestInferenceServices_PerDatabaseIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, db2Infer2)
 	require.NotSame(t, db2Infer, db2Infer2)
+}
+
+func TestInferenceServices_AdditionalBranches(t *testing.T) {
+	t.Run("disabled autolinks returns nil inference service", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = false
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		svc, err := db.GetOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		require.Nil(t, svc)
+	})
+
+	t.Run("nil base storage returns explicit error when storage is not provided", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = true
+		db := &DB{
+			config:            cfg,
+			inferenceServices: make(map[string]*inference.Engine),
+		}
+
+		svc, err := db.getOrCreateInferenceService("tenant_a", nil)
+		require.Error(t, err)
+		require.Nil(t, svc)
+		require.Contains(t, err.Error(), "base storage is nil")
+	})
+
+	t.Run("closed db returns ErrClosed via public wrapper", func(t *testing.T) {
+		db, err := Open("", DefaultConfig())
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		svc, err := db.GetOrCreateInferenceService("tenant_a", nil)
+		require.ErrorIs(t, err, ErrClosed)
+		require.Nil(t, svc)
+	})
 }

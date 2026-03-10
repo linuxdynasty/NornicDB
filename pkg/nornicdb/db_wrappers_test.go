@@ -218,4 +218,45 @@ func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 	_, err = db.maybeEnableReplication(base)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "replication: create storage adapter")
+
+	// Explicit cluster data dir override path is honored when set.
+	overridePath := t.TempDir() + "/not-a-dir-override"
+	require.NoError(t, os.WriteFile(overridePath, []byte("x"), 0644))
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_DATA_DIR", overridePath))
+	_, err = db.maybeEnableReplication(base)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "replication: create storage adapter")
+}
+
+func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
+	t.Run("nil embedder is a no-op", func(t *testing.T) {
+		db := &DB{}
+		db.SetEmbedder(nil)
+		require.Nil(t, db.embedQueue)
+	})
+
+	t.Run("nil base storage panics", func(t *testing.T) {
+		db := &DB{}
+		require.PanicsWithValue(t, "nornicdb: baseStorage is nil in SetEmbedder", func() {
+			db.SetEmbedder(newMockEmbedder())
+		})
+	})
+
+	t.Run("creates embed queue when not present", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		cfg := DefaultConfig()
+		cfg.Memory.KmeansClusterInterval = 0 // avoid timer side effects
+		db := &DB{
+			config:            cfg,
+			baseStorage:       base,
+			storage:           storage.NewNamespacedEngine(base, "nornic"),
+			embedWorkerConfig: DefaultEmbedQueueConfig(),
+		}
+		db.embedWorkerConfig.DeferWorkerStart = true
+
+		db.SetEmbedder(newMockEmbedder())
+		require.NotNil(t, db.embedQueue)
+		db.embedQueue.Close()
+	})
 }

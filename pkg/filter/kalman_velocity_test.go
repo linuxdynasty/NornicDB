@@ -359,6 +359,17 @@ func TestKalmanVelocity_VelocityCovariance(t *testing.T) {
 	}
 }
 
+func TestKalmanVelocity_Covariance(t *testing.T) {
+	k := NewKalmanVelocity(DefaultVelocityConfig())
+	_ = k.Process(5.0)
+	_ = k.Process(6.5)
+
+	posCov := k.Covariance()
+	if posCov <= 0 {
+		t.Errorf("Covariance() = %v, want > 0", posCov)
+	}
+}
+
 func TestKalmanVelocity_Position(t *testing.T) {
 	k := NewKalmanVelocity(DefaultVelocityConfig())
 	k.Process(42.0)

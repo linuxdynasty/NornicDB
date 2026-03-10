@@ -585,3 +585,28 @@ func TestClusterIntegration_FeatureFlagIntegration(t *testing.T) {
 		}
 	})
 }
+
+func TestClusterIntegration_ShouldReclusterAndGetClusterIndex(t *testing.T) {
+	manager := testGPUManager()
+	embConfig := testEmbConfig()
+	kmeansConfig := testKMeansConfig(4)
+	cfg := testClusterConfig()
+	cfg.Enabled = false
+	cfg.AutoRecluster = false
+
+	ci := NewClusterIntegration(manager, cfg, kmeansConfig, embConfig)
+	if ci.GetClusterIndex() == nil {
+		t.Fatal("GetClusterIndex() returned nil")
+	}
+	if ci.ShouldRecluster() {
+		t.Fatal("ShouldRecluster() = true while disabled, want false")
+	}
+
+	cfg.Enabled = true
+	ci.SetConfig(cfg)
+	// With no meaningful update pressure yet, reclustering should still be false,
+	// but this executes the enabled path that delegates to cluster index.
+	if ci.ShouldRecluster() {
+		t.Fatal("ShouldRecluster() = true unexpectedly")
+	}
+}

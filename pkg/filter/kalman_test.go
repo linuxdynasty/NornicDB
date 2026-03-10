@@ -610,6 +610,21 @@ func TestVarianceTracker_AdaptiveNoise(t *testing.T) {
 	}
 }
 
+func TestKalman_CovarianceAndGainGetters(t *testing.T) {
+	k := NewKalman(DefaultConfig())
+	_ = k.Process(10, 0)
+	_ = k.Process(11, 0)
+
+	cov := k.Covariance()
+	gain := k.Gain()
+	if cov <= 0 {
+		t.Errorf("Covariance() = %v, want > 0", cov)
+	}
+	if gain <= 0 || gain > 1 {
+		t.Errorf("Gain() = %v, want 0 < gain <= 1", gain)
+	}
+}
+
 // ===== Benchmark Tests =====
 
 func BenchmarkProcess(b *testing.B) {

@@ -218,6 +218,9 @@ func (ct *CooldownTable) getCooldownDuration(label string) time.Duration {
 	if duration, ok := ct.defaults[label]; ok {
 		return duration
 	}
+	if duration, ok := ct.defaults[""]; ok {
+		return duration
+	}
 	return DefaultCooldown
 }
 

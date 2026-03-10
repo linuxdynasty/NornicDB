@@ -126,3 +126,51 @@ func TestEngine_ExtensionGettersSettersAndCleanup(t *testing.T) {
 	assert.Equal(t, 1, evidenceRemoved)
 	assert.Equal(t, 1, provenanceRemoved)
 }
+
+func TestEngine_ValidateSuggestionsWithHeimdall_Branches(t *testing.T) {
+	t.Run("empty suggestions and nil QC short-circuit", func(t *testing.T) {
+		engine := New(nil)
+		got := engine.validateSuggestionsWithHeimdall(context.Background(), "src", []float32{1}, nil)
+		require.Nil(t, got)
+	})
+
+	t.Run("review error fail-open returns original suggestions", func(t *testing.T) {
+		engine := New(nil)
+		engine.SetHeimdallQC(NewHeimdallQC(func(ctx context.Context, prompt string) (string, error) {
+			return "", assert.AnError
+		}, nil))
+
+		in := []EdgeSuggestion{{SourceID: "src", TargetID: "dst", Type: "RELATES_TO", Confidence: 0.8}}
+		got := engine.validateSuggestionsWithHeimdall(context.Background(), "src", []float32{1}, in)
+		require.Equal(t, in, got)
+	})
+
+	t.Run("approved plus augmented suggestions with candidate-pool filtering", func(t *testing.T) {
+		cleanupQC := configpkg.WithAutoTLPLLMQCEnabled()
+		defer cleanupQC()
+		cleanupAug := configpkg.WithAutoTLPLLMAugmentEnabled()
+		defer cleanupAug()
+
+		engine := New(nil)
+		engine.SetSimilaritySearch(func(ctx context.Context, embedding []float32, k int) ([]SimilarityResult, error) {
+			require.Equal(t, 20, k)
+			return []SimilarityResult{
+				{ID: "src", Score: 0.99},    // filtered: source node
+				{ID: "t1", Score: 0.95},     // filtered: already suggested
+				{ID: "cand-1", Score: 0.90}, // candidate
+				{ID: "cand-2", Score: 0.88}, // candidate
+				{ID: "cand-3", Score: 0.86}, // candidate
+			}, nil
+		})
+		engine.SetHeimdallQC(NewHeimdallQC(func(ctx context.Context, prompt string) (string, error) {
+			return `{"approved":[0],"additional":[{"target_id":"aug-1","type":"INSPIRED_BY","conf":0.7,"reason":"extra"}]}`, nil
+		}, nil))
+
+		in := []EdgeSuggestion{{SourceID: "src", TargetID: "t1", Type: "RELATES_TO", Confidence: 0.9}}
+		got := engine.validateSuggestionsWithHeimdall(context.Background(), "src", []float32{1, 2, 3}, in)
+		require.Len(t, got, 2)
+		require.Equal(t, "t1", got[0].TargetID)
+		require.Equal(t, "aug-1", got[1].TargetID)
+		require.Equal(t, "src", got[1].SourceID, "augmented edges should be backfilled with source id")
+	})
+}

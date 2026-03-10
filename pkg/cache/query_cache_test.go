@@ -445,6 +445,34 @@ func TestQueryCache_ConcurrentAccess(t *testing.T) {
 	}
 }
 
+func TestConfigureGlobalCache_FirstCallWins(t *testing.T) {
+	// Reset global singleton state for deterministic test behavior.
+	globalQueryCache = nil
+	globalQueryCacheOnce = sync.Once{}
+
+	ConfigureGlobalCache(7, 2*time.Second)
+	gc := GlobalQueryCache()
+	if gc == nil {
+		t.Fatal("GlobalQueryCache returned nil")
+	}
+	if gc.maxSize != 7 {
+		t.Fatalf("maxSize = %d, want 7", gc.maxSize)
+	}
+	if gc.ttl != 2*time.Second {
+		t.Fatalf("ttl = %v, want 2s", gc.ttl)
+	}
+
+	// Second configure should be ignored due to sync.Once.
+	ConfigureGlobalCache(99, 9*time.Second)
+	gc2 := GlobalQueryCache()
+	if gc2.maxSize != 7 {
+		t.Fatalf("maxSize changed after second configure: got %d", gc2.maxSize)
+	}
+	if gc2.ttl != 2*time.Second {
+		t.Fatalf("ttl changed after second configure: got %v", gc2.ttl)
+	}
+}
+
 func TestQueryCache_ConcurrentEviction(t *testing.T) {
 	cache := NewQueryCache(10, time.Hour) // Small cache to force evictions
 

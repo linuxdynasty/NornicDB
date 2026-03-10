@@ -2,12 +2,15 @@
 package search
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +195,212 @@ func TestRRFFusion(t *testing.T) {
 	assert.Equal(t, "doc2", fusedResults[0].ID)
 	assert.Equal(t, 2, fusedResults[0].VectorRank) // Second in vector list = rank 2 (1-indexed)
 	assert.Equal(t, 1, fusedResults[0].BM25Rank)   // First in BM25 = rank 1
+}
+
+func TestServicePersistenceAndTimingHelpers(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 3)
+
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+	hnswPath := filepath.Join(tmp, "hnsw")
+
+	// schedulePersist: no-op without paths
+	svc.SetPersistenceEnabled(true)
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
+	// schedulePersist: sets timer when persistence is enabled and paths are set.
+	svc.SetFulltextIndexPath(bm25Path)
+	svc.SetVectorIndexPath(vectorPath)
+	svc.SetHNSWIndexPath(hnswPath)
+	oldDelay, hadDelay := os.LookupEnv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC")
+	require.NoError(t, os.Setenv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC", "1"))
+	t.Cleanup(func() {
+		if hadDelay {
+			_ = os.Setenv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC", oldDelay)
+		} else {
+			_ = os.Unsetenv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC")
+		}
+	})
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.NotNil(t, svc.persistTimer)
+	svc.persistTimer.Stop()
+	svc.persistTimer = nil
+	svc.persistMu.Unlock()
+
+	// persistBM25Background saves when BM25 is dirty and not building.
+	svc.fulltextIndex.Index("doc-1", "alpha beta gamma")
+	svc.persistBM25Background(bm25Path)
+	_, err := os.Stat(bm25Path)
+	require.NoError(t, err)
+
+	// persistVectorStoreBackground handles nil store and writes meta for valid store.
+	svc.persistVectorStoreBackground(vectorPath, nil)
+	vfs, err := NewVectorFileStore(vectorPath, 3)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = vfs.Close() })
+	require.NoError(t, vfs.Add("vec-1", []float32{1, 0, 0}))
+	svc.persistVectorStoreBackground(vectorPath, vfs)
+	_, err = os.Stat(vectorPath + ".meta")
+	require.NoError(t, err)
+
+	// persistHNSWBackground skip and save branches.
+	svc.persistHNSWBackground(hnswPath) // skip (< NSmallMax)
+	svc.hnswMu.Lock()
+	svc.hnswIndex = NewHNSWIndex(3, HNSWConfigFromEnv())
+	svc.hnswMu.Unlock()
+	for i := 0; i < NSmallMax; i++ {
+		require.NoError(t, svc.vectorIndex.Add(fmt.Sprintf("n-%d", i), []float32{1, 0, 0}))
+	}
+	svc.persistHNSWBackground(hnswPath)
+	_, err = os.Stat(hnswPath)
+	require.NoError(t, err)
+
+	// persistIVFHNSWBackground writes per-cluster files when cluster map exists.
+	clusterIdx := NewHNSWIndex(3, HNSWConfigFromEnv())
+	require.NoError(t, clusterIdx.Add("c-1", []float32{1, 0, 0}))
+	svc.clusterHNSWMu.Lock()
+	svc.clusterHNSW = map[int]*HNSWIndex{0: clusterIdx}
+	svc.clusterHNSWMu.Unlock()
+	svc.persistIVFHNSWBackground(hnswPath)
+	_, err = os.Stat(filepath.Join(filepath.Dir(hnswPath), "hnsw_ivf", "0"))
+	require.NoError(t, err)
+
+	// runPersist + PersistIndexesToDisk execute without panic on configured paths.
+	svc.runPersist()
+	svc.PersistIndexesToDisk()
+}
+
+func TestSearchEnvDurationAndTimingHelpers(t *testing.T) {
+	oldMs, hadMs := os.LookupEnv("NORNICDB_HNSW_MAINT_INTERVAL_MS")
+	oldSec, hadSec := os.LookupEnv("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC")
+	oldTiming, hadTiming := os.LookupEnv(EnvSearchLogTimings)
+	t.Cleanup(func() {
+		if hadMs {
+			_ = os.Setenv("NORNICDB_HNSW_MAINT_INTERVAL_MS", oldMs)
+		} else {
+			_ = os.Unsetenv("NORNICDB_HNSW_MAINT_INTERVAL_MS")
+		}
+		if hadSec {
+			_ = os.Setenv("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", oldSec)
+		} else {
+			_ = os.Unsetenv("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC")
+		}
+		if hadTiming {
+			_ = os.Setenv(EnvSearchLogTimings, oldTiming)
+		} else {
+			_ = os.Unsetenv(EnvSearchLogTimings)
+		}
+	})
+
+	require.NoError(t, os.Setenv("NORNICDB_HNSW_MAINT_INTERVAL_MS", "0"))
+	require.Equal(t, 30*time.Second, envDurationMs("NORNICDB_HNSW_MAINT_INTERVAL_MS", 30_000))
+	require.NoError(t, os.Setenv("NORNICDB_HNSW_MAINT_INTERVAL_MS", "250"))
+	require.Equal(t, 250*time.Millisecond, envDurationMs("NORNICDB_HNSW_MAINT_INTERVAL_MS", 30_000))
+
+	require.NoError(t, os.Setenv("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", "0"))
+	require.Equal(t, 60*time.Second, envDurationSec("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", 60))
+	require.NoError(t, os.Setenv("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", "2"))
+	require.Equal(t, 2*time.Second, envDurationSec("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", 60))
+
+	svc := NewServiceWithDimensions(newNamespacedEngine(t), 3)
+	resp := &SearchResponse{
+		SearchMethod:      "hybrid",
+		FallbackTriggered: false,
+		Results:           []SearchResult{{ID: "n1", Score: 0.9}},
+		Metrics: &SearchMetrics{
+			TotalTimeMs:        7,
+			VectorSearchTimeMs: 3,
+			BM25SearchTimeMs:   2,
+			FusionTimeMs:       1,
+			VectorCandidates:   4,
+			BM25Candidates:     5,
+			FusedCandidates:    3,
+		},
+	}
+
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	require.NoError(t, os.Setenv(EnvSearchLogTimings, "true"))
+	svc.maybeLogSearchTiming(strings.Repeat("q", 90), resp, 15*time.Millisecond, true)
+	out := buf.String()
+	require.Contains(t, out, "Search timing")
+	require.Contains(t, out, "cache_hit=true")
+}
+
+func TestSearchResultCacheHelpers(t *testing.T) {
+	t.Run("Get and Put handle nil, miss, eviction, and invalidate", func(t *testing.T) {
+		c := newSearchResultCache(2, 0)
+		require.Nil(t, c.Get("missing"))
+		c.Invalidate()
+
+		c.Put("nil", nil)
+		require.Nil(t, c.Get("nil"))
+
+		r1 := &SearchResponse{Status: "ok", Query: "q1"}
+		r2 := &SearchResponse{Status: "ok", Query: "q2"}
+		r3 := &SearchResponse{Status: "ok", Query: "q3"}
+		c.Put("k1", r1)
+		c.Put("k2", r2)
+		require.Equal(t, r1, c.Get("k1"))
+		require.Equal(t, r2, c.Get("k2"))
+
+		// Evict oldest when max size is reached.
+		c.Put("k3", r3)
+		require.Nil(t, c.Get("k1"))
+		require.Equal(t, r2, c.Get("k2"))
+		require.Equal(t, r3, c.Get("k3"))
+
+		c.Invalidate()
+		require.Nil(t, c.Get("k2"))
+		require.Nil(t, c.Get("k3"))
+	})
+
+	t.Run("Get expires stale entries when ttl is set", func(t *testing.T) {
+		c := newSearchResultCache(2, 5*time.Millisecond)
+		r := &SearchResponse{Status: "ok", Query: "ttl"}
+		c.Put("k", r)
+		require.Equal(t, r, c.Get("k"))
+
+		time.Sleep(12 * time.Millisecond)
+		require.Nil(t, c.Get("k"))
+
+		c.mu.RLock()
+		_, stillPresent := c.entries["k"]
+		c.mu.RUnlock()
+		require.False(t, stillPresent)
+	})
+}
+
+func TestSearchCacheKeyAndMinSimilarityHelpers(t *testing.T) {
+	optsA := DefaultSearchOptions()
+	optsA.Types = []string{"todo", "memory"}
+	optsA.MinSimilarity = nil
+
+	optsB := DefaultSearchOptions()
+	optsB.Types = []string{"memory", "todo"} // different order, same semantic key
+
+	keyA := searchCacheKey("hello", optsA)
+	keyB := searchCacheKey("hello", optsB)
+	require.Equal(t, keyA, keyB)
+
+	keyNil := searchCacheKey("hello", nil)
+	require.NotEmpty(t, keyNil)
+	require.NotEqual(t, keyA, keyNil)
+
+	ms := 0.42
+	optsA.MinSimilarity = &ms
+	require.Equal(t, 0.42, optsA.GetMinSimilarity(0.1))
+	optsA.MinSimilarity = nil
+	require.Equal(t, 0.1, optsA.GetMinSimilarity(0.1))
 }
 
 // TestAdaptiveRRFConfig tests adaptive RRF configuration.

@@ -336,6 +336,29 @@ func TestTypedCypherDecodeHelpers(t *testing.T) {
 	require.True(t, asBool)
 	err = assignValue(reflect.ValueOf(&asBool).Elem(), "not-bool")
 	require.Error(t, err)
+
+	// nil value is a no-op.
+	asInt = 99
+	require.NoError(t, assignValue(reflect.ValueOf(&asInt).Elem(), nil))
+	require.Equal(t, 99, asInt)
+
+	// Direct assignable branch.
+	type customMap map[string]int
+	var cmap customMap
+	srcMap := customMap{"a": 1}
+	require.NoError(t, assignValue(reflect.ValueOf(&cmap).Elem(), srcMap))
+	require.Equal(t, srcMap, cmap)
+
+	// ConvertibleTo branch (named type -> primitive target).
+	type myInt int64
+	var asI64 int64
+	require.NoError(t, assignValue(reflect.ValueOf(&asI64).Elem(), myInt(123)))
+	require.Equal(t, int64(123), asI64)
+
+	// Additional numeric kind conversion branch.
+	var asInt32 int32
+	require.NoError(t, assignValue(reflect.ValueOf(&asInt32).Elem(), int64(44)))
+	require.Equal(t, int32(44), asInt32)
 }
 
 func TestExecuteCypherTypedAndFirst(t *testing.T) {
@@ -384,4 +407,7 @@ func TestDB_AdminSmallHelpers(t *testing.T) {
 	stats := db.GetSearchStats()
 	// Service should initialize and return stats (non-nil path).
 	require.NotNil(t, stats)
+
+	require.NoError(t, db.Close())
+	require.Nil(t, db.GetSearchStats(), "closed DB should return nil stats")
 }
