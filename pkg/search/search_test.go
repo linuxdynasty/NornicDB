@@ -1017,6 +1017,14 @@ func TestSearchService_SchedulePersist_GuardsAndTimer(t *testing.T) {
 	svc.schedulePersist()
 	svc.persistMu.Lock()
 	require.NotNil(t, svc.persistTimer)
+	firstTimer := svc.persistTimer
+	svc.persistMu.Unlock()
+
+	// Re-scheduling should replace the previous timer.
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.NotNil(t, svc.persistTimer)
+	require.False(t, firstTimer == svc.persistTimer)
 	svc.persistMu.Unlock()
 
 	// Disabling persistence should stop and clear active timer.

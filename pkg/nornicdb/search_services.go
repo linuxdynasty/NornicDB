@@ -63,6 +63,9 @@ func (e *dbSearchService) queueRemove(localID string) {
 }
 
 func (e *dbSearchService) drainPending() map[string]pendingSearchMutation {
+	if e == nil {
+		return nil
+	}
 	e.pendingMu.Lock()
 	defer e.pendingMu.Unlock()
 	if len(e.pendingOps) == 0 {

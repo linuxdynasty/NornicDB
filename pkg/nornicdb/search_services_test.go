@@ -21,6 +21,15 @@ type blockingIterEngine struct {
 	once    sync.Once
 }
 
+type namespaceListEngine struct {
+	storage.Engine
+	namespaces []string
+}
+
+func (e *namespaceListEngine) ListNamespaces() []string {
+	return append([]string(nil), e.namespaces...)
+}
+
 func (e *blockingIterEngine) IterateNodes(fn func(*storage.Node) bool) error {
 	e.once.Do(func() { close(e.entered) })
 	<-e.release
@@ -61,6 +70,24 @@ func TestSearchServices_HelperBranches(t *testing.T) {
 	t.Run("kmeansNumClusters defaults to zero with nil config", func(t *testing.T) {
 		db := &DB{}
 		require.Equal(t, 0, db.kmeansNumClusters())
+	})
+
+	t.Run("pending queue helpers guard nil/empty inputs", func(t *testing.T) {
+		var nilEntry *dbSearchService
+		nilEntry.queueIndex(&storage.Node{ID: "x"})
+		nilEntry.queueRemove("x")
+		require.Nil(t, nilEntry.drainPending())
+
+		entry := &dbSearchService{}
+		entry.queueIndex(nil)
+		entry.queueRemove("")
+		require.Nil(t, entry.drainPending())
+
+		entry.queueIndex(&storage.Node{ID: "a"})
+		entry.queueRemove("a")
+		drained := entry.drainPending()
+		require.Len(t, drained, 1)
+		require.True(t, drained["a"].remove)
 	})
 }
 
@@ -161,6 +188,15 @@ func TestSearchServices_ResetDropsCache(t *testing.T) {
 
 	db.searchServicesMu.RLock()
 	_, exists = db.searchServices["db2"]
+	db.searchServicesMu.RUnlock()
+	require.False(t, exists)
+
+	// Empty dbName should reset default database service.
+	_, err = db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	db.ResetSearchService("")
+	db.searchServicesMu.RLock()
+	_, exists = db.searchServices[db.defaultDatabaseName()]
 	db.searchServicesMu.RUnlock()
 	require.False(t, exists)
 }
@@ -295,6 +331,65 @@ func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
 	defaultEntry.clusterMu.Lock()
 	defer defaultEntry.clusterMu.Unlock()
 	require.Equal(t, 77, defaultEntry.lastClusteredEmbedCount)
+}
+
+func TestSearchServices_RunClusteringOnceAllDatabases_BranchMatrix(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Add namespace lister branch coverage (skips empty/system namespaces).
+	db.baseStorage = &namespaceListEngine{
+		Engine:     db.baseStorage,
+		namespaces: []string{"", "system", "tenant_from_lister"},
+	}
+
+	readyEngine := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "ready_cov")
+	readySvc := search.NewServiceWithDimensions(readyEngine, 3)
+	readySvc.EnableClustering(nil, 2)
+	_, err = readyEngine.CreateNode(&storage.Node{
+		ID:              "r1",
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		Properties:      map[string]any{"content": "ready"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, readySvc.BuildIndexes(context.Background()))
+
+	disabledSvc := search.NewServiceWithDimensions(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "disabled_cov"), 3)
+
+	notReadySvc := search.NewServiceWithDimensions(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "not_ready_cov"), 3)
+	notReadySvc.EnableClustering(nil, 2)
+
+	db.searchServicesMu.Lock()
+	db.searchServices["nil_entry_cov"] = nil
+	db.searchServices["nil_svc_cov"] = &dbSearchService{dbName: "nil_svc_cov"}
+	db.searchServices["system"] = &dbSearchService{dbName: "system", svc: disabledSvc}
+	db.searchServices["disabled_cov"] = &dbSearchService{dbName: "disabled_cov", svc: disabledSvc}
+	db.searchServices["not_ready_cov"] = &dbSearchService{dbName: "not_ready_cov", svc: notReadySvc, lastClusteredEmbedCount: 11}
+	db.searchServices["ready_cov"] = &dbSearchService{
+		dbName:                  "ready_cov",
+		svc:                     readySvc,
+		lastClusteredEmbedCount: readySvc.EmbeddingCount(), // shouldRun=false branch
+	}
+	db.searchServicesMu.Unlock()
+
+	db.runClusteringOnceAllDatabases(context.Background())
+
+	// not_ready entry should be unchanged because clustering is deferred before ready.
+	db.searchServicesMu.RLock()
+	notReadyEntry := db.searchServices["not_ready_cov"]
+	_, listerCreated := db.searchServices["tenant_from_lister"]
+	_, systemCreated := db.searchServices["system"]
+	db.searchServicesMu.RUnlock()
+	require.NotNil(t, notReadyEntry)
+	require.Equal(t, 11, notReadyEntry.lastClusteredEmbedCount)
+	require.True(t, listerCreated)
+	require.True(t, systemCreated)
 }
 
 func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
@@ -527,6 +622,31 @@ func TestSearchServices_StartBuildDefaultAndClosedBranches(t *testing.T) {
 	require.NoError(t, db.Close())
 	_, err = db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
 	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestSearchServices_EnsureBuilt_ContextDonePath(t *testing.T) {
+	db := &DB{
+		storage:             storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic"),
+		searchServices:      make(map[string]*dbSearchService),
+		embeddingDims:       3,
+		searchMinSimilarity: 0.1,
+	}
+	engine := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "tenant_timeout")
+	svc := search.NewServiceWithDimensions(engine, 3)
+
+	entry := &dbSearchService{
+		dbName:    "tenant_timeout",
+		svc:       svc,
+		buildDone: make(chan struct{}),
+	}
+	// Pre-consume buildOnce so startSearchIndexBuild does not launch a goroutine.
+	entry.buildOnce.Do(func() {})
+	db.searchServices["tenant_timeout"] = entry
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := db.ensureSearchIndexesBuilt(ctx, "tenant_timeout")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestSearchServices_GetOrCreate_ResolverAndPersistPaths(t *testing.T) {
