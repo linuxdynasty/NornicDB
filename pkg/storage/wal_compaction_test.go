@@ -200,6 +200,13 @@ func TestSnapshotAndSaveSnapshot_ErrorBranches(t *testing.T) {
 		err := SaveSnapshot(&Snapshot{Version: "1.0"}, path)
 		require.ErrorContains(t, err, "failed to create snapshot file")
 	})
+
+	t.Run("SaveSnapshot returns rename error when destination path is a directory", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "snapshots", "snapshot.json")
+		require.NoError(t, os.MkdirAll(path, 0o755))
+		err := SaveSnapshot(&Snapshot{Version: "1.0"}, path)
+		require.ErrorContains(t, err, "failed to rename snapshot")
+	})
 }
 
 // TestPruneOldSnapshotFiles tests snapshot file retention pruning.

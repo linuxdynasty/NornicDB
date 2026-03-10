@@ -120,6 +120,13 @@ func TestWALManifestHelpers(t *testing.T) {
 		err := writeWALManifest(dir, &WALManifest{Version: walManifestVersion})
 		require.Error(t, err)
 	})
+
+	t.Run("write returns rename error when manifest path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(walManifestPath(dir), 0o755))
+		err := writeWALManifest(dir, &WALManifest{Version: walManifestVersion})
+		require.Error(t, err)
+	})
 }
 
 func TestWALSegmentPathHelpers(t *testing.T) {

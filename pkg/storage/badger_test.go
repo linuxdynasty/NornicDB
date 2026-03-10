@@ -1457,6 +1457,11 @@ func TestKeyEncoding(t *testing.T) {
 		edgeID := extractEdgeIDFromIndexKey(key)
 		assert.Equal(t, EdgeID(prefixTestID("edge-1")), edgeID)
 	})
+
+	t.Run("extract helpers return empty on malformed keys", func(t *testing.T) {
+		assert.Equal(t, EdgeID(""), extractEdgeIDFromIndexKey([]byte{prefixOutgoingIndex, 'x', 'y'}))
+		assert.Equal(t, NodeID(""), extractNodeIDFromLabelIndex([]byte{prefixLabelIndex, 'P', 'e'}, len("Person")))
+	})
 }
 
 // ============================================================================

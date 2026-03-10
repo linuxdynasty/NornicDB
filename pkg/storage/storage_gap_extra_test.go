@@ -473,6 +473,25 @@ func TestWALDiagnosticsHelpers(t *testing.T) {
 		require.NotEmpty(t, logger.entries)
 	})
 
+	t.Run("backup corrupted wal handles create and copy failures", func(t *testing.T) {
+		srcDir := filepath.Join(t.TempDir(), "src")
+		require.NoError(t, os.MkdirAll(srcDir, 0o755))
+		srcPath := filepath.Join(srcDir, "wal.log")
+		require.NoError(t, os.WriteFile(srcPath, []byte("data"), 0o644))
+
+		logger := &captureLogger{}
+		// Force backup create failure: configured backup dir is a file.
+		backupRoot := filepath.Join(t.TempDir(), "backup-root-file")
+		require.NoError(t, os.WriteFile(backupRoot, []byte("not-dir"), 0o644))
+		wal := &WAL{config: &WALConfig{Dir: backupRoot, Logger: logger}}
+		require.Empty(t, wal.backupCorruptedWAL(srcPath))
+
+		// Force copy failure by passing directory as source path.
+		goodBackupDir := t.TempDir()
+		wal = &WAL{config: &WALConfig{Dir: goodBackupDir, Logger: logger}}
+		require.Empty(t, wal.backupCorruptedWAL(srcDir))
+	})
+
 	t.Run("report corruption writes diagnostics and callback", func(t *testing.T) {
 		dir := t.TempDir()
 		logger := &captureLogger{}

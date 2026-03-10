@@ -932,6 +932,47 @@ func TestCheckWALIntegrity(t *testing.T) {
 		assert.False(t, report.Healthy)
 		assert.Equal(t, 1, report.CorruptedEntries)
 	})
+
+	t.Run("legacy embedding corruption is skipped but counted", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		entry := WALEntry{
+			Sequence:  1,
+			Operation: OpUpdateEmbedding,
+			Data:      mustMarshal(WALNodeData{Node: &Node{ID: "embed-1"}}),
+			Checksum:  0, // force mismatch
+		}
+		payload, err := json.Marshal(entry)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, append(payload, '\n'), 0644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotNil(t, report)
+		assert.Equal(t, "legacy", report.Format)
+		assert.Equal(t, 1, report.CorruptedEntries)
+		assert.Equal(t, 1, report.SkippedEmbeddings)
+	})
+
+	t.Run("legacy decode error is recorded in report", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		entry := WALEntry{
+			Sequence:  1,
+			Operation: OpCreateNode,
+			Data:      mustMarshal(WALNodeData{Node: &Node{ID: "ok"}}),
+		}
+		entry.Checksum = crc32Checksum(entry.Data)
+		first, err := json.Marshal(entry)
+		require.NoError(t, err)
+		content := append(first, '\n')
+		content = append(content, []byte("{bad-json")...)
+		require.NoError(t, os.WriteFile(path, content, 0644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotNil(t, report)
+		assert.NotEmpty(t, report.Errors)
+		assert.Contains(t, strings.Join(report.Errors, " "), "JSON decode error")
+	})
 }
 
 func TestWAL_ApplyRetention(t *testing.T) {
@@ -1414,6 +1455,9 @@ func TestRecoverFromWALWithResult_ErrorAndRoutingBranches(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, wal.AppendWithDatabase(OpUpdateNode, WALNodeData{
 			Node: &Node{ID: "missing", Labels: []string{"Missing"}},
+		}, "test"))
+		require.NoError(t, wal.AppendWithDatabase(OperationType("unsupported_op"), map[string]any{
+			"id": "x",
 		}, "test"))
 		require.NoError(t, wal.Close())
 
@@ -2213,6 +2257,73 @@ func TestWAL_TruncateAfterSnapshot(t *testing.T) {
 		entries, readErr := ReadWALEntries(walActivePath(dir))
 		require.NoError(t, readErr)
 		assert.NotNil(t, entries)
+	})
+}
+
+func TestWAL_TruncateAfterSnapshot_EarlyErrorBranches(t *testing.T) {
+	t.Run("returns flush error before truncate when syncLocked fails", func(t *testing.T) {
+		dir := t.TempDir()
+		walPath := walActivePath(dir)
+		f, err := os.OpenFile(walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		require.NoError(t, err)
+		defer f.Close()
+
+		w := &WAL{
+			config: &WALConfig{Dir: dir, SyncMode: "none"},
+			file:   f,
+			writer: bufio.NewWriterSize(&walErrWriter{err: fmt.Errorf("flush-fail")}, 16),
+		}
+		_, _ = w.writer.WriteString("pending")
+		err = w.TruncateAfterSnapshot(1)
+		require.ErrorContains(t, err, "failed to flush before truncate")
+	})
+
+	t.Run("returns close error when WAL file close fails", func(t *testing.T) {
+		dir := t.TempDir()
+		walPath := walActivePath(dir)
+		f, err := os.OpenFile(walPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		require.NoError(t, err)
+		require.NoError(t, f.Close()) // make subsequent close fail
+
+		w := &WAL{
+			config: &WALConfig{Dir: dir, SyncMode: "none"},
+			file:   f,
+			writer: bufio.NewWriterSize(bytes.NewBuffer(nil), 16),
+		}
+		err = w.TruncateAfterSnapshot(1)
+		require.ErrorContains(t, err, "failed to close for truncate")
+	})
+
+	t.Run("returns rename error when wal path becomes directory during truncate", func(t *testing.T) {
+		dir := t.TempDir()
+		wal, err := NewWAL("", &WALConfig{Dir: dir, SyncMode: "immediate"})
+		require.NoError(t, err)
+		defer wal.Close()
+
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{
+			Node: &Node{ID: NodeID(prefixTestID("rename-race"))},
+		}))
+		require.NoError(t, wal.Sync())
+
+		walPath := walActivePath(dir)
+		tmpPath := walPath + ".truncate.tmp"
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, statErr := os.Stat(tmpPath); statErr == nil {
+					_ = os.Remove(walPath)
+					_ = os.Mkdir(walPath, 0755)
+					return
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}()
+
+		err = wal.TruncateAfterSnapshot(0)
+		<-done
+		require.ErrorContains(t, err, "failed to rename truncated WAL")
 	})
 }
 

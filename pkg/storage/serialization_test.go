@@ -210,4 +210,28 @@ func TestStorageSerializer_HelperCoverage(t *testing.T) {
 		_, err = deserializeNode([]byte("not-a-valid-node"))
 		require.ErrorContains(t, err, "decoding node")
 	})
+
+	t.Run("serialize node and edge return encoding errors for unsupported props", func(t *testing.T) {
+		node := &Node{
+			ID:     "n-bad",
+			Labels: []string{"Bad"},
+			Properties: map[string]any{
+				"bad": make(chan int),
+			},
+		}
+		_, err := serializeNode(node)
+		require.ErrorContains(t, err, "encoding node")
+
+		edge := &Edge{
+			ID:        "e-bad",
+			StartNode: "n1",
+			EndNode:   "n2",
+			Type:      "REL",
+			Properties: map[string]any{
+				"bad": make(chan int),
+			},
+		}
+		_, err = serializeEdge(edge)
+		require.ErrorContains(t, err, "encoding edge")
+	})
 }
