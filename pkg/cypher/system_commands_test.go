@@ -505,6 +505,19 @@ func TestSystemCommands_AlterDatabaseSetLimit(t *testing.T) {
 		assert.Equal(t, 50, limits.Rate.MaxWritesPerSecond)
 	})
 
+	t.Run("set remaining numeric limits and tolerate empty assignment chunks", func(t *testing.T) {
+		result, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT max_bytes = 1234, , max_results = 500, max_concurrent_queries = 7", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+
+		limitsInterface, err := mockDBM.GetDatabaseLimits("test_db")
+		require.NoError(t, err)
+		limits := limitsInterface.(*multidb.Limits)
+		assert.Equal(t, int64(1234), limits.Storage.MaxBytes)
+		assert.Equal(t, int64(500), limits.Query.MaxResults)
+		assert.Equal(t, 7, limits.Query.MaxConcurrentQueries)
+	})
+
 	t.Run("error on non-existent database", func(t *testing.T) {
 		_, err := exec.Execute(ctx, "ALTER DATABASE nonexistent SET LIMIT max_nodes = 1000", nil)
 		assert.Error(t, err)

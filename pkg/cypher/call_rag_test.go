@@ -128,3 +128,42 @@ func TestCallDbRetrieveWrappers_ParseErrors(t *testing.T) {
 	_, err = exec.callDbRRetrieve(ctx, "CALL db.rretrieve(")
 	require.Error(t, err)
 }
+
+func TestCallRagHelpers_MessageAndCandidateParsingBranches(t *testing.T) {
+	// toChatMessages: non-list, mixed list, missing role/content filtering.
+	assert.Nil(t, toChatMessages("bad"))
+	msgs := toChatMessages([]interface{}{
+		map[string]interface{}{"role": "user", "content": "hello"},
+		map[string]interface{}{"role": "", "content": "skip-role"},
+		map[string]interface{}{"role": "assistant", "content": ""},
+		"bad",
+	})
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "user", msgs[0].Role)
+	assert.Equal(t, "hello", msgs[0].Content)
+
+	// parseRerankCandidates: non-list -> nil,nil
+	cands, err := parseRerankCandidates("bad")
+	require.NoError(t, err)
+	assert.Nil(t, cands)
+
+	// parseRerankCandidates: valid list with fallback keys.
+	cands, err = parseRerankCandidates([]interface{}{
+		map[string]interface{}{"node_id": "n1", "text": "alpha", "bi_score": 0.5},
+		map[string]interface{}{"id": "n2", "content": "beta", "rrf_score": 0.2},
+		"bad",
+	})
+	require.NoError(t, err)
+	require.Len(t, cands, 2)
+	assert.Equal(t, "n1", cands[0].ID)
+	assert.Equal(t, "alpha", cands[0].Content)
+	assert.Equal(t, "n2", cands[1].ID)
+	assert.Equal(t, "beta", cands[1].Content)
+
+	// parseRerankCandidates: missing id should error.
+	_, err = parseRerankCandidates([]interface{}{
+		map[string]interface{}{"content": "no id"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "candidate id is required")
+}

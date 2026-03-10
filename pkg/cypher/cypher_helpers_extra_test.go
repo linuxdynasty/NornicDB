@@ -1122,6 +1122,40 @@ func TestCypherHelpers_CreateAndDropConstraintVariants(t *testing.T) {
 	// Invalid drop syntax.
 	_, err = exec.executeDropConstraint(context.Background(), "DROP CONSTRAINT")
 	require.Error(t, err)
+
+	t.Run("constraint validation errors on existing data", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		eng := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(eng)
+		ctx := context.Background()
+
+		// Duplicate values violate UNIQUE constraint creation.
+		_, err := exec.Execute(ctx, "CREATE (:Person {email:'dup@example.com'})", nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, "CREATE (:Person {email:'dup@example.com'})", nil)
+		require.NoError(t, err)
+		_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT c_dup IF NOT EXISTS FOR (n:Person) REQUIRE n.email IS UNIQUE")
+		require.Error(t, err)
+
+		// Wrong property type violates type constraint creation.
+		_, err = exec.Execute(ctx, "CREATE (:Typed {age:'bad'})", nil)
+		require.NoError(t, err)
+		_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT c_type_err IF NOT EXISTS FOR (n:Typed) REQUIRE n.age IS :: INTEGER")
+		require.Error(t, err)
+	})
+
+	t.Run("temporal constraint malformed property count", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		eng := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(eng)
+
+		_, err := exec.executeCreateConstraint(
+			context.Background(),
+			"CREATE CONSTRAINT c_temporal_bad IF NOT EXISTS FOR (n:Fact) REQUIRE (n.key, n.valid_from) IS TEMPORAL",
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TEMPORAL constraint requires 3 properties")
+	})
 }
 
 func TestCypherHelpers_CallPluginHandlerSignatures(t *testing.T) {

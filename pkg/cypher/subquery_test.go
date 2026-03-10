@@ -2740,4 +2740,14 @@ func TestExecuteMatchWithCallProcedure_ParseAndExecErrors(t *testing.T) {
 	require.NotNil(t, emptyRes)
 	assert.Empty(t, emptyRes.Columns)
 	assert.Empty(t, emptyRes.Rows)
+
+	// No matching rows + relationship-vector procedure => default relationship columns.
+	emptyRelVectorRes, err := exec.executeMatchWithCallProcedure(
+		ctx,
+		"MATCH (n:Person {name:'none'}) CALL db.index.vector.queryRelationships('idx', 2, n.embedding)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, emptyRelVectorRes)
+	assert.Equal(t, []string{"relationship", "score"}, emptyRelVectorRes.Columns)
+	assert.Empty(t, emptyRelVectorRes.Rows)
 }

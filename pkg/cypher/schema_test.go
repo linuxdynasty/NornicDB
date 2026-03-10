@@ -276,6 +276,34 @@ func TestSchemaErrorCases(t *testing.T) {
 			t.Error("Expected error for invalid syntax")
 		}
 	})
+
+	t.Run("FulltextNoPropertiesFound", func(t *testing.T) {
+		// Property token missing "n." should parse as zero extracted properties.
+		_, err := exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX bad_ft FOR (n:Node) ON EACH [content]")
+		if err == nil || !strings.Contains(err.Error(), "no properties found in fulltext index definition") {
+			t.Fatalf("expected no properties error, got: %v", err)
+		}
+	})
+
+	t.Run("DuplicateFulltextAndVectorIndex", func(t *testing.T) {
+		_, err := exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX dup_ft FOR (n:Node) ON EACH [n.content]")
+		if err != nil {
+			t.Fatalf("failed to create baseline fulltext index: %v", err)
+		}
+		_, err = exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX dup_ft FOR (n:Node) ON EACH [n.content]")
+		if err != nil {
+			t.Fatalf("duplicate fulltext index should be idempotent, got error: %v", err)
+		}
+
+		_, err = exec.executeCreateVectorIndex(ctx, "CREATE VECTOR INDEX dup_vec FOR (n:Node) ON (n.embedding)")
+		if err != nil {
+			t.Fatalf("failed to create baseline vector index: %v", err)
+		}
+		_, err = exec.executeCreateVectorIndex(ctx, "CREATE VECTOR INDEX dup_vec FOR (n:Node) ON (n.embedding)")
+		if err != nil {
+			t.Fatalf("duplicate vector index should be idempotent, got error: %v", err)
+		}
+	})
 }
 
 func TestCreateExistsConstraint(t *testing.T) {
