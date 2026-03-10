@@ -781,3 +781,52 @@ func TestSearchServices_EventDuringBuild_IsDeterministicallyReplayed(t *testing.
 		return svc.EmbeddingCount() >= 1
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+func TestSearchServices_RemoveEventDuringBuild_IsDeterministicallyReplayed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	tenantStorage := storage.NewNamespacedEngine(db.baseStorage, "tenant_remove_race")
+	blocking := &blockingIterEngine{
+		Engine:  tenantStorage,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	// Seed a node and start a blocked build so remove event is queued.
+	_, err = tenantStorage.CreateNode(&storage.Node{
+		ID:              "gone",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "gone"},
+		ChunkEmbeddings: [][]float32{{0.2, 0.3, 0.4}},
+	})
+	require.NoError(t, err)
+	_, err = db.EnsureSearchIndexesBuildStarted("tenant_remove_race", blocking)
+	require.NoError(t, err)
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("build did not enter iterator in time")
+	}
+
+	svc, err := db.GetOrCreateSearchService("tenant_remove_race", blocking)
+	require.NoError(t, err)
+
+	// Queue remove while build is blocked.
+	db.removeNodeFromEvent("tenant_remove_race:gone")
+	require.Equal(t, 0, svc.EmbeddingCount())
+
+	close(blocking.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "tenant_remove_race"))
+
+	// Deferred remove must be replayed after build completion.
+	require.Eventually(t, func() bool {
+		return svc.EmbeddingCount() == 0
+	}, 5*time.Second, 10*time.Millisecond)
+}

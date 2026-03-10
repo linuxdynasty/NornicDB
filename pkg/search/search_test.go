@@ -1027,6 +1027,13 @@ func TestSearchService_SchedulePersist_GuardsAndTimer(t *testing.T) {
 	require.False(t, firstTimer == svc.persistTimer)
 	svc.persistMu.Unlock()
 
+	// Invalid/zero delay env falls back to default delay and still schedules.
+	t.Setenv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC", "0")
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.NotNil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
 	// Disabling persistence should stop and clear active timer.
 	svc.SetPersistenceEnabled(false)
 	svc.persistMu.Lock()
@@ -1063,6 +1070,52 @@ func TestVectorSearchOnly_MethodAndFilterBranches(t *testing.T) {
 	filtered, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0, 0}, opts)
 	require.NoError(t, err)
 	require.Len(t, filtered.Results, 0)
+}
+
+func TestVectorSearchOnly_SearchMethodVariants(t *testing.T) {
+	t.Run("vector_hnsw", func(t *testing.T) {
+		engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+		svc := NewServiceWithDimensions(engine, 3)
+		require.NoError(t, svc.IndexNode(&storage.Node{
+			ID:              "h1",
+			Properties:      map[string]any{"content": "hnsw"},
+			ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		}))
+
+		h := NewHNSWIndex(3, HNSWConfigFromEnv())
+		require.NoError(t, h.Add("h1", []float32{1, 0, 0}))
+		svc.pipelineMu.Lock()
+		svc.vectorPipeline = NewVectorSearchPipeline(NewHNSWCandidateGen(h), NewCPUExactScorer(svc.vectorIndex))
+		svc.pipelineMu.Unlock()
+
+		opts := DefaultSearchOptions()
+		opts.Limit = 5
+		resp, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0, 0}, opts)
+		require.NoError(t, err)
+		require.Equal(t, "vector_hnsw", resp.SearchMethod)
+	})
+
+	t.Run("vector_clustered", func(t *testing.T) {
+		engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+		svc := NewServiceWithDimensions(engine, 2)
+		svc.EnableClustering(nil, 2)
+		svc.SetMinEmbeddingsForClustering(1)
+		require.NoError(t, svc.IndexNode(&storage.Node{ID: "c1", ChunkEmbeddings: [][]float32{{1, 0}}, Properties: map[string]any{"content": "c1"}}))
+		require.NoError(t, svc.IndexNode(&storage.Node{ID: "c2", ChunkEmbeddings: [][]float32{{0, 1}}, Properties: map[string]any{"content": "c2"}}))
+		require.NoError(t, svc.TriggerClustering(context.Background()))
+		require.True(t, svc.clusterIndex.IsClustered())
+
+		gen := NewKMeansCandidateGen(svc.clusterIndex, svc.vectorIndex, 1)
+		svc.pipelineMu.Lock()
+		svc.vectorPipeline = NewVectorSearchPipeline(gen, NewCPUExactScorer(svc.vectorIndex))
+		svc.pipelineMu.Unlock()
+
+		opts := DefaultSearchOptions()
+		opts.Limit = 5
+		resp, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0}, opts)
+		require.NoError(t, err)
+		require.Equal(t, "vector_clustered", resp.SearchMethod)
+	})
 }
 
 func TestEnableClustering_ReentrantAndEnvOverrides(t *testing.T) {
@@ -1808,6 +1861,13 @@ func TestSearchHelpers_BM25SeedAndSettingsEquivalence(t *testing.T) {
 }
 
 func TestTriggerClustering_GuardBranches(t *testing.T) {
+	t.Run("not enabled returns explicit error", func(t *testing.T) {
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		err := svc.TriggerClustering(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not enabled")
+	})
+
 	t.Run("already running returns nil", func(t *testing.T) {
 		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
 		svc.EnableClustering(nil, 2)
@@ -1845,6 +1905,39 @@ func TestTriggerClustering_GuardBranches(t *testing.T) {
 		err := svc.TriggerClustering(ctx)
 		require.ErrorIs(t, err, context.Canceled)
 	})
+}
+
+func TestRRFHybridSearch_ClusteredMethodBranch(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 2)
+	svc.EnableClustering(nil, 2)
+	svc.SetMinEmbeddingsForClustering(1)
+
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "r1",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "alpha graph"},
+		ChunkEmbeddings: [][]float32{{1, 0}},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "r2",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "beta graph"},
+		ChunkEmbeddings: [][]float32{{0, 1}},
+	}))
+	require.NoError(t, svc.TriggerClustering(context.Background()))
+	require.True(t, svc.clusterIndex.IsClustered())
+
+	gen := NewKMeansCandidateGen(svc.clusterIndex, svc.vectorIndex, 1)
+	svc.pipelineMu.Lock()
+	svc.vectorPipeline = NewVectorSearchPipeline(gen, NewCPUExactScorer(svc.vectorIndex))
+	svc.pipelineMu.Unlock()
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 5
+	resp, err := svc.rrfHybridSearch(context.Background(), "graph", []float32{1, 0}, opts)
+	require.NoError(t, err)
+	require.Equal(t, "rrf_hybrid_clustered", resp.SearchMethod)
 }
 
 func TestSearchHelpers_TryRestoreAndMaybeRebuildBranches(t *testing.T) {
