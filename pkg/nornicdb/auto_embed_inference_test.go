@@ -91,3 +91,44 @@ func TestAutoTLP_ServerSideEmbeddingsTriggerInferenceOnEmbedded(t *testing.T) {
 		return false
 	}, 5*time.Second, 50*time.Millisecond)
 }
+
+func TestRunInferenceForEmbeddedNode_GuardBranches(t *testing.T) {
+	t.Run("nil receiver and nil node are no-ops", func(t *testing.T) {
+		var db *DB
+		db.runInferenceForEmbeddedNode(nil)
+	})
+
+	t.Run("returns for nodes without embeddings or invalid ids", func(t *testing.T) {
+		db := &DB{}
+		db.runInferenceForEmbeddedNode(&storage.Node{ID: "n1"})
+		db.runInferenceForEmbeddedNode(&storage.Node{ID: "unqualified", ChunkEmbeddings: [][]float32{{1, 0, 0}}})
+		db.runInferenceForEmbeddedNode(&storage.Node{ID: "system:n1", ChunkEmbeddings: [][]float32{{1, 0, 0}}})
+		db.runInferenceForEmbeddedNode(&storage.Node{ID: "tenant:qdrant:pt-1", ChunkEmbeddings: [][]float32{{1, 0, 0}}})
+	})
+
+	t.Run("returns when suggestions exist but base storage is nil", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = true
+		db := &DB{
+			config:            cfg,
+			inferenceServices: map[string]*inference.Engine{},
+			// baseStorage intentionally nil for this guard branch.
+		}
+
+		engine := inference.New(&inference.Config{
+			SimilarityThreshold: 0.1,
+			SimilarityTopK:      3,
+			CoAccessEnabled:     false,
+			TransitiveEnabled:   false,
+		})
+		engine.SetSimilaritySearch(func(ctx context.Context, embedding []float32, k int) ([]inference.SimilarityResult, error) {
+			return []inference.SimilarityResult{{ID: "n2", Score: 0.95}}, nil
+		})
+		db.inferenceServices["tenant"] = engine
+
+		db.runInferenceForEmbeddedNode(&storage.Node{
+			ID:              "tenant:n1",
+			ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		})
+	})
+}

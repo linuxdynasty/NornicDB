@@ -197,6 +197,56 @@ var Plugin P
 		require.True(t, PluginsInitialized())
 		require.Empty(t, ListLoadedPlugins(), "heimdall plugin should be skipped without context")
 	})
+
+	t.Run("heimdall plugin loads when context is provided", func(t *testing.T) {
+		pluginsMu.Lock()
+		loadedPlugins = make(map[string]*LoadedPlugin)
+		pluginFunctions = make(map[string]PluginFunction)
+		pluginProcedures = make(map[string]PluginProcedure)
+		pluginsInitialized = false
+		pluginsMu.Unlock()
+
+		dir := t.TempDir()
+		_ = buildTestPluginSO(t, dir, "heimdall_with_ctx", `package main
+import "github.com/orneryd/nornicdb/pkg/heimdall"
+type P struct{}
+func (P) Name() string { return "ctxok" }
+func (P) Version() string { return "1.0.0" }
+func (P) Type() string { return "heimdall" }
+func (P) Description() string { return "test" }
+func (P) Initialize(heimdall.SubsystemContext) error { return nil }
+func (P) Start() error { return nil }
+func (P) Stop() error { return nil }
+func (P) Shutdown() error { return nil }
+func (P) Status() heimdall.SubsystemStatus { return heimdall.StatusRunning }
+func (P) Health() heimdall.SubsystemHealth { return heimdall.SubsystemHealth{Status: heimdall.StatusRunning, Healthy: true} }
+func (P) Metrics() map[string]interface{} { return map[string]interface{}{"ok": true} }
+func (P) Config() map[string]interface{} { return nil }
+func (P) Configure(map[string]interface{}) error { return nil }
+func (P) ConfigSchema() map[string]interface{} { return nil }
+func (P) Actions() map[string]heimdall.ActionFunc { return map[string]heimdall.ActionFunc{"status": {Name: "ctxok.status", Description: "status", Category: "test"}} }
+func (P) Summary() string { return "ok" }
+func (P) RecentEvents(limit int) []heimdall.SubsystemEvent { return nil }
+var Plugin P
+`)
+
+		ctx := &heimdall.SubsystemContext{
+			Config: heimdall.Config{
+				Model:       "test",
+				ModelsDir:   "models",
+				GPULayers:   0,
+				ContextSize: 1024,
+			},
+		}
+
+		err := LoadPluginsFromDir(dir, ctx)
+		require.NoError(t, err)
+		require.True(t, PluginsInitialized())
+		plugins := ListLoadedPlugins()
+		require.Len(t, plugins, 1)
+		require.Equal(t, PluginTypeHeimdall, plugins[0].Type)
+		require.Equal(t, "ctxok", plugins[0].Name)
+	})
 }
 
 func TestPluginFunctionHandlerTypes(t *testing.T) {
@@ -386,6 +436,16 @@ func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
 		require.Len(t, loaded.Procedures, 2)
 	})
 
+	t.Run("loadFunctionPlugin errors when Name/Version missing", func(t *testing.T) {
+		_, err := loadFunctionPlugin(mockPluginNoType{}, "/tmp/no_name.so")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no Name() method")
+
+		_, err = loadFunctionPlugin(onlyNamePlugin{}, "/tmp/no_version.so")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no Version() method")
+	})
+
 	t.Run("registerProcedureWithCypher handles handler types", func(t *testing.T) {
 		before := len(cypher.ListRegisteredProcedures())
 		registerProcedureWithCypher(PluginProcedure{
@@ -419,6 +479,16 @@ func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
 		_, err = loadHeimdallPlugin(mockPluginNoType{}, "/tmp/invalid.so", nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "missing")
+	})
+
+	t.Run("extractProcedures invalid return and non-map branches", func(t *testing.T) {
+		procs, err := extractProcedures(reflect.ValueOf(badProceduresReturn{}), "x")
+		require.Error(t, err)
+		require.Nil(t, procs)
+
+		procs, err = extractProcedures(reflect.ValueOf(nonMapProcedures{}), "x")
+		require.NoError(t, err)
+		require.Empty(t, procs)
 	})
 
 	t.Run("loadPluginFile returns open error for invalid plugin file", func(t *testing.T) {
@@ -790,6 +860,21 @@ func (fqPlugin) Functions() map[string]interface{} {
 		},
 	}
 }
+
+type onlyNamePlugin struct{}
+
+func (onlyNamePlugin) Name() string { return "only-name" }
+func (onlyNamePlugin) Functions() map[string]interface{} {
+	return map[string]interface{}{}
+}
+
+type badProceduresReturn struct{}
+
+func (badProceduresReturn) Procedures() (map[string]interface{}, error) { return nil, nil }
+
+type nonMapProcedures struct{}
+
+func (nonMapProcedures) Procedures() string { return "bad" }
 
 type mockTypeFunctionValue struct{}
 

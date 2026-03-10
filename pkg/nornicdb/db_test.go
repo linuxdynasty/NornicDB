@@ -11,6 +11,7 @@ import (
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/decay"
+	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -1543,6 +1544,23 @@ func TestListEdges(t *testing.T) {
 		_, err = db.ListEdges(ctx, "", 100, 0)
 		assert.ErrorIs(t, err, ErrClosed)
 	})
+
+	t.Run("applies offset and limit", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		n1, _ := db.CreateNode(ctx, []string{"EdgePageTest"}, nil)
+		n2, _ := db.CreateNode(ctx, []string{"EdgePageTest"}, nil)
+
+		for i := 0; i < 4; i++ {
+			_, _ = db.CreateEdge(ctx, n1.ID, n2.ID, "PAGE_TYPE", map[string]interface{}{"i": i})
+		}
+
+		edges, err := db.ListEdges(ctx, "PAGE_TYPE", 2, 1)
+		require.NoError(t, err)
+		require.Len(t, edges, 2)
+	})
 }
 
 func TestGetEdge(t *testing.T) {
@@ -1806,6 +1824,60 @@ func TestFindSimilar(t *testing.T) {
 		_, err = db.FindSimilar(ctx, "test-id", 10)
 		assert.ErrorIs(t, err, ErrClosed)
 	})
+
+	t.Run("propagates context cancellation from streaming", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		mem1, _ := db.Store(ctx, &Memory{
+			Content:         "cancel stream root",
+			ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0}},
+		})
+		for i := 0; i < 32; i++ {
+			_, _ = db.Store(ctx, &Memory{
+				Content:         "cancel stream candidate",
+				ChunkEmbeddings: [][]float32{{0.9, 0.1, 0.0}},
+			})
+		}
+
+		cancelCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		_, err = db.FindSimilar(cancelCtx, mem1.ID, 5)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "context canceled")
+	})
+}
+
+func TestSearchAndHybridSearch_RetryWhileIndexBuilding(t *testing.T) {
+	ctx := context.Background()
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	ns := storage.NewNamespacedEngine(base, "nornic")
+	svc := search.NewService(ns) // Intentionally not pre-built.
+
+	db := &DB{
+		config:            DefaultConfig(),
+		storage:           ns,
+		baseStorage:       base,
+		searchServices:    map[string]*dbSearchService{},
+		inferenceServices: map[string]*inference.Engine{},
+		buildCtx:          context.Background(),
+	}
+	db.searchServices["nornic"] = &dbSearchService{
+		dbName:    "nornic",
+		engine:    ns,
+		svc:       svc,
+		buildDone: make(chan struct{}),
+	}
+
+	results, err := db.Search(ctx, "missing", nil, 10)
+	require.NoError(t, err)
+	require.NotNil(t, results)
+
+	hybrid, err := db.HybridSearch(ctx, "missing", nil, nil, 10)
+	require.NoError(t, err)
+	require.NotNil(t, hybrid)
 }
 
 // =============================================================================

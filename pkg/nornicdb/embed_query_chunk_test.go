@@ -600,4 +600,68 @@ func TestDB_GetOrCreateEmbedderForDB_FallbackBranches(t *testing.T) {
 		require.GreaterOrEqual(t, createCalls.Load(), int64(1))
 		require.LessOrEqual(t, createCalls.Load(), int64(2))
 	})
+
+	t.Run("single-flight waiter returns embedder when creator populates registry", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 8}
+		target := &factoryTestEmbedder{dims: 8}
+		keyCfg := &embed.Config{
+			Provider:   "openai",
+			Model:      "wait-success",
+			Dimensions: 8,
+			APIURL:     "https://example.invalid",
+			APIKey:     "k",
+		}
+		key := embedConfigKey(keyCfg)
+
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return keyCfg, nil
+			},
+			embedderCreate: map[string]chan struct{}{
+				key: make(chan struct{}),
+			},
+			embedderRegistry: map[string]embed.Embedder{},
+		}
+
+		done := make(chan struct{})
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			db.embedderRegistryMu.Lock()
+			db.embedderRegistry[key] = target
+			db.embedderRegistryMu.Unlock()
+			db.embedderCreateMu.Lock()
+			close(db.embedderCreate[key])
+			db.embedderCreateMu.Unlock()
+			close(done)
+		}()
+
+		got, err := db.getOrCreateEmbedderForDB("tenant_wait_success")
+		require.NoError(t, err)
+		require.Same(t, target, got)
+		<-done
+	})
+
+	t.Run("factory returns nil embedder and falls back", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 8}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return &embed.Config{
+					Provider:   "openai",
+					Model:      "nil-embedder",
+					Dimensions: 8,
+					APIURL:     "https://example.invalid",
+					APIKey:     "k",
+				}, nil
+			},
+			embedderFactory: func(cfg *embed.Config) (embed.Embedder, error) {
+				return nil, nil
+			},
+		}
+
+		got, err := db.getOrCreateEmbedderForDB("tenant_nil_embedder")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+	})
 }

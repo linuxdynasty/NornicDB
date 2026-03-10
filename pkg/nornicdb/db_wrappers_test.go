@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -356,5 +358,37 @@ func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
 		db.SetEmbedder(next)
 		require.Same(t, q, db.embedQueue, "existing queue should be reused")
 		require.Same(t, next, db.embedQueue.embedder, "existing queue should receive new embedder")
+	})
+
+	t.Run("reuses existing queue and starts clustering timer when enabled", func(t *testing.T) {
+		cleanup := featureflags.WithGPUClusteringEnabled()
+		t.Cleanup(cleanup)
+
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		cfg := DefaultConfig()
+		cfg.Memory.KmeansClusterInterval = 5 * time.Millisecond
+
+		queueCfg := DefaultEmbedQueueConfig()
+		queueCfg.DeferWorkerStart = true
+		q := NewEmbedQueue(newMockEmbedder(), base, queueCfg)
+		t.Cleanup(q.Close)
+
+		db := &DB{
+			config:            cfg,
+			baseStorage:       base,
+			storage:           storage.NewNamespacedEngine(base, "nornic"),
+			embedQueue:        q,
+			searchServices:    map[string]*dbSearchService{},
+			buildCtx:          context.Background(),
+			embedWorkerConfig: DefaultEmbedQueueConfig(),
+		}
+
+		db.SetEmbedder(newMockEmbedder())
+		require.NotNil(t, db.clusterTicker, "clustering timer should start when GPU clustering is enabled")
+
+		time.Sleep(15 * time.Millisecond)
+		db.stopClusteringTimer()
+		require.Nil(t, db.clusterTicker)
 	})
 }
