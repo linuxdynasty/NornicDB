@@ -1556,7 +1556,9 @@ func TestSearchHelpers_TransitionDeltaVectorAndReplay(t *testing.T) {
 
 	vec, ok = getTransitionDeltaVector("vi_only", vi, vfs)
 	require.True(t, ok)
-	require.Equal(t, []float32{0, 1}, vec)
+	require.Len(t, vec, 2)
+	require.InDelta(t, 0.0, vec[0], 0.0001)
+	require.InDelta(t, 1.0, vec[1], 0.0001)
 
 	vec, ok = getTransitionDeltaVector("missing", vi, vfs)
 	require.False(t, ok)

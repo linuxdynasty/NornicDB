@@ -383,4 +383,69 @@ func TestDB_GetOrCreateEmbedderForDB_FallbackBranches(t *testing.T) {
 		db.embedderRegistryMu.RUnlock()
 		require.False(t, exists)
 	})
+
+	t.Run("single-flight waiter falls back when creation fails", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 8}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return &embed.Config{
+					Provider:   "openai",
+					Model:      "singleflight-failure",
+					Dimensions: 8,
+					APIURL:     "https://example.invalid",
+					APIKey:     "k",
+				}, nil
+			},
+		}
+
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var createCalls atomic.Int64
+		db.embedderFactory = func(cfg *embed.Config) (embed.Embedder, error) {
+			createCalls.Add(1)
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil, errors.New("factory failed")
+		}
+
+		type callResult struct {
+			embedder embed.Embedder
+			err      error
+		}
+		resCh1 := make(chan callResult, 1)
+		resCh2 := make(chan callResult, 1)
+		go func() {
+			e, err := db.getOrCreateEmbedderForDB("tenant_a")
+			resCh1 <- callResult{embedder: e, err: err}
+		}()
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("factory did not start")
+		}
+		go func() {
+			e, err := db.getOrCreateEmbedderForDB("tenant_a")
+			resCh2 <- callResult{embedder: e, err: err}
+		}()
+
+		require.Eventually(t, func() bool {
+			db.embedderCreateMu.Lock()
+			inflight := len(db.embedderCreate)
+			db.embedderCreateMu.Unlock()
+			return createCalls.Load() == 1 && inflight == 1
+		}, time.Second, 10*time.Millisecond)
+
+		close(release)
+		r1 := <-resCh1
+		r2 := <-resCh2
+		require.NoError(t, r1.err)
+		require.NoError(t, r2.err)
+		require.Same(t, fallback, r1.embedder)
+		require.Same(t, fallback, r2.embedder)
+		require.Equal(t, int64(1), createCalls.Load(), "failed creation should still be single-flight")
+	})
 }

@@ -179,6 +179,9 @@ func TestDBWrapperHelpers_EmbeddingAndPendingCounts(t *testing.T) {
 func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 	origMode, hadMode := os.LookupEnv("NORNICDB_CLUSTER_MODE")
 	origDataDir, hadData := os.LookupEnv("NORNICDB_CLUSTER_DATA_DIR")
+	origRole, hadRole := os.LookupEnv("NORNICDB_CLUSTER_HA_ROLE")
+	origPeer, hadPeer := os.LookupEnv("NORNICDB_CLUSTER_HA_PEER_ADDR")
+	origBind, hadBind := os.LookupEnv("NORNICDB_CLUSTER_BIND_ADDR")
 	t.Cleanup(func() {
 		if hadMode {
 			_ = os.Setenv("NORNICDB_CLUSTER_MODE", origMode)
@@ -189,6 +192,21 @@ func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 			_ = os.Setenv("NORNICDB_CLUSTER_DATA_DIR", origDataDir)
 		} else {
 			_ = os.Unsetenv("NORNICDB_CLUSTER_DATA_DIR")
+		}
+		if hadRole {
+			_ = os.Setenv("NORNICDB_CLUSTER_HA_ROLE", origRole)
+		} else {
+			_ = os.Unsetenv("NORNICDB_CLUSTER_HA_ROLE")
+		}
+		if hadPeer {
+			_ = os.Setenv("NORNICDB_CLUSTER_HA_PEER_ADDR", origPeer)
+		} else {
+			_ = os.Unsetenv("NORNICDB_CLUSTER_HA_PEER_ADDR")
+		}
+		if hadBind {
+			_ = os.Setenv("NORNICDB_CLUSTER_BIND_ADDR", origBind)
+		} else {
+			_ = os.Unsetenv("NORNICDB_CLUSTER_BIND_ADDR")
 		}
 	})
 
@@ -249,6 +267,30 @@ func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "replication: create replicator")
 	require.Contains(t, err.Error(), "invalid HA role")
+
+	// Valid HA primary config exercises successful replication wiring/start path.
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_HA_ROLE", "primary"))
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_HA_PEER_ADDR", "127.0.0.1:65534"))
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_BIND_ADDR", "127.0.0.1:0"))
+	replicated, err := db.maybeEnableReplication(base)
+	require.NoError(t, err)
+	require.NotSame(t, base, replicated)
+	require.NotNil(t, db.replicator)
+	require.NotNil(t, db.replicationAdapter)
+	require.NotNil(t, db.replicationTrans)
+
+	if db.replicator != nil {
+		_ = db.replicator.Shutdown()
+	}
+	if db.replicationTrans != nil {
+		_ = db.replicationTrans.Close()
+	}
+	if db.replicationAdapter != nil {
+		_ = db.replicationAdapter.Close()
+	}
+	db.replicator = nil
+	db.replicationTrans = nil
+	db.replicationAdapter = nil
 }
 
 func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
