@@ -1821,6 +1821,96 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.Equal(t, []storage.NodeID{"n3", "n3"}, qe.marked)
 	})
 
+	t.Run("processNextBatch skips when node is deleted before save", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		node := &storage.Node{
+			ID:         storage.NodeID("n4"),
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"content": "hello"},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		qe := &queueBranchEngine{
+			Engine:           engine,
+			findNode:         &storage.Node{ID: storage.NodeID("n4")},
+			secondGetNodeErr: storage.ErrNotFound,
+		}
+		ew := &EmbedWorker{
+			embedder: newMockEmbedder(),
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.False(t, didWork)
+		require.Equal(t, []storage.NodeID{"n4", "n4"}, qe.marked)
+	})
+
+	t.Run("startWorkers guards closed and starts one worker when numWorkers<1", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		cfg := &EmbedWorkerConfig{
+			NumWorkers:       0, // triggers minimum worker fallback branch
+			ScanInterval:     20 * time.Millisecond,
+			BatchDelay:       time.Millisecond,
+			MaxRetries:       1,
+			ChunkSize:        64,
+			ChunkOverlap:     8,
+			DeferWorkerStart: true,
+		}
+		worker := NewEmbedWorker(newMockEmbedder(), engine, cfg)
+		defer worker.Close()
+
+		worker.closed.Store(true)
+		worker.StartWorkers()
+		require.False(t, worker.workersStarted)
+
+		worker.closed.Store(false)
+		worker.StartWorkers()
+		require.True(t, worker.workersStarted)
+	})
+
+	t.Run("close stops debounce timer safely", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		worker := NewEmbedWorker(newMockEmbedder(), engine, &EmbedWorkerConfig{
+			NumWorkers:       1,
+			ScanInterval:     20 * time.Millisecond,
+			BatchDelay:       time.Millisecond,
+			MaxRetries:       1,
+			ChunkSize:        64,
+			ChunkOverlap:     8,
+			DeferWorkerStart: true,
+		})
+		worker.clusterDebounceMu.Lock()
+		worker.clusterDebounceTimer = time.NewTimer(time.Hour)
+		worker.clusterDebounceMu.Unlock()
+		worker.Close()
+
+		worker.clusterDebounceMu.Lock()
+		defer worker.clusterDebounceMu.Unlock()
+		require.Nil(t, worker.clusterDebounceTimer)
+	})
+
+	t.Run("trigger no-op when closed and non-blocking when already queued", func(t *testing.T) {
+		worker := &EmbedWorker{
+			trigger: make(chan struct{}, 1),
+		}
+		worker.closed.Store(true)
+		worker.Trigger()
+		require.Len(t, worker.trigger, 0)
+
+		worker.closed.Store(false)
+		worker.Trigger()
+		require.Len(t, worker.trigger, 1)
+		worker.Trigger()
+		require.Len(t, worker.trigger, 1)
+	})
+
 	t.Run("worker waits for embedder then ticker picks up new node", func(t *testing.T) {
 		base := storage.NewMemoryEngine()
 		engine := storage.NewNamespacedEngine(base, "test")

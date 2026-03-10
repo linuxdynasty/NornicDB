@@ -91,4 +91,23 @@ func TestInferenceServices_AdditionalBranches(t *testing.T) {
 		require.NotNil(t, svc.GetTopologyIntegration())
 		require.NotNil(t, svc.GetKalmanAdapter())
 	})
+
+	t.Run("ResetInferenceService with empty dbName resets default service", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = true
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		before, err := db.GetOrCreateInferenceService("", nil)
+		require.NoError(t, err)
+		require.NotNil(t, before)
+
+		db.ResetInferenceService("")
+
+		after, err := db.GetOrCreateInferenceService("", nil)
+		require.NoError(t, err)
+		require.NotNil(t, after)
+		require.NotSame(t, before, after)
+	})
 }

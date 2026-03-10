@@ -131,6 +131,15 @@ func TestOpen(t *testing.T) {
 		require.Contains(t, err.Error(), "unsupported storage serializer")
 	})
 
+	t.Run("opens with msgpack storage serializer", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Database.StorageSerializer = "msgpack"
+		db, err := Open(t.TempDir(), cfg)
+		require.NoError(t, err)
+		require.NotNil(t, db)
+		require.NoError(t, db.Close())
+	})
+
 	t.Run("returns error when encryption enabled without password", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.Database.EncryptionEnabled = true
@@ -164,6 +173,27 @@ func TestOpen(t *testing.T) {
 		secondSalt, err := os.ReadFile(saltPath)
 		require.NoError(t, err)
 		require.Equal(t, firstSalt, secondSalt)
+	})
+
+	t.Run("returns persistent open error when dataDir is a file", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0600))
+
+		_, err := Open(filePath, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to open persistent storage")
+	})
+
+	t.Run("returns error when encryption cannot create data directory", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "blocked")
+		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0600))
+
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "pw"
+		_, err := Open(filePath, cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to create data directory")
 	})
 }
 
@@ -1378,6 +1408,19 @@ func TestBootstrapCanonicalSchema(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "schema manager not initialized")
 	})
+
+	t.Run("fails when existing data violates canonical required constraints", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Existing invalid Memory node (missing required canonical properties) should fail bootstrap validation.
+		_, err = db.ExecuteCypher(context.Background(), "CREATE (:Memory {id: 'bad-before-bootstrap'})", nil)
+		require.NoError(t, err)
+
+		err = db.BootstrapCanonicalSchema(context.Background())
+		require.Error(t, err)
+	})
 }
 
 // =============================================================================
@@ -2000,6 +2043,18 @@ func TestSearchAndHybridSearch_RetryWhileIndexBuilding(t *testing.T) {
 	hybrid, err := db.HybridSearch(ctx, "missing", nil, nil, 10)
 	require.NoError(t, err)
 	require.NotNil(t, hybrid)
+}
+
+func TestHybridSearch_InvalidUnnamespacedStoragePanics(t *testing.T) {
+	db := &DB{
+		config:            DefaultConfig(),
+		searchServices:    map[string]*dbSearchService{},
+		inferenceServices: map[string]*inference.Engine{},
+	}
+
+	require.Panics(t, func() {
+		_, _ = db.HybridSearch(context.Background(), "query", []float32{0.1, 0.2}, nil, 5)
+	})
 }
 
 // =============================================================================

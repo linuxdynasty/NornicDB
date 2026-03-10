@@ -463,6 +463,39 @@ func TestExecuteCypherTypedAndFirst(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestExecuteCypherTyped_DecodeErrorPath(t *testing.T) {
+	db, err := Open("", nil)
+	require.NoError(t, err)
+	defer db.Close()
+
+	type badRow struct {
+		Alive bool `cypher:"alive"`
+	}
+
+	// String cannot be assigned to bool in assignValue -> ExecuteCypherTyped should return decode error.
+	_, err = ExecuteCypherTyped[badRow](db, context.Background(), "RETURN 'not-bool' AS alive", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to decode row")
+}
+
+func TestDecodeRow_MapWithoutPropertiesAndFieldFallbacks(t *testing.T) {
+	type mixed struct {
+		Name       string `cypher:"name"`
+		LegacyCode int
+	}
+
+	var out mixed
+	err := decodeRow([]string{"n"}, []interface{}{
+		map[string]interface{}{
+			"name":       "carol",
+			"LegacyCode": int64(7), // field-name fallback branch
+		},
+	}, &out)
+	require.NoError(t, err)
+	require.Equal(t, "carol", out.Name)
+	require.Equal(t, 7, out.LegacyCode)
+}
+
 func TestDB_AdminSmallHelpers(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.AsyncWritesEnabled = true
@@ -485,6 +518,12 @@ func TestDB_AdminSmallHelpers(t *testing.T) {
 
 	require.NoError(t, db.Close())
 	require.Nil(t, db.GetSearchStats(), "closed DB should return nil stats")
+}
+
+func TestToStringValue(t *testing.T) {
+	require.Equal(t, "", toStringValue(nil))
+	require.Equal(t, "abc", toStringValue("abc"))
+	require.Equal(t, "42", toStringValue(42))
 }
 
 func TestDB_GetSearchStats_WithClusterStatsBranch(t *testing.T) {

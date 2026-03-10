@@ -19,6 +19,12 @@ type apocAdapterTestEngine struct {
 	schema     *storage.SchemaManager
 }
 
+type apocCreateErrorEngine struct {
+	*apocAdapterTestEngine
+	createNodeErr error
+	createEdgeErr error
+}
+
 func newAPOCAdapterTestEngine() *apocAdapterTestEngine {
 	return &apocAdapterTestEngine{
 		nextNodeID: 1,
@@ -27,6 +33,20 @@ func newAPOCAdapterTestEngine() *apocAdapterTestEngine {
 		edges:      make(map[storage.EdgeID]*storage.Edge),
 		schema:     storage.NewSchemaManager(),
 	}
+}
+
+func (e *apocCreateErrorEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
+	if e.createNodeErr != nil {
+		return "", e.createNodeErr
+	}
+	return e.apocAdapterTestEngine.CreateNode(node)
+}
+
+func (e *apocCreateErrorEngine) CreateEdge(edge *storage.Edge) error {
+	if e.createEdgeErr != nil {
+		return e.createEdgeErr
+	}
+	return e.apocAdapterTestEngine.CreateEdge(edge)
 }
 
 func cloneNode(n *storage.Node) *storage.Node {
@@ -469,4 +489,49 @@ func TestAPOCStorageAdapter_ErrorMappings(t *testing.T) {
 	assert.Equal(t, int64(0), rel.ID)
 	assert.Equal(t, int64(0), rel.StartNode)
 	assert.Equal(t, int64(0), rel.EndNode)
+}
+
+func TestAPOCStorageAdapter_CreateErrorsAndDirectionalDegree(t *testing.T) {
+	t.Run("create node and relationship propagate storage errors", func(t *testing.T) {
+		engine := &apocCreateErrorEngine{
+			apocAdapterTestEngine: newAPOCAdapterTestEngine(),
+			createNodeErr:         fmt.Errorf("create node boom"),
+		}
+		adapter := NewAPOCStorageAdapter(engine)
+
+		_, err := adapter.CreateNode([]string{"X"}, map[string]interface{}{"k": "v"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "create node boom")
+
+		engine.createNodeErr = nil
+		engine.createEdgeErr = fmt.Errorf("create edge boom")
+		_, _ = adapter.CreateNode([]string{"X"}, nil)
+		_, _ = adapter.CreateNode([]string{"X"}, nil)
+		_, err = adapter.CreateRelationship(1, 2, "REL", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "create edge boom")
+	})
+
+	t.Run("degree respects direction and relationship type filter", func(t *testing.T) {
+		engine := newAPOCAdapterTestEngine()
+		adapter := NewAPOCStorageAdapter(engine)
+		for _, id := range []string{"1", "2", "3"} {
+			engine.nodes[storage.NodeID(id)] = &storage.Node{ID: storage.NodeID(id), Labels: []string{"Node"}, Properties: map[string]interface{}{}}
+		}
+		engine.edges["10"] = &storage.Edge{ID: "10", StartNode: "1", EndNode: "2", Type: "KNOWS"}
+		engine.edges["11"] = &storage.Edge{ID: "11", StartNode: "3", EndNode: "1", Type: "LIKES"}
+		engine.edges["12"] = &storage.Edge{ID: "12", StartNode: "1", EndNode: "3", Type: "LIKES"}
+
+		outgoingLikes, err := adapter.GetNodeDegree(1, "LIKES", apocstorage.DirectionOutgoing)
+		require.NoError(t, err)
+		require.Equal(t, 1, outgoingLikes)
+
+		incomingLikes, err := adapter.GetNodeDegree(1, "LIKES", apocstorage.DirectionIncoming)
+		require.NoError(t, err)
+		require.Equal(t, 1, incomingLikes)
+
+		allRels, err := adapter.GetNodeDegree(1, "", apocstorage.DirectionBoth)
+		require.NoError(t, err)
+		require.Equal(t, 3, allRels)
+	})
 }
