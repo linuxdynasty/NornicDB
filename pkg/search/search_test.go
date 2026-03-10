@@ -1329,6 +1329,31 @@ func TestSearchHelpers_HNSWLexicalSeedsAndGetOrCreateBranches(t *testing.T) {
 	idx2, err := svc.getOrCreateHNSWIndex(context.Background(), 2)
 	require.NoError(t, err)
 	require.Same(t, idx, idx2)
+
+	// File-store build path with lexical seeds.
+	dir := t.TempDir()
+	vfs, err := NewVectorFileStore(filepath.Join(dir, "vectors"), 2)
+	require.NoError(t, err)
+	defer vfs.Close()
+	require.NoError(t, vfs.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, vfs.Add("doc-b", []float32{0, 1}))
+
+	svc.mu.Lock()
+	svc.vectorFileStore = vfs
+	svc.vectorIndex = nil
+	svc.fulltextIndex = &seedOverrideFulltext{
+		FulltextIndex: NewFulltextIndex(),
+		seedIDs:       []string{"doc-a"},
+	}
+	svc.mu.Unlock()
+	svc.hnswMu.Lock()
+	svc.hnswIndex = nil
+	svc.hnswMu.Unlock()
+
+	idx, err = svc.getOrCreateHNSWIndex(context.Background(), 2)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+	require.Equal(t, 2, idx.Size())
 }
 
 func TestSearchHelpers_BuildHNSWForTransition_Branches(t *testing.T) {

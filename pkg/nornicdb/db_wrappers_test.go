@@ -237,6 +237,18 @@ func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 	_, err = db.maybeEnableReplication(base)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "replication: create storage adapter")
+
+	// Invalid HA role reaches a different replicator-construction failure path.
+	validDataDir := t.TempDir()
+	cfg.Database.DataDir = validDataDir
+	db.config = cfg
+	require.NoError(t, os.Unsetenv("NORNICDB_CLUSTER_DATA_DIR"))
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_MODE", "ha_standby"))
+	t.Setenv("NORNICDB_CLUSTER_HA_ROLE", "invalid-role")
+	_, err = db.maybeEnableReplication(base)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "replication: create replicator")
+	require.Contains(t, err.Error(), "invalid HA role")
 }
 
 func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
