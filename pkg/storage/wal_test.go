@@ -2335,35 +2335,23 @@ func TestWAL_TruncateAfterSnapshot_EarlyErrorBranches(t *testing.T) {
 		require.ErrorContains(t, err, "failed to close for truncate")
 	})
 
-	t.Run("returns rename error when wal path becomes directory during truncate", func(t *testing.T) {
+	t.Run("returns rename error when wal active path is a directory", func(t *testing.T) {
 		dir := t.TempDir()
-		wal, err := NewWAL("", &WALConfig{Dir: dir, SyncMode: "immediate"})
-		require.NoError(t, err)
-		defer wal.Close()
-
-		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{
-			Node: &Node{ID: NodeID(prefixTestID("rename-race"))},
-		}))
-		require.NoError(t, wal.Sync())
-
 		walPath := walActivePath(dir)
-		tmpPath := walPath + ".truncate.tmp"
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) {
-				if _, statErr := os.Stat(tmpPath); statErr == nil {
-					_ = os.Remove(walPath)
-					_ = os.Mkdir(walPath, 0755)
-					return
-				}
-				time.Sleep(1 * time.Millisecond)
-			}
-		}()
+		require.NoError(t, os.MkdirAll(walPath, 0755))
 
-		err = wal.TruncateAfterSnapshot(0)
-		<-done
+		// Keep WAL object valid for sync/close path; active path intentionally points to a directory.
+		backingFile, err := os.OpenFile(filepath.Join(dir, "backing.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		require.NoError(t, err)
+		defer backingFile.Close()
+
+		w := &WAL{
+			config: &WALConfig{Dir: dir, SyncMode: "none"},
+			file:   backingFile,
+			writer: bufio.NewWriterSize(bytes.NewBuffer(nil), 16),
+		}
+
+		err = w.TruncateAfterSnapshot(0)
 		require.ErrorContains(t, err, "failed to rename truncated WAL")
 	})
 }
