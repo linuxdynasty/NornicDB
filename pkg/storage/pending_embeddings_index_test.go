@@ -397,6 +397,51 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 		assert.Equal(t, 0, engine.PendingEmbeddingsCount(), "stale entries should be cleaned up")
 	})
 
+	t.Run("FindNodeNeedingEmbedding_handles_malformed_pending_keys_and_decode_failures", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+		badID := NodeID(prefixTestID("decode-bad"))
+		require.NoError(t, engine.db.Update(func(txn *badger.Txn) error {
+			// malformed pending key with no node id (len<=1 path)
+			if err := txn.Set([]byte{prefixPendingEmbed}, []byte{}); err != nil {
+				return err
+			}
+			// valid pending key but corrupt node payload (decode error path)
+			if err := txn.Set(pendingEmbedKey(badID), []byte{}); err != nil {
+				return err
+			}
+			return txn.Set(nodeKey(badID), []byte("not-a-node"))
+		}))
+
+		found := engine.FindNodeNeedingEmbedding()
+		assert.Nil(t, found)
+
+		// Corrupt entry should be removed; malformed key remains ignored.
+		require.NoError(t, engine.db.View(func(txn *badger.Txn) error {
+			_, err := txn.Get(pendingEmbedKey(badID))
+			assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+			_, err = txn.Get([]byte{prefixPendingEmbed})
+			require.NoError(t, err)
+			return nil
+		}))
+	})
+
+	t.Run("FindNodeNeedingEmbedding_removes_nodes_that_no_longer_need_embedding", func(t *testing.T) {
+		engine := newTestBadgerEngineForPending(t)
+		node := &Node{
+			ID:              NodeID(prefixTestID("no-embed-needed")),
+			Labels:          []string{"Test"},
+			Properties:      map[string]interface{}{"name": "already-clean"},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2}},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+		engine.AddToPendingEmbeddings(node.ID)
+		assert.Equal(t, 1, engine.PendingEmbeddingsCount())
+		found := engine.FindNodeNeedingEmbedding()
+		assert.Nil(t, found)
+		assert.Equal(t, 0, engine.PendingEmbeddingsCount())
+	})
+
 	t.Run("UpdateNodeEmbedding_only_updates_existing_nodes", func(t *testing.T) {
 		engine := newTestBadgerEngineForPending(t)
 

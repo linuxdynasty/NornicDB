@@ -1056,6 +1056,47 @@ func TestWAL_ApplyRetention(t *testing.T) {
 		defer wal.Close()
 		require.NoError(t, wal.ApplyRetention(0))
 	})
+
+	t.Run("retention respects age and max-segment limits together", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultWALConfig()
+		cfg.Dir = dir
+		cfg.RetentionMaxAge = 30 * time.Minute
+		cfg.RetentionMaxSegments = 1
+
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		now := time.Now()
+		segDir := walSegmentsDir(dir)
+		segments := []WALSegment{
+			{FirstSeq: 1, LastSeq: 2, CreatedAt: now.Add(-2 * time.Hour), Path: "seg-1-2.wal"},
+			{FirstSeq: 3, LastSeq: 4, CreatedAt: now.Add(-90 * time.Minute), Path: "seg-3-4.wal"},
+			{FirstSeq: 5, LastSeq: 6, CreatedAt: now.Add(-10 * time.Minute), Path: "seg-5-6.wal"}, // kept by age
+			{FirstSeq: 7, LastSeq: 8, CreatedAt: now.Add(-2 * time.Hour), Path: "seg-7-8.wal"},    // > snapshot kept
+		}
+		for _, seg := range segments {
+			require.NoError(t, os.WriteFile(filepath.Join(segDir, seg.Path), []byte("segment"), 0644))
+		}
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version:  walManifestVersion,
+			Segments: segments,
+		}))
+
+		require.NoError(t, wal.ApplyRetention(6))
+
+		manifest, loadErr := loadWALManifest(dir)
+		require.NoError(t, loadErr)
+		var kept []string
+		for _, seg := range manifest.Segments {
+			kept = append(kept, seg.Path)
+		}
+		assert.Contains(t, kept, "seg-5-6.wal") // kept by age
+		assert.Contains(t, kept, "seg-7-8.wal") // beyond snapshot
+		assert.Contains(t, kept, "seg-3-4.wal") // newest remaining candidate due max segment=1
+		assert.NotContains(t, kept, "seg-1-2.wal")
+	})
 }
 
 func TestSnapshot_CreateAndLoad(t *testing.T) {

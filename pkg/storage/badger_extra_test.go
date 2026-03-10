@@ -336,6 +336,42 @@ func TestBadgerEngine_BulkCreateNodes_Extra(t *testing.T) {
 	all, err := b.AllNodes()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(all), 2)
+
+	t.Run("stores oversized node embeddings as separate chunks", func(t *testing.T) {
+		chunks := make([][]float32, 4)
+		for c := range chunks {
+			chunks[c] = make([]float32, 10000) // each chunk < badger value limit
+			for i := range chunks[c] {
+				chunks[c][i] = float32((c + i) % 7)
+			}
+		}
+		node := &Node{
+			ID:              NodeID(prefixTestID("bulk-oversized")),
+			Labels:          []string{"Doc"},
+			Properties:      map[string]interface{}{"name": "oversized"},
+			ChunkEmbeddings: chunks,
+		}
+		err := b.BulkCreateNodes([]*Node{node})
+		require.NoError(t, err)
+
+		loaded, getErr := b.GetNode(node.ID)
+		require.NoError(t, getErr)
+		require.NotNil(t, loaded)
+		require.Len(t, loaded.ChunkEmbeddings, len(chunks))
+		require.Len(t, loaded.ChunkEmbeddings[0], len(chunks[0]))
+	})
+
+	t.Run("returns encode error for unsupported properties", func(t *testing.T) {
+		node := &Node{
+			ID:     NodeID(prefixTestID("bulk-invalid-prop")),
+			Labels: []string{"Doc"},
+			Properties: map[string]interface{}{
+				"bad": make(chan int),
+			},
+		}
+		err := b.BulkCreateNodes([]*Node{node})
+		require.ErrorContains(t, err, "failed to encode node")
+	})
 }
 
 func TestBadgerEngine_BulkCreateNodes_ExtraEmpty(t *testing.T) {

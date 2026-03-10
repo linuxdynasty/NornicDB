@@ -884,6 +884,60 @@ func TestDecodeNodeWithEmbeddings(t *testing.T) {
 			return nil
 		}))
 	})
+
+	t.Run("supports numeric chunk_count variants and zero/default paths", func(t *testing.T) {
+		type testCase struct {
+			name       string
+			chunkCount interface{}
+			wantChunks int
+		}
+		cases := []testCase{
+			{name: "int8", chunkCount: int8(1), wantChunks: 1},
+			{name: "uint16", chunkCount: uint16(1), wantChunks: 1},
+			{name: "uint64", chunkCount: uint64(1), wantChunks: 1},
+			{name: "float64", chunkCount: float64(1), wantChunks: 1},
+			{name: "zero", chunkCount: 0, wantChunks: 0},
+			{name: "nil default", chunkCount: nil, wantChunks: 0},
+		}
+
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				engine := createTestBadgerEngine(t)
+				nodeID := NodeID(prefixTestID("embed-meta-" + tc.name))
+				data, err := encodeValue(&Node{
+					ID:                         nodeID,
+					EmbeddingsStoredSeparately: true,
+					EmbedMeta:                  map[string]any{"chunk_count": tc.chunkCount},
+				})
+				require.NoError(t, err)
+
+				if tc.wantChunks > 0 {
+					require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+						emb, err := encodeEmbedding([]float32{7, 8})
+						if err != nil {
+							return err
+						}
+						return txn.Set(embeddingKey(nodeID, 0), emb)
+					}))
+				}
+
+				require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+					node, err := decodeNodeWithEmbeddings(txn, data, nodeID)
+					require.NoError(t, err)
+					require.NotNil(t, node)
+					if tc.wantChunks == 0 {
+						assert.Empty(t, node.ChunkEmbeddings)
+						assert.True(t, node.EmbeddingsStoredSeparately)
+					} else {
+						assert.Len(t, node.ChunkEmbeddings, tc.wantChunks)
+						assert.False(t, node.EmbeddingsStoredSeparately)
+					}
+					return nil
+				}))
+			})
+		}
+	})
 }
 
 func TestSeparateEmbeddingChunkHelpers(t *testing.T) {
