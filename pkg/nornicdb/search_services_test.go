@@ -11,6 +11,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSearchServices_HelperBranches(t *testing.T) {
+	t.Run("splitQualifiedID validity", func(t *testing.T) {
+		dbName, local, ok := splitQualifiedID("tenant:node1")
+		require.True(t, ok)
+		require.Equal(t, "tenant", dbName)
+		require.Equal(t, "node1", local)
+
+		_, _, ok = splitQualifiedID("tenant:")
+		require.False(t, ok)
+		_, _, ok = splitQualifiedID(":node")
+		require.False(t, ok)
+		_, _, ok = splitQualifiedID("not-qualified")
+		require.False(t, ok)
+	})
+
+	t.Run("defaultDatabaseName panics when storage is not namespaced", func(t *testing.T) {
+		db := &DB{storage: storage.NewMemoryEngine()}
+		require.Panics(t, func() {
+			_ = db.defaultDatabaseName()
+		})
+	})
+
+	t.Run("kmeansNumClusters defaults to zero with nil config", func(t *testing.T) {
+		db := &DB{}
+		require.Equal(t, 0, db.kmeansNumClusters())
+	})
+}
+
 func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	cleanup := featureflags.WithGPUClusteringDisabled()
 	t.Cleanup(cleanup)
@@ -218,6 +246,76 @@ func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
 	})
 	after := svc.EmbeddingCount()
 	require.Equal(t, before, after)
+}
+
+func TestSearchServices_EventRemovalAndCreationErrorBranches(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	t.Run("removeNodeFromEvent unprefixed ID falls back to default db", func(t *testing.T) {
+		svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+
+		node := &storage.Node{
+			ID:              "n-local",
+			Properties:      map[string]any{"content": "remove me"},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		}
+		require.NoError(t, svc.IndexNode(node))
+		require.Equal(t, 1, svc.EmbeddingCount())
+
+		db.removeNodeFromEvent("n-local")
+		require.Eventually(t, func() bool {
+			return svc.EmbeddingCount() == 0
+		}, 2*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("system database creation is rejected", func(t *testing.T) {
+		_, err := db.getOrCreateSearchService("system", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "system database")
+	})
+
+	t.Run("indexNodeFromEvent ignores unqualified IDs", func(t *testing.T) {
+		svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		before := svc.EmbeddingCount()
+
+		db.indexNodeFromEvent(&storage.Node{
+			ID:              "unqualified",
+			Properties:      map[string]any{"content": "ignored"},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		})
+
+		require.Equal(t, before, svc.EmbeddingCount())
+	})
+
+	t.Run("indexNodeFromEvent tolerates service creation failure", func(t *testing.T) {
+		minimal := &DB{
+			embeddingDims:       3,
+			searchServices:      make(map[string]*dbSearchService),
+			searchMinSimilarity: 0.1,
+		}
+		minimal.indexNodeFromEvent(&storage.Node{
+			ID:              "tenant:n1",
+			Properties:      map[string]any{"content": "noop"},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+		})
+	})
+
+	t.Run("nil base storage returns deterministic error", func(t *testing.T) {
+		minimal := &DB{
+			embeddingDims:       3,
+			searchServices:      make(map[string]*dbSearchService),
+			searchMinSimilarity: 0.1,
+		}
+		_, err := minimal.getOrCreateSearchService("tenant_cov", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "base storage is nil")
+	})
 }
 
 // TestRunClusteringOnceAllDatabases_RespectsContextCancellation verifies that

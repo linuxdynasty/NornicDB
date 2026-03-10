@@ -319,3 +319,68 @@ func TestDB_GetOrCreateEmbedderForDB_SingleFlightAndNoStatsBlocking(t *testing.T
 	}
 	require.Equal(t, int64(1), createCalls.Load(), "expected single-flight embedder creation")
 }
+
+func TestDB_GetOrCreateEmbedderForDB_FallbackBranches(t *testing.T) {
+	t.Run("no queue configured returns nil embedder without error", func(t *testing.T) {
+		db := &DB{}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("nil resolver returns active queue embedder", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 6}
+		db := &DB{embedQueue: &EmbedQueue{embedder: fallback}}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+	})
+
+	t.Run("resolver error falls back to active queue embedder", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 6}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return nil, errors.New("resolver-failed")
+			},
+		}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+	})
+
+	t.Run("factory failure falls back to active queue embedder", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 8}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return &embed.Config{
+					Provider:   "openai",
+					Model:      "test-model",
+					Dimensions: 8,
+					APIURL:     "https://example.invalid",
+					APIKey:     "k",
+				}, nil
+			},
+			embedderFactory: func(cfg *embed.Config) (embed.Embedder, error) {
+				return nil, errors.New("factory failed")
+			},
+		}
+
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+
+		key := embedConfigKey(&embed.Config{
+			Provider:   "openai",
+			Model:      "test-model",
+			Dimensions: 8,
+			APIURL:     "https://example.invalid",
+			APIKey:     "k",
+		})
+		db.embedderRegistryMu.RLock()
+		_, exists := db.embedderRegistry[key]
+		db.embedderRegistryMu.RUnlock()
+		require.False(t, exists)
+	})
+}

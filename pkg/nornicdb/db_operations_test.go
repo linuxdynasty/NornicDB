@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -410,4 +411,21 @@ func TestDB_AdminSmallHelpers(t *testing.T) {
 
 	require.NoError(t, db.Close())
 	require.Nil(t, db.GetSearchStats(), "closed DB should return nil stats")
+}
+
+func TestDB_GetSearchStats_WithClusterStatsBranch(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	stats := db.GetSearchStats()
+	require.NotNil(t, stats)
+	require.True(t, stats.ClusteringEnabled)
+	require.GreaterOrEqual(t, stats.NumClusters, 0)
+	require.GreaterOrEqual(t, stats.ClusterIterations, 0)
 }

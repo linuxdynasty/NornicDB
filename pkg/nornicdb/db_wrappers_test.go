@@ -282,4 +282,29 @@ func TestDBWrapperHelpers_SetEmbedderBranches(t *testing.T) {
 		require.NotNil(t, db.embedQueue)
 		db.embedQueue.Close()
 	})
+
+	t.Run("reuses existing queue and swaps embedder", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		cfg := DefaultConfig()
+		cfg.Memory.KmeansClusterInterval = 0
+
+		queueCfg := DefaultEmbedQueueConfig()
+		queueCfg.DeferWorkerStart = true
+		initial := newMockEmbedder()
+		q := NewEmbedQueue(initial, base, queueCfg)
+		t.Cleanup(q.Close)
+
+		db := &DB{
+			config:      cfg,
+			baseStorage: base,
+			storage:     storage.NewNamespacedEngine(base, "nornic"),
+			embedQueue:  q,
+		}
+
+		next := newMockEmbedder()
+		db.SetEmbedder(next)
+		require.Same(t, q, db.embedQueue, "existing queue should be reused")
+		require.Same(t, next, db.embedQueue.embedder, "existing queue should receive new embedder")
+	})
 }
