@@ -396,6 +396,21 @@ func TestSearchServices_RunClusteringOnceAllDatabases_BranchMatrix(t *testing.T)
 	require.True(t, systemCreated)
 }
 
+func TestSearchServices_RunClusteringOnceAllDatabases_NilContext(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	require.NotPanics(t, func() {
+		db.runClusteringOnceAllDatabases(nil)
+	})
+}
+
 func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Memory.EmbeddingDimensions = 3
@@ -651,6 +666,31 @@ func TestSearchServices_EnsureBuilt_ContextDonePath(t *testing.T) {
 	defer cancel()
 	err := db.ensureSearchIndexesBuilt(ctx, "tenant_timeout")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestSearchServices_EnsureBuiltAndStart_ErrorBranches(t *testing.T) {
+	t.Run("ensureSearchIndexesBuilt returns not initialized error for missing service", func(t *testing.T) {
+		db := &DB{
+			storage:        storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic"),
+			searchServices: map[string]*dbSearchService{},
+		}
+
+		err := db.ensureSearchIndexesBuilt(context.Background(), "")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "search service not initialized")
+	})
+
+	t.Run("EnsureSearchIndexesBuildStarted rejects system database", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.EmbeddingDimensions = 3
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		_, err = db.EnsureSearchIndexesBuildStarted("system", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "system database")
+	})
 }
 
 func TestSearchServices_EnsurePendingFlush_ReplaysQueuedOps(t *testing.T) {

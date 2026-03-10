@@ -224,3 +224,14 @@ func TestRecoverBadgerFromSnapshotAndWAL_WALReplayError(t *testing.T) {
 	require.Nil(t, recovered)
 	require.Empty(t, backupDir)
 }
+
+func TestRecoverBadgerFromSnapshotAndWAL_PreserveDirRenameFailure(t *testing.T) {
+	// Missing directory makes the preserve step (os.Rename) fail after replay stage.
+	dataDir := filepath.Join(t.TempDir(), "missing-data-dir")
+	opts := storage.BadgerOptions{DataDir: dataDir}
+	recovered, backupDir, err := recoverBadgerFromSnapshotAndWAL(dataDir, opts)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to preserve corrupted data dir")
+	require.Nil(t, recovered)
+	require.Empty(t, backupDir)
+}

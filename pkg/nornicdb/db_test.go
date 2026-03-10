@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -35,6 +37,50 @@ type restoreFailEngine struct {
 	createEdgeErr error
 	updateEdgeErr error
 }
+
+type allNodesErrorEngine struct {
+	storage.Engine
+	allNodesErr error
+}
+
+func (e *allNodesErrorEngine) AllNodes() ([]*storage.Node, error) {
+	if e.allNodesErr != nil {
+		return nil, e.allNodesErr
+	}
+	return e.Engine.AllNodes()
+}
+
+type closeErrReplicator struct {
+	shutdownErr error
+}
+
+func (r *closeErrReplicator) Start(ctx context.Context) error { return nil }
+func (r *closeErrReplicator) Apply(cmd *replication.Command, timeout time.Duration) error {
+	return nil
+}
+func (r *closeErrReplicator) ApplyBatch(cmds []*replication.Command, timeout time.Duration) error {
+	return nil
+}
+func (r *closeErrReplicator) IsLeader() bool                          { return true }
+func (r *closeErrReplicator) LeaderAddr() string                      { return "" }
+func (r *closeErrReplicator) LeaderID() string                        { return "" }
+func (r *closeErrReplicator) Health() *replication.HealthStatus       { return nil }
+func (r *closeErrReplicator) WaitForLeader(ctx context.Context) error { return nil }
+func (r *closeErrReplicator) Shutdown() error                         { return r.shutdownErr }
+func (r *closeErrReplicator) Mode() replication.ReplicationMode       { return replication.ModeStandalone }
+func (r *closeErrReplicator) NodeID() string                          { return "n1" }
+
+type closeErrTransport struct {
+	closeErr error
+}
+
+func (t *closeErrTransport) Connect(ctx context.Context, addr string) (replication.PeerConnection, error) {
+	return nil, nil
+}
+func (t *closeErrTransport) Listen(ctx context.Context, addr string, handler replication.ConnectionHandler) error {
+	return nil
+}
+func (t *closeErrTransport) Close() error { return t.closeErr }
 
 type nilSchemaEngine struct {
 	storage.Engine
@@ -175,6 +221,62 @@ func TestOpen(t *testing.T) {
 		require.Equal(t, firstSalt, secondSalt)
 	})
 
+	t.Run("returns encryption error for wrong password on encrypted database", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "correct-password"
+		db, err := Open(dir, cfg)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		wrong := DefaultConfig()
+		wrong.Database.EncryptionEnabled = true
+		wrong.Database.EncryptionPassword = "wrong-password"
+		_, err = Open(dir, wrong)
+		require.Error(t, err)
+		require.True(t,
+			strings.Contains(err.Error(), "Encryption key mismatch") || strings.Contains(err.Error(), "ENCRYPTION ERROR"),
+			"unexpected error: %v", err,
+		)
+	})
+
+	t.Run("replaces malformed existing encryption salt", func(t *testing.T) {
+		dir := t.TempDir()
+		saltPath := filepath.Join(dir, "db.salt")
+		require.NoError(t, os.WriteFile(saltPath, []byte("short"), 0600))
+
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "correct-password"
+		db, err := Open(dir, cfg)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		salt, err := os.ReadFile(saltPath)
+		require.NoError(t, err)
+		require.Len(t, salt, 32)
+		require.NotEqual(t, []byte("short"), salt)
+	})
+
+	t.Run("returns encryption-required error when encrypted database opened without encryption config", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "correct-password"
+		db, err := Open(dir, cfg)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		_, err = Open(dir, DefaultConfig())
+		require.Error(t, err)
+		require.True(t,
+			strings.Contains(err.Error(), "Encryption key mismatch") ||
+				strings.Contains(err.Error(), "appears to be encrypted but no password was provided"),
+			"unexpected error: %v", err,
+		)
+	})
+
 	t.Run("returns persistent open error when dataDir is a file", func(t *testing.T) {
 		filePath := filepath.Join(t.TempDir(), "not-a-dir")
 		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0600))
@@ -265,6 +367,55 @@ func TestClose(t *testing.T) {
 		}
 		require.Nil(t, db.clusterTicker)
 		require.Nil(t, db.clusterTickerStop)
+	})
+
+	t.Run("closeInternal aggregates replication shutdown errors", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		db := &DB{
+			config: DefaultConfig(),
+			replicator: &closeErrReplicator{
+				shutdownErr: errors.New("replicator shutdown failed"),
+			},
+			replicationTrans: &closeErrTransport{
+				closeErr: errors.New("transport close failed"),
+			},
+			buildCtx:    ctx,
+			buildCancel: cancel,
+		}
+
+		err := db.closeInternal()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "replicator shutdown failed")
+		require.Contains(t, err.Error(), "transport close failed")
+	})
+}
+
+func TestMaybeEnableReplication(t *testing.T) {
+	t.Run("standalone mode returns base storage unchanged", func(t *testing.T) {
+		t.Setenv("NORNICDB_CLUSTER_MODE", string(replication.ModeStandalone))
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+
+		db := &DB{config: DefaultConfig()}
+		got, err := db.maybeEnableReplication(base)
+		require.NoError(t, err)
+		require.Same(t, base, got)
+	})
+
+	t.Run("returns adapter creation error for invalid cluster data dir", func(t *testing.T) {
+		t.Setenv("NORNICDB_CLUSTER_MODE", string(replication.ModeHAStandby))
+		filePath := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0600))
+		t.Setenv("NORNICDB_CLUSTER_DATA_DIR", filePath)
+
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+
+		db := &DB{config: DefaultConfig()}
+		got, err := db.maybeEnableReplication(base)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "replication: create storage adapter")
+		require.Nil(t, got)
 	})
 }
 
@@ -2044,6 +2195,28 @@ func TestFindSimilar(t *testing.T) {
 		_, err = db.FindSimilar(cancelCtx, mem1.ID, 5)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "context canceled")
+	})
+
+	t.Run("propagates streaming storage errors", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		ns := storage.NewNamespacedEngine(base, "test")
+		_, err := ns.CreateNode(&storage.Node{
+			ID:              "root",
+			Labels:          []string{"Doc"},
+			ChunkEmbeddings: [][]float32{{1.0, 0.0}},
+			Properties:      map[string]interface{}{"content": "root"},
+		})
+		require.NoError(t, err)
+
+		db := &DB{
+			config:  DefaultConfig(),
+			storage: &allNodesErrorEngine{Engine: ns, allNodesErr: errors.New("all nodes boom")},
+		}
+
+		_, err = db.FindSimilar(context.Background(), "root", 5)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "all nodes boom")
 	})
 }
 

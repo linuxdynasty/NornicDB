@@ -7,6 +7,7 @@ import (
 	"time"
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -510,6 +511,18 @@ func TestHybridSearch(t *testing.T) {
 		require.NoError(t, err)
 		t.Logf("HybridSearch with empty query returned %d results", len(results))
 	})
+
+	t.Run("hybrid_search_dimension_mismatch_returns_error", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Default service expects configured embedding dimensions (1024 by default).
+		shortEmbedding := []float32{0.1, 0.2}
+		results, err := db.HybridSearch(ctx, "test", shortEmbedding, nil, 10)
+		require.NoError(t, err)
+		require.NotNil(t, results)
+	})
 }
 
 func TestBuildSearchIndexes(t *testing.T) {
@@ -607,6 +620,32 @@ func TestSetGetGPUManager(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			<-done
 		}
+	})
+
+	t.Run("handles cached search-service entries with clustering enabled", func(t *testing.T) {
+		cleanup := nornicConfig.WithGPUClusteringEnabled()
+		defer cleanup()
+
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		require.NotNil(t, svc)
+		svc.EnableClustering(nil, 2)
+		require.True(t, svc.IsClusteringEnabled())
+
+		db.searchServicesMu.Lock()
+		db.searchServices["nil_entry_cov"] = nil
+		db.searchServices["nil_svc_cov"] = &dbSearchService{dbName: "nil_svc_cov"}
+		db.searchServicesMu.Unlock()
+
+		mgr := &gpu.Manager{}
+		db.SetGPUManager(mgr)
+		got, ok := db.GetGPUManager().(*gpu.Manager)
+		require.True(t, ok)
+		require.Same(t, mgr, got)
 	})
 }
 
