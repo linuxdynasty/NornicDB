@@ -1,6 +1,7 @@
 package search
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,4 +64,61 @@ func TestComposeStrategyBuildSettings_CompressedIncludesFingerprint(t *testing.T
 	require.True(t, strings.Contains(strategy, "quality=compressed"))
 	require.True(t, strings.Contains(strategy, "lists=64"))
 	require.True(t, strings.Contains(strategy, "segments=8"))
+}
+
+func TestLoadAndSaveSearchBuildSettings_EdgeBranches(t *testing.T) {
+	t.Run("load with empty path returns nil", func(t *testing.T) {
+		got, err := loadSearchBuildSettings("")
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("load with invalid msgpack returns nil without error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "build_settings")
+		require.NoError(t, os.WriteFile(path, []byte("not-msgpack"), 0o644))
+		got, err := loadSearchBuildSettings(path)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("load with wrong format version returns nil", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "build_settings")
+		require.NoError(t, saveSearchBuildSettings(path, searchBuildSettingsSnapshot{
+			FormatVersion: searchBuildSettingsFormatVersion + 1,
+			BM25:          "x",
+			Vector:        "y",
+			HNSW:          "z",
+		}))
+		got, err := loadSearchBuildSettings(path)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("save with empty path is noop", func(t *testing.T) {
+		err := saveSearchBuildSettings("", searchBuildSettingsSnapshot{FormatVersion: searchBuildSettingsFormatVersion})
+		require.NoError(t, err)
+	})
+}
+
+func TestBuildSettings_CurrentBM25AndPersistBranches(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 384)
+
+	// Explicit v1 engine should use v1 format marker.
+	svc.bm25Engine = BM25EngineV1
+	require.Equal(t, fulltextIndexFormatVersion, svc.currentBM25FormatVersion())
+
+	// Explicit v2 engine should use v2 marker.
+	svc.bm25Engine = BM25EngineV2
+	require.Equal(t, bm25V2FormatVersion, svc.currentBM25FormatVersion())
+
+	// Empty paths return early.
+	svc.persistSearchBuildSettings("", "", "")
+
+	// Persist writes build settings metadata next to the selected index path.
+	base := filepath.Join(t.TempDir(), "indexes")
+	fulltext := filepath.Join(base, "bm25")
+	svc.persistSearchBuildSettings(fulltext, "", "")
+	_, err := os.Stat(filepath.Join(base, "build_settings"))
+	require.NoError(t, err)
 }

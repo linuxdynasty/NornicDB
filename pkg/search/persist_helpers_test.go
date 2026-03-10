@@ -40,3 +40,12 @@ func TestWriteMsgpackSnapshotsAtomic(t *testing.T) {
 	_, err = os.Stat(filepath.Join(target, "meta.msgpack"))
 	require.NoError(t, err)
 }
+
+func TestWriteMsgpackSnapshot_ErrorOnInvalidParent(t *testing.T) {
+	dir := t.TempDir()
+	parentFile := filepath.Join(dir, "not-a-dir")
+	require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o644))
+
+	err := writeMsgpackSnapshot(filepath.Join(parentFile, "snapshot.msgpack"), map[string]any{"x": 1})
+	require.Error(t, err)
+}
