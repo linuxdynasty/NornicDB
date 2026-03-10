@@ -1522,6 +1522,7 @@ type queueBranchEngine struct {
 	findReturned       bool
 	getNodeErr         error
 	secondGetNodeErr   error
+	returnNilNode      bool
 	getNodeCalls       int
 	updateEmbeddingErr error
 	updateNodeErr      error
@@ -1542,6 +1543,9 @@ func (e *queueBranchEngine) GetNode(id storage.NodeID) (*storage.Node, error) {
 	e.getNodeCalls++
 	if e.getNodeCalls == 1 && e.getNodeErr != nil {
 		return nil, e.getNodeErr
+	}
+	if e.getNodeCalls == 1 && e.returnNilNode {
+		return nil, nil
 	}
 	if e.getNodeCalls > 1 && e.secondGetNodeErr != nil {
 		return nil, e.secondGetNodeErr
@@ -1732,6 +1736,27 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		didWork := ew.processNextBatch()
 		require.False(t, didWork)
 		require.Equal(t, []storage.NodeID{"missing"}, qe.marked)
+	})
+
+	t.Run("processNextBatch handles nil node returned from storage", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		qe := &queueBranchEngine{
+			Engine:        engine,
+			findNode:      &storage.Node{ID: storage.NodeID("ghost")},
+			returnNilNode: true,
+		}
+		ew := &EmbedWorker{
+			embedder: newMockEmbedder(),
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 64, ChunkOverlap: 8},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.False(t, didWork)
+		require.Equal(t, []storage.NodeID{"ghost"}, qe.marked)
 	})
 
 	t.Run("processNextBatch requeues on embed failure", func(t *testing.T) {

@@ -277,6 +277,41 @@ func TestOpen(t *testing.T) {
 		)
 	})
 
+	t.Run("explicit auto-recover env still skips when no recoverable artifacts", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "correct-password"
+		db, err := Open(dir, cfg)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		t.Setenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION", "1")
+		_, err = Open(dir, DefaultConfig())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to open persistent storage")
+	})
+
+	t.Run("explicit auto-recover path is attempted when recoverable artifacts exist", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultConfig()
+		cfg.Database.EncryptionEnabled = true
+		cfg.Database.EncryptionPassword = "correct-password"
+		db, err := Open(dir, cfg)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		// Make artifacts discoverable so auto-recover branch is eligible.
+		walDir := filepath.Join(dir, "wal")
+		require.NoError(t, os.MkdirAll(walDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(walDir, "wal.log"), []byte("not-a-valid-wal"), 0644))
+
+		t.Setenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION", "1")
+		_, err = Open(dir, DefaultConfig())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "auto-recovery failed")
+	})
+
 	t.Run("returns persistent open error when dataDir is a file", func(t *testing.T) {
 		filePath := filepath.Join(t.TempDir(), "not-a-dir")
 		require.NoError(t, os.WriteFile(filePath, []byte("x"), 0600))
