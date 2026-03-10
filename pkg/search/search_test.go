@@ -981,6 +981,51 @@ func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
 	svc.buildInProgress.Store(false)
 }
 
+func TestSearchService_SchedulePersist_GuardsAndTimer(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 2)
+	t.Setenv("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC", "1")
+
+	// Guard: persistence disabled.
+	svc.SetPersistenceEnabled(false)
+	svc.SetFulltextIndexPath(filepath.Join(t.TempDir(), "bm25"))
+	svc.SetVectorIndexPath(filepath.Join(t.TempDir(), "vec"))
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
+	// Guard: build in progress.
+	svc.SetPersistenceEnabled(true)
+	svc.buildInProgress.Store(true)
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+	svc.buildInProgress.Store(false)
+
+	// Guard: missing required paths.
+	svc.SetFulltextIndexPath("")
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
+	// Happy path: both paths configured schedules a timer.
+	svc.SetFulltextIndexPath(filepath.Join(t.TempDir(), "bm25"))
+	svc.SetVectorIndexPath(filepath.Join(t.TempDir(), "vec"))
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.NotNil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
+	// Disabling persistence should stop and clear active timer.
+	svc.SetPersistenceEnabled(false)
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+}
+
 func TestEnableClustering_ReentrantAndEnvOverrides(t *testing.T) {
 	t.Run("reentrant same mode keeps existing cluster index", func(t *testing.T) {
 		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)

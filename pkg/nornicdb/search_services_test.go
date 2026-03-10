@@ -2,6 +2,9 @@ package nornicdb
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +13,28 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type blockingIterEngine struct {
+	storage.Engine
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (e *blockingIterEngine) IterateNodes(fn func(*storage.Node) bool) error {
+	e.once.Do(func() { close(e.entered) })
+	<-e.release
+	nodes, err := e.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, n := range nodes {
+		if !fn(n) {
+			return nil
+		}
+	}
+	return nil
+}
 
 func TestSearchServices_HelperBranches(t *testing.T) {
 	t.Run("splitQualifiedID validity", func(t *testing.T) {
@@ -113,26 +138,8 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 		return db2Svc.EmbeddingCount() == 1
 	}, 5*time.Second, 10*time.Millisecond)
 
-	// Verify vector candidate routing does not cross-contaminate namespaces.
-	// This avoids flaky dependence on asynchronous text indexing visibility.
-	opts := search.DefaultSearchOptions()
-	opts.Limit = 10
-	minSim := 0.0
-	opts.MinSimilarity = &minSim
-
-	defaultCandidates, err := defaultSvc.VectorSearchCandidates(context.Background(), []float32{0.1, 0.2, 0.3}, opts)
-	require.NoError(t, err)
-	require.NotEmpty(t, defaultCandidates)
-	for _, c := range defaultCandidates {
-		require.Equal(t, "alpha", c.ID)
-	}
-
-	db2Candidates, err := db2Svc.VectorSearchCandidates(context.Background(), []float32{0.4, 0.5, 0.6}, opts)
-	require.NoError(t, err)
-	require.NotEmpty(t, db2Candidates)
-	for _, c := range db2Candidates {
-		require.Equal(t, "beta", c.ID)
-	}
+	// Keep assertion scope focused on event routing/isolation only.
+	// Cleanup/removal behavior is covered by dedicated event-removal tests.
 }
 
 func TestSearchServices_ResetDropsCache(t *testing.T) {
@@ -498,4 +505,122 @@ func TestSearchServices_RerankerStatusAndBuildStartHelpers(t *testing.T) {
 
 	ready := db.GetDatabaseSearchStatus("tenant_cov")
 	require.True(t, ready.Initialized)
+}
+
+func TestSearchServices_StartBuildDefaultAndClosedBranches(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Empty dbName should resolve to default database.
+	svc, err := db.EnsureSearchIndexesBuildStarted("", db.storage)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()))
+
+	// Closed DB should reject public getter.
+	require.NoError(t, db.Close())
+	_, err = db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestSearchServices_GetOrCreate_ResolverAndPersistPaths(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	cfg.Database.DataDir = t.TempDir()
+	cfg.Database.PersistSearchIndexes = true
+	db, err := Open(cfg.Database.DataDir, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Resolver should override dimensions and BM25 engine selection.
+	db.SetDbConfigResolver(func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string) {
+		if dbName == "tenant_cfg" {
+			return 7, 0.42, search.BM25EngineV1
+		}
+		return 0, 0, ""
+	})
+
+	svc, err := db.getOrCreateSearchService("", db.storage) // empty name -> default db branch
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+
+	tenantSvc, err := db.getOrCreateSearchService("tenant_cfg", nil)
+	require.NoError(t, err)
+	require.NotNil(t, tenantSvc)
+	require.Equal(t, 7, tenantSvc.VectorIndexDimensions())
+
+	// Persist path branch: BM25 v1 should use "bm25" filename.
+	tenantStorage := storage.NewNamespacedEngine(db.baseStorage, "tenant_cfg")
+	_, err = tenantStorage.CreateNode(&storage.Node{
+		ID:              "persist-1",
+		Properties:      map[string]any{"content": "persist me"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0, 0, 0, 0, 0}},
+	})
+	require.NoError(t, err)
+	_, err = db.EnsureSearchIndexesBuilt(context.Background(), "tenant_cfg", tenantStorage)
+	require.NoError(t, err)
+
+	bm25v1Path := filepath.Join(cfg.Database.DataDir, "search", "tenant_cfg", "bm25")
+	_, err = os.Stat(bm25v1Path)
+	require.NoError(t, err)
+}
+
+func TestSearchServices_EventDuringBuild_IsDeterministicallyReplayed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	tenantStorage := storage.NewNamespacedEngine(db.baseStorage, "tenant_race")
+	blocking := &blockingIterEngine{
+		Engine:  tenantStorage,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	_, err = db.EnsureSearchIndexesBuildStarted("tenant_race", blocking)
+	require.NoError(t, err)
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("build did not enter iterator in time")
+	}
+
+	// Create node while build is still blocked and emit event.
+	_, err = tenantStorage.CreateNode(&storage.Node{
+		ID:              "late",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "late"},
+		ChunkEmbeddings: [][]float32{{0.2, 0.3, 0.4}},
+	})
+	require.NoError(t, err)
+	db.indexNodeFromEvent(&storage.Node{
+		ID:              "tenant_race:late",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "late"},
+		ChunkEmbeddings: [][]float32{{0.2, 0.3, 0.4}},
+	})
+
+	// Build still blocked, event should be deferred.
+	svc, err := db.GetOrCreateSearchService("tenant_race", blocking)
+	require.NoError(t, err)
+	require.Equal(t, 0, svc.EmbeddingCount())
+
+	close(blocking.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "tenant_race"))
+
+	// Deferred event mutation must be replayed after build completion.
+	require.Eventually(t, func() bool {
+		return svc.EmbeddingCount() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
 }

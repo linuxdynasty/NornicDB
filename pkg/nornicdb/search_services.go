@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -26,6 +27,50 @@ type dbSearchService struct {
 
 	clusterMu               sync.Mutex
 	lastClusteredEmbedCount int
+
+	pendingMu    sync.Mutex
+	pendingOps   map[string]pendingSearchMutation
+	pendingFlush sync.Once
+}
+
+type pendingSearchMutation struct {
+	node   *storage.Node
+	remove bool
+}
+
+func (e *dbSearchService) queueIndex(node *storage.Node) {
+	if e == nil || node == nil {
+		return
+	}
+	e.pendingMu.Lock()
+	if e.pendingOps == nil {
+		e.pendingOps = make(map[string]pendingSearchMutation)
+	}
+	e.pendingOps[string(node.ID)] = pendingSearchMutation{node: storage.CopyNode(node), remove: false}
+	e.pendingMu.Unlock()
+}
+
+func (e *dbSearchService) queueRemove(localID string) {
+	if e == nil || localID == "" {
+		return
+	}
+	e.pendingMu.Lock()
+	if e.pendingOps == nil {
+		e.pendingOps = make(map[string]pendingSearchMutation)
+	}
+	e.pendingOps[localID] = pendingSearchMutation{remove: true}
+	e.pendingMu.Unlock()
+}
+
+func (e *dbSearchService) drainPending() map[string]pendingSearchMutation {
+	e.pendingMu.Lock()
+	defer e.pendingMu.Unlock()
+	if len(e.pendingOps) == 0 {
+		return nil
+	}
+	out := e.pendingOps
+	e.pendingOps = make(map[string]pendingSearchMutation)
+	return out
 }
 
 // DatabaseSearchStatus exposes per-database search service readiness/progress.
@@ -325,6 +370,46 @@ func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context)
 	})
 }
 
+func (db *DB) ensurePendingFlush(entry *dbSearchService) {
+	if entry == nil || entry.svc == nil {
+		return
+	}
+	entry.pendingFlush.Do(func() {
+		db.bgWg.Add(1)
+		go func() {
+			defer db.bgWg.Done()
+			<-entry.buildDone
+
+			for {
+				ops := entry.drainPending()
+				if len(ops) == 0 {
+					return
+				}
+				ids := make([]string, 0, len(ops))
+				for id := range ops {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for _, id := range ids {
+					op := ops[id]
+					if op.remove {
+						if err := entry.svc.RemoveNode(storage.NodeID(id)); err != nil {
+							log.Printf("⚠️ Failed to remove node %s from deferred search mutation in db %s: %v", id, entry.dbName, err)
+						}
+						continue
+					}
+					if op.node == nil {
+						continue
+					}
+					if err := entry.svc.IndexNode(op.node); err != nil {
+						log.Printf("⚠️ Failed to index node %s from deferred search mutation in db %s: %v", id, entry.dbName, err)
+					}
+				}
+			}
+		}()
+	})
+}
+
 func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error {
 	if dbName == "" {
 		dbName = db.defaultDatabaseName()
@@ -412,6 +497,24 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 
 	userNode := storage.CopyNode(node)
 	userNode.ID = storage.NodeID(local)
+
+	db.searchServicesMu.RLock()
+	entry := db.searchServices[dbName]
+	db.searchServicesMu.RUnlock()
+	if entry != nil {
+		progress := svc.GetBuildProgress()
+		if progress.Building || !progress.Ready {
+			entry.queueIndex(userNode)
+			ctx := db.buildCtx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			db.startSearchIndexBuild(entry, ctx)
+			db.ensurePendingFlush(entry)
+			return
+		}
+	}
+
 	if err := svc.IndexNode(userNode); err != nil {
 		log.Printf("⚠️ Failed to index node %s in db %s: %v", node.ID, dbName, err)
 	}
@@ -431,6 +534,18 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 	db.searchServicesMu.RUnlock()
 	if !ok || entry == nil {
 		// Service not in cache yet; nothing to remove.
+		return
+	}
+
+	progress := entry.svc.GetBuildProgress()
+	if progress.Building || !progress.Ready {
+		entry.queueRemove(local)
+		ctx := db.buildCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		db.startSearchIndexBuild(entry, ctx)
+		db.ensurePendingFlush(entry)
 		return
 	}
 
