@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -569,6 +570,18 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 		"CALL nornicdb.version()",
 		"CALL nornicdb.stats()",
 		"CALL nornicdb.decay.info()",
+		"CALL apoc.path.subgraphNodes('n1', {maxLevel: 1})",
+		"CALL apoc.path.expand('n1', 'KNOWS>', '', 1, 2)",
+		"CALL apoc.algo.pageRank({iterations: 2})",
+		"CALL apoc.algo.louvain()",
+		"CALL apoc.neighbors.tohop('n1','KNOWS',1)",
+		"CALL apoc.neighbors.byhop('n1','KNOWS',2)",
+		"CALL gds.version()",
+		"CALL gds.graph.list()",
+		"CALL apoc.cypher.run('RETURN 1', {})",
+		"CALL apoc.cypher.runMany('RETURN 1; RETURN 2', {})",
+		"CALL db.retrieve({query:'x'})",
+		"CALL db.rretrieve({query:'x'})",
 		"CALL db.awaitIndexes()",
 		"CALL db.awaitIndex('idx')",
 		"CALL db.resampleIndex('idx')",
@@ -589,6 +602,9 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 		"CALL apoc.load.json('file:///missing.json')",
 		"CALL apoc.load.csv('file:///missing.csv')",
 		"CALL apoc.import.json('file:///missing.json')",
+		"CALL apoc.path.spanningTree('n1', {maxLevel: 1})",
+		"CALL db.rerank({query:'x', candidates: []})",
+		"CALL db.infer({prompt:'x'})",
 		"CALL db.txlog.entries(1, 10)",
 		"CALL db.txlog.byTxId('tx-1', 10)",
 	}
@@ -597,59 +613,6 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 		require.Errorf(t, err, "expected error for query: %s", q)
 	}
 
-	// Environment-dependent calls: keep separate from strict success/error assertions.
-	allowEither := []string{
-		"CALL apoc.path.subgraphNodes('n1', {maxLevel: 1})",
-		"CALL apoc.path.expand('n1', 'KNOWS>', '', 1, 2)",
-		"CALL apoc.path.spanningTree('n1', {maxLevel: 1})",
-		"CALL apoc.algo.dijkstra('n1','n2','KNOWS','weight')",
-		"CALL apoc.algo.aStar('n1','n2','KNOWS','lat','lon')",
-		"CALL apoc.algo.allSimplePaths('n1','n2','KNOWS', 3)",
-		"CALL apoc.algo.pageRank({iterations: 2})",
-		"CALL apoc.algo.betweenness()",
-		"CALL apoc.algo.closeness()",
-		"CALL apoc.algo.louvain()",
-		"CALL apoc.algo.labelPropagation()",
-		"CALL apoc.algo.wcc()",
-		"CALL apoc.neighbors.tohop('n1','KNOWS',1)",
-		"CALL apoc.neighbors.byhop('n1','KNOWS',2)",
-		"CALL apoc.export.json.all('file:///tmp.json', {})",
-		"CALL apoc.export.json.query('MATCH (n) RETURN n', 'file:///tmp.json', {})",
-		"CALL apoc.export.csv.all('file:///tmp.csv', {})",
-		"CALL apoc.export.csv.query('MATCH (n) RETURN n', 'file:///tmp.csv', {})",
-		"CALL db.retrieve({query:'x'})",
-		"CALL db.rretrieve({query:'x'})",
-		"CALL db.rerank({query:'x', candidates: []})",
-		"CALL db.infer({prompt:'x'})",
-		"CALL gds.version()",
-		"CALL gds.graph.list()",
-		"CALL gds.graph.drop('missing')",
-		"CALL gds.graph.project('g', ['A'], ['R'])",
-		"CALL gds.fastRP.stream('g', {})",
-		"CALL gds.fastRP.stats('g', {})",
-		"CALL db.index.vector.queryRelationships('idx', 2, [0.1, 0.2])",
-		"CALL db.index.vector.embed('hello')",
-		"CALL db.index.vector.createNodeIndex('v_idx', 'Doc', 'embedding', 2, 'cosine')",
-		"CALL db.index.vector.createRelationshipIndex('vr_idx', 'REL', 'embedding', 2, 'cosine')",
-		"CALL db.index.fulltext.createNodeIndex('ft_idx', ['Doc'], ['content'])",
-		"CALL db.index.fulltext.createRelationshipIndex('ftr_idx', ['REL'], ['content'])",
-		"CALL db.index.fulltext.drop('ft_idx')",
-		"CALL db.index.vector.drop('v_idx')",
-		"CALL db.create.setNodeVectorProperty('n1','embedding',[0.1,0.2])",
-		"CALL db.create.setRelationshipVectorProperty('rel1','embedding',[0.1,0.2])",
-		"CALL db.temporal.assertNoOverlap('Fact','k','vf','vt','id','2024-01-01','2024-01-02')",
-		"CALL db.temporal.asOf('Fact','k','id','vf','vt','2024-01-01')",
-		"CALL apoc.cypher.run('RETURN 1', {})",
-		"CALL apoc.cypher.doItAll('RETURN 1', {})",
-		"CALL apoc.cypher.runMany('RETURN 1; RETURN 2', {})",
-		"CALL apoc.periodic.iterate('RETURN 1 AS x', 'RETURN x', {})",
-		"CALL apoc.periodic.commit('RETURN 1', {})",
-		"CALL apoc.periodic.rock_n_roll('RETURN 1 AS x', 'RETURN x', {})",
-	}
-	for _, q := range allowEither {
-		res, err := exec.executeCall(ctx, q)
-		require.Truef(t, res != nil || err != nil, "executeCall returned nil result and nil error for query: %s", q)
-	}
 }
 
 func TestCypherHelpers_CallCompatRelationshipQueries(t *testing.T) {
@@ -959,6 +922,431 @@ func TestCypherHelpers_CallPluginHandlerSignatures(t *testing.T) {
 	}
 }
 
+func TestCypherHelpers_ProcedureSpecValidation(t *testing.T) {
+	err := validateProcedureSpec(ProcedureSpec{Name: "", MinArgs: 0, MaxArgs: 0})
+	require.Error(t, err)
+
+	err = validateProcedureSpec(ProcedureSpec{Name: "db.test", MinArgs: 2, MaxArgs: 1})
+	require.Error(t, err)
+
+	err = validateProcedureSpec(ProcedureSpec{Name: "db.test", MinArgs: 0, MaxArgs: 0})
+	require.NoError(t, err)
+}
+
+func TestCypherHelpers_ExtractPolygonPoints_AllBranches(t *testing.T) {
+	fromPoints := extractPolygonPoints(map[string]interface{}{
+		"points": []interface{}{map[string]interface{}{"x": 1, "y": 2}},
+	})
+	require.Len(t, fromPoints, 1)
+
+	fromCoordinates := extractPolygonPoints(map[string]interface{}{
+		"coordinates": []interface{}{[]interface{}{1.0, 2.0}},
+	})
+	require.Len(t, fromCoordinates, 1)
+
+	none := extractPolygonPoints(map[string]interface{}{"points": "bad"})
+	assert.Nil(t, none)
+}
+
+func TestCypherHelpers_ParseRagProcedureRequest(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(base, "test"))
+	ctx := context.Background()
+
+	req, err := exec.parseRagProcedureRequest(ctx, "CALL db.retrieve({query:'alpha', limit: 5})", "DB.RETRIEVE")
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", req["query"])
+
+	req, err = exec.parseRagProcedureRequest(ctx, "CALL db.retrieve('alpha')", "DB.RETRIEVE")
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", req["query"])
+
+	req, err = exec.parseRagProcedureRequest(ctx, "CALL db.retrieve()", "DB.RETRIEVE")
+	require.NoError(t, err)
+	assert.Empty(t, req)
+
+	ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{
+		"r": map[string]interface{}{"query": "beta", "limit": int64(2)},
+	})
+	req, err = exec.parseRagProcedureRequest(ctxWithParams, "CALL db.retrieve($r)", "DB.RETRIEVE")
+	require.NoError(t, err)
+	assert.Equal(t, "beta", req["query"])
+
+	_, err = exec.parseRagProcedureRequest(ctx, "CALL db.retrieve($missing)", "DB.RETRIEVE")
+	require.Error(t, err)
+	_, err = exec.parseRagProcedureRequest(ctx, "CALL db.retrieve(123)", "DB.RETRIEVE")
+	require.Error(t, err)
+	_, err = exec.parseRagProcedureRequest(ctx, "CALL db.retrieve(", "DB.RETRIEVE")
+	require.Error(t, err)
+	_, err = exec.parseRagProcedureRequest(ctx, "CALL other.proc({})", "DB.RETRIEVE")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_CallDbIndexVectorEmbed_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(base, "test"))
+	ctx := context.Background()
+
+	_, err := exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed('x')")
+	require.Error(t, err)
+
+	exec.SetEmbedder(&mockQueryEmbedder{embedding: []float32{1, 0, 0}})
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.bad('x')")
+	require.Error(t, err)
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed")
+	require.Error(t, err)
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed(")
+	require.Error(t, err)
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed('   ')")
+	require.Error(t, err)
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed(123)")
+	require.Error(t, err)
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed($q)")
+	require.Error(t, err)
+
+	ctxWithBadParam := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": 123})
+	_, err = exec.callDbIndexVectorEmbed(ctxWithBadParam, "CALL db.index.vector.embed($q)")
+	require.Error(t, err)
+
+	ctxWithParam := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": "hello"})
+	res, err := exec.callDbIndexVectorEmbed(ctxWithParam, "CALL db.index.vector.embed($q)")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+
+	res, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed('hello')")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+}
+
+func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	node := &storage.Node{
+		ID:              "n1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2}},
+		Properties: map[string]interface{}{
+			"id":        "doc-1",
+			"score":     float64(1.5),
+			"intScore":  int64(7),
+			"published": true,
+			"embedding": []interface{}{1.0, 2.0, int64(3)},
+		},
+	}
+	ctxNodes := map[string]*storage.Node{"n": node}
+
+	// Regular property replacement.
+	out := exec.substituteBoundVariablesInCall("CALL proc(n.id, n.score, n.intScore, n.published)", ctxNodes)
+	assert.Contains(t, out, "'doc-1'")
+	assert.Contains(t, out, "1.5")
+	assert.Contains(t, out, "7")
+	assert.Contains(t, out, "true")
+
+	// Embedding from ChunkEmbeddings.
+	out = exec.substituteBoundVariablesInCall("CALL db.index.vector.queryNodes('idx', 5, n.embedding)", ctxNodes)
+	assert.Contains(t, out, "[0.1, 0.2]")
+
+	// Embedding from []float64 property.
+	nodeFloat64 := &storage.Node{
+		ID:     "n2",
+		Labels: []string{"Doc"},
+		Properties: map[string]interface{}{
+			"embedding": []float64{0.3, 0.4},
+		},
+	}
+	out = exec.substituteBoundVariablesInCall(
+		"CALL db.index.vector.queryNodes('idx', 5, n.embedding)",
+		map[string]*storage.Node{"n": nodeFloat64},
+	)
+	assert.Contains(t, out, "[0.3, 0.4]")
+
+	// Embedding from []interface{} property.
+	nodeIface := &storage.Node{
+		ID:     "n3",
+		Labels: []string{"Doc"},
+		Properties: map[string]interface{}{
+			"embedding": []interface{}{1.0, int64(2), float32(3)},
+		},
+	}
+	out = exec.substituteBoundVariablesInCall(
+		"CALL db.index.vector.queryNodes('idx', 5, n.embedding)",
+		map[string]*storage.Node{"n": nodeIface},
+	)
+	assert.Contains(t, out, "[1, 2, 3]")
+
+	// Unknown variable/property should remain unchanged.
+	orig := "CALL proc(missing.value)"
+	out = exec.substituteBoundVariablesInCall(orig, ctxNodes)
+	assert.Equal(t, orig, out)
+
+	// Patterns inside quoted strings should not be replaced.
+	inQuoted := "CALL proc('n.id', \"n.score\")"
+	out = exec.substituteBoundVariablesInCall(inQuoted, ctxNodes)
+	assert.Equal(t, inQuoted, out)
+}
+
+func TestCypherHelpers_PrefixNodeIDIfNeeded(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	assert.Equal(t, storage.NodeID("n1"), exec.prefixNodeIDIfNeeded("n1", ""))
+	assert.Equal(t, storage.NodeID("tenant:n1"), exec.prefixNodeIDIfNeeded("n1", "tenant:"))
+	assert.Equal(t, storage.NodeID("tenant:n1"), exec.prefixNodeIDIfNeeded("tenant:n1", "tenant:"))
+}
+
+func TestCypherHelpers_EvaluateWhereOnComputedRow(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	values := map[string]interface{}{
+		"score": float64(9.5),
+		"name":  "alice",
+		"age":   int64(30),
+	}
+
+	assert.True(t, exec.evaluateWhereOnComputedRow("score >= 9 AND age = 30", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("name = 'alice' OR age < 10", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("age <> 99", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("age != 99", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("score > 9", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("score < 10", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("age <= 30", values))
+	assert.False(t, exec.evaluateWhereOnComputedRow("score > 99", values))
+	assert.True(t, exec.evaluateWhereOnComputedRow("unsupported-clause", values))
+}
+
+func TestCypherHelpers_EvaluateInnerWhereBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	node := &storage.Node{
+		ID:     "n-123",
+		Labels: []string{"Person"},
+		Properties: map[string]interface{}{
+			"name": "alice",
+			"age":  int64(30),
+			"bio":  "hello world",
+			"tags": []interface{}{"a", "b"},
+		},
+	}
+
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "(n.age = 30)"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age = 30 AND n.name = 'alice'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age = 99 OR n.name = 'alice'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "NOT n.age = 99"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.bio CONTAINS 'hello'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.name STARTS WITH 'ali'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.name ENDS WITH 'ice'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "'a' IN n.tags"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.name IS NOT NULL"))
+	assert.False(t, exec.evaluateInnerWhere(node, "n", "n.missing IS NOT NULL"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.missing IS NULL"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "id(n) = 'n-123'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "elementId(n) = 'n-123'"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age >= 30"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age <= 30"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age > 29"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.age < 31"))
+	assert.True(t, exec.evaluateInnerWhere(node, "n", "n.name =~ 'a.*'"))
+	assert.False(t, exec.evaluateInnerWhere(node, "n", "n.age = 99"))
+	assert.False(t, exec.evaluateInnerWhere(node, "n", "x.age = 30")) // wrong variable branch
+	assert.True(t, exec.evaluateInnerWhere(node, "n", ""))            // empty where clause includes
+	assert.False(t, exec.evaluateInnerWhere(node, "n", "MALFORMED"))  // malformed non-empty clause excludes
+}
+
+func TestCypherHelpers_NormalizePropValueAndMap(t *testing.T) {
+	assert.Equal(t, int64(1), normalizePropValue(int(1)))
+	assert.Equal(t, int64(2), normalizePropValue(int8(2)))
+	assert.Equal(t, int64(3), normalizePropValue(int16(3)))
+	assert.Equal(t, int64(4), normalizePropValue(int32(4)))
+	assert.Equal(t, int64(5), normalizePropValue(int64(5)))
+	assert.Equal(t, int64(6), normalizePropValue(uint(6)))
+	assert.Equal(t, int64(7), normalizePropValue(uint8(7)))
+	assert.Equal(t, int64(8), normalizePropValue(uint16(8)))
+	assert.Equal(t, int64(9), normalizePropValue(uint32(9)))
+	assert.Equal(t, int64(10), normalizePropValue(uint64(10)))
+	assert.Equal(t, float64(1.25), normalizePropValue(float32(1.25)))
+
+	overMax := uint64(math.MaxInt64) + 1
+	_, isFloat := normalizePropValue(overMax).(float64)
+	assert.True(t, isFloat)
+
+	nested := normalizePropValue([]interface{}{int(1), map[string]interface{}{"x": uint8(2)}})
+	require.Equal(t, []interface{}{int64(1), map[string]interface{}{"x": int64(2)}}, nested)
+
+	props, err := normalizePropsMap(map[string]interface{}{"a": int(1), "b": float32(2)}, "$p")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), props["a"])
+	assert.Equal(t, float64(2), props["b"])
+
+	props, err = normalizePropsMap(map[interface{}]interface{}{"a": int8(1)}, "props")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), props["a"])
+
+	_, err = normalizePropsMap(map[interface{}]interface{}{1: "bad"}, "props")
+	require.Error(t, err)
+	_, err = normalizePropsMap("not-map", "props")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_FindNodeByVariableInMatch(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	_, err := eng.CreateNode(&storage.Node{ID: "id-node", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "other-node", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// ID pattern branch.
+	n := exec.findNodeByVariableInMatch("MATCH (a:Person {id: 'id-node'}) RETURN a", "a")
+	require.NotNil(t, n)
+	assert.Equal(t, storage.NodeID("id-node"), n.ID)
+
+	// Non-id pattern branch currently does not resolve a node from MATCH text.
+	n = exec.findNodeByVariableInMatch("MATCH (a:Person) RETURN a", "a")
+	assert.Nil(t, n)
+
+	// No match branch.
+	n = exec.findNodeByVariableInMatch("MATCH (x:Thing) RETURN x", "a")
+	assert.Nil(t, n)
+}
+
+func TestCypherHelpers_ApocLouvainBasic(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "a"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "b"}})
+	require.NoError(t, err)
+	err = eng.CreateEdge(&storage.Edge{
+		ID:         "e1",
+		StartNode:  "n1",
+		EndNode:    "n2",
+		Type:       "LINK",
+		Properties: map[string]interface{}{"weight": float64(2)},
+	})
+	require.NoError(t, err)
+
+	// Basic call with explicit label filter.
+	res, err := exec.callApocAlgoLouvain(context.Background(), "CALL apoc.algo.louvain(['Node']) YIELD node, community")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node", "community"}, res.Columns)
+
+	// weightProperty parsing branch.
+	res, err = exec.callApocAlgoLouvain(context.Background(), "CALL apoc.algo.louvain(['Node'], {weightProperty: 'weight'}) YIELD node, community")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node", "community"}, res.Columns)
+}
+
+func TestCypherHelpers_ParseFulltextQueryAndShowDatabase(t *testing.T) {
+	terms, excludes, must := parseFulltextQuery(`alpha AND beta OR "exact phrase" +must -drop NOT skip`)
+	assert.Contains(t, terms, "alpha")
+	assert.Contains(t, terms, "beta")
+	assert.Contains(t, excludes, "drop")
+	assert.Contains(t, excludes, "skip")
+	assert.Contains(t, must, "exact phrase")
+	assert.Contains(t, must, "must")
+
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "tenant_show")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"X"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	err = eng.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "LOOP"})
+	require.NoError(t, err)
+
+	// Without dbManager, default fallback branch.
+	res, err := exec.executeShowDatabase(ctx, "SHOW DATABASE")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "nornic", res.Rows[0][0])
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+
+	// :USE context branch should override namespace.
+	ctxUse := context.WithValue(ctx, ctxKeyUseDatabase, "ctx_db")
+	res, err = exec.executeShowDatabase(ctxUse, "SHOW DATABASE")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "ctx_db", res.Rows[0][0])
+}
+
+func TestCypherHelpers_EvaluateSetExpressionAndArraySuffix(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	assert.Nil(t, exec.evaluateSetExpression("null"))
+	assert.Equal(t, "x", exec.evaluateSetExpression("'x'"))
+	assert.Equal(t, "y", exec.evaluateSetExpression("\"y\""))
+	assert.Equal(t, true, exec.evaluateSetExpression("true"))
+	assert.Equal(t, false, exec.evaluateSetExpression("false"))
+	assert.Equal(t, int64(42), exec.evaluateSetExpression("42"))
+	assert.Equal(t, float64(3.5), exec.evaluateSetExpression("3.5"))
+	assert.Equal(t, []interface{}{}, exec.evaluateSetExpression("[]"))
+	assert.Equal(t, []interface{}{int64(1), "a", true}, exec.evaluateSetExpression("[1, 'a', true]"))
+	assert.IsType(t, int64(0), exec.evaluateSetExpression("timestamp()"))
+	assert.IsType(t, "", exec.evaluateSetExpression("datetime()"))
+	assert.IsType(t, "", exec.evaluateSetExpression("randomUUID()"))
+
+	collected := []interface{}{int64(1), int64(2), int64(3), int64(4)}
+	assert.Equal(t, collected, exec.applyArraySuffix(collected, ""))
+	assert.Equal(t, collected, exec.applyArraySuffix(collected, "bad"))
+	assert.Equal(t, []interface{}{int64(1), int64(2)}, exec.applyArraySuffix(collected, "[..2]"))
+	assert.Equal(t, []interface{}{int64(2), int64(3)}, exec.applyArraySuffix(collected, "[1..3]"))
+	assert.Equal(t, []interface{}{int64(3), int64(4)}, exec.applyArraySuffix(collected, "[-2..]"))
+	assert.Equal(t, []interface{}{}, exec.applyArraySuffix(collected, "[3..1]"))
+	assert.Equal(t, int64(2), exec.applyArraySuffix(collected, "[1]"))
+	assert.Equal(t, int64(4), exec.applyArraySuffix(collected, "[-1]"))
+	assert.Nil(t, exec.applyArraySuffix(collected, "[99]"))
+}
+
+func TestCypherHelpers_AssignValueAdditionalCases(t *testing.T) {
+	// time conversion branches
+	var ts time.Time
+	err := assignValue(reflect.ValueOf(&ts).Elem(), int64(1700000000))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1700000000), ts.Unix())
+
+	var ts2 time.Time
+	err = assignValue(reflect.ValueOf(&ts2).Elem(), "2024-01-02 03:04:05")
+	require.NoError(t, err)
+	assert.Equal(t, 2024, ts2.Year())
+
+	// bool conversion branches
+	var b bool
+	err = assignValue(reflect.ValueOf(&b).Elem(), int(1))
+	require.NoError(t, err)
+	assert.True(t, b)
+	err = assignValue(reflect.ValueOf(&b).Elem(), int64(0))
+	require.NoError(t, err)
+	assert.False(t, b)
+
+	// slice conversion branch
+	var ints []int64
+	err = assignValue(reflect.ValueOf(&ints).Elem(), []interface{}{float64(1), int64(2)})
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1, 2}, ints)
+
+	// unsupported assignment branch
+	var dst struct{ A int }
+	err = assignValue(reflect.ValueOf(&dst).Elem(), "bad")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_CompareValuesForSort(t *testing.T) {
+	assert.Equal(t, 0, compareValuesForSort(nil, nil))
+	assert.Equal(t, -1, compareValuesForSort(nil, 1))
+	assert.Equal(t, 1, compareValuesForSort(1, nil))
+	assert.Equal(t, -1, compareValuesForSort(1, 2))
+	assert.Equal(t, 1, compareValuesForSort(2, 1))
+	assert.Equal(t, 0, compareValuesForSort(2, 2))
+	assert.Equal(t, -1, compareValuesForSort(int64(1), int64(2)))
+	assert.Equal(t, 0, compareValuesForSort(float64(1.5), float64(1.5)))
+	assert.Equal(t, -1, compareValuesForSort("a", "b"))
+	assert.Equal(t, 1, compareValuesForSort("b", "a"))
+	assert.Equal(t, -1, compareValuesForSort(struct{ X int }{1}, struct{ X int }{2}))
+}
+
 func TestCypherHelpers_SubstituteNodeAndExecuteSetMerge(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	eng := storage.NewNamespacedEngine(base, "test")
@@ -1017,4 +1405,490 @@ func TestCypherHelpers_SubstituteNodeAndExecuteSetMerge(t *testing.T) {
 	require.Error(t, err)
 	_, err = normalizePropsMap("not-map", "bad")
 	require.Error(t, err)
+}
+
+func TestCypherHelpers_TypedResultDecodeAndAssignBranches(t *testing.T) {
+	// decodeRow pointer validation.
+	var scalar int
+	err := decodeRow([]string{"x"}, []interface{}{1}, scalar)
+	require.Error(t, err)
+	err = decodeRow([]string{"x"}, []interface{}{1}, (*int)(nil))
+	require.Error(t, err)
+
+	// scalar assignment path.
+	err = decodeRow([]string{"x"}, []interface{}{int64(7)}, &scalar)
+	require.NoError(t, err)
+	assert.Equal(t, 7, scalar)
+
+	// unsupported destination type branch.
+	var unsupported map[string]int
+	err = decodeRow([]string{"x", "y"}, []interface{}{1, 2}, &unsupported)
+	require.Error(t, err)
+
+	// decodeMap and decodeStruct error propagation branches.
+	type badTimeStruct struct {
+		When time.Time `cypher:"when"`
+	}
+	var bad badTimeStruct
+	err = decodeMap(map[string]interface{}{"when": "not-a-time"}, reflect.ValueOf(&bad).Elem())
+	require.Error(t, err)
+
+	type badIntStruct struct {
+		Age int `cypher:"age"`
+	}
+	var badInt badIntStruct
+	err = decodeStruct([]string{"age"}, []interface{}{"not-int"}, reflect.ValueOf(&badInt).Elem())
+	require.Error(t, err)
+
+	// assignValue additional conversion branches.
+	var s string
+	err = assignValue(reflect.ValueOf(&s).Elem(), 123)
+	require.NoError(t, err)
+	assert.Equal(t, "{", s)
+	err = assignValue(reflect.ValueOf(&s).Elem(), struct{ V int }{V: 9})
+	require.NoError(t, err)
+	assert.Contains(t, s, "9")
+
+	var b bool
+	err = assignValue(reflect.ValueOf(&b).Elem(), true)
+	require.NoError(t, err)
+	assert.True(t, b)
+
+	var f32 float32
+	err = assignValue(reflect.ValueOf(&f32).Elem(), int64(9))
+	require.NoError(t, err)
+	assert.Equal(t, float32(9), f32)
+
+	var i8 int8
+	err = assignValue(reflect.ValueOf(&i8).Elem(), float32(4.0))
+	require.NoError(t, err)
+	assert.Equal(t, int8(4), i8)
+
+	var times []time.Time
+	err = assignValue(reflect.ValueOf(&times).Elem(), []interface{}{"2024-01-01T00:00:00Z"})
+	require.NoError(t, err)
+	require.Len(t, times, 1)
+	assert.Equal(t, 2024, times[0].Year())
+
+	var tm time.Time
+	err = assignValue(reflect.ValueOf(&tm).Elem(), "not-a-time")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_CallEvaluationHelpers(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	node := &storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"name": "alice", "id": "user-1"},
+	}
+	ctxVals := map[string]interface{}{
+		"score": 0.9,
+		"n":     node,
+		"m": map[string]interface{}{
+			"name": "bob",
+			"properties": map[string]interface{}{
+				"city": "NYC",
+			},
+		},
+	}
+
+	assert.Equal(t, 0.9, exec.evaluateReturnExprInContext("score", ctxVals))
+	assert.Equal(t, "alice", exec.evaluateReturnExprInContext("n.name", ctxVals))
+	assert.Equal(t, "user-1", exec.evaluateReturnExprInContext("n.id", ctxVals))
+	assert.Equal(t, "bob", exec.evaluateReturnExprInContext("m.name", ctxVals))
+	assert.Equal(t, "NYC", exec.evaluateReturnExprInContext("m.city", ctxVals))
+	assert.Nil(t, exec.evaluateReturnExprInContext("missing.field", ctxVals))
+
+	ok, err := exec.evaluateYieldWhere("", map[string]interface{}{"x": 1})
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	ok, err = exec.evaluateYieldWhere("n.value > 0", map[string]interface{}{"n": map[string]interface{}{"value": int64(2)}})
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	ok, err = exec.evaluateYieldWhere("x.value > 1", map[string]interface{}{"x": int64(0)})
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	ok, err = exec.evaluateYieldWhere("1 + 1", map[string]interface{}{})
+	require.Error(t, err)
+	assert.False(t, ok)
+}
+
+func TestCypherHelpers_VectorParsingAndQueryBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	_, _, _, err := exec.parseVectorQueryParams("CALL db.labels()")
+	require.Error(t, err)
+	_, _, _, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes")
+	require.Error(t, err)
+	_, _, _, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx', 2, [1,2]")
+	require.Error(t, err)
+
+	indexName, k, input, err := exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx', 5, [1.0, 2.5])")
+	require.NoError(t, err)
+	assert.Equal(t, "idx", indexName)
+	assert.Equal(t, 5, k)
+	assert.Equal(t, []float32{1.0, 2.5}, input.vector)
+
+	_, _, input, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx', 3, 'hello')")
+	require.NoError(t, err)
+	assert.Equal(t, "hello", input.stringQuery)
+
+	_, _, input, err = exec.parseVectorQueryParams("CALL db.index.vector.queryRelationships('idx', 4, $q)")
+	require.NoError(t, err)
+	assert.Equal(t, "q", input.paramName)
+
+	parts := splitParamsCarefully(`'idx', 5, "a,b", [1,2,{x:3}]`)
+	require.Len(t, parts, 4)
+	assert.Equal(t, "\"a,b\"", strings.TrimSpace(parts[2]))
+	assert.Equal(t, []float32{1.5, 2}, parseInlineVector("[1.5, bad, 2]"))
+
+	// String query branch without embedder should error.
+	_, err = exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx', 2, 'search text')")
+	require.Error(t, err)
+
+	// Parameter branch with no params should return empty result.
+	res, err := exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx', 2, $query)")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Empty(t, res.Rows)
+
+	// Parameter missing in map should error.
+	ctxMissing := context.WithValue(ctx, paramsKey, map[string]interface{}{"other": []float64{1, 2}})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxMissing, "CALL db.index.vector.queryNodes('idx', 2, $query)")
+	require.Error(t, err)
+
+	// Unsupported parameter type should error.
+	ctxBadType := context.WithValue(ctx, paramsKey, map[string]interface{}{"query": true})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxBadType, "CALL db.index.vector.queryNodes('idx', 2, $query)")
+	require.Error(t, err)
+
+	// []interface{} with non-numeric value should error.
+	ctxNonNumeric := context.WithValue(ctx, paramsKey, map[string]interface{}{"query": []interface{}{1, "x"}})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxNonNumeric, "CALL db.index.vector.queryNodes('idx', 2, $query)")
+	require.Error(t, err)
+
+	// No recognized input plus unsupported params path.
+	ctxUnsupported := context.WithValue(ctx, paramsKey, map[string]interface{}{"bad": true})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxUnsupported, "CALL db.index.vector.queryNodes('idx', 2, 123)")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_VectorAndFulltextRelationshipQueryBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	// Fulltext relationships: empty query and match query branches.
+	res, err := exec.callDbIndexFulltextQueryRelationships("CALL db.index.fulltext.queryRelationships('idx', '')")
+	require.NoError(t, err)
+	require.Equal(t, []string{"relationship", "score"}, res.Columns)
+
+	// Populate one relationship with searchable property.
+	_, err = exec.storage.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "a"}})
+	require.NoError(t, err)
+	_, err = exec.storage.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "b"}})
+	require.NoError(t, err)
+	err = exec.storage.CreateEdge(&storage.Edge{
+		ID:        "r1",
+		StartNode: "a",
+		EndNode:   "b",
+		Type:      "LINKS",
+		Properties: map[string]interface{}{
+			"text": "hello world",
+		},
+	})
+	require.NoError(t, err)
+	res, err = exec.callDbIndexFulltextQueryRelationships("CALL db.index.fulltext.queryRelationships('idx', 'hello')")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	// Vector relationships: same error/param branches as node vector query.
+	_, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx', 2, 'search text')")
+	require.Error(t, err)
+
+	res, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx', 2, $query)")
+	require.NoError(t, err)
+	assert.Empty(t, res.Rows)
+
+	ctxMissing := context.WithValue(ctx, paramsKey, map[string]interface{}{"other": []float64{1, 2}})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxMissing, "CALL db.index.vector.queryRelationships('idx', 2, $query)")
+	require.Error(t, err)
+
+	ctxBadType := context.WithValue(ctx, paramsKey, map[string]interface{}{"query": true})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxBadType, "CALL db.index.vector.queryRelationships('idx', 2, $query)")
+	require.Error(t, err)
+
+	ctxNonNumeric := context.WithValue(ctx, paramsKey, map[string]interface{}{"query": []interface{}{1, "x"}})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxNonNumeric, "CALL db.index.vector.queryRelationships('idx', 2, $query)")
+	require.Error(t, err)
+
+	ctxUnsupported := context.WithValue(ctx, paramsKey, map[string]interface{}{"bad": true})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxUnsupported, "CALL db.index.vector.queryRelationships('idx', 2, 123)")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	expectSuccess := []string{
+		"CALL db.info()",
+		"CALL db.ping()",
+		"CALL db.labels()",
+		"CALL db.relationshipTypes()",
+		"CALL db.propertyKeys()",
+		"CALL db.indexes()",
+		"CALL db.constraints()",
+		"CALL db.index.stats()",
+		"CALL db.schema.visualization()",
+		"CALL db.schema.nodeProperties()",
+		"CALL db.schema.relProperties()",
+		"CALL dbms.info()",
+		"CALL dbms.listConfig()",
+		"CALL dbms.clientConfig()",
+		"CALL dbms.listConnections()",
+		"CALL dbms.components()",
+		"CALL dbms.procedures()",
+		"CALL dbms.functions()",
+		"CALL db.index.fulltext.listAvailableAnalyzers()",
+		"CALL db.index.fulltext.queryRelationships('idx', 'nothing')",
+		"CALL db.index.vector.queryRelationships('idx', 2, $q)",
+		"CALL gds.version()",
+		"CALL gds.graph.list()",
+		"CALL nornicdb.version()",
+		"CALL nornicdb.stats()",
+		"CALL nornicdb.decay.info()",
+		"CALL db.retrieve('x')",
+		"CALL db.rretrieve('x')",
+		"CALL db.stats.status()",
+		"CALL db.stats.stop()",
+		"CALL db.stats.clear()",
+		"CALL db.clearQueryCaches()",
+	}
+	for _, q := range expectSuccess {
+		t.Run("success_"+q, func(t *testing.T) {
+			res, err := exec.executeCall(ctx, q)
+			require.NoError(t, err, q)
+			require.NotNil(t, res, q)
+			require.NotEmpty(t, res.Columns, q)
+		})
+	}
+
+	expectError := []string{
+		"CALL db.index.vector.queryRelationships('idx', 2, 'search text')", // no embedder
+		"CALL db.index.vector.queryNodes('idx', 2, 'search text')",         // no embedder
+		"CALL db.txlog.entries(1, 2)",                                      // no WAL on memory engine
+		"CALL db.txlog.byTxId('x', 2)",                                     // no WAL on memory engine
+		"CALL db.index.vector.embed('hello')",                              // no embedder
+		"CALL db.rerank('x')",                                              // missing/invalid args
+		"CALL db.infer('x')",                                               // missing/invalid args
+		"CALL db.temporal.assertNoOverlap()",                               // malformed
+		"CALL db.temporal.asOf()",                                          // malformed
+		"CALL apoc.path.expand()",                                          // malformed
+		"CALL apoc.path.spanningTree()",                                    // malformed
+		"CALL apoc.algo.dijkstra()",                                        // malformed
+		"CALL apoc.algo.aStar()",                                           // malformed
+		"CALL apoc.algo.allSimplePaths()",                                  // malformed
+		"CALL apoc.neighbors.tohop()",                                      // malformed
+		"CALL apoc.neighbors.byhop()",                                      // malformed
+		"CALL apoc.load.json()",                                            // malformed
+		"CALL apoc.load.csv()",                                             // malformed
+		"CALL apoc.import.json()",                                          // malformed
+		"CALL apoc.periodic.commit()",                                      // malformed
+		"CALL apoc.periodic.iterate()",                                     // malformed
+		"CALL apoc.cypher.run()",                                           // malformed
+		"CALL apoc.cypher.runMany()",                                       // malformed
+	}
+	for _, q := range expectError {
+		t.Run("error_"+q, func(t *testing.T) {
+			res, err := exec.executeCall(ctx, q)
+			require.Error(t, err, q)
+			assert.Nil(t, res, q)
+		})
+	}
+}
+
+func TestCypherHelpers_ExecuteCartesianProductMatch_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(30)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(20)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "a1", Labels: []string{"Area"}, Properties: map[string]interface{}{"code": "X"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "a2", Labels: []string{"Area"}, Properties: map[string]interface{}{"code": "Y"}})
+	require.NoError(t, err)
+
+	// Non-aggregation path with WHERE, DISTINCT, ORDER BY, SKIP, LIMIT.
+	query := "MATCH (p:Person), (a:Area) WHERE p.age >= 20 RETURN p.name AS name, a.code AS code ORDER BY name SKIP 1 LIMIT 2"
+	retItems := []returnItem{{expr: "p.name", alias: "name"}, {expr: "a.code", alias: "code"}}
+	res := &ExecuteResult{Columns: []string{"name", "code"}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+	out, err := exec.executeCartesianProductMatch(
+		ctx,
+		query,
+		"MATCH (p:Person), (a:Area)",
+		[]string{"(p:Person)", "(a:Area)"},
+		strings.Index(strings.ToUpper(query), "WHERE"),
+		strings.Index(strings.ToUpper(query), "RETURN"),
+		retItems,
+		false,
+		true,
+		res,
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Rows, 2)
+
+	// Aggregation path.
+	aggQuery := "MATCH (p:Person), (a:Area) RETURN count(*) AS c, collect(p.name) AS names"
+	aggItems := []returnItem{{expr: "count(*)", alias: "c"}, {expr: "collect(p.name)", alias: "names"}}
+	aggRes := &ExecuteResult{Columns: []string{"c", "names"}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+	aggOut, err := exec.executeCartesianProductMatch(
+		ctx,
+		aggQuery,
+		"MATCH (p:Person), (a:Area)",
+		[]string{"(p:Person)", "(a:Area)"},
+		-1,
+		strings.Index(strings.ToUpper(aggQuery), "RETURN"),
+		aggItems,
+		true,
+		false,
+		aggRes,
+	)
+	require.NoError(t, err)
+	require.Len(t, aggOut.Rows, 1)
+	assert.Equal(t, int64(4), aggOut.Rows[0][0]) // 2x2 cartesian product
+}
+
+func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(40)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(30)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(20)}})
+	require.NoError(t, err)
+	err = eng.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"})
+	require.NoError(t, err)
+	err = eng.CreateEdge(&storage.Edge{ID: "e2", StartNode: "n2", EndNode: "n3", Type: "LIKES"})
+	require.NoError(t, err)
+
+	n1, err := eng.GetNode("n1")
+	require.NoError(t, err)
+	n2, err := eng.GetNode("n2")
+	require.NoError(t, err)
+	n3, err := eng.GetNode("n3")
+	require.NoError(t, err)
+
+	assert.False(t, exec.evaluateRelationshipPatternInWhere(n1, "n", "(x)-[:KNOWS]->()"))
+	assert.True(t, exec.evaluateRelationshipPatternInWhere(n1, "n", "(n)-[:KNOWS]->()"))
+	assert.False(t, exec.evaluateRelationshipPatternInWhere(n1, "n", "(n)-[:LIKES]->()"))
+	assert.True(t, exec.evaluateRelationshipPatternInWhere(n2, "n", "(n)<-[:KNOWS]-()"))
+	assert.True(t, exec.evaluateRelationshipPatternInWhere(n2, "n", "(n)-[:ANY]-()"))
+	assert.True(t, exec.evaluateRelationshipPatternInWhere(n1, "n", "(n)-[:KNOWS]->()-[:LIKES]->()"))
+
+	assert.False(t, exec.checkChainedPattern(n1, "x", "(n)-[:KNOWS]->()-[:LIKES]->()", ""))
+	assert.True(t, exec.checkChainedPattern(n1, "n", "(n:Person)-[:KNOWS]->()-[:LIKES]->()", ""))
+
+	hops := exec.parseRelationshipHops("(n)-[:KNOWS|FRIEND]->()-[:LIKES]->()", "n")
+	require.Len(t, hops, 2)
+	assert.True(t, hops[0].outgoing)
+	assert.ElementsMatch(t, []string{"KNOWS", "FRIEND"}, hops[0].relTypes)
+	assert.True(t, hops[1].outgoing)
+	assert.ElementsMatch(t, []string{"LIKES"}, hops[1].relTypes)
+	assert.Empty(t, exec.parseRelationshipHops("(n)-[:BROKEN->()", "n"))
+
+	assert.True(t, exec.traverseChain(n1, []relationshipHop{
+		{relTypes: []string{"KNOWS"}, outgoing: true},
+		{relTypes: []string{"LIKES"}, outgoing: true},
+	}, 0))
+	assert.False(t, exec.traverseChain(n1, []relationshipHop{
+		{relTypes: []string{"KNOWS"}, outgoing: true},
+		{relTypes: []string{"MISSING"}, outgoing: true},
+	}, 0))
+
+	// Incoming traversal branch.
+	assert.True(t, exec.traverseChain(n3, []relationshipHop{
+		{relTypes: []string{"LIKES"}, outgoing: false},
+		{relTypes: []string{"KNOWS"}, outgoing: false},
+	}, 0))
+	assert.False(t, exec.traverseChain(n3, []relationshipHop{
+		{relTypes: []string{"MISSING"}, outgoing: false},
+	}, 0))
+
+	// No type filter branch.
+	assert.True(t, exec.traverseChain(n1, []relationshipHop{
+		{relTypes: nil, outgoing: true},
+	}, 0))
+}
+
+func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	node := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(21), "name": "alice"}}
+
+	assert.True(t, exec.evaluateWhereAsBoolean("n.age >= 21", "n", node))
+	assert.False(t, exec.evaluateWhereAsBoolean("n.missing", "n", node))
+	assert.True(t, exec.evaluateWhereAsBoolean("1", "n", node))
+	assert.False(t, exec.evaluateWhereAsBoolean("0", "n", node))
+	assert.True(t, exec.evaluateWhereAsBoolean("1.5", "n", node))
+	assert.False(t, exec.evaluateWhereAsBoolean("0.0", "n", node))
+	assert.True(t, exec.evaluateWhereAsBoolean("'x'", "n", node))
+}
+
+func TestCypherHelpers_ExplainInferenceAndCostHelpers(t *testing.T) {
+	exec := &StorageExecutor{}
+
+	cols := exec.inferExplainColumns("CALL db.labels() YIELD label AS lbl RETURN lbl")
+	require.Equal(t, []string{"lbl"}, cols)
+	cols = exec.inferExplainColumns("MATCH (n) RETURN n.name AS name, n.age")
+	require.Equal(t, []string{"name", "n.age"}, cols)
+	cols = exec.inferExplainColumns("MATCH (n)")
+	require.Empty(t, cols)
+
+	limit := exec.analyzeLimitSkip("MATCH (n) RETURN n SKIP 5 LIMIT 10")
+	require.Equal(t, "10", limit.Arguments["limit"])
+	require.Equal(t, "5", limit.Arguments["skip"])
+	assert.Equal(t, int64(10), limit.EstimatedRows)
+	assert.Contains(t, limit.Description, "Limit to 10 rows")
+	assert.Contains(t, limit.Description, "skip 5")
+
+	skipOnly := exec.analyzeLimitSkip("MATCH (n) RETURN n SKIP 2")
+	assert.Equal(t, int64(100), skipOnly.EstimatedRows)
+	assert.Equal(t, "2", skipOnly.Arguments["skip"])
+
+	plan := &PlanOperator{
+		OperatorType:  "NodeByLabelScan",
+		EstimatedRows: 3,
+		Children: []*PlanOperator{
+			{OperatorType: "Expand", EstimatedRows: 2},
+			{OperatorType: "CustomOperator", EstimatedRows: 4},
+		},
+	}
+	hits := exec.estimateDBHits(plan)
+	require.Equal(t, int64(16), hits)
+	assert.Equal(t, int64(16), plan.DBHits)
+
+	res := &ExecuteResult{
+		Rows: [][]interface{}{{1}, {2}},
+	}
+	exec.updatePlanWithStats(plan, res)
+	assert.Equal(t, int64(2), plan.ActualRows)
+	require.Len(t, plan.Children, 2)
+	assert.Equal(t, int64(2), plan.Children[0].ActualRows)
+
+	attached := exec.attachPlanMetadata(&ExecuteResult{}, &ExecutionPlan{Mode: ModeExplain, Root: plan})
+	require.NotNil(t, attached.Metadata["planString"])
+	require.NotNil(t, attached.Metadata["plan"])
+	require.Equal(t, string(ModeExplain), attached.Metadata["planType"])
 }

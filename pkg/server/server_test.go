@@ -4,7 +4,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -3711,7 +3710,7 @@ func TestUIAndStringHelpers_AdditionalBranches(t *testing.T) {
 	require.Nil(t, h)
 
 	UIEnabled = true
-	UIAssets = embed.FS{}
+	UIAssets = nil
 	h, err = newUIHandler()
 	require.Error(t, err)
 	require.Nil(t, h)

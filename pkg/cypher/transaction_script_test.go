@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -156,4 +157,147 @@ func TestTransactionScriptHelpers_ParseAndMapBuilders(t *testing.T) {
 	assert.Equal(t, "two", vals["b"])
 	_, exists := vals["c"]
 	assert.False(t, exists)
+}
+
+func TestTransactionScript_AdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// executeTransactionScript non-BEGIN and bare BEGIN paths.
+	res, err := exec.executeTransactionScript(ctx, "MATCH (n) RETURN n")
+	require.NoError(t, err)
+	assert.Nil(t, res)
+	res, err = exec.executeTransactionScript(ctx, "BEGIN")
+	require.NoError(t, err)
+	assert.Nil(t, res)
+
+	// Missing COMMIT/ROLLBACK action should return nil,nil.
+	res, err = exec.executeTransactionScript(ctx, "BEGIN RETURN 1")
+	require.NoError(t, err)
+	assert.Nil(t, res)
+
+	// executeSimpleTransactionScript invalid action rolls back and returns error.
+	_, err = exec.executeSimpleTransactionScript(ctx, "RETURN 1 AS x", "INVALID")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid transaction script action")
+
+	// executeSimpleTransactionScript query error path rolls back.
+	_, err = exec.executeSimpleTransactionScript(ctx, "BLAH COMMAND", "COMMIT")
+	require.Error(t, err)
+
+	// evaluateConditionExpression non-boolean branch.
+	ok, err := exec.evaluateConditionExpression("'x'", map[string]*storage.Node{}, map[string]*storage.Edge{})
+	require.Error(t, err)
+	assert.False(t, ok)
+}
+
+func TestTransactionStatementHandlers_AdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	res, err := exec.parseTransactionStatement("MATCH (n) RETURN n")
+	require.NoError(t, err)
+	assert.Nil(t, res)
+
+	res, err = exec.parseTransactionStatement("BEGIN")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"status"}, res.Columns)
+	require.NotNil(t, exec.txContext)
+	assert.True(t, exec.txContext.active)
+
+	_, err = exec.handleBegin()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transaction already active")
+
+	commitRes, err := exec.handleCommit()
+	require.NoError(t, err)
+	require.Equal(t, []string{"status"}, commitRes.Columns)
+	assert.Equal(t, "Transaction committed", commitRes.Rows[0][0])
+	assert.Nil(t, exec.txContext)
+
+	_, err = exec.handleCommit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no active transaction")
+
+	exec.txContext = &TransactionContext{tx: struct{}{}, active: true}
+	_, err = exec.handleCommit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown transaction type")
+
+	exec.txContext = &TransactionContext{tx: struct{}{}, active: true}
+	_, err = exec.handleRollback()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown transaction type")
+
+	exec.txContext = nil
+	_, err = exec.handleRollback()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no active transaction")
+}
+
+func TestTransactionStatementHandlers_WithWALAsyncEngine(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cypher-transaction-wal-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	badger, err := storage.NewBadgerEngine(tmpDir)
+	require.NoError(t, err)
+	defer badger.Close()
+
+	wal, err := storage.NewWAL(tmpDir+"/wal", nil)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	walEngine := storage.NewWALEngine(badger, wal)
+	asyncEngine := storage.NewAsyncEngine(walEngine, nil)
+	defer asyncEngine.Close()
+
+	store := storage.NewNamespacedEngine(asyncEngine, "test")
+	exec := NewStorageExecutor(store)
+
+	beginRes, err := exec.parseTransactionStatement("BEGIN TRANSACTION")
+	require.NoError(t, err)
+	require.Equal(t, "Transaction started", beginRes.Rows[0][0])
+	require.NotNil(t, exec.txContext)
+	assert.NotNil(t, exec.txContext.wal)
+	assert.Greater(t, exec.txContext.walSeqStart, uint64(0))
+
+	commitRes, err := exec.parseTransactionStatement("COMMIT TRANSACTION")
+	require.NoError(t, err)
+	require.Equal(t, "Transaction committed", commitRes.Rows[0][0])
+	require.NotNil(t, commitRes.Metadata)
+	require.NotNil(t, commitRes.Metadata["receipt"])
+}
+
+func TestTransactionHandleBegin_NoTransactionEngine(t *testing.T) {
+	exec := &StorageExecutor{} // no storage engine configured
+	_, err := exec.handleBegin()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "engine does not support transactions")
+}
+
+func TestTransactionScript_CaseRollbackAdditionalErrorBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeCaseRollbackTransactionScript(ctx, "CALL db.labels()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing CASE block")
+
+	_, err = exec.executeCaseRollbackTransactionScript(ctx, "CALL db.labels() CASE WHEN true THEN ROLLBACK")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid transaction CASE syntax")
+
+	_, err = exec.executeCaseRollbackTransactionScript(ctx, "CALL bad.proc() CASE WHEN true THEN ROLLBACK ELSE RETURN 1 COMMIT")
+	require.Error(t, err)
+
+	_, err = exec.executeCaseRollbackTransactionScript(ctx, "CALL dbms.info() YIELD id CASE WHEN 'x' THEN ROLLBACK ELSE RETURN id COMMIT")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not evaluate to boolean")
 }

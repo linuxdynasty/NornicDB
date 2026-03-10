@@ -1131,3 +1131,70 @@ func TestMultipleGraphProjections(t *testing.T) {
 
 	t.Log("✓ Multiple graph projections work correctly")
 }
+
+func TestGenerateFastRPEmbeddings_Branches(t *testing.T) {
+	empty := generateFastRPEmbeddings(&GraphProjection{}, FastRPConfig{EmbeddingDimension: 4})
+	if len(empty) != 0 {
+		t.Fatalf("expected empty embedding map for empty projection, got %d", len(empty))
+	}
+
+	proj := &GraphProjection{
+		NodeIDs: []string{"n1", "n2"},
+		NodeProperties: map[string]map[string]any{
+			"n1": {"age": float64(20)},
+			"n2": {"age": float64(40)},
+		},
+		Adjacency: map[string][]string{
+			"n1": {"n2"},
+			"n2": {"n1"},
+		},
+		EdgeWeights: map[string]map[string]float64{
+			"n1": {"n2": 2.0},
+			"n2": {"n1": 1.0},
+		},
+	}
+	cfg := FastRPConfig{
+		EmbeddingDimension:         8,
+		IterationWeights:           []float64{0.0, 1.0},
+		PropertyRatio:              0.25,
+		FeatureProperties:          []string{"age"},
+		RelationshipWeightProperty: "weight",
+		RandomSeed:                 7,
+	}
+	out := generateFastRPEmbeddings(proj, cfg)
+	if len(out) != 2 {
+		t.Fatalf("expected embeddings for 2 nodes, got %d", len(out))
+	}
+	for nodeID, emb := range out {
+		if len(emb) != 8 {
+			t.Fatalf("node %s: expected dim=8, got %d", nodeID, len(emb))
+		}
+		var normSq float64
+		for _, v := range emb {
+			normSq += v * v
+		}
+		norm := math.Sqrt(normSq)
+		if norm < 0.99 || norm > 1.01 {
+			t.Fatalf("node %s: expected normalized embedding, got norm=%f", nodeID, norm)
+		}
+	}
+}
+
+func TestGenerateFastRPEmbeddings_LargeGraphStreamingBranch(t *testing.T) {
+	nodeIDs := make([]string, maxNodesBeforeStreaming+1)
+	for i := range nodeIDs {
+		nodeIDs[i] = fmt.Sprintf("n%d", i)
+	}
+	proj := &GraphProjection{NodeIDs: nodeIDs}
+	out := generateFastRPEmbeddings(proj, FastRPConfig{
+		EmbeddingDimension: 2,
+		IterationWeights:   []float64{0.0, 0.0},
+		RandomSeed:         123,
+	})
+	if len(out) != len(nodeIDs) {
+		t.Fatalf("expected %d embeddings, got %d", len(nodeIDs), len(out))
+	}
+	if len(out["n0"]) != 2 {
+		t.Fatalf("expected n0 to have embedding dimension 2, got %d", len(out["n0"]))
+	}
+}

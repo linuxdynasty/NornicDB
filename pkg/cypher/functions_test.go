@@ -1842,3 +1842,98 @@ func TestApocMapRemoveKey(t *testing.T) {
 		t.Errorf("apoc.map.removeKey should return map, got %T", result)
 	}
 }
+
+func TestFunctionAdditionalMathAndStringCoverage(t *testing.T) {
+	e := setupTestExecutor(t)
+	nodes := map[string]*storage.Node{
+		"n": {
+			ID: "n1",
+			Properties: map[string]interface{}{
+				"txt": "go",
+				"x":   int64(42),
+			},
+		},
+	}
+
+	tests := []struct {
+		expr string
+		want interface{}
+	}{
+		{"cot(1)", 1.0 / math.Tan(1)},
+		{"haversin(1)", (1 - math.Cos(1)) / 2},
+		{"normalize('cafe')", "cafe"},
+		{"lpad('go', 5, '.')", "...go"},
+		{"rpad('go', 5, '.')", "go..."},
+		{"percentileCont(n.x, 0.5)", int64(42)},
+		{"percentileDisc(n.x, 0.5)", int64(42)},
+		{"stDev(n.x)", float64(0)},
+		{"stDevP(n.x)", float64(0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.expr, func(t *testing.T) {
+			got := e.evaluateExpressionWithContext(tt.expr, nodes, nil)
+			if got != tt.want {
+				t.Errorf("%s = %v, want %v", tt.expr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFunctionAdditionalGeometryAndPathCoverage(t *testing.T) {
+	e := setupTestExecutor(t)
+
+	// linestring / polygon literals
+	line := e.evaluateExpressionWithContext("lineString([point({x:0,y:0}), point({x:1,y:1})])", nil, nil)
+	lineMap, ok := line.(map[string]interface{})
+	if !ok {
+		t.Fatalf("lineString should return map, got %T", line)
+	}
+	if lineMap["type"] != "linestring" {
+		t.Fatalf("lineString type = %v, want linestring", lineMap["type"])
+	}
+
+	poly := e.evaluateExpressionWithContext("polygon([point({x:0,y:0}), point({x:2,y:0}), point({x:0,y:2})])", nil, nil)
+	polyMap, ok := poly.(map[string]interface{})
+	if !ok {
+		t.Fatalf("polygon should return map, got %T", poly)
+	}
+	if polyMap["type"] != "polygon" {
+		t.Fatalf("polygon type = %v, want polygon", polyMap["type"])
+	}
+
+	// insufficient points branches
+	if v := e.evaluateExpressionWithContext("lineString([point({x:0,y:0})])", nil, nil); v != nil {
+		t.Fatalf("lineString with <2 points should be nil, got %v", v)
+	}
+	if v := e.evaluateExpressionWithContext("polygon([point({x:0,y:0}), point({x:1,y:1})])", nil, nil); v != nil {
+		t.Fatalf("polygon with <3 points should be nil, got %v", v)
+	}
+
+	// nodes(path) coverage using explicit path context
+	pathNodes := []*storage.Node{
+		{ID: "a", Properties: map[string]interface{}{"name": "a"}},
+		{ID: "b", Properties: map[string]interface{}{"name": "b"}},
+	}
+	pathEdges := []*storage.Edge{
+		{ID: "e1", Type: "KNOWS", Properties: map[string]interface{}{"w": 1}},
+	}
+	path := &PathResult{
+		Nodes:         pathNodes,
+		Relationships: pathEdges,
+		Length:        1,
+	}
+	gotNodes := e.evaluateExpressionWithContextFull("nodes(p)", nil, nil, map[string]*PathResult{"p": path}, nil, nil, 0)
+	if arr, ok := gotNodes.([]interface{}); !ok || len(arr) != 2 {
+		t.Fatalf("nodes(p) expected 2 entries, got %T %#v", gotNodes, gotNodes)
+	}
+
+	// fallback via allPathNodes/allPathEdges
+	gotNodesFallback := e.evaluateExpressionWithContextFull("nodes(p)", nil, nil, nil, nil, pathNodes, 0)
+	if arr, ok := gotNodesFallback.([]interface{}); !ok || len(arr) != 2 {
+		t.Fatalf("nodes(p) fallback expected 2 entries, got %T %#v", gotNodesFallback, gotNodesFallback)
+	}
+	gotRelsFallback := e.evaluateExpressionWithContextFull("relationships(p)", nil, nil, nil, pathEdges, nil, 0)
+	if arr, ok := gotRelsFallback.([]interface{}); !ok || len(arr) != 1 {
+		t.Fatalf("relationships(p) fallback expected 1 entry, got %T %#v", gotRelsFallback, gotRelsFallback)
+	}
+}

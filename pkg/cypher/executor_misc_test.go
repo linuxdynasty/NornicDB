@@ -385,6 +385,13 @@ func TestDbTxlogProcedures_WithWALStack(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
+	beginSeq, err := wal.AppendTxBegin("test", "tx-test-1", map[string]string{"app": "cypher-test"})
+	require.NoError(t, err)
+	_, err = wal.AppendTxCommit("test", "tx-test-1", 2)
+	require.NoError(t, err)
+	require.Greater(t, beginSeq, uint64(0))
+	require.NoError(t, wal.Sync())
+
 	_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "one"})`, nil)
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "two"})`, nil)
@@ -392,18 +399,7 @@ func TestDbTxlogProcedures_WithWALStack(t *testing.T) {
 
 	entriesRes, err := exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1, 0)")
 	require.NoError(t, err)
-	if len(entriesRes.Rows) == 0 {
-		_, err = exec.Execute(ctx, `CREATE (n:TxLog {name: "retry"})`, nil)
-		require.NoError(t, err)
-		entriesRes, err = exec.callDbTxlogEntries(ctx, "CALL db.txlog.entries(1, 1000)")
-		require.NoError(t, err)
-	}
-	if len(entriesRes.Rows) == 0 {
-		// In some backends txlog visibility can lag even after writes.
-		// Avoid timing-flaky hard failures.
-		return
-	}
-
+	require.NotEmpty(t, entriesRes.Rows)
 	var txID string
 	for _, row := range entriesRes.Rows {
 		if len(row) > 3 {
@@ -413,14 +409,15 @@ func TestDbTxlogProcedures_WithWALStack(t *testing.T) {
 			}
 		}
 	}
-	if txID == "" {
-		// No usable txID surfaced in rows; avoid backend-specific assumptions.
-		return
-	}
+	require.NotEmpty(t, txID)
 
-	byTxIDRes, err := exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('"+txID+"', 10)")
+	byTxIDRes, err := exec.callDbTxlogByTxID(ctx, "CALL db.txlog.byTxId('tx-test-1', 10)")
 	require.NoError(t, err)
 	require.NotEmpty(t, byTxIDRes.Rows)
+	for _, row := range byTxIDRes.Rows {
+		require.GreaterOrEqual(t, len(row), 4)
+		assert.Equal(t, "tx-test-1", row[3])
+	}
 }
 
 // =============================================================================

@@ -3,10 +3,10 @@ package server
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/audit"
@@ -24,9 +25,15 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	uiassets "github.com/orneryd/nornicdb/ui"
 	"github.com/stretchr/testify/assert"
 )
+
+func testUIAssetsFS() fs.FS {
+	return fstest.MapFS{
+		"dist/index.html":    &fstest.MapFile{Data: []byte("<html>ui</html>")},
+		"dist/assets/app.js": &fstest.MapFile{Data: []byte("console.log('ui');")},
+	}
+}
 
 func TestBackupInvalidJSON(t *testing.T) {
 	server, auth := setupTestServer(t)
@@ -1394,7 +1401,7 @@ func TestUIHelpersAndHeimdallSetter(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, h)
 
-	SetUIAssets(embed.FS{})
+	SetUIAssets(fstest.MapFS{})
 	h, err = newUIHandler()
 	assert.Error(t, err)
 	assert.Nil(t, h)
@@ -1929,11 +1936,11 @@ func TestRouterRegistrationBranches(t *testing.T) {
 	assert.Nil(t, server.registerUIRoutes(mux))
 	server.config.Headless = false
 	UIEnabled = true
-	UIAssets = embed.FS{}
+	UIAssets = fstest.MapFS{}
 	assert.Nil(t, server.registerUIRoutes(mux))
 
-	// registerUIRoutes success path using real embedded UI assets.
-	SetUIAssets(uiassets.Assets)
+	// registerUIRoutes success path using injected UI assets.
+	SetUIAssets(testUIAssetsFS())
 	mux = http.NewServeMux()
 	uih := server.registerUIRoutes(mux)
 	assert.NotNil(t, uih)

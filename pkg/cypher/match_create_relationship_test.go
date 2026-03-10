@@ -250,3 +250,96 @@ func TestMatchCreateRelationship_ReverseDirection(t *testing.T) {
 		assert.Equal(t, 1, result.Stats.RelationshipsCreated)
 	})
 }
+
+func TestMatchCreateRelationship_CompoundHelpersAndDeleteBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (a:Person {name: 'Alice'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (b:Person {name: 'Bob'})`, nil)
+	require.NoError(t, err)
+
+	t.Run("splitMatchCreateBlocksAndKeywordHelpers", func(t *testing.T) {
+		query := `
+			MATCH (a:Person {name: 'Alice'})
+			MATCH (b:Person {name: 'Bob'})
+			CREATE (a)-[:KNOWS]->(b)
+			MATCH (c:Person {name: 'Alice'})
+			CREATE (c)-[:KNOWS]->(b)
+		`
+		blocks := exec.splitMatchCreateBlocks(query)
+		require.Len(t, blocks, 2)
+		assert.Contains(t, blocks[0], "CREATE (a)-[:KNOWS]->(b)")
+		assert.Contains(t, blocks[1], "CREATE (c)-[:KNOWS]->(b)")
+
+		positions := findAllKeywordPositions(`MATCH (n {txt: "MATCH"}) RETURN n MATCH (m) RETURN m`, "MATCH")
+		require.Len(t, positions, 2)
+		assert.True(t, positions[0] < positions[1])
+		assert.True(t, isInsideQuotes(`'abc'`, 2))
+		assert.False(t, isInsideQuotes(`'abc' x`, 5))
+	})
+
+	t.Run("compoundMatchCreateWithSetMapParams", func(t *testing.T) {
+		query := `
+			MATCH (a:Person {name: $name}), (b:Person {name: 'Bob'})
+			CREATE (a)-[r:KNOWS]->(b)
+			SET r += $props
+			RETURN r.since
+		`
+		ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{
+			"name":  "Alice",
+			"props": map[string]interface{}{"since": int64(2024), "weight": float64(0.8)},
+		})
+		res, err := exec.executeCompoundMatchCreate(ctxWithParams, query)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 1)
+		assert.Equal(t, int64(2024), res.Rows[0][0])
+
+		verify, err := exec.Execute(ctx, `
+			MATCH (:Person {name: 'Alice'})-[r:KNOWS]->(:Person {name: 'Bob'})
+			RETURN r.since, r.weight
+		`, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, verify.Rows)
+		assert.Equal(t, int64(2024), verify.Rows[len(verify.Rows)-1][0])
+		assert.Equal(t, float64(0.8), verify.Rows[len(verify.Rows)-1][1])
+	})
+
+	t.Run("compoundMatchCreateWithDirectDeleteAndWithDelete", func(t *testing.T) {
+		directDelete := `
+			MATCH (a:Person {name: 'Alice'})
+			CREATE (tmp:Tmp {id: 'tmp-direct'})
+			DELETE tmp
+			RETURN 'ok' AS status
+		`
+		res, err := exec.executeCompoundMatchCreate(ctx, directDelete)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 1)
+		assert.Equal(t, "ok", res.Rows[0][0])
+
+		checkDirect, err := exec.Execute(ctx, `MATCH (n:Tmp {id: 'tmp-direct'}) RETURN count(n)`, nil)
+		require.NoError(t, err)
+		require.Len(t, checkDirect.Rows, 1)
+		assert.Equal(t, int64(0), checkDirect.Rows[0][0])
+
+		withDelete := `
+			MATCH (a:Person {name: 'Alice'})
+			CREATE (tmp:Tmp {id: 'tmp-with'})
+			WITH tmp
+			DELETE tmp
+			RETURN 'gone' AS status
+		`
+		withDeleteRes, err := exec.executeCompoundMatchCreate(ctx, withDelete)
+		require.NoError(t, err)
+		require.Len(t, withDeleteRes.Rows, 1)
+		assert.Equal(t, "gone", withDeleteRes.Rows[0][0])
+
+		checkWith, err := exec.Execute(ctx, `MATCH (n:Tmp {id: 'tmp-with'}) RETURN count(n)`, nil)
+		require.NoError(t, err)
+		require.Len(t, checkWith.Rows, 1)
+		assert.Equal(t, int64(0), checkWith.Rows[0][0])
+	})
+}

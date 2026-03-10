@@ -2213,3 +2213,78 @@ func TestSubqueryWithNestedBraces(t *testing.T) {
 		t.Errorf("Expected 1 result, got %d", len(result.Rows))
 	}
 }
+
+func TestSubqueryHelpers_AddLimitSkipAndAfterCallProcessing(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	// addLimitSkipToSubquery branches
+	s1 := exec.addLimitSkipToSubquery("MATCH (n) SET n.x = 1 RETURN n", 10, 0)
+	assert.Contains(t, s1, "WITH n LIMIT 10")
+	assert.Contains(t, s1, "SET n.x = 1")
+
+	s2 := exec.addLimitSkipToSubquery("MATCH (n) CREATE (m) RETURN n", 5, 2)
+	assert.Contains(t, s2, "WITH n SKIP 2 LIMIT 5")
+	assert.Contains(t, s2, "CREATE (m)")
+
+	s3 := exec.addLimitSkipToSubquery("MATCH (n) RETURN n", 3, 1)
+	assert.Contains(t, s3, "SKIP 1 LIMIT 3")
+	assert.Contains(t, s3, "RETURN n")
+
+	s4 := exec.addLimitSkipToSubquery("MATCH (n)", 7, 0)
+	assert.Contains(t, s4, "LIMIT 7")
+
+	s5 := exec.addLimitSkipToSubquery("MATCH (n) RETURN n LIMIT 1", 2, 0)
+	assert.Contains(t, s5, "LIMIT 1")
+	assert.Contains(t, s5, "LIMIT 2")
+
+	// convertWriteSubqueryToRead branches
+	assert.Equal(t,
+		"MATCH (n) RETURN n",
+		exec.makeSubqueryReadOnly("MATCH (n) SET n.x = 1 RETURN n"),
+	)
+	assert.Equal(t,
+		"MATCH (n) RETURN n",
+		exec.makeSubqueryReadOnly("MATCH (n) CREATE (m) RETURN n"),
+	)
+	assert.Equal(t, "", exec.makeSubqueryReadOnly("CALL db.labels()"))
+
+	inner := &ExecuteResult{
+		Columns: []string{"name", "score"},
+		Rows: [][]interface{}{
+			{"alice", float64(0.9)},
+			{"bob", float64(0.8)},
+		},
+	}
+
+	// processAfterCallSubquery RETURN path
+	ret, err := exec.processAfterCallSubquery(ctx, inner, "RETURN name, score")
+	require.NoError(t, err)
+	require.Equal(t, []string{"name", "score"}, ret.Columns)
+	require.Len(t, ret.Rows, 2)
+
+	// ORDER BY path + modifiers
+	ordered, err := exec.processAfterCallSubquery(ctx, inner, "ORDER BY score DESC LIMIT 1")
+	require.NoError(t, err)
+	require.Len(t, ordered.Rows, 1)
+	assert.Equal(t, "alice", ordered.Rows[0][0])
+
+	// unsupported clause branch
+	_, err = exec.processAfterCallSubquery(ctx, inner, "WITH name RETURN name")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported clause after CALL {}")
+
+	// processCallSubqueryReturn: aggregation and aliases
+	innerForAgg := &ExecuteResult{
+		Columns: []string{"name", "score"},
+		Rows: [][]interface{}{
+			{"alice", float64(0.9)},
+			{"bob", float64(0.8)},
+		},
+	}
+	agg, err := exec.processCallSubqueryReturn(innerForAgg, "RETURN count(*) AS c")
+	require.NoError(t, err)
+	require.Equal(t, []string{"c"}, agg.Columns)
+	require.Len(t, agg.Rows, 1)
+	assert.Equal(t, int64(2), agg.Rows[0][0])
+}

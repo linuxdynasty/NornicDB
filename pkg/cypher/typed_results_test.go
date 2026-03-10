@@ -191,3 +191,76 @@ func TestAssignValue_TimeAndErrorBranches(t *testing.T) {
 	require.NoError(t, assignValue(fv, int64(9)))
 	assert.Equal(t, 9.0, f)
 }
+
+func TestTypedExecute_ErrorPaths(t *testing.T) {
+	baseEngine := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	// Raw execute error path.
+	_, err := TypedExecute[MemoryNode](ctx, executor, "THIS IS NOT CYPHER", nil)
+	require.Error(t, err)
+
+	// Decode error path from incompatible destination type.
+	type badRow struct {
+		Age int `cypher:"age"`
+	}
+	_, err = executor.Execute(ctx, `CREATE (:Person {age: 'not-int'})`, nil)
+	require.NoError(t, err)
+	_, err = TypedExecute[badRow](ctx, executor, `MATCH (n:Person) RETURN n.age AS age`, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to decode row")
+}
+
+func TestTypedDecodeAndAssign_AdditionalBranches(t *testing.T) {
+	type tagged struct {
+		Skip  string `json:"-"`
+		Name  string `json:"name,omitempty"`
+		Count int32  `cypher:"count"`
+		Raw   string
+	}
+
+	var out tagged
+	err := decodeStruct(
+		[]string{"name", "count", "raw", "missing"},
+		[]interface{}{"alice", int64(3), "x", "y"},
+		reflect.ValueOf(&out).Elem(),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", out.Name)
+	assert.Equal(t, int32(3), out.Count)
+	assert.Equal(t, "x", out.Raw)
+
+	// decodeMap fallback to field-name lookup branch.
+	type fieldNameStruct struct {
+		FieldOnly string
+	}
+	var byField fieldNameStruct
+	err = decodeMap(map[string]interface{}{"FieldOnly": "v"}, reflect.ValueOf(&byField).Elem())
+	require.NoError(t, err)
+	assert.Equal(t, "v", byField.FieldOnly)
+
+	// assignValue direct assignable path.
+	var i64 int64
+	err = assignValue(reflect.ValueOf(&i64).Elem(), int64(11))
+	require.NoError(t, err)
+	assert.Equal(t, int64(11), i64)
+
+	// assignValue convertible path.
+	type myInt int64
+	var mi myInt
+	err = assignValue(reflect.ValueOf(&mi).Elem(), int64(9))
+	require.NoError(t, err)
+	assert.Equal(t, myInt(9), mi)
+
+	// assignValue unsupported bool conversion path.
+	var b bool
+	err = assignValue(reflect.ValueOf(&b).Elem(), "true")
+	require.Error(t, err)
+
+	// assignValue slice recursion error path.
+	var ints []int
+	err = assignValue(reflect.ValueOf(&ints).Elem(), []interface{}{"bad"})
+	require.Error(t, err)
+}

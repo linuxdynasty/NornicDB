@@ -2,21 +2,20 @@
 package server
 
 import (
-	"embed"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"strings"
 )
 
-// UIAssets holds the embedded UI files (set by main package)
-var UIAssets embed.FS
+// UIAssets holds the UI files (set by main package or tests).
+var UIAssets fs.FS
 
 // UIEnabled indicates if UI assets are available
 var UIEnabled bool
 
-// SetUIAssets configures the embedded UI assets
-func SetUIAssets(assets embed.FS) {
+// SetUIAssets configures the UI assets.
+func SetUIAssets(assets fs.FS) {
 	UIAssets = assets
 	UIEnabled = true
 }
@@ -31,6 +30,9 @@ type uiHandler struct {
 func newUIHandler() (*uiHandler, error) {
 	if !UIEnabled {
 		return nil, nil
+	}
+	if UIAssets == nil {
+		return nil, fmt.Errorf("UI assets not configured")
 	}
 
 	// List the embedded files to debug
