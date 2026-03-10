@@ -3,6 +3,7 @@ package nornicdb
 import (
 	"testing"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -70,5 +71,24 @@ func TestInferenceServices_AdditionalBranches(t *testing.T) {
 		svc, err := db.GetOrCreateInferenceService("tenant_a", nil)
 		require.ErrorIs(t, err, ErrClosed)
 		require.Nil(t, svc)
+	})
+
+	t.Run("feature-flag integrations are wired when enabled", func(t *testing.T) {
+		cleanupTLP := featureflags.WithAutoTLPEnabled()
+		defer cleanupTLP()
+		cleanupKalman := featureflags.WithKalmanEnabled()
+		defer cleanupKalman()
+
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = true
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		svc, err := db.GetOrCreateInferenceService("", nil) // empty dbName uses default
+		require.NoError(t, err)
+		require.NotNil(t, svc)
+		require.NotNil(t, svc.GetTopologyIntegration())
+		require.NotNil(t, svc.GetKalmanAdapter())
 	})
 }

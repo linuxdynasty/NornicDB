@@ -54,6 +54,35 @@ func TestQueryLoadPredictor_ShouldScaleDown_LowLoad(t *testing.T) {
 	_ = qlp.ShouldScaleDown(1000.0, -1.0)
 }
 
+func TestQueryLoadPredictor_GetLoadLevel_AllBuckets(t *testing.T) {
+	cfg := DefaultLoadConfig()
+	qlp := NewQueryLoadPredictor(cfg)
+
+	setQPS := func(v float64) {
+		qlp.qpsFilter.Reset()
+		for i := 0; i < 32; i++ {
+			qlp.qpsFilter.Process(v)
+		}
+	}
+
+	cases := []struct {
+		qps  float64
+		want int
+	}{
+		{5, 0},   // <0.1
+		{20, 1},  // <0.3
+		{40, 2},  // <0.5
+		{60, 3},  // <0.7
+		{80, 4},  // <0.9
+		{120, 5}, // default
+	}
+	for _, tc := range cases {
+		setQPS(tc.qps)
+		got := qlp.GetLoadLevel(100.0)
+		assert.Equal(t, tc.want, got, "qps=%v", tc.qps)
+	}
+}
+
 // ============================================================================
 // RelationshipEvolution – GetStrengthening/Weakening
 // ============================================================================
