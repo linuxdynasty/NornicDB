@@ -593,6 +593,19 @@ func TestSplitMergeChainClauseBlock_Branches(t *testing.T) {
 	require.Len(t, clauses, 2)
 	assert.Equal(t, "MATCH (n)", clauses[0])
 	assert.Equal(t, "RETURN n", clauses[1])
+
+	// Mixed clause chain with intermediate text: parser should still split at known clause starts.
+	clauses = splitMergeChainClauseBlock("MATCH (n) junk OPTIONAL MATCH (m) FOREACH (x IN [1] | SET m.v = x) RETURN m")
+	require.Len(t, clauses, 4)
+	assert.Equal(t, "MATCH (n) junk", clauses[0])
+	assert.Equal(t, "OPTIONAL MATCH (m)", clauses[1])
+	assert.Equal(t, "FOREACH (x IN [1] | SET m.v = x)", clauses[2])
+	assert.Equal(t, "RETURN m", clauses[3])
+
+	// Unknown tail after first clause is kept as part of that clause when no next keyword exists.
+	clauses = splitMergeChainClauseBlock("MATCH (n) trailing noise")
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "MATCH (n) trailing noise", clauses[0])
 }
 
 func TestApplyWithProjection_Branches(t *testing.T) {

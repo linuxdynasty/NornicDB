@@ -455,6 +455,47 @@ func TestCaseConditionEvaluation(t *testing.T) {
 	})
 }
 
+func TestEvaluateCondition_OperatorAndPredicateMatrix(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	node := &storage.Node{
+		ID:     "cond-node",
+		Labels: []string{"Person"},
+		Properties: map[string]interface{}{
+			"name": "Alice",
+			"age":  int64(10),
+		},
+	}
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
+
+	nodes := map[string]*storage.Node{"n": node}
+	tests := []struct {
+		condition string
+		expected  bool
+	}{
+		{"n.age >= 10 AND n.age <= 10", true},
+		{"n.age > 10 OR n.age = 10", true},
+		{"NOT n.age < 5", true},
+		{"n.name <> 'Bob'", true},
+		{"n.missing IS NULL", true},
+		{"n.name IS NOT NULL", true},
+		{"n.name STARTS WITH 'Al'", true},
+		{"n.name ENDS WITH 'ce'", true},
+		{"n.age CONTAINS '1'", false},
+		{"n:Person", true},
+		{"n:Other", false},
+		{"n.name", true},
+	}
+
+	for _, tt := range tests {
+		got := exec.evaluateCondition(tt.condition, nodes, nil)
+		assert.Equal(t, tt.expected, got, "condition=%q", tt.condition)
+	}
+}
+
 // Helper to convert various numeric types to int64
 func toInt64Value(v interface{}) int64 {
 	switch val := v.(type) {
