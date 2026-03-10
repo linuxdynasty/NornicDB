@@ -739,7 +739,9 @@ func TestSearchServices_EventDuringBuild_IsDeterministicallyReplayed(t *testing.
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	tenantStorage := storage.NewNamespacedEngine(db.baseStorage, "tenant_race")
+	// Use isolated storage for deterministic replay assertions. Using db.baseStorage
+	// can introduce unrelated async mutation callbacks that race this test.
+	tenantStorage := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "tenant_race")
 	blocking := &blockingIterEngine{
 		Engine:  tenantStorage,
 		entered: make(chan struct{}),
@@ -793,7 +795,9 @@ func TestSearchServices_RemoveEventDuringBuild_IsDeterministicallyReplayed(t *te
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	tenantStorage := storage.NewNamespacedEngine(db.baseStorage, "tenant_remove_race")
+	// Use isolated storage for deterministic replay assertions. Using db.baseStorage
+	// can introduce unrelated async mutation callbacks that race this test.
+	tenantStorage := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "tenant_remove_race")
 	blocking := &blockingIterEngine{
 		Engine:  tenantStorage,
 		entered: make(chan struct{}),
