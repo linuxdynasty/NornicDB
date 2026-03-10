@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -25,6 +26,27 @@ type testReranker struct {
 	enabled bool
 	results []RerankResult
 	err     error
+}
+
+type iteratorEngine struct {
+	storage.Engine
+	iterateErr error
+}
+
+func (e *iteratorEngine) IterateNodes(fn func(*storage.Node) bool) error {
+	if e.iterateErr != nil {
+		return e.iterateErr
+	}
+	nodes, err := e.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if !fn(node) {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (r *testReranker) Name() string                         { return "test_reranker" }
@@ -274,6 +296,88 @@ func TestServicePersistenceAndTimingHelpers(t *testing.T) {
 	// runPersist + PersistIndexesToDisk execute without panic on configured paths.
 	svc.runPersist()
 	svc.PersistIndexesToDisk()
+
+	// schedulePersist: disabled and build-in-progress no-op branches.
+	svc.SetPersistenceEnabled(false)
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+
+	svc.SetPersistenceEnabled(true)
+	svc.buildInProgress.Store(true)
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+	svc.buildInProgress.Store(false)
+
+	// schedulePersist: requires both fulltext and vector paths.
+	svc.SetFulltextIndexPath("")
+	svc.schedulePersist()
+	svc.persistMu.Lock()
+	require.Nil(t, svc.persistTimer)
+	svc.persistMu.Unlock()
+}
+
+func TestSearchHandleOrphanedEmbeddingBranches(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 3)
+
+	node := &storage.Node{
+		ID:              "orphan-node",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "to-remove"},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, svc.IndexNode(node))
+	require.Equal(t, 1, svc.EmbeddingCount())
+
+	// Non-ErrNotFound branch.
+	ok := svc.handleOrphanedEmbedding(context.Background(), "orphan-node", fmt.Errorf("other error"), nil)
+	require.False(t, ok)
+	require.Equal(t, 1, svc.EmbeddingCount())
+
+	// ErrNotFound branch removes orphaned vectors.
+	err = engine.DeleteNode("orphan-node")
+	require.NoError(t, err)
+	seen := map[string]bool{}
+	ok = svc.handleOrphanedEmbedding(context.Background(), "orphan-node", storage.ErrNotFound, seen)
+	require.True(t, ok)
+	require.True(t, seen["orphan-node"])
+	require.Equal(t, 0, svc.EmbeddingCount())
+
+	// Already-seen branch short-circuits deterministically.
+	ok = svc.handleOrphanedEmbedding(context.Background(), "orphan-node", storage.ErrNotFound, seen)
+	require.True(t, ok)
+}
+
+func TestSearchWarmupVectorPipelineBranches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 3)
+
+	// No embeddings: warmup is a no-op.
+	svc.warmupVectorPipeline(nil)
+	svc.pipelineMu.RLock()
+	require.Nil(t, svc.vectorPipeline)
+	svc.pipelineMu.RUnlock()
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:              "w1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "warmup"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.BuildIndexes(context.Background()))
+
+	// Embeddings present: warmup builds a ready pipeline.
+	svc.warmupVectorPipeline(context.Background())
+	svc.pipelineMu.RLock()
+	require.NotNil(t, svc.vectorPipeline)
+	svc.pipelineMu.RUnlock()
 }
 
 func TestSearchEnvDurationAndTimingHelpers(t *testing.T) {
@@ -606,6 +710,175 @@ func TestSearchService_BuildIndexes(t *testing.T) {
 	// Verify indexes were built
 	assert.Equal(t, 2, svc.vectorIndex.Count())
 	assert.Equal(t, 2, svc.fulltextIndex.Count())
+}
+
+func TestSearchService_BuildIndexes_ContextCanceled(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 3)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:              "n1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "alpha"},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = svc.BuildIndexes(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSearchService_BuildIndexes_IteratorEngineBranches(t *testing.T) {
+	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	_, err := base.CreateNode(&storage.Node{
+		ID:              "it-1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "alpha"},
+	})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&storage.Node{
+		ID:              "it-2",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0, 1, 0}},
+		Properties:      map[string]any{"content": "beta"},
+	})
+	require.NoError(t, err)
+
+	t.Run("iterates_and_builds", func(t *testing.T) {
+		svc := NewServiceWithDimensions(&iteratorEngine{Engine: base}, 3)
+		err := svc.BuildIndexes(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 2, svc.fulltextIndex.Count())
+		require.Equal(t, 2, svc.EmbeddingCount())
+	})
+
+	t.Run("canceled_context_returns_error", func(t *testing.T) {
+		svc := NewServiceWithDimensions(&iteratorEngine{Engine: base}, 3)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := svc.BuildIndexes(ctx)
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("iterator_error_propagates", func(t *testing.T) {
+		svc := NewServiceWithDimensions(&iteratorEngine{
+			Engine:     base,
+			iterateErr: errors.New("iterate-failed"),
+		}, 3)
+		err := svc.BuildIndexes(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "iterate-failed")
+	})
+}
+
+func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 2)
+
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+	hnswPath := filepath.Join(tmp, "hnsw")
+	svc.SetFulltextIndexPath(bm25Path)
+	svc.SetVectorIndexPath(vectorPath)
+	svc.SetHNSWIndexPath(hnswPath)
+
+	// Persistence disabled: no files should be written.
+	svc.SetPersistenceEnabled(false)
+	svc.persistBaseIndexes()
+	_, err := os.Stat(bm25Path)
+	require.Error(t, err)
+	require.True(t, os.IsNotExist(err))
+
+	// Persistence enabled but no dirty BM25 / nil vector store.
+	svc.SetPersistenceEnabled(true)
+	svc.persistBaseIndexes()
+	_, err = os.Stat(vectorPath + ".meta")
+	require.Error(t, err)
+	require.True(t, os.IsNotExist(err))
+
+	// Dirty BM25 + valid vector store writes both artifacts.
+	svc.fulltextIndex.Index("doc-1", "alpha beta")
+	vfs, err := NewVectorFileStore(vectorPath, 2)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = vfs.Close() })
+	require.NoError(t, vfs.Add("v-1", []float32{1, 0}))
+	require.NoError(t, vfs.Add("v-1", []float32{0, 1})) // create an obsolete record
+	require.NoError(t, vfs.Add("v-2", []float32{1, 1}))
+	svc.mu.Lock()
+	svc.vectorFileStore = vfs
+	svc.mu.Unlock()
+
+	t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", "1")
+	t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", "0")
+	t.Setenv("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", "0")
+	svc.buildInProgress.Store(false) // compaction path enabled
+	svc.persistBaseIndexes()
+
+	_, err = os.Stat(bm25Path)
+	require.NoError(t, err)
+	_, err = os.Stat(vectorPath + ".meta")
+	require.NoError(t, err)
+
+	// buildInProgress=true path: persist still succeeds while compaction is skipped.
+	svc.buildInProgress.Store(true)
+	require.NoError(t, vfs.Add("v-3", []float32{0, 1}))
+	svc.persistBaseIndexes()
+	_, err = os.Stat(vectorPath + ".meta")
+	require.NoError(t, err)
+	svc.buildInProgress.Store(false)
+}
+
+func TestSearchService_EnsureBuildVectorFileStore_Branches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 2)
+
+	// persistence disabled branch
+	svc.vectorIndex.vectors["keep"] = []float32{1, 0}
+	svc.ensureBuildVectorFileStore()
+	require.Nil(t, svc.vectorFileStore)
+	require.Contains(t, svc.vectorIndex.vectors, "keep")
+
+	// empty vector path branch
+	svc.SetPersistenceEnabled(true)
+	svc.ensureBuildVectorFileStore()
+	require.Nil(t, svc.vectorFileStore)
+
+	// nil vector index branch
+	svc.SetVectorIndexPath(filepath.Join(t.TempDir(), "vectors"))
+	orig := svc.vectorIndex
+	svc.vectorIndex = nil
+	svc.ensureBuildVectorFileStore()
+	require.Nil(t, svc.vectorFileStore)
+	svc.vectorIndex = orig
+
+	// dimensions <= 0 branch
+	svc.vectorIndex = NewVectorIndex(0)
+	svc.ensureBuildVectorFileStore()
+	require.Nil(t, svc.vectorFileStore)
+
+	// create fail branch (invalid parent path from file)
+	badParent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(badParent, []byte("x"), 0o644))
+	svc.vectorIndex = NewVectorIndex(2)
+	svc.vectorIndexPath = filepath.Join(badParent, "vectors")
+	svc.ensureBuildVectorFileStore()
+	require.Nil(t, svc.vectorFileStore)
+
+	// success branch creates file store and clears in-memory vector maps.
+	okPath := filepath.Join(t.TempDir(), "ok-vectors")
+	svc.vectorIndexPath = okPath
+	svc.vectorIndex.vectors["a"] = []float32{1, 0}
+	svc.vectorIndex.rawVectors["a"] = []float32{1, 0}
+	svc.ensureBuildVectorFileStore()
+	require.NotNil(t, svc.vectorFileStore)
+	require.Empty(t, svc.vectorIndex.vectors)
+	require.Empty(t, svc.vectorIndex.rawVectors)
 }
 
 // TestSearchService_WithRealData tests search with exported Neo4j data.

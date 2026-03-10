@@ -49,8 +49,8 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelBuild()
 
 	// Wait for the per-database search services to finish their initial startup build
 	// before injecting event-driven index updates. This test is verifying namespace
@@ -58,12 +58,12 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	// otherwise race with IndexNode() and make the expected counts nondeterministic.
 	defaultSvc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
 	require.NoError(t, err)
-	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()))
+	require.NoError(t, db.ensureSearchIndexesBuilt(buildCtx, db.defaultDatabaseName()))
 	require.Equal(t, 0, defaultSvc.EmbeddingCount())
 
 	db2Svc, err := db.GetOrCreateSearchService("db2", nil)
 	require.NoError(t, err)
-	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "db2"))
+	require.NoError(t, db.ensureSearchIndexesBuilt(buildCtx, "db2"))
 	require.Equal(t, 0, db2Svc.EmbeddingCount())
 
 	// Create and index a node in the default database (nornic).
@@ -117,29 +117,29 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	// The fulltext index updates are inline but may have small delays,
 	// especially in high-load CI environments.
 	require.Eventually(t, func() bool {
-		resp, err := defaultSvc.Search(ctx, "hello", nil, nil)
+		resp, err := defaultSvc.Search(context.Background(), "hello", nil, nil)
 		return err == nil && len(resp.Results) > 0
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Verify text-only search does not cross-contaminate.
 	// Default DB should find alpha, not beta.
-	resp, err := defaultSvc.Search(ctx, "world", nil, nil)
+	resp, err := defaultSvc.Search(context.Background(), "world", nil, nil)
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 0)
 
-	resp, err = defaultSvc.Search(ctx, "hello", nil, nil)
+	resp, err = defaultSvc.Search(context.Background(), "hello", nil, nil)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp.Results), 1)
 
 	// db2 should find beta, not alpha.
-	resp, err = db2Svc.Search(ctx, "hello", nil, nil)
+	resp, err = db2Svc.Search(context.Background(), "hello", nil, nil)
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 0)
 
 	// As with defaultSvc above, text search visibility can lag briefly in CI even
 	// when embedding counts are updated, so assert db2's positive search via retry.
 	require.Eventually(t, func() bool {
-		resp, err = db2Svc.Search(ctx, "world", nil, nil)
+		resp, err = db2Svc.Search(context.Background(), "world", nil, nil)
 		return err == nil && len(resp.Results) >= 1
 	}, 5*time.Second, 10*time.Millisecond)
 }
