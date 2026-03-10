@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,9 +11,30 @@ import (
 	"time"
 
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type backupErrorEngine struct {
+	storage.Engine
+	allNodesErr error
+	allEdgesErr error
+}
+
+func (e *backupErrorEngine) AllNodes() ([]*storage.Node, error) {
+	if e.allNodesErr != nil {
+		return nil, e.allNodesErr
+	}
+	return e.Engine.AllNodes()
+}
+
+func (e *backupErrorEngine) AllEdges() ([]*storage.Edge, error) {
+	if e.allEdgesErr != nil {
+		return nil, e.allEdgesErr
+	}
+	return e.Engine.AllEdges()
+}
 
 func TestDB_GetIndexes(t *testing.T) {
 	t.Run("returns empty for new database", func(t *testing.T) {
@@ -135,6 +157,38 @@ func TestDB_Backup(t *testing.T) {
 		err = db.Backup(context.Background(), t.TempDir())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to write backup")
+	})
+
+	t.Run("backup returns wrapped node read error", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{
+			storage: &backupErrorEngine{
+				Engine:      base,
+				allNodesErr: errors.New("boom nodes"),
+			},
+			config: DefaultConfig(),
+		}
+
+		err := db.Backup(context.Background(), filepath.Join(t.TempDir(), "should-not-write.json"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get nodes")
+	})
+
+	t.Run("backup returns wrapped edge read error", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{
+			storage: &backupErrorEngine{
+				Engine:      base,
+				allEdgesErr: errors.New("boom edges"),
+			},
+			config: DefaultConfig(),
+		}
+
+		err := db.Backup(context.Background(), filepath.Join(t.TempDir(), "should-not-write.json"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get edges")
 	})
 }
 

@@ -1572,6 +1572,12 @@ func (e *queueBranchEngine) UpdateNode(node *storage.Node) error {
 	return e.Engine.UpdateNode(node)
 }
 
+// engineOnlyWrapper intentionally exposes only storage.Engine so optional
+// interfaces (EmbeddingFinder/EmbeddingIndexManager) are not satisfied.
+type engineOnlyWrapper struct {
+	storage.Engine
+}
+
 type emptyBatchEmbedder struct {
 	dims int
 }
@@ -1908,7 +1914,7 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		ew := &EmbedWorker{storage: engine}
+		ew := &EmbedWorker{storage: &engineOnlyWrapper{Engine: engine}}
 		n := ew.findNodeWithoutEmbedding()
 		require.NotNil(t, n)
 		require.Equal(t, storage.NodeID("fallback-node"), n.ID)
@@ -1922,7 +1928,7 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		ew := &EmbedWorker{storage: qe}
 		require.Equal(t, 7, ew.refreshEmbeddingIndex())
 
-		ew.storage = engine
+		ew.storage = &engineOnlyWrapper{Engine: engine}
 		require.Equal(t, 0, ew.refreshEmbeddingIndex())
 	})
 }

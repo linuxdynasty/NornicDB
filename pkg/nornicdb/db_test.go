@@ -1204,25 +1204,37 @@ func TestExecuteCypher(t *testing.T) {
 }
 
 func TestBootstrapCanonicalSchema(t *testing.T) {
-	tmpDir := t.TempDir()
-	db, err := Open(tmpDir, nil)
-	require.NoError(t, err)
-	defer db.Close()
+	t.Run("enforces canonical constraints", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		db, err := Open(tmpDir, nil)
+		require.NoError(t, err)
+		defer db.Close()
 
-	ctx := context.Background()
-	require.NoError(t, db.BootstrapCanonicalSchema(ctx))
+		ctx := context.Background()
+		require.NoError(t, db.BootstrapCanonicalSchema(ctx))
+		require.NoError(t, db.BootstrapCanonicalSchema(ctx), "bootstrap should be idempotent")
 
-	_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {tier: 'SEMANTIC'})", nil)
-	require.Error(t, err)
+		_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {tier: 'SEMANTIC'})", nil)
+		require.Error(t, err)
 
-	_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 'bad'})", nil)
-	require.Error(t, err)
+		_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 'bad'})", nil)
+		require.Error(t, err)
 
-	_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 0})", nil)
-	require.NoError(t, err)
+		_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 0})", nil)
+		require.NoError(t, err)
 
-	_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 0})", nil)
-	require.Error(t, err)
+		_, err = db.ExecuteCypher(ctx, "CREATE (:Memory {id: 'mem-1', content: 'hello', tier: 'SEMANTIC', decay_score: 1.0, last_accessed: '2024-01-01T00:00:00Z', access_count: 0})", nil)
+		require.Error(t, err)
+	})
+
+	t.Run("returns ErrClosed for closed database", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		err = db.BootstrapCanonicalSchema(context.Background())
+		require.ErrorIs(t, err, ErrClosed)
+	})
 }
 
 // =============================================================================

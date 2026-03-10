@@ -526,6 +526,33 @@ func TestExtractFunctions(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, funcs)
 	})
+
+	t.Run("returns error when Functions method missing", func(t *testing.T) {
+		funcs, err := extractFunctions(reflectValueOf(&mockPluginNoType{}), "nop")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no Functions() method")
+		require.Nil(t, funcs)
+	})
+
+	t.Run("returns error for invalid Functions return arity", func(t *testing.T) {
+		funcs, err := extractFunctions(reflectValueOf(badFunctionsReturn{}), "bad")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "Functions() invalid return")
+		require.Nil(t, funcs)
+	})
+
+	t.Run("returns empty when Functions result is non-map", func(t *testing.T) {
+		funcs, err := extractFunctions(reflectValueOf(nonMapFunctionsReturn{}), "nonmap")
+		require.NoError(t, err)
+		require.Empty(t, funcs)
+	})
+
+	t.Run("preserves fully-qualified apoc names", func(t *testing.T) {
+		funcs, err := extractFunctions(reflectValueOf(fqPlugin{}), "ignored")
+		require.NoError(t, err)
+		require.Len(t, funcs, 1)
+		require.Equal(t, "apoc.custom.echo", funcs[0].Name)
+	})
 }
 
 func TestLoadedPluginTypes(t *testing.T) {
@@ -701,6 +728,30 @@ func (m *mockPluginNoType) Version() string { return m.version }
 type mockTypeNonString struct{}
 
 func (m *mockTypeNonString) Type() int { return 7 }
+
+type badFunctionsReturn struct{}
+
+func (badFunctionsReturn) Functions() (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+type nonMapFunctionsReturn struct{}
+
+func (nonMapFunctionsReturn) Functions() string { return "not-a-map" }
+
+type fqPlugin struct{}
+
+func (fqPlugin) Functions() map[string]interface{} {
+	return map[string]interface{}{
+		"apoc.custom.echo": struct {
+			Handler     interface{}
+			Description string
+		}{
+			Handler:     func(x string) string { return x },
+			Description: "echo",
+		},
+	}
+}
 
 type mockTypeFunctionValue struct{}
 

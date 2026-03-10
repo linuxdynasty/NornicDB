@@ -139,3 +139,16 @@ func TestRecoverBadgerFromSnapshotAndWAL_HandlesEmptyRecoveryInputs(t *testing.T
 	require.NoError(t, err)
 	require.Empty(t, nodes)
 }
+
+func TestRecoverBadgerFromSnapshotAndWAL_WALReplayError(t *testing.T) {
+	// Use a file path as dataDir so walDir cannot be opened as a proper directory.
+	filePath := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(filePath, []byte("x"), 0644))
+
+	opts := storage.BadgerOptions{DataDir: filePath}
+	recovered, backupDir, err := recoverBadgerFromSnapshotAndWAL(filePath, opts)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wal replay failed")
+	require.Nil(t, recovered)
+	require.Empty(t, backupDir)
+}
