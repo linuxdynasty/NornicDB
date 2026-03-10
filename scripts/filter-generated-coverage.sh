@@ -24,6 +24,11 @@ is_excluded_from_coverage() {
     pkg/cypher/antlr/*) return 0 ;;
     pkg/graphql/generated/*) return 0 ;;
     pkg/gpu/*) return 0 ;;
+    # Arch-specific SIMD backends depend on host CPU capabilities/toolchain.
+    # Keep package-level API coverage, but exclude backend implementation files.
+    pkg/simd/simd_amd64.go) return 0 ;;
+    pkg/simd/simd_arm64.go) return 0 ;;
+    pkg/simd/neon_simd.go) return 0 ;;
   esac
 
   case "$b" in
