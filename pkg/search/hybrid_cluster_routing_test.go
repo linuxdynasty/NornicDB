@@ -114,6 +114,23 @@ func TestApplyBM25SeedHints_NoSeedsIsNoOp(t *testing.T) {
 	require.Empty(t, preferredSeedsForTest(t, svc.clusterIndex))
 }
 
+func TestTopNTokenWeights_Branches(t *testing.T) {
+	in := map[string]float64{
+		"a": 0.9,
+		"b": 0.5,
+		"c": 0.8,
+	}
+	// len(weights) <= n returns original map directly.
+	require.Equal(t, in, topNTokenWeights(in, 3))
+
+	trimmed := topNTokenWeights(in, 2)
+	require.Len(t, trimmed, 2)
+	_, hasA := trimmed["a"]
+	_, hasC := trimmed["c"]
+	require.True(t, hasA)
+	require.True(t, hasC)
+}
+
 func BenchmarkSelectHybridClusters(b *testing.B) {
 	_ = os.Setenv("NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM", "0.7")
 	_ = os.Setenv("NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX", "0.3")

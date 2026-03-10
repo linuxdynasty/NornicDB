@@ -439,6 +439,23 @@ func TestSearchVersionHelpers(t *testing.T) {
 	require.False(t, searchIndexVersionCompatible("2.0.0", "1.2.3", "test"))
 }
 
+func TestFulltextIndex_UpdateAvgDocLengthBranches(t *testing.T) {
+	idx := NewFulltextIndex()
+
+	idx.mu.Lock()
+	idx.docCount = 0
+	idx.totalDocLength = 99
+	idx.updateAvgDocLength()
+	require.Equal(t, 0.0, idx.avgDocLength)
+	require.Equal(t, int64(0), idx.totalDocLength)
+
+	idx.docCount = 4
+	idx.totalDocLength = 10
+	idx.updateAvgDocLength()
+	require.Equal(t, 2.5, idx.avgDocLength)
+	idx.mu.Unlock()
+}
+
 // TestAdaptiveRRFConfig tests adaptive RRF configuration.
 func TestAdaptiveRRFConfig(t *testing.T) {
 	// Short query - should favor BM25
@@ -1213,6 +1230,176 @@ func TestSearchHelpers_TryRestoreAndMaybeRebuildBranches(t *testing.T) {
 	require.NoError(t, s.maybeRebuildHNSW(context.Background(), 0.99, 10.0, 0))
 }
 
+func TestSearchHelpers_ClusterBackfillAndWarmupBranches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.EnableClustering(nil, 2)
+	svc.SetMinEmbeddingsForClustering(1)
+
+	require.NoError(t, svc.vectorIndex.Add("a", []float32{1, 0}))
+	require.NoError(t, svc.vectorIndex.Add("b", []float32{0, 1}))
+
+	// Force lagging cluster state so backfill branch executes from in-memory vectors.
+	svc.clusterIndex.Clear()
+	require.Equal(t, 0, svc.clusterIndex.Count())
+	svc.ensureClusterIndexBackfilled(2)
+	require.GreaterOrEqual(t, svc.clusterIndex.Count(), 2)
+
+	// Invalid/missing IVF-HNSW path should deterministically return false (no panic).
+	svc.hnswIndexPath = filepath.Join(t.TempDir(), "missing_hnsw")
+	require.False(t, svc.tryRestoreClusteredWarmupFromDisk(context.Background(), svc.clusterIndex, svc.hnswIndexPath))
+
+	// With clustering enabled and enough vectors, warmup should run clustering path.
+	require.NoError(t, svc.warmupClusteredStrategy(context.Background(), 2))
+	require.True(t, svc.clusterIndex.IsClustered())
+}
+
+func TestSearchHelpers_BuildPipelineAndGPUBranches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	vi := NewVectorIndex(2)
+	require.NoError(t, vi.Add("x", []float32{1, 0}))
+
+	require.Nil(t, svc.buildPipelineForMode(strategyModeUnknown, vi, nil))
+	require.NotNil(t, svc.buildPipelineForMode(strategyModeBruteCPU, vi, nil))
+
+	dir := t.TempDir()
+	vfs, err := NewVectorFileStore(filepath.Join(dir, "vectors"), 2)
+	require.NoError(t, err)
+	defer vfs.Close()
+	require.NoError(t, vfs.Add("y", []float32{0, 1}))
+	require.NotNil(t, svc.buildPipelineForMode(strategyModeBruteCPU, vi, vfs))
+
+	require.Nil(t, svc.buildPipelineForMode(strategyModeHNSW, vi, nil))
+	svc.hnswMu.Lock()
+	svc.hnswIndex = NewHNSWIndex(2, DefaultHNSWConfig())
+	svc.hnswMu.Unlock()
+	require.NotNil(t, svc.buildPipelineForMode(strategyModeHNSW, vi, nil))
+	require.NotNil(t, svc.buildPipelineForMode(strategyModeHNSW, vi, vfs))
+
+	// ensureGPUIndexSynced should error when GPU manager is unavailable/disabled.
+	require.Error(t, svc.ensureGPUIndexSynced(vi, nil))
+	cfg := gpu.DefaultConfig()
+	cfg.Enabled = false
+	gm, err := gpu.NewManager(cfg)
+	require.NoError(t, err)
+	svc.gpuManager = gm
+	require.Error(t, svc.ensureGPUIndexSynced(vi, nil))
+}
+
+func TestSearchHelpers_HNSWLexicalSeedsAndGetOrCreateBranches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+
+	t.Setenv("NORNICDB_HNSW_LEXICAL_SEED_MAX_TERMS", "0")
+	t.Setenv("NORNICDB_HNSW_LEXICAL_SEED_PER_TERM", "0")
+	require.Nil(t, svc.hnswLexicalSeedNodeSet(nil))
+
+	ft := &seedOverrideFulltext{
+		FulltextIndex: NewFulltextIndex(),
+		seedIDs:       []string{"  doc-a ", "", "doc-a", "doc-b"},
+	}
+	seedSet := svc.hnswLexicalSeedNodeSet(ft)
+	require.Len(t, seedSet, 2)
+	_, okA := seedSet["doc-a"]
+	_, okB := seedSet["doc-b"]
+	require.True(t, okA)
+	require.True(t, okB)
+
+	// Error branch when neither vector store nor in-memory vector index is available.
+	svc.mu.Lock()
+	svc.vectorIndex = nil
+	svc.vectorFileStore = nil
+	svc.mu.Unlock()
+	_, err := svc.getOrCreateHNSWIndex(context.Background(), 2)
+	require.Error(t, err)
+
+	// Context-canceled branch during in-memory build.
+	svc.mu.Lock()
+	svc.vectorIndex = NewVectorIndex(2)
+	svc.mu.Unlock()
+	require.NoError(t, svc.vectorIndex.Add("n1", []float32{1, 0}))
+	require.NoError(t, svc.vectorIndex.Add("n2", []float32{0, 1}))
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.getOrCreateHNSWIndex(cancelled, 2)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// Successful build + existing-index fast path.
+	idx, err := svc.getOrCreateHNSWIndex(context.Background(), 2)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+	idx2, err := svc.getOrCreateHNSWIndex(context.Background(), 2)
+	require.NoError(t, err)
+	require.Same(t, idx, idx2)
+}
+
+func TestSearchHelpers_BuildHNSWForTransition_Branches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+
+	// Nil indexes should return a deterministic error.
+	_, err := svc.buildHNSWForTransition(context.Background(), 2, nil, nil)
+	require.Error(t, err)
+
+	vi := NewVectorIndex(2)
+	require.NoError(t, vi.Add("n1", []float32{1, 0}))
+	require.NoError(t, vi.Add("n2", []float32{0, 1}))
+
+	// Cancelled context should short-circuit during build.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.buildHNSWForTransition(cancelled, 2, vi, nil)
+	require.ErrorIs(t, err, context.Canceled)
+
+	rebuilt, err := svc.buildHNSWForTransition(context.Background(), 2, vi, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, rebuilt.Size())
+}
+
+func TestSearchHelpers_MaybeRebuildHNSW_RebuildAndCancelBranches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.vectorIndex = NewVectorIndex(2)
+	require.NoError(t, svc.vectorIndex.Add("n1", []float32{1, 0}))
+	require.NoError(t, svc.vectorIndex.Add("n2", []float32{0, 1}))
+	require.NoError(t, svc.vectorIndex.Add("n3", []float32{0.7, 0.3}))
+
+	old := NewHNSWIndex(2, DefaultHNSWConfig())
+	require.NoError(t, old.Add("n1", []float32{1, 0}))
+	require.NoError(t, old.Add("n2", []float32{0, 1}))
+	require.NoError(t, old.Add("n3", []float32{0.7, 0.3}))
+	old.Remove("n1")
+	old.Remove("n2")
+
+	svc.hnswMu.Lock()
+	svc.hnswIndex = old
+	svc.hnswMu.Unlock()
+	svc.pipelineMu.Lock()
+	svc.vectorPipeline = NewVectorSearchPipeline(NewBruteForceCandidateGen(svc.vectorIndex), NewCPUExactScorer(svc.vectorIndex))
+	svc.pipelineMu.Unlock()
+
+	require.NoError(t, svc.maybeRebuildHNSW(context.Background(), 0.1, 1.1, 0))
+	svc.hnswMu.RLock()
+	rebuilt := svc.hnswIndex
+	svc.hnswMu.RUnlock()
+	require.NotNil(t, rebuilt)
+	require.NotSame(t, old, rebuilt)
+	require.Equal(t, 3, rebuilt.Size())
+	svc.pipelineMu.RLock()
+	require.Nil(t, svc.vectorPipeline)
+	svc.pipelineMu.RUnlock()
+
+	// Recreate a tombstoned index and cancel rebuild mid-flight.
+	old2 := NewHNSWIndex(2, DefaultHNSWConfig())
+	require.NoError(t, old2.Add("n1", []float32{1, 0}))
+	require.NoError(t, old2.Add("n2", []float32{0, 1}))
+	old2.Remove("n1")
+	svc.hnswMu.Lock()
+	svc.hnswIndex = old2
+	svc.hnswMu.Unlock()
+	svc.hnswLastRebuildUnix.Store(0)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := svc.maybeRebuildHNSW(cancelled, 0.0, 1.0, 0)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 // TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).
 func TestVectorIndex_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
@@ -1296,6 +1483,44 @@ func TestVectorIndex_LoadOldVersion(t *testing.T) {
 	err = idx.Load(oldPath)
 	require.NoError(t, err)
 	assert.Equal(t, 0, idx.Count()) // old version not loaded; caller will rebuild
+}
+
+func TestVectorIndex_LoadAdditionalBranches(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing file returns nil", func(t *testing.T) {
+		idx := NewVectorIndex(4)
+		err := idx.Load(filepath.Join(dir, "no-such-index"))
+		require.NoError(t, err)
+		require.Equal(t, 0, idx.Count())
+	})
+
+	t.Run("corrupt file clears index", func(t *testing.T) {
+		p := filepath.Join(dir, "vectors-corrupt")
+		require.NoError(t, os.WriteFile(p, []byte("not-msgpack"), 0644))
+		idx := NewVectorIndex(4)
+		require.NoError(t, idx.Add("x", []float32{1, 0, 0, 0}))
+		require.NoError(t, idx.Load(p))
+		require.Equal(t, 0, idx.Count())
+	})
+
+	t.Run("dimension mismatch clears index", func(t *testing.T) {
+		p := filepath.Join(dir, "vectors-dim-mismatch")
+		f, err := os.Create(p)
+		require.NoError(t, err)
+		require.NoError(t, msgpack.NewEncoder(f).Encode(&vectorIndexSnapshot{
+			Version:    vectorIndexFormatVersion,
+			Dimensions: 8,
+			Vectors:    map[string][]float32{"a": {1, 0, 0, 0, 0, 0, 0, 0}},
+			RawVectors: map[string][]float32{"a": {1, 0, 0, 0, 0, 0, 0, 0}},
+		}))
+		require.NoError(t, f.Close())
+
+		idx := NewVectorIndex(4)
+		require.NoError(t, idx.Add("seed", []float32{1, 0, 0, 0}))
+		require.NoError(t, idx.Load(p))
+		require.Equal(t, 0, idx.Count())
+	})
 }
 
 // TestSearchService_RemoveNode tests node removal from search service.

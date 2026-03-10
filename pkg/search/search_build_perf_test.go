@@ -40,6 +40,56 @@ func TestVectorFromPropertyValue_DimensionAware(t *testing.T) {
 	require.Equal(t, []float32{1, 2, 3}, vec)
 }
 
+func TestVectorFromPropertyValue_AdditionalBranches(t *testing.T) {
+	_, ok := vectorFromPropertyValue([]float32{1, 2, 3}, 0)
+	require.False(t, ok)
+
+	vec, ok := vectorFromPropertyValue([]float64{1, 2, 3}, 3)
+	require.True(t, ok)
+	require.Equal(t, []float32{1, 2, 3}, vec)
+
+	_, ok = vectorFromPropertyValue([]float64{1, 2}, 3)
+	require.False(t, ok)
+
+	vec, ok = vectorFromPropertyValue([]any{float32(1), int(2), int64(3)}, 3)
+	require.True(t, ok)
+	require.Equal(t, []float32{1, 2, 3}, vec)
+
+	_, ok = vectorFromPropertyValue([]any{1, "bad", 3}, 3)
+	require.False(t, ok)
+
+	_, ok = vectorFromPropertyValue("not-a-vector", 3)
+	require.False(t, ok)
+}
+
+func TestPropertyToString_AdditionalBranches(t *testing.T) {
+	require.Equal(t, "hello", propertyToString("hello"))
+	require.Equal(t, "a b", propertyToString([]string{"a", "b"}))
+	require.Equal(t, "42", propertyToString(42))
+	require.Equal(t, "true", propertyToString(true))
+	require.Equal(t, "false", propertyToString(false))
+	require.Equal(t, "", propertyToString(map[string]any{"k": "v"}))
+}
+
+func TestLooksLikeDenseNumericSlice_Branches(t *testing.T) {
+	require.False(t, looksLikeDenseNumericSlice([]any{1, 2, 3}))
+
+	mixed := make([]any, 40)
+	for i := 0; i < 30; i++ {
+		mixed[i] = float64(i)
+	}
+	for i := 30; i < len(mixed); i++ {
+		mixed[i] = "x"
+	}
+	require.False(t, looksLikeDenseNumericSlice(mixed))
+
+	dense := make([]any, 40)
+	for i := range dense {
+		dense[i] = float64(i)
+	}
+	require.True(t, looksLikeDenseNumericSlice(dense))
+}
+
 func TestBuildIndexes_IndexesNamedChunkAndPropertyVectors(t *testing.T) {
 	t.Parallel()
 
