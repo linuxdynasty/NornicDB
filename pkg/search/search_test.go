@@ -1034,6 +1034,37 @@ func TestSearchService_SchedulePersist_GuardsAndTimer(t *testing.T) {
 	svc.persistMu.Unlock()
 }
 
+func TestVectorSearchOnly_MethodAndFilterBranches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 3)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:              "v1",
+		Labels:          []string{"Person"},
+		Properties:      map[string]any{"content": "alpha"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}, {1, 0, 0}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.BuildIndexes(context.Background()))
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 5
+	resp, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0, 0}, opts)
+	require.NoError(t, err)
+	require.Equal(t, "vector_brute", resp.SearchMethod)
+	require.NotEmpty(t, resp.Results)
+	for i, r := range resp.Results {
+		require.Equal(t, i+1, r.VectorRank)
+		require.Equal(t, 0, r.BM25Rank)
+	}
+
+	// Type filter branch should remove non-matching labels/types.
+	opts.Types = []string{"organization"}
+	filtered, err := svc.vectorSearchOnly(context.Background(), []float32{1, 0, 0}, opts)
+	require.NoError(t, err)
+	require.Len(t, filtered.Results, 0)
+}
+
 func TestEnableClustering_ReentrantAndEnvOverrides(t *testing.T) {
 	t.Run("reentrant same mode keeps existing cluster index", func(t *testing.T) {
 		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)

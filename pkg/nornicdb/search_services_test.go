@@ -649,6 +649,43 @@ func TestSearchServices_EnsureBuilt_ContextDonePath(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestSearchServices_EnsurePendingFlush_ReplaysQueuedOps(t *testing.T) {
+	db := &DB{}
+	engine := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "tenant_flush")
+	svc := search.NewServiceWithDimensions(engine, 3)
+
+	entry := &dbSearchService{
+		dbName:    "tenant_flush",
+		svc:       svc,
+		buildDone: make(chan struct{}),
+	}
+
+	// Queue operations before build completes:
+	// - remove op (should be tolerated even when missing)
+	// - nil node op (should be skipped)
+	// - valid index op (should be applied)
+	entry.pendingMu.Lock()
+	entry.pendingOps = map[string]pendingSearchMutation{
+		"missing": {remove: true},
+		"nil-op":  {node: nil, remove: false},
+		"n1": {
+			node: &storage.Node{
+				ID:              "n1",
+				Properties:      map[string]any{"content": "flush"},
+				ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+			},
+		},
+	}
+	entry.pendingMu.Unlock()
+
+	db.ensurePendingFlush(entry)
+	close(entry.buildDone)
+
+	require.Eventually(t, func() bool {
+		return svc.EmbeddingCount() == 1
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 func TestSearchServices_GetOrCreate_ResolverAndPersistPaths(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Memory.EmbeddingDimensions = 3
