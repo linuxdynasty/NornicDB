@@ -3,8 +3,11 @@ package search
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,4 +43,62 @@ func TestIVFPQPersistRoundTrip(t *testing.T) {
 	require.NotNil(t, loaded)
 	require.Equal(t, idx.Count(), loaded.Count())
 	require.True(t, loaded.compatibleProfile(idx.profile))
+}
+
+func TestIVFPQPersistHelpersAndErrorBranches(t *testing.T) {
+	require.Equal(t, "", ivfpqBundleDir(""))
+	require.NoError(t, SaveIVFPQBundle("", nil))
+	require.NoError(t, SaveIVFPQBundle("base", nil))
+
+	idx, err := LoadIVFPQBundle("")
+	require.NoError(t, err)
+	require.Nil(t, idx)
+
+	idx, err = LoadIVFPQBundle(filepath.Join(t.TempDir(), "missing-base"))
+	require.NoError(t, err)
+	require.Nil(t, idx)
+
+	// Unsupported format metadata should return nil without error.
+	base := filepath.Join(t.TempDir(), "hnsw")
+	dir := ivfpqBundleDir(base)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, writeMsgpackSnapshots(dir, map[string]any{
+		"meta":      ivfpqMetaSnapshot{FormatVersion: ivfpqBundleFormatVersion + 1},
+		"centroids": [][]float32{},
+		"codebooks": ivfpqCodebooksSnapshot{},
+		"lists":     ivfpqListsSnapshot{},
+	}))
+	idx, err = LoadIVFPQBundle(base)
+	require.NoError(t, err)
+	require.Nil(t, idx)
+
+	// Invalid msgpack decode path.
+	bad := filepath.Join(t.TempDir(), "bad.msgpack")
+	require.NoError(t, os.WriteFile(bad, []byte("not-msgpack"), 0o644))
+	var dst ivfpqMetaSnapshot
+	require.Error(t, decodeMsgpackFile(bad, &dst))
+}
+
+func TestIVFPQPersist_ServiceBranches(t *testing.T) {
+	profile := IVFPQProfile{
+		Dimensions:          8,
+		IVFLists:            16,
+		PQSegments:          4,
+		PQBits:              4,
+		NProbe:              4,
+		RerankTopK:          20,
+		TrainingSampleMax:   128,
+		KMeansMaxIterations: 4,
+	}
+
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 8)
+
+	// vfs nil branch when no compatible in-memory/persisted index exists.
+	_, err := svc.getOrBuildIVFPQIndex(context.Background(), profile, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "vector file store unavailable")
+
+	// persistIVFPQBackground no-op branches: no base path and no index.
+	svc.persistIVFPQBackground("", "")
+	svc.persistIVFPQBackground(filepath.Join(t.TempDir(), "vectors"), "")
 }

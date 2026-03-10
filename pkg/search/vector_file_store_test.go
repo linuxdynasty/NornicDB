@@ -2,9 +2,11 @@ package search
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,4 +215,90 @@ func TestVectorFileStore_ScoreCandidatesDotAndScratchHelpers(t *testing.T) {
 	scored, err = vfs.scoreCandidatesDot(context.Background(), []float32{1, 0, 0}, []Candidate{{ID: "a"}})
 	require.NoError(t, err)
 	require.Nil(t, scored)
+}
+
+func TestVectorFileStore_IterateChunked_Branches(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "vectors")
+	vfs, err := NewVectorFileStore(base, 2)
+	require.NoError(t, err)
+	defer func() { _ = vfs.Close() }()
+
+	// Large ID ensures IterateChunked grows its internal record buffer.
+	longID := strings.Repeat("x", 400)
+	require.NoError(t, vfs.Add(longID, []float32{1, 0}))
+	require.NoError(t, vfs.Add("b", []float32{0, 1}))
+
+	var chunks int
+	err = vfs.IterateChunked(0, func(ids []string, vecs [][]float32) error { // 0 -> default chunk size branch
+		chunks++
+		require.Len(t, ids, len(vecs))
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, chunks)
+
+	// Callback error should be propagated.
+	err = vfs.IterateChunked(1, func(ids []string, vecs [][]float32) error {
+		return fmt.Errorf("stop-iteration")
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stop-iteration")
+
+	// Nil file branch.
+	vfs.mu.Lock()
+	saved := vfs.file
+	vfs.file = nil
+	vfs.mu.Unlock()
+	err = vfs.IterateChunked(1, func(ids []string, vecs [][]float32) error { return nil })
+	require.ErrorIs(t, err, errVecFileClosed)
+	vfs.mu.Lock()
+	vfs.file = saved
+	vfs.mu.Unlock()
+
+	// Closed branch.
+	require.NoError(t, vfs.Close())
+	err = vfs.IterateChunked(1, func(ids []string, vecs [][]float32) error { return nil })
+	require.ErrorIs(t, err, errVecFileClosed)
+}
+
+func TestVectorFileStore_NewVectorFileStore_InvalidExistingHeader(t *testing.T) {
+	t.Run("invalid magic", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "vectors")
+		vecPath := base + ".vec"
+		h := make([]byte, vecHeaderSize)
+		copy(h[:4], []byte("BAD!"))
+		require.NoError(t, os.WriteFile(vecPath, h, 0o644))
+
+		_, err := NewVectorFileStore(base, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid vector file magic")
+	})
+
+	t.Run("unsupported version", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "vectors")
+		vecPath := base + ".vec"
+		h := make([]byte, vecHeaderSize)
+		copy(h[:4], []byte(vecFileMagic))
+		h[4] = 99
+		binary.LittleEndian.PutUint32(h[5:9], uint32(2))
+		require.NoError(t, os.WriteFile(vecPath, h, 0o644))
+
+		_, err := NewVectorFileStore(base, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported vector file version")
+	})
+
+	t.Run("dimension mismatch", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "vectors")
+		vecPath := base + ".vec"
+		h := make([]byte, vecHeaderSize)
+		copy(h[:4], []byte(vecFileMagic))
+		h[4] = vecFileVersion
+		binary.LittleEndian.PutUint32(h[5:9], uint32(3))
+		require.NoError(t, os.WriteFile(vecPath, h, 0o644))
+
+		_, err := NewVectorFileStore(base, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "dimensions")
+	})
 }

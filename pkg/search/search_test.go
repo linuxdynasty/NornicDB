@@ -378,6 +378,12 @@ func TestSearchResultCacheHelpers(t *testing.T) {
 		c.mu.RUnlock()
 		require.False(t, stillPresent)
 	})
+
+	t.Run("new cache normalizes non-positive max size", func(t *testing.T) {
+		c := newSearchResultCache(0, time.Second)
+		require.NotNil(t, c)
+		require.Equal(t, 1000, c.maxSize)
+	})
 }
 
 func TestSearchCacheKeyAndMinSimilarityHelpers(t *testing.T) {
@@ -401,6 +407,26 @@ func TestSearchCacheKeyAndMinSimilarityHelpers(t *testing.T) {
 	require.Equal(t, 0.42, optsA.GetMinSimilarity(0.1))
 	optsA.MinSimilarity = nil
 	require.Equal(t, 0.1, optsA.GetMinSimilarity(0.1))
+}
+
+func TestSearchBM25EngineHelpers(t *testing.T) {
+	t.Run("default engine env normalization", func(t *testing.T) {
+		t.Setenv(EnvSearchBM25Engine, "v1")
+		require.Equal(t, BM25EngineV1, DefaultBM25Engine())
+
+		t.Setenv(EnvSearchBM25Engine, "  unknown ")
+		require.Equal(t, BM25EngineV2, DefaultBM25Engine())
+	})
+
+	t.Run("newBM25Index returns both implementations", func(t *testing.T) {
+		idx, engine := newBM25Index("v1")
+		require.NotNil(t, idx)
+		require.Equal(t, BM25EngineV1, engine)
+
+		idx, engine = newBM25Index("v2")
+		require.NotNil(t, idx)
+		require.Equal(t, BM25EngineV2, engine)
+	})
 }
 
 func TestSearchVersionHelpers(t *testing.T) {
@@ -997,6 +1023,25 @@ func TestConvertFileGobToMsgpack_ErrorPaths(t *testing.T) {
 	require.NoError(t, out.Close())
 	err = convertFileGobToMsgpack(filepath.Join(tmp, "missing.gob"), newPath, "vector")
 	require.ErrorIs(t, err, errAlreadyMsgpack)
+}
+
+func TestConvertOneDbDir_Branches(t *testing.T) {
+	t.Run("hnsw_ivf readdir error propagates", func(t *testing.T) {
+		dbDir := t.TempDir()
+		// Trigger non-ENOENT error for os.ReadDir(ivfDir).
+		require.NoError(t, os.WriteFile(filepath.Join(dbDir, "hnsw_ivf"), []byte("not-dir"), 0o644))
+		err := convertOneDbDir(dbDir)
+		require.Error(t, err)
+	})
+
+	t.Run("non-numeric gob in hnsw_ivf is skipped", func(t *testing.T) {
+		dbDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dbDir, "hnsw_ivf"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dbDir, "hnsw_ivf", "abc.gob"), []byte("x"), 0o644))
+		require.NoError(t, convertOneDbDir(dbDir))
+		_, err := os.Stat(filepath.Join(dbDir, "hnsw_ivf", "abc.gob"))
+		require.NoError(t, err)
+	})
 }
 
 func TestKMeansCandidateGenerators_Branches(t *testing.T) {

@@ -49,3 +49,24 @@ func TestWriteMsgpackSnapshot_ErrorOnInvalidParent(t *testing.T) {
 	err := writeMsgpackSnapshot(filepath.Join(parentFile, "snapshot.msgpack"), map[string]any{"x": 1})
 	require.Error(t, err)
 }
+
+func TestWriteMsgpackSnapshotsAndAtomic_ErrorPaths(t *testing.T) {
+	t.Run("write snapshots fails on invalid parent path", func(t *testing.T) {
+		dir := t.TempDir()
+		parentFile := filepath.Join(dir, "not-a-dir")
+		require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o644))
+
+		err := writeMsgpackSnapshots(filepath.Join(parentFile, "bundle"), map[string]any{"a.msgpack": map[string]any{"a": 1}})
+		require.Error(t, err)
+	})
+
+	t.Run("atomic write propagates encode errors and does not leave target", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "bundle")
+		err := writeMsgpackSnapshotsAtomic(target, map[string]any{
+			"bad.msgpack": make(chan int), // msgpack cannot encode channels
+		})
+		require.Error(t, err)
+		_, statErr := os.Stat(target)
+		require.True(t, os.IsNotExist(statErr))
+	})
+}
