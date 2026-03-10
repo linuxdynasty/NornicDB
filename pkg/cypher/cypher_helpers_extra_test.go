@@ -968,6 +968,8 @@ func TestCypherHelpers_DatabaseNameAndRemoveNodeFromSearch(t *testing.T) {
 	execNoNS := NewStorageExecutor(base)
 	t.Setenv("NORNICDB_DEFAULT_DATABASE", "db_env_cov")
 	assert.Equal(t, "db_env_cov", execNoNS.databaseName())
+	t.Setenv("NORNICDB_DEFAULT_DATABASE", "")
+	assert.Equal(t, "nornic", execNoNS.databaseName())
 
 	// removeNodeFromSearch should early-return on empty id / nil search.
 	execNoNS.removeNodeFromSearch("")
@@ -978,6 +980,49 @@ func TestCypherHelpers_DatabaseNameAndRemoveNodeFromSearch(t *testing.T) {
 	execNoNS.SetSearchService(svc)
 	execNoNS.removeNodeFromSearch("tenant_cov:node-1")
 	execNoNS.removeNodeFromSearch("node-2")
+}
+
+func TestCypherHelpers_VectorRegistryRegisterUnregister(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	ns := storage.NewNamespacedEngine(base, "tenant_cov")
+	exec := NewStorageExecutor(ns)
+
+	// Successful registration with default vector name and cosine distance.
+	exec.registerVectorSpace("idx_cov", "Person", "", 3, "cosine")
+	key, ok := exec.vectorIndexSpaces["idx_cov"]
+	require.True(t, ok)
+	assert.Equal(t, "tenant_cov", key.DB)
+	assert.Equal(t, "person", key.Type)
+	assert.Equal(t, vectorspace.DefaultVectorName, key.VectorName)
+	assert.Equal(t, vectorspace.DistanceCosine, key.Distance)
+
+	space, exists := exec.GetVectorRegistry().GetSpace(key)
+	require.True(t, exists)
+	require.NotNil(t, space)
+
+	// Invalid similarity should be rejected without map insert.
+	exec.registerVectorSpace("idx_bad", "Person", "embedding", 3, "chebyshev")
+	_, ok = exec.vectorIndexSpaces["idx_bad"]
+	assert.False(t, ok)
+
+	// dims <= 0 is ignored.
+	exec.registerVectorSpace("idx_zero", "Person", "embedding", 0, "cosine")
+	_, ok = exec.vectorIndexSpaces["idx_zero"]
+	assert.False(t, ok)
+
+	// unregister should remove both registry and local mapping.
+	exec.unregisterVectorSpace("idx_cov")
+	_, ok = exec.vectorIndexSpaces["idx_cov"]
+	assert.False(t, ok)
+	_, exists = exec.GetVectorRegistry().GetSpace(key)
+	assert.False(t, exists)
+
+	// Missing index and nil registry are safe no-op branches.
+	exec.unregisterVectorSpace("missing")
+	exec.vectorRegistry = nil
+	exec.registerVectorSpace("idx_nil", "Person", "embedding", 3, "cosine")
+	_, ok = exec.vectorIndexSpaces["idx_nil"]
+	assert.False(t, ok)
 }
 
 func TestCypherHelpers_SchemaVectorAndApocPathHelpers(t *testing.T) {

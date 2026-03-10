@@ -2151,20 +2151,71 @@ func TestFunctionFullMathAdditionalCoverage(t *testing.T) {
 	if got := eval("point.srid(point({latitude: 1, longitude: 2}))", nil, nil, 0); got != int64(4326) {
 		t.Fatalf("point.srid(lat/lon) = %#v", got)
 	}
+	if got := eval("point.srid(point({x: 1, y: 2}))", nil, nil, 0); got != int64(7203) {
+		t.Fatalf("point.srid(cartesian default) = %#v", got)
+	}
+	if got := eval("point.srid(point({x: 1, y: 2, srid: 9157}))", nil, nil, 0); got != int64(9157) {
+		t.Fatalf("point.srid(explicit) = %#v", got)
+	}
 	if got := eval("point.crs(point({x: 1, y: 2, z: 3}))", nil, nil, 0); got != "cartesian-3d" {
 		t.Fatalf("point.crs = %#v", got)
+	}
+	if got := eval("point.crs(point({latitude: 1, longitude: 2}))", nil, nil, 0); got != "wgs-84" {
+		t.Fatalf("point.crs(wgs84) = %#v", got)
+	}
+	if got := eval("point.crs(point({latitude: 1, longitude: 2, height: 3}))", nil, nil, 0); got != "wgs-84-3d" {
+		t.Fatalf("point.crs(wgs84-3d) = %#v", got)
+	}
+	if got := eval("point.crs(point({x: 1, y: 2, crs: 'custom'}))", nil, nil, 0); got != "custom" {
+		t.Fatalf("point.crs(custom) = %#v", got)
 	}
 	if got := eval("point.height(point({altitude: 7}))", nil, nil, 0); got != float64(7) {
 		t.Fatalf("point.height = %#v", got)
 	}
+	if got := eval("point.height(point({z: 8}))", nil, nil, 0); got != float64(8) {
+		t.Fatalf("point.height(z) = %#v", got)
+	}
+	if got := eval("point.height(point({height: 9}))", nil, nil, 0); got != float64(9) {
+		t.Fatalf("point.height(height) = %#v", got)
+	}
+	if got := eval("point.z(point({z: 10}))", nil, nil, 0); got != float64(10) {
+		t.Fatalf("point.z = %#v", got)
+	}
+	if got := eval("point.latitude(point({latitude: 12.5, longitude: 22.5}))", nil, nil, 0); got != float64(12.5) {
+		t.Fatalf("point.latitude = %#v", got)
+	}
+	if got := eval("point.longitude(point({latitude: 12.5, longitude: 22.5}))", nil, nil, 0); got != float64(22.5) {
+		t.Fatalf("point.longitude = %#v", got)
+	}
 	if got := eval("distance(point({x:0,y:0}), point({x:3,y:4}))", nil, nil, 0); got != float64(5) {
 		t.Fatalf("distance = %#v", got)
+	}
+	if got := eval("distance(point({latitude:0,longitude:0}), point({latitude:0,longitude:0.01}))", nil, nil, 0); got == nil {
+		t.Fatalf("distance(lat/lon) should not be nil")
 	}
 	if got := eval("point.withinBBox(point({x:1,y:1}), point({x:0,y:0}), point({x:2,y:2}))", nil, nil, 0); got != true {
 		t.Fatalf("point.withinBBox = %#v", got)
 	}
+	if got := eval("withinBBox(point({latitude:1,longitude:1}), point({latitude:0,longitude:0}), point({latitude:2,longitude:2}))", nil, nil, 0); got != true {
+		t.Fatalf("withinBBox(lat/lon) = %#v", got)
+	}
 	if got := eval("point.withinDistance(point({x:1,y:1}), point({x:0,y:0}), 2)", nil, nil, 0); got != true {
 		t.Fatalf("point.withinDistance = %#v", got)
+	}
+	if got := eval("point.withinDistance(point({latitude:1,longitude:1}), point({latitude:1,longitude:1}), 1)", nil, nil, 0); got != true {
+		t.Fatalf("point.withinDistance(lat/lon) = %#v", got)
+	}
+	if got := eval("polygon([point({x:0,y:0}), point({x:2,y:0}), point({x:2,y:2})])", nil, nil, 0); got == nil {
+		t.Fatalf("polygon should not be nil")
+	}
+	if got := eval("lineString([point({x:0,y:0}), point({x:2,y:2})])", nil, nil, 0); got == nil {
+		t.Fatalf("lineString should not be nil")
+	}
+	if got := eval("point.intersects(point({x:1,y:1}), polygon([point({x:0,y:0}), point({x:2,y:0}), point({x:2,y:2})]))", nil, nil, 0); got != true {
+		t.Fatalf("point.intersects(...) = %#v", got)
+	}
+	if got := eval("point.contains(polygon([point({x:0,y:0}), point({x:2,y:0}), point({x:2,y:2})]), point({x:1,y:1}))", nil, nil, 0); got != true {
+		t.Fatalf("point.contains(...) = %#v", got)
 	}
 	if got := eval("vector.similarity.cosine([1.0,0.0], [1.0,0.0])", nil, nil, 0); got == nil {
 		t.Fatal("vector.similarity.cosine should not be nil")
@@ -2193,8 +2244,75 @@ func TestFunctionFullMathAdditionalCoverage(t *testing.T) {
 	if got := eval("[x IN [1,2,3] WHERE x > 1]", nil, nil, 0).([]interface{}); len(got) != 2 {
 		t.Fatalf("list comp filter len = %d, want 2", len(got))
 	}
+	if got := eval("[x IN [1,2,3] WHERE x >= 2]", nil, nil, 0).([]interface{}); len(got) != 2 {
+		t.Fatalf("list comp >= len = %d, want 2", len(got))
+	}
+	if got := eval("[x IN [1,2,3] WHERE x = 2]", nil, nil, 0).([]interface{}); len(got) != 1 {
+		t.Fatalf("list comp = len = %d, want 1", len(got))
+	}
+	if got := eval("[x IN [1,2,3] WHERE x != 2]", nil, nil, 0).([]interface{}); len(got) != 2 {
+		t.Fatalf("list comp != len = %d, want 2", len(got))
+	}
 	if got := eval("[x IN [1,2,3]]", nil, nil, 0).([]interface{}); len(got) != 3 {
 		t.Fatalf("list comp identity len = %d, want 3", len(got))
+	}
+	if got := eval("[r IN relationships(p) | type(r)]", nil, nil, 0).([]interface{}); len(got) != 1 || got[0] != "REL" {
+		t.Fatalf("relationship transform result = %#v", got)
+	}
+}
+
+func TestFunctionEvaluator_KalmanAdditionalBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	n := createTestNode(t, e, "kal-n", []string{"Kalman"}, map[string]interface{}{})
+	nodes := map[string]*storage.Node{"n": n}
+
+	state := e.evaluateExpressionWithContext("kalman.init()", nodes, nil)
+	stateStr, ok := state.(string)
+	if !ok || stateStr == "" {
+		t.Fatalf("kalman.init() should return non-empty state string, got %#v", state)
+	}
+	n.Properties["state"] = stateStr
+
+	processed := e.evaluateExpressionWithContext("kalman.process(10, n.state)", nodes, nil)
+	processedMap, ok := processed.(map[string]interface{})
+	if !ok || processedMap["state"] == nil || processedMap["value"] == nil {
+		t.Fatalf("kalman.process should return state/value map, got %#v", processed)
+	}
+	if gotState, ok := processedMap["state"].(string); ok && gotState != "" {
+		n.Properties["state"] = gotState
+	}
+
+	if got := e.evaluateExpressionWithContext("kalman.predict(n.state, 2)", nodes, nil); got == nil {
+		t.Fatalf("kalman.predict should not be nil")
+	}
+	if got := e.evaluateExpressionWithContext("kalman.state(n.state)", nodes, nil); got == nil {
+		t.Fatalf("kalman.state should not be nil")
+	}
+	if got := e.evaluateExpressionWithContext("kalman.reset(n.state)", nodes, nil); got == nil {
+		t.Fatalf("kalman.reset should not be nil")
+	}
+
+	vstate := e.evaluateExpressionWithContext("kalman.velocity.init()", nodes, nil)
+	vstateStr, ok := vstate.(string)
+	if !ok || vstateStr == "" {
+		t.Fatalf("kalman.velocity.init() should return state string, got %#v", vstate)
+	}
+	n.Properties["vstate"] = vstateStr
+	if got := e.evaluateExpressionWithContext("kalman.velocity.process(5, n.vstate)", nodes, nil); got == nil {
+		t.Fatalf("kalman.velocity.process should not be nil")
+	}
+	if got := e.evaluateExpressionWithContext("kalman.velocity.predict(n.vstate, 3)", nodes, nil); got == nil {
+		t.Fatalf("kalman.velocity.predict should not be nil")
+	}
+
+	astate := e.evaluateExpressionWithContext("kalman.adaptive.init()", nodes, nil)
+	astateStr, ok := astate.(string)
+	if !ok || astateStr == "" {
+		t.Fatalf("kalman.adaptive.init() should return state string, got %#v", astate)
+	}
+	n.Properties["astate"] = astateStr
+	if got := e.evaluateExpressionWithContext("kalman.adaptive.process(5, n.astate)", nodes, nil); got == nil {
+		t.Fatalf("kalman.adaptive.process should not be nil")
 	}
 }
 
@@ -2393,5 +2511,85 @@ func TestFunctionEvaluator_ConversionAndStringFallbackBranches(t *testing.T) {
 	}
 	if got := e.evaluateExpressionWithContext("format()", nodes, nil); got != nil {
 		t.Fatalf("format() should be nil, got %#v", got)
+	}
+}
+
+func TestFunctionFullMath_AdditionalInvalidInputBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	nodes := map[string]*storage.Node{
+		"n": {ID: "math-n", Properties: map[string]interface{}{"x": "bad"}},
+	}
+
+	nilExprs := []string{
+		"cos('bad')",
+		"tan('bad')",
+		"cot('bad')",
+		"asin('bad')",
+		"acos('bad')",
+		"atan('bad')",
+		"atan2(1)",
+		"exp('bad')",
+		"log('bad')",
+		"log10('bad')",
+		"sqrt('bad')",
+		"radians('bad')",
+		"degrees('bad')",
+		"haversin('bad')",
+		"sinh('bad')",
+		"cosh('bad')",
+		"tanh('bad')",
+		"power(2)",
+		"lpad('x', bad)",
+		"rpad('x', bad)",
+		"point.x('bad')",
+		"point.y('bad')",
+		"point.z('bad')",
+		"point.latitude('bad')",
+		"point.longitude('bad')",
+		"point.srid('bad')",
+		"point.distance('bad', point({x:0,y:0}))",
+		"point.height('bad')",
+		"point.crs('bad')",
+		"polygon([point({x:0,y:0}), point({x:1,y:1})])",
+		"lineString([point({x:0,y:0})])",
+	}
+	for _, expr := range nilExprs {
+		if got := e.evaluateExpressionWithContext(expr, nodes, nil); got != nil {
+			t.Fatalf("%s should be nil, got %#v", expr, got)
+		}
+	}
+	if got := e.evaluateExpressionWithContext("point.withinBBox('bad', point({x:0,y:0}), point({x:1,y:1}))", nodes, nil); got != false {
+		t.Fatalf("point.withinBBox invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("point.withinDistance('bad', point({x:0,y:0}), 1)", nodes, nil); got != false {
+		t.Fatalf("point.withinDistance invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("point.intersects(point({x:1,y:1}), 'bad')", nodes, nil); got != false {
+		t.Fatalf("point.intersects invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("point.contains('bad', point({x:1,y:1}))", nodes, nil); got != false {
+		t.Fatalf("point.contains invalid input should be false, got %#v", got)
+	}
+
+	if got := e.evaluateExpressionWithContext("isNaN('bad')", nodes, nil); got != false {
+		t.Fatalf("isNaN('bad') should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("all(x IN 'bad' WHERE x > 0)", nodes, nil); got != false {
+		t.Fatalf("all invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("any(x IN 'bad' WHERE x > 0)", nodes, nil); got != false {
+		t.Fatalf("any invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("none(x IN 'bad' WHERE x > 0)", nodes, nil); got != true {
+		t.Fatalf("none invalid input should be true, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("single(x IN 'bad' WHERE x > 0)", nodes, nil); got != false {
+		t.Fatalf("single invalid input should be false, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("filter(x IN 'bad' WHERE x > 0)", nodes, nil); !reflect.DeepEqual(got, []interface{}{}) {
+		t.Fatalf("filter invalid input should return empty list, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("extract(x IN 'bad' | x)", nodes, nil); !reflect.DeepEqual(got, []interface{}{}) {
+		t.Fatalf("extract invalid input should return empty list, got %#v", got)
 	}
 }

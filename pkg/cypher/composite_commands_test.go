@@ -402,6 +402,18 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.NotEmpty(t, res.Rows)
 		require.Equal(t, []string{"alias", "database", "type", "access_mode"}, res.Columns)
 
+		// Flexible whitespace branch: hit COMPOSITE + DATABASE parsing path.
+		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE\tDATABASE\tc_show")
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Rows)
+		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE\nDATABASE\nc_show")
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Rows)
+
+		_, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE   ")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "name expected")
+
 		_, err = exec.executeShowConstituents(ctx, "SHOW PARTS FOR COMPOSITE DATABASE c_show")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid SHOW CONSTITUENTS syntax")
