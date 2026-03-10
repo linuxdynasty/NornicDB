@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,42 @@ type failingCloseEngine struct {
 
 func (f *failingCloseEngine) Close() error {
 	return f.closeErr
+}
+
+type restoreFailEngine struct {
+	storage.Engine
+	createNodeErr error
+	updateNodeErr error
+	createEdgeErr error
+	updateEdgeErr error
+}
+
+func (e *restoreFailEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
+	if e.createNodeErr != nil {
+		return "", e.createNodeErr
+	}
+	return e.Engine.CreateNode(node)
+}
+
+func (e *restoreFailEngine) UpdateNode(node *storage.Node) error {
+	if e.updateNodeErr != nil {
+		return e.updateNodeErr
+	}
+	return e.Engine.UpdateNode(node)
+}
+
+func (e *restoreFailEngine) CreateEdge(edge *storage.Edge) error {
+	if e.createEdgeErr != nil {
+		return e.createEdgeErr
+	}
+	return e.Engine.CreateEdge(edge)
+}
+
+func (e *restoreFailEngine) UpdateEdge(edge *storage.Edge) error {
+	if e.updateEdgeErr != nil {
+		return e.updateEdgeErr
+	}
+	return e.Engine.UpdateEdge(edge)
 }
 
 func TestMemoryTierHalfLives(t *testing.T) {
@@ -1958,6 +1995,117 @@ func TestRestore(t *testing.T) {
 
 		err = db.Restore(ctx, "/any/path.json")
 		assert.ErrorIs(t, err, ErrClosed)
+	})
+
+	t.Run("returns parse error for invalid backup json", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{storage: base, config: DefaultConfig()}
+
+		p := filepath.Join(t.TempDir(), "bad.json")
+		require.NoError(t, os.WriteFile(p, []byte("{not-json"), 0644))
+		err := db.Restore(ctx, p)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to parse backup")
+	})
+
+	t.Run("returns node restore error when create and update fail", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{
+			storage: &restoreFailEngine{
+				Engine:        base,
+				createNodeErr: errors.New("create node failed"),
+				updateNodeErr: errors.New("update node failed"),
+			},
+			config: DefaultConfig(),
+		}
+
+		p := filepath.Join(t.TempDir(), "backup-node-fail.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{"version":"1.0","created_at":"2026-03-10T00:00:00Z","nodes":[{"id":"n1","labels":["L"],"properties":{}}],"edges":[]}`), 0644))
+
+		err := db.Restore(ctx, p)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to restore node n1")
+	})
+
+	t.Run("returns edge restore error when create and update fail", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{
+			storage: &restoreFailEngine{
+				Engine:        base,
+				createEdgeErr: errors.New("create edge failed"),
+				updateEdgeErr: errors.New("update edge failed"),
+			},
+			config: DefaultConfig(),
+		}
+
+		p := filepath.Join(t.TempDir(), "backup-edge-fail.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{"version":"1.0","created_at":"2026-03-10T00:00:00Z","nodes":[],"edges":[{"id":"e1","source":"n1","target":"n2","type":"REL","properties":{}}]}`), 0644))
+
+		err := db.Restore(ctx, p)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to restore edge e1")
+	})
+
+	t.Run("updates existing nodes and edges when ids already exist", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
+		t.Cleanup(func() { _ = base.Close() })
+		db := &DB{
+			storage:        base,
+			config:         DefaultConfig(),
+			searchServices: make(map[string]*dbSearchService),
+		}
+
+		_, err := base.CreateNode(&storage.Node{
+			ID:     "n1",
+			Labels: []string{"Person"},
+			Properties: map[string]any{
+				"name": "OldAlice",
+			},
+		})
+		require.NoError(t, err)
+		_, err = base.CreateNode(&storage.Node{
+			ID:     "n2",
+			Labels: []string{"Person"},
+			Properties: map[string]any{
+				"name": "Bob",
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, base.CreateEdge(&storage.Edge{
+			ID:        "e1",
+			StartNode: "n1",
+			EndNode:   "n2",
+			Type:      "KNOWS",
+			Properties: map[string]any{
+				"since": "2020",
+			},
+		}))
+
+		p := filepath.Join(t.TempDir(), "backup-update-existing.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{
+			"version":"1.0",
+			"created_at":"2026-03-10T00:00:00Z",
+			"nodes":[
+				{"id":"n1","labels":["Person"],"properties":{"name":"NewAlice"}},
+				{"id":"n2","labels":["Person"],"properties":{"name":"Bob"}}
+			],
+			"edges":[
+				{"id":"e1","startNode":"n1","endNode":"n2","type":"KNOWS","properties":{"since":"2026"}}
+			]
+		}`), 0644))
+
+		require.NoError(t, db.Restore(ctx, p))
+
+		n1, err := base.GetNode("n1")
+		require.NoError(t, err)
+		require.Equal(t, "NewAlice", n1.Properties["name"])
+
+		e1, err := base.GetEdge("e1")
+		require.NoError(t, err)
+		require.Equal(t, "2026", e1.Properties["since"])
 	})
 }
 

@@ -1426,7 +1426,6 @@ func (db *DB) SetEmbedConfigForDB(fn func(dbName string) (*embed.Config, error))
 func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	db.mu.RLock()
 	fn := db.embedConfigForDB
-	defaultKey := db.defaultEmbedKey
 	embedQueue := db.embedQueue
 	db.mu.RUnlock()
 
@@ -1447,12 +1446,6 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 			db.embedderRegistryMu.RUnlock()
 			return e, nil
 		}
-		if key == defaultKey && defaultKey != "" {
-			if e, ok := db.embedderRegistry[defaultKey]; ok {
-				db.embedderRegistryMu.RUnlock()
-				return e, nil
-			}
-		}
 	}
 	db.embedderRegistryMu.RUnlock()
 
@@ -1463,12 +1456,6 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	if e, ok := db.embedderRegistry[key]; ok {
 		db.embedderRegistryMu.Unlock()
 		return e, nil
-	}
-	if key == defaultKey && defaultKey != "" {
-		if e, ok := db.embedderRegistry[defaultKey]; ok {
-			db.embedderRegistryMu.Unlock()
-			return e, nil
-		}
 	}
 	// Reuse the active default local embedder when resolved config is equivalent.
 	// This avoids expensive re-initialization on the query path due key drift
@@ -1501,13 +1488,6 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 		db.embedderRegistryMu.RUnlock()
 		db.embedderCreateMu.Unlock()
 		return e, nil
-	}
-	if key == defaultKey && defaultKey != "" {
-		if e, ok := db.embedderRegistry[defaultKey]; ok {
-			db.embedderRegistryMu.RUnlock()
-			db.embedderCreateMu.Unlock()
-			return e, nil
-		}
 	}
 	db.embedderRegistryMu.RUnlock()
 	if ch, ok := db.embedderCreate[key]; ok {

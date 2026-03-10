@@ -159,6 +159,44 @@ func TestLoadPluginsFromDir(t *testing.T) {
 			assert.Contains(t, err.Error(), "not a directory")
 		}
 	})
+
+	t.Run("heimdall plugin is skipped when context is nil", func(t *testing.T) {
+		pluginsMu.Lock()
+		loadedPlugins = make(map[string]*LoadedPlugin)
+		pluginFunctions = make(map[string]PluginFunction)
+		pluginProcedures = make(map[string]PluginProcedure)
+		pluginsInitialized = false
+		pluginsMu.Unlock()
+
+		dir := t.TempDir()
+		_ = buildTestPluginSO(t, dir, "heimdall_skip_ctx", `package main
+import "github.com/orneryd/nornicdb/pkg/heimdall"
+type P struct{}
+func (P) Name() string { return "skipctx" }
+func (P) Version() string { return "1.0.0" }
+func (P) Type() string { return "heimdall" }
+func (P) Description() string { return "test" }
+func (P) Initialize(heimdall.SubsystemContext) error { return nil }
+func (P) Start() error { return nil }
+func (P) Stop() error { return nil }
+func (P) Shutdown() error { return nil }
+func (P) Status() heimdall.SubsystemStatus { return heimdall.StatusRunning }
+func (P) Health() heimdall.SubsystemHealth { return heimdall.SubsystemHealth{Status: heimdall.StatusRunning, Healthy: true} }
+func (P) Metrics() map[string]interface{} { return nil }
+func (P) Config() map[string]interface{} { return nil }
+func (P) Configure(map[string]interface{}) error { return nil }
+func (P) ConfigSchema() map[string]interface{} { return nil }
+func (P) Actions() map[string]heimdall.ActionFunc { return nil }
+func (P) Summary() string { return "ok" }
+func (P) RecentEvents(limit int) []heimdall.SubsystemEvent { return nil }
+var Plugin P
+`)
+
+		err := LoadPluginsFromDir(dir, nil)
+		require.NoError(t, err)
+		require.True(t, PluginsInitialized())
+		require.Empty(t, ListLoadedPlugins(), "heimdall plugin should be skipped without context")
+	})
 }
 
 func TestPluginFunctionHandlerTypes(t *testing.T) {
