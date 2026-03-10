@@ -107,9 +107,12 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 0)
 
-	resp, err = db2Svc.Search(ctx, "world", nil, nil)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(resp.Results), 1)
+	// As with defaultSvc above, text search visibility can lag briefly in CI even
+	// when embedding counts are updated, so assert db2's positive search via retry.
+	require.Eventually(t, func() bool {
+		resp, err = db2Svc.Search(ctx, "world", nil, nil)
+		return err == nil && len(resp.Results) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestSearchServices_ResetDropsCache(t *testing.T) {
