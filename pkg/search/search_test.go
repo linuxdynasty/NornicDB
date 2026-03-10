@@ -923,6 +923,80 @@ func TestSearchService_BuildIndexes_SkipIterationFromDisk(t *testing.T) {
 	require.GreaterOrEqual(t, svc2.EmbeddingCount(), 1)
 }
 
+func TestSearchService_BuildIndexes_ForcedRebuildOnSettingsMismatch(t *testing.T) {
+	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	_, err := base.CreateNode(&storage.Node{
+		ID:              "mismatch-1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "persisted-one"},
+	})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&storage.Node{
+		ID:              "mismatch-2",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0, 1, 0}},
+		Properties:      map[string]any{"content": "persisted-two"},
+	})
+	require.NoError(t, err)
+
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+	hnswPath := filepath.Join(tmp, "hnsw.idx")
+
+	// Seed persisted artifacts/settings.
+	svc1 := NewServiceWithDimensions(base, 3)
+	svc1.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc1.SetPersistenceEnabled(false) })
+	svc1.SetFulltextIndexPath(bm25Path)
+	svc1.SetVectorIndexPath(vectorPath)
+	svc1.SetHNSWIndexPath(hnswPath)
+	require.NoError(t, svc1.BuildIndexes(context.Background()))
+	svc1.persistSearchBuildSettings(bm25Path, vectorPath, hnswPath)
+
+	// Overwrite build settings with mismatched fingerprints so rebuild flags trigger.
+	settingsPath := searchBuildSettingsPath(bm25Path, vectorPath, hnswPath)
+	require.NoError(t, saveSearchBuildSettings(settingsPath, searchBuildSettingsSnapshot{
+		FormatVersion: searchBuildSettingsFormatVersion,
+		BM25:          "old-bm25-fingerprint",
+		Vector:        "old-vector-fingerprint",
+		HNSW:          "old-hnsw-fingerprint",
+		Routing:       "old-routing-fingerprint",
+		Strategy:      "old-strategy-fingerprint",
+	}))
+
+	svc2 := NewServiceWithDimensions(base, 3)
+	svc2.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc2.SetPersistenceEnabled(false) })
+	svc2.SetFulltextIndexPath(bm25Path)
+	svc2.SetVectorIndexPath(vectorPath)
+	svc2.SetHNSWIndexPath(hnswPath)
+
+	// Pre-populate fields that forced rebuild paths should clear.
+	svc2.clusterLexicalProfiles = map[int]map[string]float64{
+		1: {"alpha": 1},
+	}
+	svc2.ivfpqMu.Lock()
+	svc2.ivfpqIndex = &IVFPQIndex{}
+	svc2.ivfpqMu.Unlock()
+
+	require.NoError(t, svc2.BuildIndexes(context.Background()))
+	require.True(t, svc2.IsReady())
+	require.GreaterOrEqual(t, svc2.fulltextIndex.Count(), 1)
+	require.GreaterOrEqual(t, svc2.EmbeddingCount(), 1)
+
+	// Build must persist updated fingerprints (not stale old-* values).
+	gotSettings, err := loadSearchBuildSettings(settingsPath)
+	require.NoError(t, err)
+	require.NotNil(t, gotSettings)
+	require.NotEqual(t, "old-bm25-fingerprint", gotSettings.BM25)
+	require.NotEqual(t, "old-vector-fingerprint", gotSettings.Vector)
+	require.NotEqual(t, "old-hnsw-fingerprint", gotSettings.HNSW)
+	require.NotEqual(t, "old-routing-fingerprint", gotSettings.Routing)
+	require.NotEqual(t, "old-strategy-fingerprint", gotSettings.Strategy)
+}
+
 func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
 	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
 	svc := NewServiceWithDimensions(engine, 2)

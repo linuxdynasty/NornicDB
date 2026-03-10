@@ -1345,6 +1345,39 @@ func TestNamespacedCypherHelperAdditionalCoverage(t *testing.T) {
 		assert.Equal(t, "REPORTS_TO", edge.Type)
 		assert.Equal(t, true, edge.Properties["active"])
 
+		edge, err = extractEdgeFromResult([]interface{}{
+			&storage.Edge{
+				ID:         "edge-4",
+				StartNode:  "fallback-source",
+				EndNode:    "fallback-target",
+				Type:       "MENTORS",
+				Properties: map[string]interface{}{"strength": int64(9)},
+			},
+			map[string]interface{}{"_nodeId": "explicit-source"},
+			"explicit-target",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "explicit-source", edge.Source)
+		assert.Equal(t, "explicit-target", edge.Target)
+		assert.Equal(t, "MENTORS", edge.Type)
+		assert.EqualValues(t, 9, edge.Properties["strength"])
+
+		edge, err = extractEdgeFromResult([]interface{}{
+			map[string]interface{}{
+				"id":         "edge-5",
+				"type":       "FOLLOWS",
+				"properties": map[string]interface{}{"since": "2024"},
+			},
+			"source-as-string",
+			&storage.Node{ID: "target-as-node"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "edge-5", edge.ID)
+		assert.Equal(t, "source-as-string", edge.Source)
+		assert.Equal(t, "target-as-node", edge.Target)
+		assert.Equal(t, "FOLLOWS", edge.Type)
+		assert.Equal(t, "2024", edge.Properties["since"])
+
 		_, err = extractEdgeFromResult([]interface{}{})
 		require.ErrorContains(t, err, "insufficient edge data")
 

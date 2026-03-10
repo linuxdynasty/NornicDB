@@ -2474,3 +2474,90 @@ func TestEvaluateExpressionFromValues_Branches(t *testing.T) {
 	mapLit := exec.evaluateExpressionFromValues("{name: n.name, relCount: size(relationships(path))}", values)
 	require.NotNil(t, mapLit)
 }
+
+func TestExecuteMatchWithClause_DelegationAndErrorBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "w1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(31)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "w2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(29)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "w3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carol", "age": int64(22)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "w4", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "nobody"}})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "wr1", StartNode: "w1", EndNode: "w2", Type: "KNOWS", Properties: map[string]interface{}{"weight": int64(3)}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "wr2", StartNode: "w1", EndNode: "w3", Type: "KNOWS", Properties: map[string]interface{}{"weight": int64(5)}}))
+
+	// Missing WITH/RETURN must fail deterministically.
+	_, err = exec.executeMatchWithClause(ctx, "MATCH (n:Person) RETURN n.name")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "WITH and RETURN clauses required")
+
+	// WITH + UNWIND branch delegates to executeMatchWithUnwind.
+	res, err := exec.executeMatchWithClause(ctx, "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS name RETURN name")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(res.Rows), 3)
+
+	// WITH + OPTIONAL MATCH branch delegates to executeMatchWithOptionalMatch.
+	res, err = exec.executeMatchWithClause(ctx, "MATCH (n:Person) WITH n OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN n.name, m.name")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+	require.Equal(t, "alice", res.Rows[0][0])
+
+	// Relationship-pattern path delegates to executeMatchRelationshipsWithClause.
+	res, err = exec.executeMatchWithClause(ctx, "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH a.name AS who, sum(r.weight) AS total RETURN who, total")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "alice", res.Rows[0][0])
+	require.Equal(t, int64(8), res.Rows[0][1])
+
+	// Explicit relationship query with no matches still returns empty rows.
+	res, err = exec.executeMatchWithClause(ctx, "MATCH (a:Person)-[r:LIKES]->(b:Person) WITH a, b RETURN a, b")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 0)
+}
+
+func TestExecuteMatchWithClause_ChainedWithAndStorageFailureBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "cw1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "cw2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// Chained WITH parsing: first WITH has WHERE, second WITH has projection.
+	res, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Person) WITH n.name AS name WHERE name <> 'bob' WITH name WHERE name STARTS WITH 'a' RETURN name",
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "alice", res.Rows[0][0])
+
+	// Exercise storage error path from GetNodesByLabel.
+	failing := &failingNodeLookupEngine{
+		Engine:     store,
+		byLabelErr: errors.New("forced-label-error"),
+	}
+	execFail := NewStorageExecutor(failing)
+	_, err = execFail.executeMatchWithClause(ctx, "MATCH (n:Person) WITH n RETURN n")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "forced-label-error")
+
+	// Exercise storage error path from AllNodes.
+	failingAll := &failingNodeLookupEngine{
+		Engine:      store,
+		allNodesErr: errors.New("forced-allnodes-error"),
+	}
+	execFailAll := NewStorageExecutor(failingAll)
+	_, err = execFailAll.executeMatchWithClause(ctx, "MATCH (n) WITH n RETURN n")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "forced-allnodes-error")
+}
