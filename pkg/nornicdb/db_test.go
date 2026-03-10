@@ -1943,6 +1943,39 @@ func TestFindSimilar(t *testing.T) {
 		assert.NotNil(t, results)
 	})
 
+	t.Run("maintains top-k order and replacement logic", func(t *testing.T) {
+		db, err := Open(t.TempDir(), nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		root, err := db.Store(ctx, &Memory{
+			Content:         "root",
+			ChunkEmbeddings: [][]float32{{1.0, 0.0}},
+		})
+		require.NoError(t, err)
+
+		low, err := db.Store(ctx, &Memory{
+			Content:         "low",
+			ChunkEmbeddings: [][]float32{{0.2, 0.8}},
+		})
+		require.NoError(t, err)
+
+		high, err := db.Store(ctx, &Memory{
+			Content:         "high",
+			ChunkEmbeddings: [][]float32{{0.98, 0.02}},
+		})
+		require.NoError(t, err)
+
+		_, err = db.CreateNode(ctx, []string{"NoEmbed"}, map[string]interface{}{"name": "ignored"})
+		require.NoError(t, err)
+
+		results, err := db.FindSimilar(ctx, root.ID, 1)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		require.Equal(t, high.ID, results[0].Node.ID)
+		require.NotEqual(t, low.ID, results[0].Node.ID)
+	})
+
 	t.Run("returns error for non-existent node", func(t *testing.T) {
 		db, err := Open(t.TempDir(), nil)
 		require.NoError(t, err)
@@ -2054,6 +2087,35 @@ func TestHybridSearch_InvalidUnnamespacedStoragePanics(t *testing.T) {
 
 	require.Panics(t, func() {
 		_, _ = db.HybridSearch(context.Background(), "query", []float32{0.1, 0.2}, nil, 5)
+	})
+}
+
+func TestHybridSearch_ErrorBranches(t *testing.T) {
+	t.Run("returns explicit error when cached service is nil", func(t *testing.T) {
+		db, err := Open("", DefaultConfig())
+		require.NoError(t, err)
+		defer db.Close()
+
+		dbName := db.defaultDatabaseName()
+		db.searchServicesMu.Lock()
+		db.searchServices[dbName] = &dbSearchService{dbName: dbName, svc: nil}
+		db.searchServicesMu.Unlock()
+
+		_, err = db.HybridSearch(context.Background(), "query", []float32{0.1, 0.2}, nil, 5)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "search service not initialized")
+	})
+
+	t.Run("handles canceled context without panic", func(t *testing.T) {
+		db, err := Open("", DefaultConfig())
+		require.NoError(t, err)
+		defer db.Close()
+
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		results, err := db.HybridSearch(canceledCtx, "missing", make([]float32, 1024), nil, 10)
+		require.NoError(t, err)
+		require.NotNil(t, results)
 	})
 }
 
