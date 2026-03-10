@@ -1205,6 +1205,11 @@ func TestSearchHelpers_BM25SeedAndSettingsEquivalence(t *testing.T) {
 		current,
 		bm25V2FormatVersion,
 	))
+
+	assert.Equal(t, BM25EngineV2, normalizeBM25Engine(""))
+	assert.Equal(t, BM25EngineV2, normalizeBM25Engine(" V2 "))
+	assert.Equal(t, BM25EngineV1, normalizeBM25Engine("v1"))
+	assert.Equal(t, BM25EngineV2, normalizeBM25Engine("unknown"))
 }
 
 func TestSearchHelpers_TryRestoreAndMaybeRebuildBranches(t *testing.T) {
@@ -1283,6 +1288,35 @@ func TestSearchHelpers_BuildPipelineAndGPUBranches(t *testing.T) {
 	require.NoError(t, err)
 	svc.gpuManager = gm
 	require.Error(t, svc.ensureGPUIndexSynced(vi, nil))
+}
+
+func TestSearchHelpers_SetGPUManager_NonGPUBranches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.pipelineMu.Lock()
+	svc.vectorPipeline = NewVectorSearchPipeline(NewBruteForceCandidateGen(svc.vectorIndex), NewCPUExactScorer(svc.vectorIndex))
+	svc.pipelineMu.Unlock()
+
+	// Nil manager clears pipeline and keeps GPU index nil.
+	svc.SetGPUManager(nil)
+	svc.pipelineMu.RLock()
+	require.Nil(t, svc.vectorPipeline)
+	svc.pipelineMu.RUnlock()
+	require.Nil(t, svc.gpuEmbeddingIndex)
+
+	// Disabled manager follows same non-GPU branch.
+	cfg := gpu.DefaultConfig()
+	cfg.Enabled = false
+	gm, err := gpu.NewManager(cfg)
+	require.NoError(t, err)
+	svc.SetGPUManager(gm)
+	require.Nil(t, svc.gpuEmbeddingIndex)
+
+	// No vector index dimensions path (dimensions <= 0) should return without creating GPU index.
+	svc.mu.Lock()
+	svc.vectorIndex = nil
+	svc.mu.Unlock()
+	svc.SetGPUManager(gm)
+	require.Nil(t, svc.gpuEmbeddingIndex)
 }
 
 func TestSearchHelpers_HNSWLexicalSeedsAndGetOrCreateBranches(t *testing.T) {
@@ -1376,6 +1410,23 @@ func TestSearchHelpers_BuildHNSWForTransition_Branches(t *testing.T) {
 	rebuilt, err := svc.buildHNSWForTransition(context.Background(), 2, vi, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, rebuilt.Size())
+
+	// File-store build path.
+	dir := t.TempDir()
+	vfs, err := NewVectorFileStore(filepath.Join(dir, "transition_vectors"), 2)
+	require.NoError(t, err)
+	defer vfs.Close()
+	require.NoError(t, vfs.Add("vf1", []float32{1, 0}))
+	require.NoError(t, vfs.Add("vf2", []float32{0, 1}))
+
+	rebuilt, err = svc.buildHNSWForTransition(context.Background(), 2, nil, vfs)
+	require.NoError(t, err)
+	require.Equal(t, 2, rebuilt.Size())
+
+	cancelledVFS, cancelVFS := context.WithCancel(context.Background())
+	cancelVFS()
+	_, err = svc.buildHNSWForTransition(cancelledVFS, 2, nil, vfs)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestSearchHelpers_MaybeRebuildHNSW_RebuildAndCancelBranches(t *testing.T) {
@@ -1423,6 +1474,115 @@ func TestSearchHelpers_MaybeRebuildHNSW_RebuildAndCancelBranches(t *testing.T) {
 	cancel()
 	err := svc.maybeRebuildHNSW(cancelled, 0.0, 1.0, 0)
 	require.ErrorIs(t, err, context.Canceled)
+
+	// Rebuild-in-flight guard should short-circuit without error.
+	svc.hnswRebuildInFlight.Store(true)
+	require.NoError(t, svc.maybeRebuildHNSW(context.Background(), 0.0, 1.0, 0))
+	svc.hnswRebuildInFlight.Store(false)
+}
+
+func TestSearchHelpers_HNSWUpdateLive_Branches(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+
+	// No HNSW index: deferred counter should remain unchanged.
+	svc.hnswUpdateLive("missing", []float32{1, 0}, false)
+	require.Equal(t, int64(0), svc.hnswDeferredMutations.Load())
+	svc.hnswUpdateLive("missing", []float32{1, 0}, true) // no-op with nil index
+
+	idx := NewHNSWIndex(2, DefaultHNSWConfig())
+	require.NoError(t, idx.Add("doc-a", []float32{1, 0}))
+	svc.hnswMu.Lock()
+	svc.hnswIndex = idx
+	svc.hnswMu.Unlock()
+
+	// allowLive=false increments deferred mutations when HNSW exists.
+	svc.hnswUpdateLive("doc-a", []float32{0.5, 0.5}, false)
+	require.Equal(t, int64(1), svc.hnswDeferredMutations.Load())
+
+	// allowLive=true updates existing vector and can add a new vector ID through Update().
+	svc.hnswUpdateLive("doc-a", []float32{0.5, 0.5}, true)
+	svc.hnswUpdateLive("doc-b", []float32{0, 1}, true)
+	svc.hnswMu.RLock()
+	size := svc.hnswIndex.Size()
+	svc.hnswMu.RUnlock()
+	require.Equal(t, 2, size)
+}
+
+func TestSearchHelpers_TryRestoreClusteredWarmupFromDisk_Success(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.EnableClustering(nil, 2)
+	svc.SetMinEmbeddingsForClustering(1)
+
+	// Backing vectors used by centroid derivation and lookup.
+	require.NoError(t, svc.vectorIndex.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, svc.vectorIndex.Add("doc-b", []float32{0, 1}))
+	require.NoError(t, svc.clusterIndex.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, svc.clusterIndex.Add("doc-b", []float32{0, 1}))
+
+	cluster0 := NewHNSWIndex(2, DefaultHNSWConfig())
+	cluster1 := NewHNSWIndex(2, DefaultHNSWConfig())
+	require.NoError(t, cluster0.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, cluster1.Add("doc-b", []float32{0, 1}))
+
+	hnswPath := filepath.Join(t.TempDir(), "hnsw")
+	require.NoError(t, SaveIVFHNSW(hnswPath, map[int]*HNSWIndex{
+		0: cluster0,
+		1: cluster1,
+	}))
+
+	restored := svc.tryRestoreClusteredWarmupFromDisk(context.Background(), svc.clusterIndex, hnswPath)
+	require.True(t, restored)
+	require.True(t, svc.clusterIndex.IsClustered())
+	require.Equal(t, 2, svc.clusterIndex.NumClusters())
+}
+
+func TestSearchHelpers_TransitionDeltaVectorAndReplay(t *testing.T) {
+	vi := NewVectorIndex(2)
+	require.NoError(t, vi.Add("same", []float32{1, 0}))
+	require.NoError(t, vi.Add("vi_only", []float32{0, 1}))
+
+	dir := t.TempDir()
+	vfs, err := NewVectorFileStore(filepath.Join(dir, "delta_vectors"), 2)
+	require.NoError(t, err)
+	defer vfs.Close()
+	require.NoError(t, vfs.Add("same", []float32{0.5, 0.5}))
+	require.NoError(t, vfs.Add("vfs_only", []float32{0.2, 0.8}))
+
+	vec, ok := getTransitionDeltaVector("same", vi, vfs)
+	require.True(t, ok)
+	require.Len(t, vec, 2)
+	require.InDelta(t, 0.7071, vec[0], 0.001) // vfs stores normalized vectors
+	require.InDelta(t, 0.7071, vec[1], 0.001)
+
+	vec, ok = getTransitionDeltaVector("vi_only", vi, vfs)
+	require.True(t, ok)
+	require.Equal(t, []float32{0, 1}, vec)
+
+	vec, ok = getTransitionDeltaVector("missing", vi, vfs)
+	require.False(t, ok)
+	require.Nil(t, vec)
+
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.strategyTransitionMu.Lock()
+	svc.strategyTransitionDeltas = []strategyDeltaMutation{
+		{seq: 1, id: "vi_only", add: true},
+		{seq: 2, id: "vi_only", add: false},
+		{seq: 3, id: "vfs_only", add: true},
+	}
+	svc.strategyTransitionMu.Unlock()
+
+	target := NewHNSWIndex(2, DefaultHNSWConfig())
+	last := svc.replayTransitionDeltas(target, strategyModeHNSW, vi, vfs, 0)
+	require.Equal(t, uint64(3), last)
+	require.Equal(t, 1, target.Size())
+
+	// After watermark should only replay newer deltas.
+	svc.strategyTransitionMu.Lock()
+	svc.strategyTransitionDeltas = append(svc.strategyTransitionDeltas, strategyDeltaMutation{seq: 4, id: "vfs_only", add: false})
+	svc.strategyTransitionMu.Unlock()
+	last = svc.replayTransitionDeltas(target, strategyModeHNSW, vi, vfs, 3)
+	require.Equal(t, uint64(4), last)
+	require.Equal(t, 0, target.Size())
 }
 
 // TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).

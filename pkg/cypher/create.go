@@ -1323,6 +1323,8 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		// Parse per-MATCH WHERE: each "MATCH ... WHERE ..." segment keeps its own WHERE
 		// so we do not truncate matchPart after the first WHERE (which would drop
 		// subsequent MATCH clauses and leave variables like 'a' or 'b' unbound).
+		hadMatchPatterns := false
+		anyPatternUnmatched := false
 		patternMatches := make([]struct {
 			variable string
 			nodes    []*storage.Node
@@ -1350,6 +1352,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			numPatternsInSegment := 0
 			for _, p := range patterns {
 				if strings.TrimSpace(p) != "" {
+					hadMatchPatterns = true
 					numPatternsInSegment++
 				}
 			}
@@ -1450,12 +1453,18 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 						variable: nodeInfo.variable,
 						nodes:    matchingNodes,
 					})
+				} else {
+					anyPatternUnmatched = true
 				}
 			}
 		}
 
 		// Build cartesian product of all pattern matches
-		allCombinations = e.buildCartesianProduct(patternMatches)
+		if anyPatternUnmatched {
+			allCombinations = []map[string]*storage.Node{}
+		} else {
+			allCombinations = e.buildCartesianProduct(patternMatches)
+		}
 
 		// Apply WITH LIMIT/SKIP if present (from MATCH ... WITH ... LIMIT ... CREATE pattern)
 		// This limits how many matched rows are processed before CREATE
@@ -1488,6 +1497,22 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 
 		// If no combinations, fall back to using existing nodeVars
 		if len(allCombinations) == 0 {
+			// openCypher semantics: MATCH producing zero rows short-circuits the CREATE path
+			// and returns an empty result set (with RETURN columns if requested).
+			if hadMatchPatterns {
+				if returnPart != "" {
+					returnItems := e.parseReturnItems(returnPart)
+					result.Columns = make([]string, len(returnItems))
+					for i, item := range returnItems {
+						if item.alias != "" {
+							result.Columns[i] = item.alias
+						} else {
+							result.Columns[i] = item.expr
+						}
+					}
+				}
+				return result, nil
+			}
 			allCombinations = []map[string]*storage.Node{nodeVars}
 		}
 	}

@@ -1498,6 +1498,14 @@ func TestResolverNamespacedErrorAndFallbackCoverage(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("createEdgeViaCypher returns deterministic error on match miss", func(t *testing.T) {
+		_, err := resolver.createEdgeViaCypher(ctx, source.ID, "missing-target", "KNOWS", map[string]interface{}{"since": "2024"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create relationship: source node")
+		assert.Contains(t, err.Error(), "exists=true")
+		assert.Contains(t, err.Error(), "target=missing-target")
+	})
+
 	t.Run("query search by property covers labels+limit and parse branches", func(t *testing.T) {
 		metaNode := createNodeViaCypher(t, resolver, []string{"Person"}, map[string]interface{}{
 			"name": "MetaCarrier",

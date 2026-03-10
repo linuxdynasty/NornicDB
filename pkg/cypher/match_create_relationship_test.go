@@ -229,6 +229,31 @@ func TestMatchCreateRelationship_NoReturn(t *testing.T) {
 	})
 }
 
+func TestMatchCreateRelationship_NoMatchReturnsEmptyWithoutError(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (a:Person {id: '1'})`, nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		MATCH (a:Person {id: '1'}), (b:Person {id: 'missing'})
+		CREATE (a)-[r:KNOWS]->(b)
+		RETURN r
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"r"}, result.Columns)
+	assert.Empty(t, result.Rows)
+	assert.Equal(t, 0, result.Stats.RelationshipsCreated)
+
+	verify, err := exec.Execute(ctx, `MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r)`, nil)
+	require.NoError(t, err)
+	require.Len(t, verify.Rows, 1)
+	assert.Equal(t, int64(0), verify.Rows[0][0])
+}
+
 func TestMatchCreateRelationship_ReverseDirection(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
