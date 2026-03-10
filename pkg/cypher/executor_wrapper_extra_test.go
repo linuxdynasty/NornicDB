@@ -1,6 +1,7 @@
 package cypher
 
 import (
+	"context"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -184,4 +185,80 @@ func TestTransactionStorageWrapper_BulkDelete_ErrorPaths(t *testing.T) {
 
 	err = w.BulkDeleteEdges([]storage.EdgeID{"missing-edge"})
 	require.Error(t, err)
+}
+
+func TestExecuteSetTrailingUnwind_ErrorAndProjectionBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	node := &storage.Node{
+		ID:         "p1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice"},
+	}
+
+	matchResult := &ExecuteResult{
+		Columns: []string{"n", "x"},
+		Rows:    [][]interface{}{{node, int64(7)}},
+	}
+
+	_, err := exec.executeSetTrailingUnwind(context.Background(), "RETURN 1", matchResult, &ExecuteResult{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNWIND clause expected")
+
+	_, err = exec.executeSetTrailingUnwind(context.Background(), "UNWIND [1,2,3] RETURN 1", matchResult, &ExecuteResult{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNWIND requires AS clause")
+
+	_, err = exec.executeSetTrailingUnwind(context.Background(), "UNWIND [1,2,3] AS item", matchResult, &ExecuteResult{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires RETURN clause")
+
+	ctxWithParams := context.WithValue(context.Background(), paramsKey, map[string]interface{}{
+		"vals": []interface{}{int64(10), int64(20)},
+	})
+	ok, err := exec.executeSetTrailingUnwind(
+		ctxWithParams,
+		"UNWIND ($vals) AS item RETURN item, n.name, x, n, toUpper(n.name), ghost.prop",
+		matchResult,
+		&ExecuteResult{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"item", "n.name", "x", "n", "toUpper(n.name)", "ghost.prop"}, ok.Columns)
+	require.Len(t, ok.Rows, 2)
+
+	assert.Equal(t, int64(10), ok.Rows[0][0])
+	assert.Equal(t, "alice", ok.Rows[0][1])
+	assert.Equal(t, int64(7), ok.Rows[0][2])
+	assert.Equal(t, node, ok.Rows[0][3])
+	assert.Equal(t, "ALICE", ok.Rows[0][4])
+	assert.Equal(t, "ghost.prop", ok.Rows[0][5])
+
+	assert.Equal(t, int64(20), ok.Rows[1][0])
+	assert.Equal(t, "alice", ok.Rows[1][1])
+	assert.Equal(t, int64(7), ok.Rows[1][2])
+	assert.Equal(t, node, ok.Rows[1][3])
+	assert.Equal(t, "ALICE", ok.Rows[1][4])
+	assert.Equal(t, "ghost.prop", ok.Rows[1][5])
+}
+
+func TestExecuteCallInTransactions_AdditionalBatchingBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:Person {name:'a'}), (:Person {name:'b'}), (:Person {name:'c'})", nil)
+	require.NoError(t, err)
+
+	// Known-row-count path: read-only conversion succeeds, but write batch fails.
+	_, err = exec.executeCallInTransactions(ctx, "MATCH (n:Person) SET n += 1 RETURN n.name AS name", 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "batch 1/")
+
+	// Guard branch error path for non-batchable writes.
+	_, err = exec.executeCallInTransactions(ctx, "CREATE (n:TmpBad RETURN n", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "batch 1 failed")
 }

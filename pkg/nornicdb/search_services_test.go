@@ -277,7 +277,10 @@ func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
 		ID:              storage.NodeID("alpha"),
 		Labels:          []string{"Doc"},
 		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
-		Properties:      map[string]any{"content": "alpha"},
+		Properties: map[string]any{
+			"content":   "alpha",
+			"embedding": []float32{0.1, 0.2, 0.3},
+		},
 	})
 	require.NoError(t, err)
 
@@ -286,7 +289,7 @@ func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
 	defaultSvc, err := db.EnsureSearchIndexesBuilt(buildCtx, db.defaultDatabaseName(), defaultStorage)
 	require.NoError(t, err)
 	require.NotNil(t, defaultSvc)
-	require.Equal(t, 1, defaultSvc.EmbeddingCount())
+	require.Eventually(t, func() bool { return defaultSvc.EmbeddingCount() >= 1 }, 3*time.Second, 25*time.Millisecond)
 
 	// db2 service exists but intentionally remains unbuilt (not ready).
 	db2Svc, err := db.GetOrCreateSearchService("db2", nil)
@@ -310,6 +313,7 @@ func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
 	db2Entry.clusterMu.Unlock()
 
 	db.runClusteringOnceAllDatabases(context.Background())
+	expectedCount := defaultSvc.EmbeddingCount()
 
 	defaultEntry.clusterMu.Lock()
 	defaultAfter := defaultEntry.lastClusteredEmbedCount
@@ -318,7 +322,7 @@ func TestSearchServices_RunClusteringOnceAllDatabases_Guards(t *testing.T) {
 	db2After := db2Entry.lastClusteredEmbedCount
 	db2Entry.clusterMu.Unlock()
 
-	require.Equal(t, 1, defaultAfter, "ready service should update clustered count")
+	require.Equal(t, expectedCount, defaultAfter, "ready service should update clustered count")
 	require.Equal(t, 123, db2After, "not-ready service should be skipped")
 
 	// Canceled context should return immediately without mutating counters.

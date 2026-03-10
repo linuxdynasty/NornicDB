@@ -2227,3 +2227,171 @@ func TestFunctionEvaluator_ArrayIndexingAdditionalBranches(t *testing.T) {
 		t.Fatalf("n.arrAny[1..] unexpected: %#v", got)
 	}
 }
+
+func TestFunctionEvaluator_ConversionAndStringFallbackBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	node := createTestNode(t, e, "conv-n", []string{"Person"}, map[string]interface{}{
+		"arrAny": []interface{}{int64(1), int64(2), int64(3), int64(4)},
+		"mixed":  []interface{}{int64(1), float64(2.9), "3", "bad", true, nil},
+		"mixedF": []interface{}{float32(1.25), int64(2), "3.5", "bad", true},
+		"mixedB": []interface{}{true, "false", "bad", int64(1)},
+		"text":   "xy",
+	})
+	nodes := map[string]*storage.Node{"n": node}
+
+	if got := e.evaluateExpressionWithContextFullFunctions("", nodes, nil, nil, nil, nil, 0); got != nil {
+		t.Fatalf("empty expr should return nil, got %#v", got)
+	}
+
+	// Additional array-indexing/slicing branches.
+	if got := e.evaluateExpressionWithContext("n.arrAny[-3..-1]", nodes, nil); !reflect.DeepEqual([]interface{}{int64(2), int64(3)}, got) {
+		t.Fatalf("n.arrAny[-3..-1] unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("n.arrAny[-99..2]", nodes, nil); !reflect.DeepEqual([]interface{}{int64(1), int64(2)}, got) {
+		t.Fatalf("n.arrAny[-99..2] unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("n.arrAny[3..1]", nodes, nil); !reflect.DeepEqual([]interface{}{}, got) {
+		t.Fatalf("n.arrAny[3..1] unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("'abc'[..1]", nodes, nil); got != nil {
+		t.Fatalf("'abc'[..1] should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("n.arrAny['2']", nodes, nil); got != int64(3) {
+		t.Fatalf("n.arrAny['2'] unexpected: %#v", got)
+	}
+
+	// Scalar conversions.
+	if got := e.evaluateExpressionWithContext("toInteger(2.9)", nodes, nil); got != int64(2) {
+		t.Fatalf("toInteger(2.9) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toInteger('bad')", nodes, nil); got != nil {
+		t.Fatalf("toInteger('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toInt(3)", nodes, nil); got != int64(3) {
+		t.Fatalf("toInt(3) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toInt('bad')", nodes, nil); got != nil {
+		t.Fatalf("toInt('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloat(2)", nodes, nil); got != float64(2) {
+		t.Fatalf("toFloat(2) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloat('3.5')", nodes, nil); got != float64(3.5) {
+		t.Fatalf("toFloat('3.5') = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloat('bad')", nodes, nil); got != nil {
+		t.Fatalf("toFloat('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBoolean('TRUE')", nodes, nil); got != true {
+		t.Fatalf("toBoolean('TRUE') = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBoolean(1)", nodes, nil); got != nil {
+		t.Fatalf("toBoolean(1) should be nil, got %#v", got)
+	}
+
+	// OrNull conversion variants.
+	if got := e.evaluateExpressionWithContext("toIntegerOrNull('7')", nodes, nil); got != int64(7) {
+		t.Fatalf("toIntegerOrNull('7') = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toIntegerOrNull('bad')", nodes, nil); got != nil {
+		t.Fatalf("toIntegerOrNull('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloatOrNull('2.25')", nodes, nil); got != float64(2.25) {
+		t.Fatalf("toFloatOrNull('2.25') = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloatOrNull('bad')", nodes, nil); got != nil {
+		t.Fatalf("toFloatOrNull('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBooleanOrNull('false')", nodes, nil); got != false {
+		t.Fatalf("toBooleanOrNull('false') = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBooleanOrNull('bad')", nodes, nil); got != nil {
+		t.Fatalf("toBooleanOrNull('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toStringOrNull(null)", nodes, nil); got != nil {
+		t.Fatalf("toStringOrNull(null) should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toStringOrNull(12)", nodes, nil); got != "12" {
+		t.Fatalf("toStringOrNull(12) = %#v", got)
+	}
+
+	// List conversion functions.
+	if got := e.evaluateExpressionWithContext("toIntegerList(n.mixed)", nodes, nil); !reflect.DeepEqual([]interface{}{int64(1), int64(2), int64(3), nil, nil, nil}, got) {
+		t.Fatalf("toIntegerList(n.mixed) unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toIntegerList('bad')", nodes, nil); got != nil {
+		t.Fatalf("toIntegerList('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloatList(n.mixedF)", nodes, nil); !reflect.DeepEqual([]interface{}{float64(1.25), float64(2), float64(3.5), nil, nil}, got) {
+		t.Fatalf("toFloatList(n.mixedF) unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toFloatList('bad')", nodes, nil); got != nil {
+		t.Fatalf("toFloatList('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBooleanList(n.mixedB)", nodes, nil); !reflect.DeepEqual([]interface{}{true, false, nil, nil}, got) {
+		t.Fatalf("toBooleanList(n.mixedB) unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toBooleanList('bad')", nodes, nil); got != nil {
+		t.Fatalf("toBooleanList('bad') should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toStringList([1, null, true])", nodes, nil); !reflect.DeepEqual([]interface{}{"1", nil, "true"}, got) {
+		t.Fatalf("toStringList([1, null, true]) unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("toStringList('bad')", nodes, nil); got != nil {
+		t.Fatalf("toStringList('bad') should be nil, got %#v", got)
+	}
+
+	// Utility + aggregate-in-expression branches.
+	if got := e.evaluateExpressionWithContext("valueType({k: 1})", nodes, nil); got != "MAP" {
+		t.Fatalf("valueType({k:1}) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("valueType([1])", nodes, nil); got != "LIST" {
+		t.Fatalf("valueType([1]) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("valueType(n)", nodes, nil); got != "ANY" {
+		t.Fatalf("valueType(n) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("collect(null)", nodes, nil); !reflect.DeepEqual([]interface{}{}, got) {
+		t.Fatalf("collect(null) unexpected: %#v", got)
+	}
+
+	// String helper nil/fallback branches.
+	for _, expr := range []string{"lower(1)", "upper(1)", "trim(1)", "ltrim(1)", "rtrim(1)"} {
+		if got := e.evaluateExpressionWithContext(expr, nodes, nil); got != nil {
+			t.Fatalf("%s should be nil, got %#v", expr, got)
+		}
+	}
+	if got := e.evaluateExpressionWithContext("replace('abc', 'a')", nodes, nil); got != nil {
+		t.Fatalf("replace with missing arg should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("split('a')", nodes, nil); got != nil {
+		t.Fatalf("split with missing delimiter should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("substring('abc', 99, 2)", nodes, nil); got != "" {
+		t.Fatalf("substring start >= len should be empty, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("substring('abc')", nodes, nil); got != nil {
+		t.Fatalf("substring with missing args should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("left('abc', 99)", nodes, nil); got != "abc" {
+		t.Fatalf("left('abc',99) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("left('abc')", nodes, nil); got != nil {
+		t.Fatalf("left with missing args should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("right('abc', 99)", nodes, nil); got != "abc" {
+		t.Fatalf("right('abc',99) = %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("right('abc')", nodes, nil); got != nil {
+		t.Fatalf("right with missing args should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("lpad('x', bad)", nodes, nil); got != nil {
+		t.Fatalf("lpad invalid length should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("rpad('x', bad)", nodes, nil); got != nil {
+		t.Fatalf("rpad invalid length should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("format()", nodes, nil); got != nil {
+		t.Fatalf("format() should be nil, got %#v", got)
+	}
+}
