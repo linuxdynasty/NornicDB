@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFastPath_MatchCreateDeleteRel tests the fast-path for MATCH...CREATE...DELETE patterns.
@@ -171,6 +173,74 @@ func TestFastPath_RegexMatching(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFastPath_CreateDeleteRelCount_HelperBranches(t *testing.T) {
+	baseEngine := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:     "p1",
+		Labels: []string{"Person"},
+		Properties: map[string]interface{}{
+			"id": int64(1),
+		},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "p2",
+		Labels: []string{"Person"},
+		Properties: map[string]interface{}{
+			"id": int64(2),
+		},
+	})
+	require.NoError(t, err)
+
+	okRes, ok := executor.executeFastPathCreateDeleteRelCount(
+		"Person", "Person",
+		"id", int64(1),
+		"id", int64(2),
+		"TEMP_REL", "r",
+	)
+	require.True(t, ok)
+	require.NotNil(t, okRes)
+	assert.Equal(t, []string{"count(r)"}, okRes.Columns)
+	require.Len(t, okRes.Rows, 1)
+	assert.Equal(t, int64(1), okRes.Rows[0][0])
+	assert.Equal(t, 1, okRes.Stats.RelationshipsCreated)
+	assert.Equal(t, 1, okRes.Stats.RelationshipsDeleted)
+
+	// Missing property-matched endpoint returns not fast-path-applicable.
+	missRes, missOK := executor.executeFastPathCreateDeleteRelCount(
+		"Person", "Person",
+		"id", int64(1),
+		"id", int64(999),
+		"TEMP_REL", "r",
+	)
+	assert.False(t, missOK)
+	assert.Nil(t, missRes)
+
+	// Label lookup branch when property filters are absent.
+	labelRes, labelOK := executor.executeFastPathCreateDeleteRelCount(
+		"Person", "Person",
+		"", nil,
+		"", nil,
+		"TEMP_REL", "edgeRef",
+	)
+	require.True(t, labelOK)
+	require.NotNil(t, labelRes)
+	assert.Equal(t, []string{"count(edgeRef)"}, labelRes.Columns)
+
+	// Missing label path returns false.
+	noneRes, noneOK := executor.executeFastPathCreateDeleteRelCount(
+		"MissingLabelA", "MissingLabelB",
+		"", nil,
+		"", nil,
+		"TEMP_REL", "r",
+	)
+	assert.False(t, noneOK)
+	assert.Nil(t, noneRes)
 }
 
 // BenchmarkFastPath_WithLimit benchmarks the WITH LIMIT pattern.

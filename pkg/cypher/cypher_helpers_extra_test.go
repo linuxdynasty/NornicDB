@@ -1808,6 +1808,13 @@ func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {
 	assert.True(t, hops[1].outgoing)
 	assert.ElementsMatch(t, []string{"LIKES"}, hops[1].relTypes)
 	assert.Empty(t, exec.parseRelationshipHops("(n)-[:BROKEN->()", "n"))
+	incomingHops := exec.parseRelationshipHops("(n)<-[:LIKES|FOLLOWS]-()<-[]-()", "n")
+	require.Len(t, incomingHops, 2)
+	assert.False(t, incomingHops[0].outgoing)
+	assert.ElementsMatch(t, []string{"LIKES", "FOLLOWS"}, incomingHops[0].relTypes)
+	assert.False(t, incomingHops[1].outgoing)
+	assert.Empty(t, incomingHops[1].relTypes)
+	assert.Empty(t, exec.parseRelationshipHops("(n)<-[:BROKEN-()", "n"))
 
 	assert.True(t, exec.traverseChain(n1, []relationshipHop{
 		{relTypes: []string{"KNOWS"}, outgoing: true},
@@ -1833,6 +1840,62 @@ func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {
 	}, 0))
 }
 
+func TestCypherHelpers_ExecuteMatchRelationshipsWithClause_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:         "pa",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice"},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:         "pb",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "bob"},
+	})
+	require.NoError(t, err)
+	err = eng.CreateEdge(&storage.Edge{
+		ID:        "kn-1",
+		StartNode: "pa",
+		EndNode:   "pb",
+		Type:      "KNOWS",
+	})
+	require.NoError(t, err)
+
+	out, err := exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"p = (a:Person)-[r:KNOWS]->(b:Person)",
+		"",
+		"WITH a, b, r, p WHERE a.name = 'alice' RETURN a.name AS fromName, b.name AS toName ORDER BY fromName SKIP 0 LIMIT 10",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, out.Rows)
+	assert.Equal(t, "alice", out.Rows[0][0])
+	assert.Equal(t, "bob", out.Rows[0][1])
+
+	_, err = exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"(a:Person)-[r:KNOWS]->(b:Person)",
+		"",
+		"WITH a, b, r",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RETURN clause required")
+
+	_, err = exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"this is not a traversal pattern",
+		"",
+		"WITH a RETURN a",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid traversal pattern")
+}
+
 func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
 	node := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(21), "name": "alice"}}
@@ -1844,6 +1907,186 @@ func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
 	assert.True(t, exec.evaluateWhereAsBoolean("1.5", "n", node))
 	assert.False(t, exec.evaluateWhereAsBoolean("0.0", "n", node))
 	assert.True(t, exec.evaluateWhereAsBoolean("'x'", "n", node))
+}
+
+func TestCypherHelpers_ComparisonHelpers_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	node := &storage.Node{
+		ID:              "n1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2}},
+		EmbedMeta: map[string]interface{}{
+			"source":        "model-a",
+			"nullable_meta": nil,
+		},
+		Properties: map[string]interface{}{
+			"name": "alice",
+			"age":  int64(42),
+			"nick": nil,
+		},
+	}
+
+	items, ok := toInterfaceSlice([]string{"a", "b"})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"a", "b"}, items)
+	items, ok = toInterfaceSlice([]interface{}{1, "x"})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{1, "x"}, items)
+	_, ok = toInterfaceSlice(nil)
+	assert.False(t, ok)
+	_, ok = toInterfaceSlice(123)
+	assert.False(t, ok)
+
+	// Variable mismatch keeps historical pass-through semantics.
+	assert.True(t, exec.evaluateIsNull(node, "n", "other.name IS NULL", false))
+	assert.True(t, exec.evaluateIsNull(node, "n", "other.name IS NOT NULL", true))
+
+	// Standard property null checks.
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.nick IS NULL", false))
+	assert.False(t, exec.evaluateIsNull(node, "n", "n.nick IS NOT NULL", true))
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.name IS NOT NULL", true))
+	assert.False(t, exec.evaluateIsNull(node, "n", "n.missing IS NOT NULL", true))
+
+	// EmbedMeta-backed properties.
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.source IS NOT NULL", true))
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.nullable_meta IS NULL", false))
+
+	// Managed embedding special-case.
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NOT NULL", true))
+	node.ChunkEmbeddings = nil
+	node.EmbedMeta["has_embedding"] = false
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NULL", false))
+}
+
+func TestCypherHelpers_ExecuteUnwind_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	_, err := exec.executeUnwind(ctx, "MATCH (n) RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNWIND clause not found")
+
+	_, err = exec.executeUnwind(ctx, "UNWIND [1,2,3] RETURN x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires AS clause")
+
+	_, err = exec.executeUnwind(ctx, "UNWIND keys({a:1}) AS k RETURN k")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keys() function")
+
+	aggRes, err := exec.executeUnwind(ctx, "UNWIND [1,2,3] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a, min(x) AS mn, max(x) AS mx, collect(x)[..2] AS cs")
+	require.NoError(t, err)
+	require.Len(t, aggRes.Rows, 1)
+	assert.Equal(t, int64(6), aggRes.Rows[0][0])
+	assert.Equal(t, int64(3), aggRes.Rows[0][1])
+	assert.Equal(t, 2.0, aggRes.Rows[0][2])
+	assert.Equal(t, 1.0, aggRes.Rows[0][3])
+	assert.Equal(t, 3.0, aggRes.Rows[0][4])
+	assert.Equal(t, []interface{}{int64(1), int64(2)}, aggRes.Rows[0][5])
+
+	rowRes, err := exec.executeUnwind(ctx, "UNWIND ['a','b'] AS x RETURN x AS value")
+	require.NoError(t, err)
+	require.Len(t, rowRes.Rows, 2)
+	assert.Equal(t, "a", rowRes.Rows[0][0])
+	assert.Equal(t, "b", rowRes.Rows[1][0])
+
+	nullAgg, err := exec.executeUnwind(ctx, "UNWIND null AS x RETURN count(x) AS c")
+	require.NoError(t, err)
+	require.Len(t, nullAgg.Rows, 1)
+	assert.Equal(t, int64(0), nullAgg.Rows[0][0])
+
+	createRes, err := exec.executeUnwind(ctx, "UNWIND [1,2] AS x CREATE (n:UnwindNode {v: x}) RETURN n.v AS v")
+	require.NoError(t, err)
+	assert.Equal(t, 2, createRes.Stats.NodesCreated)
+	require.Len(t, createRes.Rows, 2)
+	assert.Equal(t, int64(1), createRes.Rows[0][0])
+	assert.Equal(t, int64(2), createRes.Rows[1][0])
+}
+
+func TestCypherHelpers_ExecuteMatchWithPipelineToRows_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "o-2",
+		Labels: []string{"OrderStatus"},
+		Properties: map[string]interface{}{
+			"orderId": int64(2),
+			"state":   "ready",
+			"active":  true,
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "o-1",
+		Labels: []string{"OrderStatus"},
+		Properties: map[string]interface{}{
+			"orderId": int64(1),
+			"state":   "ready",
+			"active":  true,
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "o-3",
+		Labels: []string{"OrderStatus"},
+		Properties: map[string]interface{}{
+			"orderId": int64(3),
+			"state":   "ignored",
+			"active":  false,
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "ph-2",
+		Labels: []string{"Pharmacy"},
+		Properties: map[string]interface{}{
+			"id": "B",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "ph-1",
+		Labels: []string{"Pharmacy"},
+		Properties: map[string]interface{}{
+			"id": "A",
+		},
+	})
+	require.NoError(t, err)
+
+	rows, err := exec.executeMatchWithPipelineToRows(
+		ctx,
+		"MATCH (o:OrderStatus {state: 'ready'}) WHERE o.active = true WITH o",
+		[]string{"o", "pharmacy"},
+		eng,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	firstOrder, ok := rows[0]["o"].(*storage.Node)
+	require.True(t, ok)
+	firstPharmacy, ok := rows[0]["pharmacy"].(*storage.Node)
+	require.True(t, ok)
+	secondOrder, ok := rows[1]["o"].(*storage.Node)
+	require.True(t, ok)
+	secondPharmacy, ok := rows[1]["pharmacy"].(*storage.Node)
+	require.True(t, ok)
+
+	// Orders are sorted by orderId and pharmacy assignment follows modulo index.
+	assert.Equal(t, storage.NodeID("o-1"), firstOrder.ID)
+	assert.Equal(t, storage.NodeID("ph-1"), firstPharmacy.ID)
+	assert.Equal(t, storage.NodeID("o-2"), secondOrder.ID)
+	assert.Equal(t, storage.NodeID("ph-2"), secondPharmacy.ID)
+
+	_, err = exec.executeMatchWithPipelineToRows(ctx, "MATCH (o:OrderStatus)", []string{"o"}, eng)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pipeline requires WITH")
+
+	_, err = exec.executeMatchWithPipelineToRows(ctx, "MATCH (:OrderStatus) WITH o", []string{"o"}, eng)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must have a variable")
 }
 
 func TestCypherHelpers_ExplainInferenceAndCostHelpers(t *testing.T) {
