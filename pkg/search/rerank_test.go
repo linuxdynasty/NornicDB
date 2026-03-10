@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,4 +274,127 @@ func TestCrossEncoderWithAuth(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "Bearer test-api-key", receivedAuth)
+}
+
+func TestCrossEncoder_NameEnabledConfigAndAvailability(t *testing.T) {
+	ce := NewCrossEncoder(nil)
+	assert.Equal(t, "cross_encoder", ce.Name())
+	assert.False(t, ce.Enabled())
+	require.NotNil(t, ce.Config())
+
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer health.Close()
+
+	ce = NewCrossEncoder(&CrossEncoderConfig{
+		Enabled: true,
+		APIURL:  health.URL + "/rerank",
+		Timeout: 5 * time.Second,
+	})
+	assert.True(t, ce.Enabled())
+	assert.True(t, ce.IsAvailable(context.Background()))
+
+	ce.config.Enabled = false
+	assert.False(t, ce.IsAvailable(context.Background()))
+}
+
+func TestLLMReranker_DefaultsAndPassThrough(t *testing.T) {
+	cfg := DefaultLLMRerankerConfig()
+	require.NotNil(t, cfg)
+	assert.False(t, cfg.Enabled)
+	assert.Equal(t, 25, cfg.MaxCandidates)
+
+	r := NewLLMReranker(nil, nil)
+	assert.Equal(t, "heimdall_llm", r.Name())
+	assert.False(t, r.Enabled())
+	assert.False(t, r.IsAvailable(context.Background()))
+
+	cands := []RerankCandidate{
+		{ID: "a", Content: "alpha", Score: 0.8},
+		{ID: "b", Content: "beta", Score: 0.6},
+	}
+	out, err := r.Rerank(context.Background(), "q", cands)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, "a", out[0].ID)
+	assert.Equal(t, "b", out[1].ID)
+}
+
+func TestLLMReranker_BuildPromptAndParseResponse(t *testing.T) {
+	r := NewLLMReranker(&LLMRerankerConfig{
+		Enabled:       true,
+		Timeout:       time.Second,
+		MaxCandidates: 3,
+		MaxDocChars:   5,
+		MaxQueryChars: 5,
+	}, func(ctx context.Context, prompt string) (string, error) {
+		return `{"ranked":[{"index":1,"score":0.9},{"index":0,"score":0.4}]}`, nil
+	})
+
+	prompt := r.buildPrompt("query-long", []RerankCandidate{
+		{ID: "a", Content: "abcdefg", Score: 0.1},
+	})
+	assert.Contains(t, prompt, "id=a")
+	assert.Contains(t, prompt, "abcde")
+	assert.False(t, strings.Contains(prompt, "abcdefg"))
+
+	order, scores := parseLLMRerankResponse(`{"ranked":[{"index":2,"score":0.7},{"index":1,"score":0.5}]}`, 3)
+	require.Equal(t, []int{2, 1}, order)
+	require.InDelta(t, 0.7, scores[2], 1e-9)
+
+	order, scores = parseLLMRerankResponse(`{"order":[1,0,1],"scores":[0.8,0.4,0.1]}`, 3)
+	require.Equal(t, []int{1, 0}, order)
+	require.InDelta(t, 0.8, scores[1], 1e-9)
+	require.InDelta(t, 0.4, scores[0], 1e-9)
+
+	order, scores = parseLLMRerankResponse("ranks 2 then 0 then 2", 3)
+	require.Equal(t, []int{2, 0}, order)
+	require.Nil(t, scores)
+
+	order, scores = parseLLMRerankResponse("no ranking", 3)
+	require.Nil(t, order)
+	require.Nil(t, scores)
+}
+
+func TestLLMReranker_RerankScoredFilteredAndFallbacks(t *testing.T) {
+	cfg := &LLMRerankerConfig{
+		Enabled:       true,
+		Timeout:       time.Second,
+		MaxCandidates: 2,
+		MaxDocChars:   100,
+		MaxQueryChars: 4,
+		MinScore:      0.5,
+	}
+	var gotPrompt string
+	r := NewLLMReranker(cfg, func(ctx context.Context, prompt string) (string, error) {
+		gotPrompt = prompt
+		return `{"ranked":[{"index":1,"score":0.9},{"index":0,"score":0.2}]}`, nil
+	})
+
+	cands := []RerankCandidate{
+		{ID: "a", Content: "alpha", Score: 0.8},
+		{ID: "b", Content: "beta", Score: 0.6},
+		{ID: "c", Content: "gamma", Score: 0.4},
+	}
+	out, err := r.Rerank(context.Background(), "query-long", cands)
+	require.NoError(t, err)
+	require.NotEmpty(t, gotPrompt)
+	require.Len(t, out, 1)
+	assert.Equal(t, "b", out[0].ID)
+	assert.Equal(t, 1, out[0].NewRank)
+
+	// Malformed response falls back to pass-through.
+	rBad := NewLLMReranker(cfg, func(ctx context.Context, prompt string) (string, error) {
+		return "{}", nil
+	})
+	out, err = rBad.Rerank(context.Background(), "q", cands[:2])
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, "a", out[0].ID)
+	assert.Equal(t, "b", out[1].ID)
 }

@@ -3,6 +3,7 @@ package search
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
 	"math"
 	"os"
@@ -10,11 +11,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 )
+
+type testReranker struct {
+	enabled bool
+	results []RerankResult
+	err     error
+}
+
+func (r *testReranker) Name() string                         { return "test_reranker" }
+func (r *testReranker) Enabled() bool                        { return r.enabled }
+func (r *testReranker) IsAvailable(ctx context.Context) bool { return r.enabled }
+func (r *testReranker) Rerank(ctx context.Context, query string, candidates []RerankCandidate) ([]RerankResult, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.results != nil {
+		return r.results, nil
+	}
+	out := make([]RerankResult, len(candidates))
+	for i, c := range candidates {
+		out[i] = RerankResult{
+			ID:           c.ID,
+			Content:      c.Content,
+			OriginalRank: i + 1,
+			NewRank:      i + 1,
+			BiScore:      c.Score,
+			CrossScore:   c.Score,
+			FinalScore:   c.Score,
+		}
+	}
+	return out, nil
+}
 
 func newNamespacedEngine(tb testing.TB) storage.Engine {
 	base := storage.NewMemoryEngine()
@@ -571,6 +604,370 @@ func TestFulltextIndex_IndexBatch(t *testing.T) {
 	assert.Equal(t, 4, idx.Count())
 }
 
+func TestFulltextIndex_DirtySaveNoCopyClearAndSeeds(t *testing.T) {
+	idx := NewFulltextIndex()
+	assert.False(t, idx.IsDirty())
+
+	idx.IndexBatch([]FulltextBatchEntry{
+		{ID: "d1", Text: "graph query graph traversal"},
+		{ID: "d2", Text: "graph query optimization"},
+		{ID: "d3", Text: "vector search graph hybrid"},
+	})
+	assert.True(t, idx.IsDirty())
+
+	seeds := idx.LexicalSeedDocIDs(2, 2)
+	require.NotEmpty(t, seeds)
+	assert.Nil(t, idx.LexicalSeedDocIDs(0, 1))
+	assert.Nil(t, idx.LexicalSeedDocIDs(1, 0))
+
+	path := filepath.Join(t.TempDir(), "bm25")
+	require.NoError(t, idx.SaveNoCopy(path))
+	assert.False(t, idx.IsDirty())
+
+	idx.Clear()
+	assert.Equal(t, 0, idx.Count())
+	assert.True(t, idx.IsDirty())
+
+	// Empty clear path should be a no-op.
+	idx.Clear()
+	assert.Equal(t, 0, idx.Count())
+}
+
+func TestConvertGobToMsgpack_FilesAndDirectory(t *testing.T) {
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "tenant_a")
+	require.NoError(t, os.MkdirAll(filepath.Join(dbDir, "hnsw_ivf"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "README.txt"), []byte("skip non-dir"), 0644))
+
+	fullSnap := fulltextIndexSnapshot{
+		Version:       "1.0.0",
+		Documents:     map[string]string{"d1": "hello world"},
+		InvertedIndex: map[string]map[string]int{"hello": {"d1": 1}},
+		DocLengths:    map[string]int{"d1": 2},
+		AvgDocLength:  2,
+		DocCount:      1,
+	}
+	vecSnap := vectorIndexSnapshot{
+		Version:    "1.0.0",
+		Dimensions: 3,
+		Vectors:    map[string][]float32{"d1": {1, 0, 0}},
+		RawVectors: map[string][]float32{"d1": {1, 0, 0}},
+	}
+	hnswSnap := hnswIndexSnapshot{
+		Version:      hnswIndexFormatVersionGraphOnly,
+		Dimensions:   3,
+		InternalToID: []string{"d1"},
+		IDToInternal: map[string]uint32{"d1": 0},
+	}
+
+	writeGob := func(path string, v any) {
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		require.NoError(t, gob.NewEncoder(f).Encode(v))
+		require.NoError(t, f.Close())
+	}
+	writeGob(filepath.Join(dbDir, "bm25.gob"), &fullSnap)
+	writeGob(filepath.Join(dbDir, "vectors.gob"), &vecSnap)
+	writeGob(filepath.Join(dbDir, "hnsw.gob"), &hnswSnap)
+	writeGob(filepath.Join(dbDir, "hnsw_ivf", "0.gob"), &hnswSnap)
+	require.NoError(t, os.WriteFile(filepath.Join(dbDir, "hnsw_ivf", "ignored.txt"), []byte("x"), 0644))
+
+	require.NoError(t, ConvertSearchIndexDirFromGobToMsgpack(root))
+
+	_, err := os.Stat(filepath.Join(dbDir, "bm25.gob"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(filepath.Join(dbDir, "vectors.gob"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(filepath.Join(dbDir, "hnsw.gob"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(filepath.Join(dbDir, "hnsw_ivf", "0.gob"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+
+	fBm25, err := os.Open(filepath.Join(dbDir, "bm25"))
+	require.NoError(t, err)
+	assert.True(t, tryDecodeMsgpack(fBm25, "fulltext"))
+	require.NoError(t, fBm25.Close())
+
+	fVec, err := os.Open(filepath.Join(dbDir, "vectors"))
+	require.NoError(t, err)
+	assert.True(t, tryDecodeMsgpack(fVec, "vector"))
+	require.NoError(t, fVec.Close())
+
+	fHNSW, err := os.Open(filepath.Join(dbDir, "hnsw"))
+	require.NoError(t, err)
+	assert.True(t, tryDecodeMsgpack(fHNSW, "hnsw"))
+	require.NoError(t, fHNSW.Close())
+
+	fIVF, err := os.Open(filepath.Join(dbDir, "hnsw_ivf", "0"))
+	require.NoError(t, err)
+	assert.True(t, tryDecodeMsgpack(fIVF, "hnsw"))
+	require.NoError(t, fIVF.Close())
+
+	// Re-running should identify already-converted files and remain successful.
+	require.NoError(t, ConvertSearchIndexDirFromGobToMsgpack(root))
+}
+
+func TestConvertFileGobToMsgpack_ErrorPaths(t *testing.T) {
+	tmp := t.TempDir()
+	oldPath := filepath.Join(tmp, "bad.gob")
+	newPath := filepath.Join(tmp, "new")
+
+	require.NoError(t, os.WriteFile(oldPath, []byte("not-gob"), 0644))
+	err := convertFileGobToMsgpack(oldPath, newPath, "vector")
+	require.Error(t, err)
+
+	unknownOld := filepath.Join(tmp, "unknown.gob")
+	require.NoError(t, os.WriteFile(unknownOld, []byte("x"), 0644))
+	err = convertFileGobToMsgpack(unknownOld, newPath, "unknown")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown format")
+
+	// Already-converted short-circuit.
+	snap := vectorIndexSnapshot{
+		Version:    "1.0.0",
+		Dimensions: 3,
+		Vectors:    map[string][]float32{"d1": {1, 2, 3}},
+		RawVectors: map[string][]float32{"d1": {1, 2, 3}},
+	}
+	out, err := os.Create(newPath)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(out).Encode(&snap))
+	require.NoError(t, out.Close())
+	err = convertFileGobToMsgpack(filepath.Join(tmp, "missing.gob"), newPath, "vector")
+	require.ErrorIs(t, err, errAlreadyMsgpack)
+}
+
+func TestKMeansCandidateGenerators_Branches(t *testing.T) {
+	ctx := context.Background()
+
+	// KMeansCandidateGen fallback path when clustering is unavailable.
+	vectorIdx := NewVectorIndex(3)
+	require.NoError(t, vectorIdx.Add("d1", []float32{1, 0, 0}))
+	require.NoError(t, vectorIdx.Add("d2", []float32{0.9, 0.1, 0}))
+	kGen := NewKMeansCandidateGen(nil, vectorIdx, 0)
+	require.Equal(t, 3, kGen.numClustersToSearch)
+	kGen.SetClusterSelector(func(context.Context, []float32, int) []int { return nil })
+	cands, err := kGen.SearchCandidates(ctx, []float32{1, 0, 0}, 5, 0.0)
+	require.NoError(t, err)
+	require.NotEmpty(t, cands)
+
+	// GPUKMeansCandidateGen error branch when index is not clustered.
+	gpuGen := NewGPUKMeansCandidateGen(nil, 0)
+	require.Equal(t, 3, gpuGen.numClustersToSearch)
+	gpuGen.SetClusterSelector(func(context.Context, []float32, int) []int { return nil })
+	_, err = gpuGen.SearchCandidates(ctx, []float32{1, 0, 0}, 5, 0.0)
+	require.Error(t, err)
+
+	// Clustered path with deterministic single cluster.
+	embCfg := gpu.DefaultEmbeddingIndexConfig(3)
+	embCfg.GPUEnabled = true
+	embCfg.AutoSync = true
+	clusterIndex := gpu.NewClusterIndex(nil, embCfg, &gpu.KMeansConfig{
+		NumClusters:   1,
+		MaxIterations: 5,
+		Tolerance:     0.001,
+		InitMethod:    "kmeans++",
+	})
+	require.NoError(t, clusterIndex.Add("d1", []float32{1, 0, 0}))
+	require.NoError(t, clusterIndex.Add("d2", []float32{0.8, 0.2, 0}))
+	require.NoError(t, clusterIndex.Cluster())
+
+	kGen = NewKMeansCandidateGen(clusterIndex, vectorIdx, 1)
+	kGen.SetClusterSelector(func(context.Context, []float32, int) []int { return []int{0} })
+	cands, err = kGen.SearchCandidates(ctx, []float32{1, 0, 0}, 5, -1.0)
+	require.NoError(t, err)
+	require.NotEmpty(t, cands)
+
+	gpuGen = NewGPUKMeansCandidateGen(clusterIndex, 1)
+	gpuGen.SetClusterSelector(func(context.Context, []float32, int) []int { return []int{0} })
+	cands, err = gpuGen.SearchCandidates(ctx, []float32{1, 0, 0}, 5, -1.0)
+	require.NoError(t, err)
+	require.NotEmpty(t, cands)
+
+	// Cancellation branch during candidate conversion.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = gpuGen.SearchCandidates(cancelCtx, []float32{1, 0, 0}, 5, -1.0)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestVectorQueryNodes_IndexedAndExactPaths(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 3)
+
+	namedNode := &storage.Node{
+		ID:              "named",
+		Labels:          []string{"Doc"},
+		NamedEmbeddings: map[string][]float32{"myvec": {1, 0, 0}},
+		ChunkEmbeddings: [][]float32{{0, 1, 0}},
+	}
+	propNode := &storage.Node{
+		ID:     "prop",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"vec_prop": []any{1.0, 0.0, 0.0},
+		},
+	}
+	chunkNode := &storage.Node{
+		ID:              "chunk",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.95, 0.05, 0}},
+	}
+	require.NoError(t, svc.IndexNode(namedNode))
+	require.NoError(t, svc.IndexNode(propNode))
+	require.NoError(t, svc.IndexNode(chunkNode))
+
+	query := []float32{1, 0, 0}
+
+	// Indexed cosine path.
+	hits, err := svc.VectorQueryNodes(context.Background(), query, VectorQuerySpec{
+		Label:      "Doc",
+		Property:   "myvec",
+		Similarity: "cosine",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	assert.Equal(t, "named", hits[0].ID)
+
+	// Exact path with dot similarity.
+	hits, err = svc.VectorQueryNodes(context.Background(), query, VectorQuerySpec{
+		Label:      "Doc",
+		Property:   "vec_prop",
+		Similarity: "dot",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	assert.Equal(t, "prop", hits[0].ID)
+
+	// Dimension mismatch returns empty result set, not error.
+	hits, err = svc.VectorQueryNodes(context.Background(), []float32{1, 0}, VectorQuerySpec{
+		Similarity: "cosine",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, hits)
+}
+
+func TestVectorQueryHelpers_ConversionsAndResolution(t *testing.T) {
+	assert.Equal(t, []float32{1, 2}, toFloat32SliceAny([]float32{1, 2}))
+	assert.Equal(t, []float32{1, 2}, toFloat32SliceAny([]float64{1, 2}))
+	assert.Equal(t, []float32{1, 2, 3, 4}, toFloat32SliceAny([]any{float32(1), float64(2), int(3), int64(4)}))
+	assert.Nil(t, toFloat32SliceAny([]any{"bad"}))
+	assert.Nil(t, toFloat32SliceAny("bad"))
+
+	node := &storage.Node{
+		ID:              "n",
+		NamedEmbeddings: map[string][]float32{"x": {1, 0, 0}},
+		Properties:      map[string]any{"vec": []float64{0.5, 0.5, 0}},
+		ChunkEmbeddings: [][]float32{{0, 1, 0}},
+	}
+	embs := resolveCypherCandidateEmbeddings(node, "vec", "x")
+	require.Len(t, embs, 1)
+	assert.Equal(t, []float32{1, 0, 0}, embs[0])
+
+	node.NamedEmbeddings = nil
+	embs = resolveCypherCandidateEmbeddings(node, "vec", "x")
+	require.Len(t, embs, 1)
+	assert.Equal(t, []float32{0.5, 0.5, 0}, embs[0])
+
+	node.Properties = nil
+	embs = resolveCypherCandidateEmbeddings(node, "vec", "x")
+	require.Len(t, embs, 1)
+	assert.Equal(t, []float32{0, 1, 0}, embs[0])
+	assert.Nil(t, resolveCypherCandidateEmbeddings(nil, "vec", "x"))
+
+	query := []float32{1, 0, 0}
+	assert.InDelta(t, 1.0, cypherVectorSimilarity("dot", query, []float32{1, 0, 0}), 1e-9)
+	assert.InDelta(t, 1.0, cypherVectorSimilarity("cosine", query, []float32{1, 0, 0}), 1e-9)
+	assert.Less(t, cypherVectorSimilarity("euclidean", query, []float32{0, 1, 0}), 1.0)
+}
+
+func TestVectorQueryNodes_ErrorAndContextBranches(t *testing.T) {
+	var nilSvc *Service
+	_, err := nilSvc.VectorQueryNodes(context.Background(), []float32{1, 0, 0}, VectorQuerySpec{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unavailable")
+
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 3)
+	_, err = svc.VectorQueryNodes(context.Background(), nil, VectorQuerySpec{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required")
+
+	// Trigger cancellation branch in exact path loop.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, svc.IndexNode(&storage.Node{
+			ID:              storage.NodeID(fmt.Sprintf("cx-%d", i)),
+			Labels:          []string{"Doc"},
+			ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		}))
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.VectorQueryNodes(cancelled, []float32{1, 0, 0}, VectorQuerySpec{
+		Similarity: "dot",
+		Limit:      10,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSearchHelpers_BM25SeedAndSettingsEquivalence(t *testing.T) {
+	s := NewServiceWithDimensions(storage.NewMemoryEngine(), 3)
+
+	assert.False(t, s.ClusteringInProgress())
+	s.kmeansInProgress.Store(true)
+	assert.True(t, s.ClusteringInProgress())
+	s.kmeansInProgress.Store(false)
+
+	assert.False(t, vectorIDInSeedNodeSet("", map[string]struct{}{"a": {}}))
+	assert.False(t, vectorIDInSeedNodeSet("chunk:x", nil))
+	assert.True(t, vectorIDInSeedNodeSet("a", map[string]struct{}{"a": {}}))
+	assert.False(t, vectorIDInSeedNodeSet("b", map[string]struct{}{"a": {}}))
+
+	current := "schema=node;props=title,text;format=2.0.0"
+	assert.True(t, bm25SettingsEquivalent(current, current, bm25V2FormatVersion))
+	assert.True(t, bm25SettingsEquivalent(
+		"schema=node;props=title,text;format=1.0.0",
+		current,
+		bm25V2FormatVersion,
+	))
+	assert.False(t, bm25SettingsEquivalent(
+		"schema=node;props=title;format=1.0.0",
+		current,
+		bm25V2FormatVersion,
+	))
+	assert.False(t, bm25SettingsEquivalent(
+		"bad-format",
+		current,
+		bm25V2FormatVersion,
+	))
+}
+
+func TestSearchHelpers_TryRestoreAndMaybeRebuildBranches(t *testing.T) {
+	s := NewServiceWithDimensions(storage.NewMemoryEngine(), 3)
+
+	// Restore shortcut branches.
+	assert.False(t, s.tryRestoreClusteredWarmupFromDisk(context.Background(), nil, ""))
+	assert.False(t, s.tryRestoreClusteredWarmupFromDisk(context.Background(), nil, "/tmp/nope"))
+
+	// maybeRebuild: no index and min-interval path should no-op.
+	require.NoError(t, s.maybeRebuildHNSW(context.Background(), 0.1, 1.1, time.Second))
+	s.hnswLastRebuildUnix.Store(time.Now().Unix())
+	require.NoError(t, s.maybeRebuildHNSW(context.Background(), 0.1, 1.1, time.Hour))
+
+	// maybeRebuild: index present but no tombstones, no-op.
+	idx := NewHNSWIndex(3, DefaultHNSWConfig())
+	require.NoError(t, idx.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, idx.Add("b", []float32{0, 1, 0}))
+	s.hnswMu.Lock()
+	s.hnswIndex = idx
+	s.hnswMu.Unlock()
+	s.hnswLastRebuildUnix.Store(0)
+	require.NoError(t, s.maybeRebuildHNSW(context.Background(), 0.99, 10.0, 0))
+}
+
 // TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).
 func TestVectorIndex_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
@@ -968,6 +1365,197 @@ func TestSearchService_HybridSearch(t *testing.T) {
 
 	// Should return results ordered by hybrid score
 	assert.Greater(t, len(response.Results), 0)
+}
+
+func TestService_ProgressAndSimilarityHelpers(t *testing.T) {
+	svc := NewService(newNamespacedEngine(t))
+	assert.False(t, svc.BuildInProgress())
+
+	svc.buildInProgress.Store(true)
+	svc.buildPhase.Store("indexing")
+	svc.buildStartedUnix.Store(time.Now().Add(-1 * time.Second).Unix())
+	svc.buildProcessed.Store(10)
+	svc.buildTotalNodes.Store(20)
+	progress := svc.GetBuildProgress()
+	assert.True(t, progress.Building)
+	assert.Equal(t, "indexing", progress.Phase)
+	assert.Equal(t, int64(10), progress.ProcessedNodes)
+	assert.Equal(t, int64(20), progress.TotalNodes)
+	assert.Greater(t, progress.RateNodesPerSec, 0.0)
+
+	svc.SetDefaultMinSimilarity(0.42)
+	assert.Equal(t, 0.42, svc.GetDefaultMinSimilarity())
+}
+
+func TestService_VectorAccessAndClear(t *testing.T) {
+	svc := NewServiceWithDimensions(newNamespacedEngine(t), 3)
+	require.NoError(t, svc.vectorIndex.Add("v1", []float32{1, 0, 0}))
+
+	lookup := &vectorLookupGetter{lookup: svc.getVectorLookup()}
+	vec, ok := lookup.GetVector("v1")
+	require.True(t, ok)
+	require.Len(t, vec, 3)
+
+	rawVec, ok := svc.getVectorForCypher("v1")
+	require.True(t, ok)
+	require.Len(t, rawVec, 3)
+	assert.Equal(t, float32(1), rawVec[0])
+
+	svc.ClearVectorIndex()
+	assert.Equal(t, 0, svc.vectorIndex.Count())
+}
+
+func TestService_LastWriteTimeAndTypeFilter(t *testing.T) {
+	eng := newNamespacedEngine(t)
+	svc := NewService(eng)
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "alpha",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "hello",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "beta",
+		Labels: []string{"Other"},
+		Properties: map[string]any{
+			"content": "world",
+		},
+	})
+	require.NoError(t, err)
+
+	candidates := []SearchCandidate{{ID: "alpha", Score: 0.9}, {ID: "beta", Score: 0.8}, {ID: "missing", Score: 0.7}}
+	filtered := svc.filterCandidatesByType(context.Background(), candidates, []string{"doc"}, map[string]bool{})
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "alpha", filtered[0].ID)
+
+	unfiltered := svc.filterCandidatesByType(context.Background(), candidates, nil, map[string]bool{})
+	require.Len(t, unfiltered, len(candidates))
+
+	// Namespaced engine does not expose LastWriteTime -> zero value.
+	assert.True(t, svc.lastWriteTime().IsZero())
+	assert.True(t, NewService(nil).lastWriteTime().IsZero())
+}
+
+func TestService_RerankerPlumbingAndStage2(t *testing.T) {
+	eng := newNamespacedEngine(t)
+	svc := NewService(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "a",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "alpha",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "b",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "beta",
+		},
+	})
+	require.NoError(t, err)
+
+	// Cross-encoder wiring and availability.
+	assert.False(t, svc.CrossEncoderAvailable(ctx))
+	ce := NewCrossEncoder(&CrossEncoderConfig{Enabled: false})
+	svc.SetCrossEncoder(ce)
+	assert.False(t, svc.CrossEncoderAvailable(ctx))
+
+	// Generic reranker wiring.
+	rr := &testReranker{enabled: true}
+	svc.SetReranker(rr)
+	assert.True(t, svc.RerankerAvailable(ctx))
+	svc.SetReranker(rr) // no-op equality fast path
+
+	// applyStage2Rerank: disabled reranker -> pass through.
+	base := []rrfResult{{ID: "a", RRFScore: 0.9, VectorRank: 1, BM25Rank: 2}, {ID: "b", RRFScore: 0.8, VectorRank: 2, BM25Rank: 1}}
+	out := svc.applyStage2Rerank(ctx, "q", base, DefaultSearchOptions(), map[string]bool{}, &testReranker{enabled: false})
+	require.Len(t, out, 2)
+	assert.Equal(t, base[0].ID, out[0].ID)
+
+	// applyStage2Rerank: reranker error -> pass through.
+	out = svc.applyStage2Rerank(ctx, "q", base, DefaultSearchOptions(), map[string]bool{}, &testReranker{enabled: true, err: fmt.Errorf("boom")})
+	require.Len(t, out, 2)
+	assert.Equal(t, base[0].ID, out[0].ID)
+
+	// applyStage2Rerank: near-identical scores -> keep original order.
+	out = svc.applyStage2Rerank(ctx, "q", base, DefaultSearchOptions(), map[string]bool{}, &testReranker{
+		enabled: true,
+		results: []RerankResult{
+			{ID: "b", FinalScore: 0.51, BiScore: 0.2},
+			{ID: "a", FinalScore: 0.50, BiScore: 0.3},
+		},
+	})
+	require.Len(t, out, 2)
+	assert.Equal(t, "a", out[0].ID) // original order preserved
+
+	// applyStage2Rerank: reranked with score spread and min-score filter.
+	opts := DefaultSearchOptions()
+	opts.RerankMinScore = 0.6
+	out = svc.applyStage2Rerank(ctx, "q", base, opts, map[string]bool{}, &testReranker{
+		enabled: true,
+		results: []RerankResult{
+			{ID: "b", FinalScore: 0.9, BiScore: 0.4},
+			{ID: "a", FinalScore: 0.55, BiScore: 0.3},
+		},
+	})
+	require.Len(t, out, 1)
+	assert.Equal(t, "b", out[0].ID)
+	assert.Equal(t, 2, out[0].VectorRank) // preserved from original map
+}
+
+func TestService_RerankCandidatesBranches(t *testing.T) {
+	ctx := context.Background()
+	var nilSvc *Service
+	_, err := nilSvc.RerankCandidates(ctx, "q", []RerankCandidate{{ID: "a", Content: "x", Score: 0.1}}, nil)
+	require.Error(t, err)
+
+	svc := NewService(newNamespacedEngine(t))
+	// Empty candidates branch.
+	out, err := svc.RerankCandidates(ctx, "q", nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+
+	candidates := []RerankCandidate{
+		{ID: "a", Content: "alpha", Score: 0.9},
+		{ID: "b", Content: "beta", Score: 0.8},
+		{ID: "c", Content: "gamma", Score: 0.7},
+	}
+
+	// No reranker -> pass-through.
+	out, err = svc.RerankCandidates(ctx, "q", candidates, nil)
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	assert.Equal(t, "a", out[0].ID)
+	assert.Equal(t, 1, out[0].OriginalRank)
+	assert.Equal(t, 1, out[0].NewRank)
+
+	// Enabled reranker with topK and min-score filtering.
+	svc.SetReranker(&testReranker{
+		enabled: true,
+		results: []RerankResult{
+			{ID: "b", FinalScore: 0.95},
+			{ID: "a", FinalScore: 0.40},
+		},
+	})
+	opts := DefaultSearchOptions()
+	opts.RerankTopK = 2
+	opts.RerankMinScore = 0.5
+	out, err = svc.RerankCandidates(ctx, "q", candidates, opts)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "b", out[0].ID)
+
+	// Error path.
+	svc.SetReranker(&testReranker{enabled: true, err: fmt.Errorf("rerank failed")})
+	_, err = svc.RerankCandidates(ctx, "q", candidates, DefaultSearchOptions())
+	require.Error(t, err)
 }
 
 // TestSearchService_VectorSearchOnly tests vector-only search mode.

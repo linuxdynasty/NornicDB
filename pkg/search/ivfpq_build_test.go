@@ -38,3 +38,13 @@ func TestBuildIVFPQFromVectorStore(t *testing.T) {
 	require.Equal(t, 32, stats.ListCount)
 	require.Greater(t, stats.AvgListSize, 0.0)
 }
+
+func TestNearestCentroidIndexCosine(t *testing.T) {
+	centroids := [][]float32{
+		{1, 0, 0},
+		{0, 1, 0},
+		{0, 0, 1},
+	}
+	idx := nearestCentroidIndexCosine([]float32{0.9, 0.1, 0}, centroids)
+	require.Equal(t, 0, idx)
+}

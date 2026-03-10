@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,4 +163,54 @@ func TestVectorFileStore_AddDoesNotBlockGetVector(t *testing.T) {
 
 	close(release)
 	require.NoError(t, <-addDone)
+}
+
+func TestVectorFileStore_HasAndBuildIndexedCount(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "vectors")
+	vfs, err := NewVectorFileStore(base, 3)
+	require.NoError(t, err)
+	defer func() { _ = vfs.Close() }()
+
+	require.NoError(t, vfs.Add("id-1", []float32{1, 0, 0}))
+	require.True(t, vfs.Has("id-1"))
+	require.False(t, vfs.Has("missing"))
+
+	vfs.SetBuildIndexedCount(42)
+	require.Equal(t, int64(42), vfs.GetBuildIndexedCount())
+}
+
+func TestVectorFileStore_ScoreCandidatesDotAndScratchHelpers(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "vectors")
+	vfs, err := NewVectorFileStore(base, 3)
+	require.NoError(t, err)
+	defer func() { _ = vfs.Close() }()
+
+	require.NoError(t, vfs.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, vfs.Add("b", []float32{0, 1, 0}))
+
+	scored, err := vfs.scoreCandidatesDot(context.Background(), []float32{1, 0, 0}, []Candidate{
+		{ID: "a", Score: 0.1},
+		{ID: "b", Score: 0.1},
+		{ID: "missing", Score: 0.1},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, scored)
+	require.Equal(t, "a", scored[0].ID)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = vfs.scoreCandidatesDot(cancelled, []float32{1, 0, 0}, []Candidate{{ID: "a"}})
+	require.ErrorIs(t, err, context.Canceled)
+
+	scratch := vfs.getScoreScratch(2, 128)
+	require.NotNil(t, scratch)
+	require.GreaterOrEqual(t, cap(scratch.batch), 128)
+	vfs.putScoreScratch(scratch)
+	vfs.putScoreScratch(nil)
+
+	// Closed store returns nil score list without error.
+	require.NoError(t, vfs.Close())
+	scored, err = vfs.scoreCandidatesDot(context.Background(), []float32{1, 0, 0}, []Candidate{{ID: "a"}})
+	require.NoError(t, err)
+	require.Nil(t, scored)
 }

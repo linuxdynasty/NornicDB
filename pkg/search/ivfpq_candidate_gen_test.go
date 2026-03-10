@@ -38,3 +38,12 @@ func TestIVFPQCandidateGen_SearchCandidates(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, cands)
 }
+
+func TestIVFPQCandidateGen_DefaultNProbeAndNilIndex(t *testing.T) {
+	gen := NewIVFPQCandidateGen(nil, 0)
+	require.Equal(t, 1, gen.nprobe)
+
+	_, err := gen.SearchCandidates(nil, []float32{1, 0, 0}, 5, 0.0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not configured")
+}

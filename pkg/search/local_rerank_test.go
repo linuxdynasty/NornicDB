@@ -42,6 +42,23 @@ func TestLocalReranker_Name(t *testing.T) {
 	}
 }
 
+func TestLocalReranker_IsAvailable(t *testing.T) {
+	cfg := DefaultLocalRerankerConfig()
+	cfg.Enabled = true
+
+	okReranker := NewLocalReranker(mockScorer{
+		"health|check": 0.9,
+	}, cfg)
+	if !okReranker.IsAvailable(context.Background()) {
+		t.Fatal("expected IsAvailable true when health check scoring succeeds")
+	}
+
+	badReranker := NewLocalReranker(failingScorer{}, cfg)
+	if badReranker.IsAvailable(context.Background()) {
+		t.Fatal("expected IsAvailable false when health check scoring fails")
+	}
+}
+
 func TestLocalReranker_Rerank_EmptyCandidates(t *testing.T) {
 	r := NewLocalReranker(mockScorer{}, DefaultLocalRerankerConfig())
 	got, err := r.Rerank(context.Background(), "q", nil)

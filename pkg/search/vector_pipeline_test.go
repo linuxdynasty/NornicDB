@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -290,4 +291,85 @@ func TestVectorSearchPipeline_UsesBruteForceWhenClusteredAndSmall(t *testing.T) 
 	require.NoError(t, err)
 	_, ok := pipeline.candidateGen.(*BruteForceCandidateGen)
 	require.True(t, ok)
+}
+
+func TestFileStoreBruteForceCandidateGen_SearchAndCancel(t *testing.T) {
+	path := fmt.Sprintf("%s/vectors", t.TempDir())
+	vfs, err := NewVectorFileStore(path, 3)
+	require.NoError(t, err)
+	defer vfs.Close()
+
+	require.NoError(t, vfs.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, vfs.Add("b", []float32{0.9, 0.1, 0}))
+	require.NoError(t, vfs.Add("c", []float32{0, 1, 0}))
+
+	gen := NewFileStoreBruteForceCandidateGen(vfs)
+	cands, err := gen.SearchCandidates(context.Background(), []float32{1, 0, 0}, 2, 0.0)
+	require.NoError(t, err)
+	require.NotEmpty(t, cands)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = gen.SearchCandidates(cancelled, []float32{1, 0, 0}, 2, 0.0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	nilGen := &FileStoreBruteForceCandidateGen{}
+	cands, err = nilGen.SearchCandidates(context.Background(), []float32{1, 0, 0}, 2, 0.0)
+	require.NoError(t, err)
+	require.Nil(t, cands)
+}
+
+func TestGPUExactAndBruteForceGenerators_Fallbacks(t *testing.T) {
+	idx := NewVectorIndex(3)
+	require.NoError(t, idx.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, idx.Add("b", []float32{0, 1, 0}))
+	cpu := NewCPUExactScorer(idx)
+
+	gpuScorer := NewGPUExactScorer(nil, cpu)
+	scored, err := gpuScorer.ScoreCandidates(context.Background(), []float32{1, 0, 0}, []Candidate{
+		{ID: "a", Score: 0.5},
+		{ID: "b", Score: 0.4},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, scored)
+	assert.Equal(t, "a", scored[0].ID)
+
+	gen := NewGPUBruteForceCandidateGen(nil)
+	_, err = gen.SearchCandidates(context.Background(), []float32{1, 0, 0}, 3, 0.0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unavailable")
+
+	embCfg := gpu.DefaultEmbeddingIndexConfig(3)
+	embCfg.GPUEnabled = true
+	embCfg.AutoSync = true
+	emb := gpu.NewEmbeddingIndex(nil, embCfg)
+	require.NoError(t, emb.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, emb.Add("b", []float32{0, 1, 0}))
+	gen = NewGPUBruteForceCandidateGen(emb)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = gen.SearchCandidates(cancelled, []float32{1, 0, 0}, 3, 0.0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	cands, err := gen.SearchCandidates(context.Background(), []float32{1, 0, 0}, 3, -1.0)
+	require.NoError(t, err)
+	require.NotEmpty(t, cands)
+}
+
+func TestIdentityExactScorer_ContextAndSort(t *testing.T) {
+	scorer := &IdentityExactScorer{}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := scorer.ScoreCandidates(cancelled, []float32{1, 0, 0}, []Candidate{{ID: "x", Score: 0.1}})
+	require.ErrorIs(t, err, context.Canceled)
+
+	out, err := scorer.ScoreCandidates(context.Background(), nil, []Candidate{
+		{ID: "x", Score: 0.1},
+		{ID: "y", Score: 0.9},
+		{ID: "z", Score: 0.5},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"y", "z", "x"}, []string{out[0].ID, out[1].ID, out[2].ID})
 }

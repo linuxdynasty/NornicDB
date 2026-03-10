@@ -617,3 +617,82 @@ func TestHNSWIndex_LoadMissingOrCorrupt(t *testing.T) {
 		assert.Nil(t, loaded)
 	})
 }
+
+func TestHNSW_ConfigSearchWithEfAndDistHeap(t *testing.T) {
+	cfg := HNSWConfig{M: 12, EfConstruction: 80, EfSearch: 25, LevelMultiplier: 0.5}
+	idx := NewHNSWIndex(3, cfg)
+	assert.Equal(t, cfg, idx.Config())
+
+	require.NoError(t, idx.Add("a", []float32{1, 0, 0}))
+	require.NoError(t, idx.Add("b", []float32{0.9, 0.1, 0}))
+	require.NoError(t, idx.Add("c", []float32{0, 1, 0}))
+
+	results, err := idx.SearchWithEf(context.Background(), []float32{1, 0, 0}, 2, -1.0, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	results, err = idx.SearchWithEf(context.Background(), []float32{1, 0, 0}, 2, -1.0, 32)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	maxHeap := newDistHeap(true, -1)
+	maxHeap.Push(hnswDistItem{id: 1, dist: 0.1})
+	maxHeap.Push(hnswDistItem{id: 2, dist: 0.9})
+	require.Equal(t, uint32(2), maxHeap.Peek().id)
+	require.Equal(t, uint32(2), maxHeap.Pop().id)
+
+	maxHeap.Reset(false, 4)
+	maxHeap.Push(hnswDistItem{id: 3, dist: 0.8})
+	maxHeap.Push(hnswDistItem{id: 4, dist: 0.2})
+	require.Equal(t, uint32(4), maxHeap.Pop().id)
+}
+
+func TestHNSW_IVFClusterPersistenceAndDeriveCentroids(t *testing.T) {
+	tmp := t.TempDir()
+	hnswPath := filepath.Join(tmp, "hnsw")
+
+	cluster0 := NewHNSWIndex(3, DefaultHNSWConfig())
+	require.NoError(t, cluster0.Add("n1", []float32{1, 0, 0}))
+	require.NoError(t, cluster0.Add("n2", []float32{0.8, 0.2, 0}))
+	cluster1 := NewHNSWIndex(3, DefaultHNSWConfig())
+	require.NoError(t, cluster1.Add("n3", []float32{0, 1, 0}))
+
+	require.NoError(t, SaveIVFHNSW(hnswPath, map[int]*HNSWIndex{
+		0: cluster0,
+		1: cluster1,
+	}))
+	require.NoError(t, SaveIVFHNSW("", map[int]*HNSWIndex{0: cluster0}))
+
+	vectors := map[string][]float32{
+		"n1": {1, 0, 0},
+		"n2": {0.8, 0.2, 0},
+		"n3": {0, 1, 0},
+	}
+	lookup := func(id string) ([]float32, bool) {
+		v, ok := vectors[id]
+		return v, ok
+	}
+
+	loaded0, err := LoadIVFHNSWCluster(hnswPath, 0, lookup)
+	require.NoError(t, err)
+	require.NotNil(t, loaded0)
+
+	loadedNil, err := LoadIVFHNSWCluster(hnswPath, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, loadedNil)
+
+	memberIDs, err := loadIVFClusterMemberIDs(filepath.Join(tmp, "hnsw_ivf"), 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, memberIDs)
+
+	centroids, idToCluster, err := DeriveIVFCentroidsFromClusters(hnswPath, lookup)
+	require.NoError(t, err)
+	require.Len(t, centroids, 2)
+	require.Equal(t, 0, idToCluster["n1"])
+	require.Equal(t, 1, idToCluster["n3"])
+
+	centroids, idToCluster, err = DeriveIVFCentroidsFromClusters("", lookup)
+	require.NoError(t, err)
+	require.Nil(t, centroids)
+	require.Nil(t, idToCluster)
+}

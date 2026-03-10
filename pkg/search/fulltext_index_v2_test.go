@@ -2,6 +2,7 @@ package search
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -95,4 +96,38 @@ func TestFulltextIndexV2_SaveLoadAndMigrateV1(t *testing.T) {
 	require.NoError(t, fromLegacy.Load(legacyPath))
 	require.Equal(t, 2, fromLegacy.Count())
 	require.NotEmpty(t, fromLegacy.Search("legacy", 10))
+}
+
+func TestFulltextIndexV2_DirtySaveNoCopyPhraseClear(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	require.False(t, idx.IsDirty())
+
+	idx.Index("doc1", "the quick brown fox jumps")
+	idx.Index("doc2", "quick brown is common phrase")
+	require.True(t, idx.IsDirty())
+
+	phrase := idx.PhraseSearch("quick brown", 10)
+	require.Len(t, phrase, 2)
+
+	path := filepath.Join(t.TempDir(), "bm25v2")
+	require.NoError(t, idx.SaveNoCopy(path))
+	require.False(t, idx.IsDirty())
+
+	idx.Clear()
+	require.Equal(t, 0, idx.Count())
+	require.True(t, idx.IsDirty())
+
+	// Empty clear path should still be safe.
+	idx.Clear()
+	require.Equal(t, 0, idx.Count())
+}
+
+func TestFulltextIndexV2_LoadDecodeFailureClears(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bm25v2_corrupt")
+	require.NoError(t, os.WriteFile(path, []byte("not-msgpack"), 0644))
+
+	idx := NewFulltextIndexV2()
+	idx.Index("doc1", "hello world")
+	require.NoError(t, idx.Load(path))
+	require.Equal(t, 0, idx.Count())
 }
