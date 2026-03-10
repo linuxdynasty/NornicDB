@@ -2,6 +2,10 @@ package cypher
 
 import (
 	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseIndexHints(t *testing.T) {
@@ -258,4 +262,39 @@ func TestNilIndexHintContext(t *testing.T) {
 	if ctx.ShouldForceScan("n", "Person") {
 		t.Error("expected false for nil context")
 	}
+}
+
+func TestApplyAndValidateIndexHints(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	defer base.Close()
+	eng := storage.NewNamespacedEngine(base, "test")
+	schema := eng.GetSchema()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(30)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(40)}})
+	require.NoError(t, err)
+
+	require.NoError(t, schema.AddPropertyIndex("person_name_idx", "Person", []string{"name"}))
+	require.NoError(t, schema.PropertyIndexInsert("Person", "name", storage.NodeID("n1"), "alice"))
+
+	nodes, err := ApplyIndexHint(eng, schema, IndexHint{Type: HintIndex, Variable: "n", Label: "Person", Property: "name"}, "alice")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, storage.NodeID("n1"), nodes[0].ID)
+
+	// Non-index hint should no-op.
+	nodes, err = ApplyIndexHint(eng, schema, IndexHint{Type: HintScan, Variable: "n", Label: "Person"}, "alice")
+	require.NoError(t, err)
+	assert.Nil(t, nodes)
+
+	// Missing index should fall back to label scan+filter.
+	nodes, err = ApplyIndexHint(eng, schema, IndexHint{Type: HintIndex, Variable: "n", Label: "Person", Property: "age"}, int64(40))
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, storage.NodeID("n2"), nodes[0].ID)
+
+	require.NoError(t, ValidateIndexHints(schema, []IndexHint{{Type: HintIndex, Variable: "n", Label: "Person", Property: "name"}}))
+	require.Error(t, ValidateIndexHints(schema, []IndexHint{{Type: HintIndex, Variable: "n", Label: "Person", Property: "missing"}}))
+	require.NoError(t, ValidateIndexHints(nil, []IndexHint{{Type: HintIndex, Variable: "n", Label: "Person", Property: "missing"}}))
 }

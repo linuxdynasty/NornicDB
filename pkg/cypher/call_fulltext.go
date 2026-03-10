@@ -193,7 +193,10 @@ func (e *StorageExecutor) extractFulltextParams(cypher string) (indexName, query
 	upper := strings.ToUpper(cypher)
 	callIdx := strings.Index(upper, "DB.INDEX.FULLTEXT.QUERYNODES")
 	if callIdx == -1 {
-		return "", ""
+		callIdx = strings.Index(upper, "DB.INDEX.FULLTEXT.QUERYRELATIONSHIPS")
+		if callIdx == -1 {
+			return "", ""
+		}
 	}
 
 	// Find the opening parenthesis

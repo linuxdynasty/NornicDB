@@ -226,6 +226,27 @@ func TestWorkerPool(t *testing.T) {
 	}
 }
 
+func TestParallelFilterEdges(t *testing.T) {
+	edges := []*storage.Edge{
+		{ID: "e1", Type: "KNOWS"},
+		{ID: "e2", Type: "LIKES"},
+		{ID: "e3", Type: "KNOWS"},
+	}
+	filter := func(edge *storage.Edge) bool { return edge.Type == "KNOWS" }
+
+	SetParallelConfig(ParallelConfig{Enabled: false, MaxWorkers: 4, MinBatchSize: 100})
+	out := parallelFilterEdges(edges, filter)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 edges, got %d", len(out))
+	}
+
+	SetParallelConfig(ParallelConfig{Enabled: true, MaxWorkers: 2, MinBatchSize: 1})
+	out = parallelFilterEdges(edges, filter)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 edges, got %d", len(out))
+	}
+}
+
 // =============================================================================
 // Benchmarks
 // =============================================================================

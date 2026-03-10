@@ -235,6 +235,23 @@ func TestCallDbResampleIndex(t *testing.T) {
 	}
 }
 
+func TestCallDbIndexStats(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// No explicit index required: procedure should still return valid shape.
+	result, err := exec.Execute(ctx, `CALL db.index.stats()`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{"name", "type", "label", "property", "totalEntries", "uniqueValues", "selectivity"}, result.Columns)
+	// row count backend-dependent, but every row should have all columns.
+	for _, row := range result.Rows {
+		require.Len(t, row, len(result.Columns))
+	}
+}
+
 // ========================================
 // tx.setMetaData Tests
 // ========================================

@@ -108,6 +108,20 @@ func TestKalmanPredict(t *testing.T) {
 	}
 }
 
+func TestKalmanVelocityValue(t *testing.T) {
+	state := KalmanState{X: 5.5, LastX: 4.0}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if got := kalmanVelocityValue(string(b)); math.Abs(got-1.5) > 1e-9 {
+		t.Fatalf("expected 1.5, got %f", got)
+	}
+	if got := kalmanVelocityValue("not-json"); got != 0 {
+		t.Fatalf("expected 0 on invalid json, got %f", got)
+	}
+}
+
 func TestKalmanVelocityInit_Default(t *testing.T) {
 	stateJSON := kalmanVelocityInit(0, 0, false)
 

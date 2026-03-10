@@ -478,12 +478,15 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 //
 // Range indexes optimize queries with range predicates (>, <, >=, <=, BETWEEN).
 func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Reuse generic CREATE INDEX regexes by normalizing RANGE syntax.
+	normalized := strings.Replace(strings.ToUpper(cypher), "CREATE RANGE INDEX", "CREATE INDEX", 1)
+
 	// Pattern: CREATE RANGE INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property)
 	// Reuse the standard index pattern - same structure
-	if matches := indexNamedFor.FindStringSubmatch(cypher); matches != nil {
+	if matches := indexNamedFor.FindStringSubmatch(normalized); matches != nil {
 		indexName := matches[1]
 		label := matches[3]
-		propertiesStr := matches[5]
+		propertiesStr := matches[4]
 
 		// Range index only supports single property
 		properties := e.parseIndexProperties(propertiesStr)
@@ -500,9 +503,9 @@ func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher st
 	}
 
 	// Unnamed range index
-	if matches := indexUnnamedFor.FindStringSubmatch(cypher); matches != nil {
+	if matches := indexUnnamedFor.FindStringSubmatch(normalized); matches != nil {
 		label := matches[2]
-		propertiesStr := matches[4]
+		propertiesStr := matches[3]
 
 		properties := e.parseIndexProperties(propertiesStr)
 		if len(properties) != 1 {

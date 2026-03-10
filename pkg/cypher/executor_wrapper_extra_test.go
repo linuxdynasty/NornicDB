@@ -27,7 +27,6 @@ func TestTransactionStorageWrapper_CreateGetDelete_WithNamespace(t *testing.T) {
 	defer eng.Close()
 	tx, err := eng.BeginTransaction()
 	require.NoError(t, err)
-	defer tx.Rollback()
 
 	w := &transactionStorageWrapper{tx: tx, underlying: eng, namespace: "tenant", separator: ":"}
 
@@ -120,6 +119,43 @@ func TestTransactionStorageWrapper_BulkOps_AndCounts(t *testing.T) {
 
 	_, _, err = w.DeleteByPrefix("test:")
 	assert.Error(t, err)
+}
+
+func TestTransactionStorageWrapper_BulkOps_WithNamespace(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	tx, err := eng.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	w := &transactionStorageWrapper{tx: tx, underlying: eng, namespace: "tenant", separator: ":"}
+
+	nodes := []*storage.Node{
+		{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "a"}},
+		{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "b"}},
+	}
+	require.NoError(t, w.BulkCreateNodes(nodes))
+
+	edges := []*storage.Edge{
+		{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{}},
+	}
+	require.NoError(t, w.BulkCreateEdges(edges))
+
+	require.NoError(t, tx.Commit())
+
+	// Ensure transactional create path wrote namespaced IDs.
+	createdNode, err := eng.GetNode("tenant:n1")
+	require.NoError(t, err)
+	require.NotNil(t, createdNode)
+	assert.Equal(t, storage.NodeID("tenant:n1"), createdNode.ID)
+
+	createdEdge, err := eng.GetEdge("tenant:e1")
+	require.NoError(t, err)
+	require.NotNil(t, createdEdge)
+	assert.Equal(t, storage.EdgeID("tenant:e1"), createdEdge.ID)
+	assert.Equal(t, storage.NodeID("tenant:n1"), createdEdge.StartNode)
+	assert.Equal(t, storage.NodeID("tenant:n2"), createdEdge.EndNode)
 }
 
 func TestTransactionStorageWrapper_ToUserNode_NilSafe(t *testing.T) {

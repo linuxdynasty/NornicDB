@@ -47,14 +47,14 @@ type MatchClause struct {
 	Where    *WhereClause
 }
 
-func (c *MatchClause) clauseMarker() {}
+func (c *MatchClause) clauseMarker() { _ = c }
 
 // CreateClause represents a CREATE clause.
 type CreateClause struct {
 	Pattern Pattern
 }
 
-func (c *CreateClause) clauseMarker() {}
+func (c *CreateClause) clauseMarker() { _ = c }
 
 // ReturnClause represents a RETURN clause.
 type ReturnClause struct {
@@ -64,21 +64,21 @@ type ReturnClause struct {
 	Limit   *int
 }
 
-func (c *ReturnClause) clauseMarker() {}
+func (c *ReturnClause) clauseMarker() { _ = c }
 
 // WhereClause represents a WHERE clause.
 type WhereClause struct {
 	Expression Expression
 }
 
-func (c *WhereClause) clauseMarker() {}
+func (c *WhereClause) clauseMarker() { _ = c }
 
 // SetClause represents a SET clause.
 type SetClause struct {
 	Items []SetItem
 }
 
-func (c *SetClause) clauseMarker() {}
+func (c *SetClause) clauseMarker() { _ = c }
 
 // DeleteClause represents a DELETE clause.
 type DeleteClause struct {
@@ -86,7 +86,7 @@ type DeleteClause struct {
 	Detach    bool
 }
 
-func (c *DeleteClause) clauseMarker() {}
+func (c *DeleteClause) clauseMarker() { _ = c }
 
 // Pattern represents a graph pattern.
 type Pattern struct {
@@ -131,7 +131,7 @@ type PropertyAccess struct {
 	Property string
 }
 
-func (e *PropertyAccess) exprMarker() {}
+func (e *PropertyAccess) exprMarker() { _ = e }
 
 // Comparison represents a comparison expression.
 type Comparison struct {
@@ -140,21 +140,21 @@ type Comparison struct {
 	Right    Expression
 }
 
-func (e *Comparison) exprMarker() {}
+func (e *Comparison) exprMarker() { _ = e }
 
 // Literal represents a literal value.
 type Literal struct {
 	Value any
 }
 
-func (e *Literal) exprMarker() {}
+func (e *Literal) exprMarker() { _ = e }
 
 // Parameter represents a query parameter ($name).
 type Parameter struct {
 	Name string
 }
 
-func (e *Parameter) exprMarker() {}
+func (e *Parameter) exprMarker() { _ = e }
 
 // FunctionCall represents a function call.
 type FunctionCall struct {
@@ -162,7 +162,7 @@ type FunctionCall struct {
 	Args []Expression
 }
 
-func (e *FunctionCall) exprMarker() {}
+func (e *FunctionCall) exprMarker() { _ = e }
 
 // ReturnItem represents an item in a RETURN clause.
 type ReturnItem struct {

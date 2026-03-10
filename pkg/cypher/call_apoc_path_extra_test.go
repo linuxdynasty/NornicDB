@@ -82,3 +82,25 @@ func TestApocPathExtra_BFSPathTraversal(t *testing.T) {
 	paths2 := exec.bfsPathTraversal(start, cfg2)
 	assert.Empty(t, paths2)
 }
+
+func TestApocPathExtra_CallApocPathExpand(t *testing.T) {
+	exec, eng := setupApocPathExecutor(t)
+	_, err := eng.CreateNode(&storage.Node{ID: "s1", Labels: []string{"Person"}, Properties: map[string]interface{}{"id": "s1"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "t1", Labels: []string{"Person"}, Properties: map[string]interface{}{"id": "t1"}})
+	require.NoError(t, err)
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "st", StartNode: "s1", EndNode: "t1", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	res, err := exec.callApocPathExpand("MATCH (n:Person {id: 's1'}) CALL apoc.path.expand(n, '>KNOWS', '+Person', 1, 2) YIELD path RETURN path")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, []string{"path"}, res.Columns)
+	assert.NotEmpty(t, res.Rows)
+
+	// No start node branch should return empty rows with no error.
+	emptyRes, err := exec.callApocPathExpand("RETURN 1")
+	require.NoError(t, err)
+	require.NotNil(t, emptyRes)
+	assert.Equal(t, []string{"path"}, emptyRes.Columns)
+	assert.Empty(t, emptyRes.Rows)
+}

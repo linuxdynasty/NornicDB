@@ -2,6 +2,8 @@ package cypher
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,8 +58,8 @@ func TestApocLoadExportHelpers_CallApocLoadCsvParams_Delegates(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocLoadJsonArray_FromFile(t *testing.T) {
-	eng := storage.NewMemoryEngine()
-	defer eng.Close()
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
 	e := NewStorageExecutor(eng)
 
 	dir := t.TempDir()
@@ -99,4 +101,56 @@ func TestApocLoadExportHelpers_CallApocImportJson_FromFile(t *testing.T) {
 	assert.Equal(t, jsonPath, res.Rows[0][0])
 	assert.EqualValues(t, 2, res.Rows[0][1])
 	assert.EqualValues(t, 1, res.Rows[0][2])
+}
+
+func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+	e := NewStorageExecutor(eng)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"x":1,"y":"z"}`))
+		case "/bad":
+			http.Error(w, "boom", http.StatusBadGateway)
+		default:
+			_, _ = w.Write([]byte(`not-json`))
+		}
+	}))
+	defer srv.Close()
+
+	data, err := e.loadJsonFromURL(srv.URL + "/ok")
+	require.NoError(t, err)
+	require.NotNil(t, data)
+	_, err = e.loadJsonFromURL(srv.URL + "/bad")
+	require.Error(t, err)
+	_, err = e.loadJsonFromURL(srv.URL + "/malformed")
+	require.Error(t, err)
+
+	tmpDir := t.TempDir()
+	jsonOut := filepath.Join(tmpDir, "q.json")
+	csvOut := filepath.Join(tmpDir, "q.csv")
+
+	jsonRes, err := e.callApocExportJsonQuery(context.Background(), "CALL apoc.export.json.query('RETURN 1 AS name', '"+jsonOut+"', {})")
+	require.NoError(t, err)
+	require.Len(t, jsonRes.Rows, 1)
+	assert.Equal(t, jsonOut, jsonRes.Rows[0][0])
+	assert.EqualValues(t, 1, jsonRes.Rows[0][1])
+	_, err = os.Stat(jsonOut)
+	require.NoError(t, err)
+
+	csvRes, err := e.callApocExportCsvQuery(context.Background(), "CALL apoc.export.csv.query('RETURN 1 AS name', '"+csvOut+"', {})")
+	require.NoError(t, err)
+	require.Len(t, csvRes.Rows, 1)
+	assert.Equal(t, csvOut, csvRes.Rows[0][0])
+	assert.EqualValues(t, 1, csvRes.Rows[0][1])
+	_, err = os.Stat(csvOut)
+	require.NoError(t, err)
+
+	_, err = e.callApocExportJsonQuery(context.Background(), "CALL apoc.export.json.query('', '"+jsonOut+"', {})")
+	require.Error(t, err)
+	_, err = e.callApocExportCsvQuery(context.Background(), "CALL apoc.export.csv.query('', '"+csvOut+"', {})")
+	require.Error(t, err)
 }

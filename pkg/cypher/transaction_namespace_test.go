@@ -2,9 +2,12 @@ package cypher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func countFromResult(t *testing.T, result *ExecuteResult) int64 {
@@ -72,5 +75,119 @@ func TestExplicitTransaction_NamespacedCreateRollback(t *testing.T) {
 	}
 	if got := countFromResult(t, result); got != 0 {
 		t.Fatalf("expected 0 rolled-back nodes, got %d", got)
+	}
+}
+
+func TestTransactionStatementRoutingAndErrors(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	// Unknown statement returns nil,nil (not a tx command).
+	res, err := exec.parseTransactionStatement("MATCH (n) RETURN n")
+	require.NoError(t, err)
+	assert.Nil(t, res)
+
+	// BEGIN route.
+	res, err = exec.parseTransactionStatement("BEGIN TRANSACTION")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, "Transaction started", res.Rows[0][0])
+
+	// Active transaction guard on BEGIN.
+	_, err = exec.parseTransactionStatement("BEGIN")
+	require.Error(t, err)
+
+	// COMMIT route.
+	res, err = exec.parseTransactionStatement("COMMIT TRANSACTION")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, "Transaction committed", res.Rows[0][0])
+
+	// No active transaction for COMMIT and ROLLBACK.
+	_, err = exec.parseTransactionStatement("COMMIT")
+	require.Error(t, err)
+	_, err = exec.parseTransactionStatement("ROLLBACK")
+	require.Error(t, err)
+}
+
+func TestTransactionUnknownTypeBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+
+	// Force unknown transaction type branch in executeInTransaction.
+	exec.txContext.tx = "not-a-transaction"
+	_, err = exec.executeInTransaction(ctx, "MATCH (n) RETURN n", "MATCH (N) RETURN N")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown transaction type")
+
+	// Force unknown type branches in commit/rollback handlers.
+	exec.txContext.active = true
+	exec.txContext.tx = 123
+	_, err = exec.handleCommit()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown transaction type")
+
+	exec.txContext.active = true
+	exec.txContext.tx = 123
+	_, err = exec.handleRollback()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown transaction type")
+}
+
+func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "dispatch-node",
+		Labels:     []string{"Dispatch"},
+		Properties: map[string]interface{}{"name": "n1"},
+	})
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name      string
+		cypher    string
+		expectErr bool
+	}{
+		{name: "create", cypher: "CREATE (:Dispatch {name:'c1'})", expectErr: false},
+		{name: "match", cypher: "MATCH (n:Dispatch) RETURN count(n)", expectErr: false},
+		{name: "optional_match", cypher: "OPTIONAL MATCH (n:Dispatch) RETURN n", expectErr: false},
+		{name: "merge", cypher: "MERGE (n:Dispatch {name:'m1'}) RETURN n", expectErr: false},
+		{name: "delete_prefix", cypher: "DELETE n", expectErr: true},
+		{name: "set_prefix", cypher: "SET n.name = 'x'", expectErr: true},
+		{name: "return", cypher: "RETURN 1", expectErr: false},
+		{name: "call", cypher: "CALL db.labels()", expectErr: false},
+		{name: "show_indexes", cypher: "SHOW INDEXES", expectErr: false},
+		{name: "show_constraints", cypher: "SHOW CONSTRAINTS", expectErr: false},
+		{name: "show_procedures", cypher: "SHOW PROCEDURES", expectErr: false},
+		{name: "show_functions", cypher: "SHOW FUNCTIONS", expectErr: false},
+		{name: "show_databases", cypher: "SHOW DATABASES", expectErr: false},
+		{name: "show_unsupported", cypher: "SHOW FOO", expectErr: true},
+		{name: "drop_index_noop", cypher: "DROP INDEX idx_any", expectErr: false},
+		{name: "unwind", cypher: "UNWIND [1,2] AS x RETURN x", expectErr: false},
+		{name: "with", cypher: "WITH 1 AS x RETURN x", expectErr: false},
+		{name: "foreach", cypher: "FOREACH (x IN [1] | CREATE (:Dispatch {name:'f'}))", expectErr: false},
+		{name: "unsupported", cypher: "BLAH COMMAND", expectErr: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := exec.executeQueryAgainstStorage(ctx, tc.cypher, strings.ToUpper(tc.cypher))
+			if tc.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
 	}
 }
