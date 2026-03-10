@@ -92,7 +92,7 @@ RUN chmod +x /app/entrypoint.sh
 # Download and embed BGE-M3 (embeddings), BGE-Reranker (search), and qwen3-0.6b (Heimdall SLM)
 ARG BGE_MODEL_URL=https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
 ARG BGE_RERANKER_URL=https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
-ARG QWEN_MODEL_URL=https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
+ARG QWEN_MODEL_URL=https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
 RUN \
     echo "=== Embedding models for batteries-included deployment ===" && \
     wget -q --show-progress -O /app/models/bge-m3.gguf "$BGE_MODEL_URL" && \

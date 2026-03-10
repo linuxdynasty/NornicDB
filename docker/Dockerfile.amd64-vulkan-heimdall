@@ -108,7 +108,7 @@ RUN chmod +x /app/entrypoint.sh
 ARG EMBED_MODEL=false
 ARG HEADLESS=false
 ARG BGE_MODEL_URL=https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
-ARG QWEN_MODEL_URL=https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
+ARG QWEN_MODEL_URL=https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
 RUN \
     if [ "$EMBED_MODEL" = "true" ]; then \
       wget -q --show-progress -O /app/models/bge-m3.gguf "$BGE_MODEL_URL" && \
