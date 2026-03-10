@@ -131,3 +131,9 @@ func TestFulltextIndexV2_LoadDecodeFailureClears(t *testing.T) {
 	require.NoError(t, idx.Load(path))
 	require.Equal(t, 0, idx.Count())
 }
+
+func TestFulltextIndexV2_MinIntHelper(t *testing.T) {
+	require.Equal(t, 1, minInt(1, 2))
+	require.Equal(t, -5, minInt(-5, 3))
+	require.Equal(t, 7, minInt(7, 7))
+}

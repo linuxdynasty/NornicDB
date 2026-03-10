@@ -131,6 +131,16 @@ func TestTopNTokenWeights_Branches(t *testing.T) {
 	require.True(t, hasC)
 }
 
+func TestQueryTextContextHelpers(t *testing.T) {
+	// Nil context branch should allocate a background context and preserve query.
+	ctx := withQueryText(nil, "  hello world  ")
+	require.Equal(t, "hello world", queryTextFromContext(ctx))
+
+	// Empty/missing value branches.
+	require.Equal(t, "", queryTextFromContext(nil))
+	require.Equal(t, "", queryTextFromContext(context.Background()))
+}
+
 func BenchmarkSelectHybridClusters(b *testing.B) {
 	_ = os.Setenv("NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM", "0.7")
 	_ = os.Setenv("NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX", "0.3")

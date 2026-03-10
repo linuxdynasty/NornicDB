@@ -1723,6 +1723,46 @@ func TestSearchHelpers_BM25SeedAndSettingsEquivalence(t *testing.T) {
 	assert.Equal(t, BM25EngineV2, normalizeBM25Engine("unknown"))
 }
 
+func TestTriggerClustering_GuardBranches(t *testing.T) {
+	t.Run("already running returns nil", func(t *testing.T) {
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 2)
+		svc.kmeansInProgress.Store(true)
+		defer svc.kmeansInProgress.Store(false)
+
+		err := svc.TriggerClustering(context.Background())
+		require.NoError(t, err)
+	})
+
+	t.Run("too few embeddings returns nil", func(t *testing.T) {
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 2)
+		svc.SetMinEmbeddingsForClustering(10)
+		require.NoError(t, svc.IndexNode(&storage.Node{
+			ID:              "few-1",
+			ChunkEmbeddings: [][]float32{{1, 0}},
+		}))
+
+		err := svc.TriggerClustering(context.Background())
+		require.NoError(t, err)
+	})
+
+	t.Run("canceled context is returned after threshold gate", func(t *testing.T) {
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 2)
+		svc.SetMinEmbeddingsForClustering(1)
+		require.NoError(t, svc.IndexNode(&storage.Node{
+			ID:              "ctx-1",
+			ChunkEmbeddings: [][]float32{{1, 0}},
+		}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := svc.TriggerClustering(ctx)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
 func TestSearchHelpers_TryRestoreAndMaybeRebuildBranches(t *testing.T) {
 	s := NewServiceWithDimensions(storage.NewMemoryEngine(), 3)
 

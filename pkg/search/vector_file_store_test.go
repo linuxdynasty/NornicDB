@@ -210,6 +210,13 @@ func TestVectorFileStore_ScoreCandidatesDotAndScratchHelpers(t *testing.T) {
 	vfs.putScoreScratch(scratch)
 	vfs.putScoreScratch(nil)
 
+	// Reuse branch: when capacities are sufficient, slice should be reset, not reallocated.
+	scratch2 := vfs.getScoreScratch(1, 64)
+	require.NotNil(t, scratch2)
+	require.GreaterOrEqual(t, cap(scratch2.offsets), 1)
+	require.GreaterOrEqual(t, cap(scratch2.batch), 64)
+	vfs.putScoreScratch(scratch2)
+
 	// Closed store returns nil score list without error.
 	require.NoError(t, vfs.Close())
 	scored, err = vfs.scoreCandidatesDot(context.Background(), []float32{1, 0, 0}, []Candidate{{ID: "a"}})

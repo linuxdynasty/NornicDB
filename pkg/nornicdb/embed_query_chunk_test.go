@@ -454,12 +454,52 @@ func TestDB_GetOrCreateEmbedderForDB_FallbackBranches(t *testing.T) {
 		require.Same(t, fallback, got)
 	})
 
+	t.Run("queue configured with nil embedder returns nil without error", func(t *testing.T) {
+		db := &DB{embedQueue: &EmbedQueue{embedder: nil}}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
 	t.Run("resolver error falls back to active queue embedder", func(t *testing.T) {
 		fallback := &chunkingTestEmbedder{dims: 6}
 		db := &DB{
 			embedQueue: &EmbedQueue{embedder: fallback},
 			embedConfigForDB: func(dbName string) (*embed.Config, error) {
 				return nil, errors.New("resolver-failed")
+			},
+		}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+	})
+
+	t.Run("resolver returns nil config and falls back to active queue embedder", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 6}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return nil, nil
+			},
+		}
+		got, err := db.getOrCreateEmbedderForDB("tenant")
+		require.NoError(t, err)
+		require.Same(t, fallback, got)
+	})
+
+	t.Run("uses default embedder when resolved key matches default and explicit key missing", func(t *testing.T) {
+		fallback := &chunkingTestEmbedder{dims: 5}
+		defaultCfg := &embed.Config{Provider: "local", Model: "bge-m3", Dimensions: 5, GPULayers: -1}
+		defaultKey := embedConfigKey(defaultCfg)
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: fallback},
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				// Equivalent config that resolves to the same key.
+				return &embed.Config{Provider: "local", Model: "bge-m3", Dimensions: 5, GPULayers: 0}, nil
+			},
+			defaultEmbedKey: defaultKey,
+			embedderRegistry: map[string]embed.Embedder{
+				defaultKey: fallback,
 			},
 		}
 		got, err := db.getOrCreateEmbedderForDB("tenant")
