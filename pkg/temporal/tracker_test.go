@@ -504,3 +504,27 @@ func TestTracker_GetColdNodes(t *testing.T) {
 	}
 	t.Logf("Cold nodes: %v", coldNodes)
 }
+
+func TestTracker_EvictOldestAndCleanup(t *testing.T) {
+	tracker := NewTracker(DefaultConfig())
+
+	// Empty eviction should no-op.
+	tracker.evictOldest()
+
+	tracker.nodes["n1"] = &nodeTracker{}
+	tracker.nodes["n2"] = &nodeTracker{}
+	tracker.accessOrder = []string{"n1", "n2"}
+	tracker.evictOldest()
+	if _, exists := tracker.nodes["n1"]; exists {
+		t.Fatal("expected n1 to be evicted")
+	}
+	if len(tracker.accessOrder) != 1 || tracker.accessOrder[0] != "n2" {
+		t.Fatalf("unexpected access order after eviction: %v", tracker.accessOrder)
+	}
+
+	before := tracker.lastCleanup
+	tracker.cleanup()
+	if !tracker.lastCleanup.After(before) {
+		t.Fatalf("cleanup did not advance lastCleanup: before=%v after=%v", before, tracker.lastCleanup)
+	}
+}

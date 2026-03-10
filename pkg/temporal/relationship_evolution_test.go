@@ -139,6 +139,33 @@ func TestRelationshipEvolution_EdgeKeyConsistency(t *testing.T) {
 	}
 }
 
+func TestRelationshipEvolution_EvictOldest(t *testing.T) {
+	re := NewRelationshipEvolution(DefaultRelationshipConfig())
+
+	re.edges["a->b"] = &edgeTracker{}
+	re.edges["b->c"] = &edgeTracker{}
+	re.accessOrder = []string{"a->b", "b->c"}
+
+	re.evictOldest()
+	if _, exists := re.edges["a->b"]; exists {
+		t.Fatal("expected oldest edge to be evicted")
+	}
+	if len(re.accessOrder) != 1 || re.accessOrder[0] != "b->c" {
+		t.Fatalf("unexpected access order after first eviction: %v", re.accessOrder)
+	}
+
+	re.evictOldest()
+	if len(re.edges) != 0 {
+		t.Fatalf("expected all edges evicted, got %d", len(re.edges))
+	}
+
+	// Empty path should be a no-op.
+	re.evictOldest()
+	if len(re.edges) != 0 || len(re.accessOrder) != 0 {
+		t.Fatalf("expected empty state unchanged, edges=%d order=%d", len(re.edges), len(re.accessOrder))
+	}
+}
+
 func BenchmarkRelationshipEvolution_RecordCoAccess(b *testing.B) {
 	re := NewRelationshipEvolution(DefaultRelationshipConfig())
 	b.ResetTimer()

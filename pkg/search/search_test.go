@@ -403,6 +403,42 @@ func TestSearchCacheKeyAndMinSimilarityHelpers(t *testing.T) {
 	require.Equal(t, 0.1, optsA.GetMinSimilarity(0.1))
 }
 
+func TestSearchVersionHelpers(t *testing.T) {
+	tests := []struct {
+		in    string
+		ok    bool
+		major int
+		minor int
+		patch int
+	}{
+		{"1.2.3", true, 1, 2, 3},
+		{" 2.0.1 ", true, 2, 0, 1},
+		{"", false, 0, 0, 0},
+		{"1.2", false, 0, 0, 0},
+		{"a.b.c", false, 0, 0, 0},
+		{"-1.2.3", false, 0, 0, 0},
+	}
+	for _, tt := range tests {
+		maj, min, pat, ok := parseSemver(tt.in)
+		require.Equal(t, tt.ok, ok, tt.in)
+		require.Equal(t, tt.major, maj, tt.in)
+		require.Equal(t, tt.minor, min, tt.in)
+		require.Equal(t, tt.patch, pat, tt.in)
+	}
+
+	require.Equal(t, -1, compareSemver("1.0.0", "2.0.0"))
+	require.Equal(t, 1, compareSemver("2.0.0", "1.9.9"))
+	require.Equal(t, -1, compareSemver("1.1.0", "1.2.0"))
+	require.Equal(t, 1, compareSemver("1.2.1", "1.2.0"))
+	require.Equal(t, 0, compareSemver("1.2.3", "1.2.3"))
+	require.Equal(t, -1, compareSemver("invalid", "1.0.0")) // invalid stored treated as old
+	require.Equal(t, 0, compareSemver("1.0.0", "bad"))      // invalid current treated neutral
+
+	require.True(t, searchIndexVersionCompatible("1.2.3", "1.2.3", "test"))
+	require.False(t, searchIndexVersionCompatible("1.2.2", "1.2.3", "test"))
+	require.False(t, searchIndexVersionCompatible("2.0.0", "1.2.3", "test"))
+}
+
 // TestAdaptiveRRFConfig tests adaptive RRF configuration.
 func TestAdaptiveRRFConfig(t *testing.T) {
 	// Short query - should favor BM25

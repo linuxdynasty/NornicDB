@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,6 +16,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func buildTestPluginSO(t *testing.T, dir, baseName, source string) string {
+	t.Helper()
+	srcPath := filepath.Join(dir, baseName+".go")
+	soPath := filepath.Join(dir, baseName+".so")
+	require.NoError(t, os.WriteFile(srcPath, []byte(source), 0o600))
+
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", soPath, srcPath)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "go build plugin failed: %s", string(out))
+	return soPath
+}
 
 func TestPluginFunctionRegistry(t *testing.T) {
 	// Clear any existing state
@@ -379,6 +393,46 @@ func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
 		require.Contains(t, err.Error(), "open")
 	})
 
+	t.Run("loadPluginFile branch coverage with built plugins", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		noSymbol := buildTestPluginSO(t, tmpDir, "nosymbol", `package main
+var NotPlugin = 1
+`)
+		loaded, err := loadPluginFile(noSymbol, nil)
+		require.Error(t, err)
+		require.Nil(t, loaded)
+		require.Contains(t, err.Error(), "no Plugin symbol")
+
+		unknownType := buildTestPluginSO(t, tmpDir, "unknown_type", `package main
+type PluginValue struct{}
+var Plugin PluginValue
+`)
+		loaded, err = loadPluginFile(unknownType, nil)
+		require.Error(t, err)
+		require.Nil(t, loaded)
+		require.Contains(t, err.Error(), "unknown plugin type")
+
+		functionPlugin := buildTestPluginSO(t, tmpDir, "function_ok", `package main
+type TestPlugin struct{}
+func (TestPlugin) Type() string { return "function" }
+func (TestPlugin) Name() string { return "func_ok" }
+func (TestPlugin) Version() string { return "1.0.0" }
+func (TestPlugin) Functions() map[string]interface{} {
+	return map[string]interface{}{
+		"double": func(x float64) float64 { return x * 2 },
+	}
+}
+var Plugin TestPlugin
+`)
+		loaded, err = loadPluginFile(functionPlugin, nil)
+		require.NoError(t, err)
+		require.NotNil(t, loaded)
+		require.Equal(t, PluginTypeFunction, loaded.Type)
+		require.Equal(t, "func_ok", loaded.Name)
+		require.Len(t, loaded.Functions, 1)
+	})
+
 	t.Run("loadPluginsFromDir tolerates bad plugin files", func(t *testing.T) {
 		pluginsMu.Lock()
 		loadedPlugins = make(map[string]*LoadedPlugin)
@@ -392,6 +446,34 @@ func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
 		require.NoError(t, LoadPluginsFromDir(dir, nil))
 		require.True(t, PluginsInitialized())
 		require.Empty(t, ListLoadedPlugins())
+	})
+
+	t.Run("LoadPluginsFromDir loads valid function plugin from directory", func(t *testing.T) {
+		pluginsMu.Lock()
+		loadedPlugins = make(map[string]*LoadedPlugin)
+		pluginFunctions = make(map[string]PluginFunction)
+		pluginProcedures = make(map[string]PluginProcedure)
+		pluginsInitialized = false
+		pluginsMu.Unlock()
+
+		dir := t.TempDir()
+		_ = buildTestPluginSO(t, dir, "dir_function_ok", `package main
+type TestPlugin struct{}
+func (TestPlugin) Type() string { return "function" }
+func (TestPlugin) Name() string { return "dir_func_ok" }
+func (TestPlugin) Version() string { return "1.0.0" }
+func (TestPlugin) Functions() map[string]interface{} {
+	return map[string]interface{}{
+		"double": func(x float64) float64 { return x * 2 },
+	}
+}
+var Plugin TestPlugin
+`)
+
+		require.NoError(t, LoadPluginsFromDir(dir, nil))
+		require.True(t, PluginsInitialized())
+		require.NotEmpty(t, ListLoadedPlugins())
+		require.NotEmpty(t, ListPluginFunctions())
 	})
 
 	t.Run("registerHeimdallPlugin returns start error with context", func(t *testing.T) {
