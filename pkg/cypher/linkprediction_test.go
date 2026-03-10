@@ -93,6 +93,41 @@ func TestParseLinkPredictionConfig(t *testing.T) {
 	}
 }
 
+func TestParseLinkPredictionConfig_AdditionalBranches(t *testing.T) {
+	executor := &StorageExecutor{storage: storage.NewMemoryEngine()}
+
+	// id(var) with missing variable in provided context should error clearly.
+	_, err := executor.parseLinkPredictionConfig(
+		`CALL gds.linkPrediction.adamicAdar.stream({sourceNode: id(missing), topK: 10})`,
+		map[string]*storage.Node{"n": {ID: "node-1"}},
+	)
+	if err == nil {
+		t.Fatal("expected error for unresolved id(variable), got nil")
+	}
+
+	// id(var) with nil nodeVars falls back to literal variable name.
+	cfg, err := executor.parseLinkPredictionConfig(
+		`CALL gds.linkPrediction.adamicAdar.stream({sourceNode: id(seed), topK: bad, algorithm: 'jaccard', topologyWeight: 0.7, semanticWeight: 0.3, minThreshold: 0.2})`,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(cfg.SourceNode) != "seed" {
+		t.Fatalf("SourceNode = %v, want seed", cfg.SourceNode)
+	}
+	// invalid topK keeps default.
+	if cfg.TopK != 10 {
+		t.Fatalf("TopK = %d, want default 10", cfg.TopK)
+	}
+	if cfg.Algorithm != "jaccard" {
+		t.Fatalf("Algorithm = %s, want jaccard", cfg.Algorithm)
+	}
+	if cfg.TopologyWeight != 0.7 || cfg.SemanticWeight != 0.3 || cfg.MinThreshold != 0.2 {
+		t.Fatalf("weights/threshold parsed incorrectly: %+v", cfg)
+	}
+}
+
 // TestGdsLinkPredictionAdamicAdar tests Adamic-Adar procedure
 func TestGdsLinkPredictionAdamicAdar(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()

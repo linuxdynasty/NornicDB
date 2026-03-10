@@ -129,6 +129,14 @@ func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
 	_, err = e.loadJsonFromURL(srv.URL + "/malformed")
 	require.Error(t, err)
 
+	// File loader branches: missing file and malformed JSON.
+	_, err = e.loadJsonFromFile(filepath.Join(t.TempDir(), "missing.json"))
+	require.Error(t, err)
+	badPath := filepath.Join(t.TempDir(), "bad.json")
+	require.NoError(t, os.WriteFile(badPath, []byte(`{"x":`), 0o644))
+	_, err = e.loadJsonFromFile(badPath)
+	require.Error(t, err)
+
 	tmpDir := t.TempDir()
 	jsonOut := filepath.Join(tmpDir, "q.json")
 	csvOut := filepath.Join(tmpDir, "q.csv")

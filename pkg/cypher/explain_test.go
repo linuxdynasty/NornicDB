@@ -486,6 +486,10 @@ func TestTruncate(t *testing.T) {
 			t.Errorf("truncate(%q, %d) = %q, want prefix of %q", tt.input, tt.maxLen, result, tt.expected)
 		}
 	}
+
+	// truncateQuery helper: trims spaces and only appends ellipsis when needed.
+	assert.Equal(t, "MATCH (n) RETURN n", truncateQuery("  MATCH (n) RETURN n  ", 64))
+	assert.Equal(t, "MATCH...", truncateQuery("MATCH (n) RETURN n", 5))
 }
 
 func TestExplainHelpers_InferColumnsAndDBHitsBranches(t *testing.T) {

@@ -266,6 +266,110 @@ func TestCypherHelpers_ToStringAnyMapAndSubstringSet(t *testing.T) {
 	assert.Equal(t, "", exec.evaluateSubstringForSet("substring('abc')"))
 }
 
+func TestCypherHelpers_RagToFloat64Branches(t *testing.T) {
+	v, ok := ragToFloat64(float64(1.5))
+	require.True(t, ok)
+	assert.Equal(t, float64(1.5), v)
+
+	v, ok = ragToFloat64(float32(2.5))
+	require.True(t, ok)
+	assert.Equal(t, float64(2.5), v)
+
+	v, ok = ragToFloat64(3)
+	require.True(t, ok)
+	assert.Equal(t, float64(3), v)
+
+	v, ok = ragToFloat64(int64(4))
+	require.True(t, ok)
+	assert.Equal(t, float64(4), v)
+
+	v, ok = ragToFloat64(" 5.25 ")
+	require.True(t, ok)
+	assert.Equal(t, float64(5.25), v)
+
+	_, ok = ragToFloat64("bad")
+	assert.False(t, ok)
+	_, ok = ragToFloat64(true)
+	assert.False(t, ok)
+}
+
+func TestCypherHelpers_EvaluateExpressionWithContextFullOperators_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	nodes := map[string]*storage.Node{
+		"n": {
+			ID:     "n1",
+			Labels: []string{"Person"},
+			Properties: map[string]interface{}{
+				"name": "alice",
+				"age":  int64(30),
+			},
+		},
+	}
+
+	eval := func(expr string) interface{} {
+		return exec.evaluateExpressionWithContextFullOperators(expr, strings.ToLower(expr), nodes, nil, nil, nil, nil, 0)
+	}
+
+	assert.Equal(t, false, eval("NOT true"))
+	assert.Equal(t, true, eval("5 BETWEEN 1 AND 10"))
+	// Invalid BETWEEN shape falls through to generic evaluation path.
+	assert.Equal(t, "5 BETWEEN 1", eval("5 BETWEEN 1"))
+	assert.Equal(t, true, eval("1 = 1 AND 2 = 2"))
+	assert.Equal(t, true, eval("1 = 2 OR 2 = 2"))
+	assert.Equal(t, true, eval("true XOR false"))
+	assert.Equal(t, true, eval("1 <> 2"))
+	assert.Equal(t, int64(3), eval("1 + 2"))
+	assert.Equal(t, float64(-1.5), eval("-1.5"))
+	assert.Equal(t, "ab", eval("'a' + 'b'"))
+	assert.Equal(t, int64(-5), eval("-5"))
+	assert.Equal(t, true, eval("n.missing IS NULL"))
+	assert.Equal(t, true, eval("n.name IS NOT NULL"))
+	assert.Equal(t, true, eval("n.name STARTS WITH 'al'"))
+	assert.Equal(t, true, eval("n.name ENDS WITH 'ce'"))
+	assert.Equal(t, true, eval("n.name CONTAINS 'lic'"))
+	assert.Equal(t, false, eval("n.age STARTS WITH '3'"))
+	assert.Equal(t, true, eval("'a' IN ['a','b']"))
+	assert.Equal(t, true, eval("30 IN [20,30]"))
+	assert.Equal(t, false, eval("'a' IN 42"))
+	assert.Equal(t, true, eval("'z' NOT IN ['a','b']"))
+	assert.Equal(t, false, eval("30 NOT IN [10,30]"))
+	assert.Equal(t, true, eval("'z' NOT IN 42"))
+	assert.Equal(t, "alice", eval("n.name"))
+}
+
+func TestCypherHelpers_CallTxSetMetadata_SyntaxBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	// No active transaction.
+	_, err := exec.callTxSetMetadata("CALL tx.setMetaData({app:'x'})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires an active transaction")
+
+	// Active tx with unsupported tx implementation.
+	exec.txContext = &TransactionContext{active: true, tx: struct{}{}}
+	_, err = exec.callTxSetMetadata("CALL tx.setMetaData({app:'x'})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transaction type not supported")
+
+	// Invalid syntax / missing payload branches.
+	exec.txContext = &TransactionContext{active: true, tx: struct{}{}}
+	_, err = exec.callTxSetMetadata("CALL tx.meta({app:'x'})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid tx.setMetaData syntax")
+
+	_, err = exec.callTxSetMetadata("CALL tx.setMetaData")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing parentheses")
+
+	_, err = exec.callTxSetMetadata("CALL tx.setMetaData()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a metadata object")
+
+	_, err = exec.callTxSetMetadata("CALL tx.setMetaData({})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one key-value pair")
+}
+
 func TestCypherHelpers_FindNodeByProperties_AndRangeIndex(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	eng := storage.NewNamespacedEngine(base, "test")
@@ -353,6 +457,14 @@ func TestCypherHelpers_ParserMarkersAndUnwindHelpers(t *testing.T) {
 	assert.True(t, hasOuterParens("(a)"))
 	assert.True(t, hasOuterParens("((a+b))"))
 	assert.False(t, hasOuterParens("(a)+b"))
+	assert.False(t, hasOuterParens("a"))
+	assert.False(t, hasOuterParens("(a"))
+	assert.False(t, hasOuterParens("a)"))
+	assert.False(t, hasOuterParens("(a) + (b)"))
+	assert.True(t, hasOuterParens("(\"(\")"))
+	assert.True(t, hasOuterParens("(')')"))
+	assert.False(t, hasOuterParens("('x') + ('y')"))
+	assert.True(t, hasOuterParens("((\"(\") + (')'))"))
 	assert.Equal(t, "$x", normalizeUnwindExpression(" ( ($x) ) "))
 
 	assert.Nil(t, coerceToUnwindItems(nil))
@@ -2391,6 +2503,75 @@ func TestCypherHelpers_TryFastRevenueByProduct_TypeAndPaginationBranches(t *test
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Empty(t, res.Rows)
+}
+
+func TestCypherHelpers_TryFastCompoundOptionalMatchCount_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	// Rejection branches.
+	res, ok, err := exec.tryFastCompoundOptionalMatchCount(nil, nodePatternInfo{variable: "p"}, optionalRelPattern{direction: "in", relType: "ORDERS", targetVar: "o"}, "RETURN p.productName, count(o)")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, res)
+
+	nodes := []*storage.Node{{ID: "p0", Properties: map[string]interface{}{"productName": "X"}}}
+	res, ok, err = exec.tryFastCompoundOptionalMatchCount(nodes, nodePatternInfo{variable: ""}, optionalRelPattern{direction: "in", relType: "ORDERS", targetVar: "o"}, "RETURN p.productName, count(o)")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, res)
+
+	res, ok, err = exec.tryFastCompoundOptionalMatchCount(nodes, nodePatternInfo{variable: "p"}, optionalRelPattern{direction: "out", relType: "ORDERS", targetVar: "o"}, "RETURN p.productName, count(o)")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, res)
+
+	res, ok, err = exec.tryFastCompoundOptionalMatchCount(nodes, nodePatternInfo{variable: "p"}, optionalRelPattern{direction: "in", relType: "LIKES", targetVar: "o"}, "RETURN p.productName, count(o)")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, res)
+
+	res, ok, err = exec.tryFastCompoundOptionalMatchCount(nodes, nodePatternInfo{variable: "p"}, optionalRelPattern{direction: "in", relType: "ORDERS", targetVar: "o"}, "WITH p RETURN p")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, res)
+
+	// Happy path with ORDER BY/SKIP/LIMIT.
+	_, err = eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "A"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "B"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p3", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "C"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o1", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(1)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o2", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(2)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o3", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(3)}})
+	require.NoError(t, err)
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e1", StartNode: "o1", EndNode: "p1", Type: "ORDERS"}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e2", StartNode: "o2", EndNode: "p1", Type: "ORDERS"}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e3", StartNode: "o3", EndNode: "p2", Type: "ORDERS"}))
+
+	initial := []*storage.Node{
+		{ID: "p1", Properties: map[string]interface{}{"productName": "A"}},
+		{ID: "p2", Properties: map[string]interface{}{"productName": "B"}},
+		{ID: "p3", Properties: map[string]interface{}{"productName": "C"}},
+	}
+	res, ok, err = exec.tryFastCompoundOptionalMatchCount(
+		initial,
+		nodePatternInfo{variable: "p"},
+		optionalRelPattern{direction: "in", relType: "ORDERS", targetVar: "o"},
+		"RETURN p.productName, count(o) AS orderCount ORDER BY orderCount DESC SKIP 1 LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []string{"p.productName", "orderCount"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	// Counts are A=2, B=1, C=0 => after SKIP 1 LIMIT 1 => B.
+	assert.Equal(t, "B", res.Rows[0][0])
+	assert.Equal(t, int64(1), res.Rows[0][1])
 }
 
 func TestCypherHelpers_MergeRelationshipContextHelpers_Branches(t *testing.T) {

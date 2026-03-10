@@ -2556,3 +2556,133 @@ func TestSubqueryHelpers_SubstituteBoundVariablesInCall_Branches(t *testing.T) {
 	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
 	assert.Contains(t, got, "[0.6, 0.7]")
 }
+
+func TestSubqueryHelpers_ExecuteMatchWithCallProcedure_ParamAndWhereBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(30)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(20)}})
+	require.NoError(t, err)
+
+	// Parameter substitution + WHERE filtering + MATCH without label (AllNodes branch).
+	ctxWithParams := context.WithValue(context.Background(), paramsKey, map[string]interface{}{"name": "alice"})
+	res, err := exec.executeMatchWithCallProcedure(
+		ctxWithParams,
+		"MATCH (n) WHERE n.name = $name CALL db.info() YIELD name RETURN name",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "nornicdb", res.Rows[0][0])
+}
+
+func TestSubqueryHelpers_AddLimitSkipToSubquery_WithWhereAndFallbackVariable(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	// WHERE clause path should still inject WITH var SKIP/LIMIT before SET.
+	withWhere := exec.addLimitSkipToSubquery(
+		"MATCH (p:Person) WHERE p.age > 10 SET p.active = true RETURN p.name",
+		5,
+		2,
+	)
+	assert.Contains(t, withWhere, "WITH p SKIP 2 LIMIT 5")
+	assert.Contains(t, withWhere, "SET p.active = true")
+
+	// No variable in pattern uses fallback variable name 'n' for WITH clause.
+	noVar := exec.addLimitSkipToSubquery(
+		"MATCH (:Person) RETURN 1 AS one",
+		3,
+		0,
+	)
+	assert.Contains(t, noVar, "WITH n LIMIT 3")
+	assert.Contains(t, noVar, "RETURN 1 AS one")
+}
+
+func TestSubqueryHelpers_AddLimitSkipToSubquery_OperationBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	tests := []struct {
+		name   string
+		query  string
+		limit  int
+		skip   int
+		assert func(t *testing.T, got string)
+	}{
+		{
+			name:  "match_delete_branch",
+			query: "MATCH (n:Person) DELETE n RETURN count(*)",
+			limit: 4,
+			skip:  1,
+			assert: func(t *testing.T, got string) {
+				assert.Contains(t, got, "WITH n SKIP 1 LIMIT 4")
+				assert.Contains(t, got, "DELETE n")
+			},
+		},
+		{
+			name:  "match_merge_branch",
+			query: "MATCH (n:Person) MERGE (m:Person {name:'x'}) RETURN m",
+			limit: 2,
+			skip:  0,
+			assert: func(t *testing.T, got string) {
+				assert.Contains(t, got, "WITH n LIMIT 2")
+				assert.Contains(t, got, "MERGE (m:Person")
+			},
+		},
+		{
+			name:  "match_return_branch",
+			query: "MATCH (n:Person) RETURN n.name",
+			limit: 3,
+			skip:  1,
+			assert: func(t *testing.T, got string) {
+				assert.Contains(t, got, "WITH n SKIP 1 LIMIT 3")
+				assert.Contains(t, got, "RETURN n.name")
+			},
+		},
+		{
+			name:  "fallback_before_return_without_match",
+			query: "WITH 1 AS x RETURN x",
+			limit: 9,
+			skip:  2,
+			assert: func(t *testing.T, got string) {
+				assert.Contains(t, got, "SKIP 2 LIMIT 9 RETURN x")
+			},
+		},
+		{
+			name:  "fallback_existing_limit_skip",
+			query: "WITH 1 AS x RETURN x LIMIT 1",
+			limit: 6,
+			skip:  0,
+			assert: func(t *testing.T, got string) {
+				assert.Contains(t, got, "RETURN x LIMIT 1 LIMIT 6")
+			},
+		},
+		{
+			name:  "fallback_no_return",
+			query: "WITH 1 AS x",
+			limit: 5,
+			skip:  0,
+			assert: func(t *testing.T, got string) {
+				assert.Equal(t, "WITH 1 AS x LIMIT 5", got)
+			},
+		},
+		{
+			name:  "match_no_operation_then_no_return_fallback",
+			query: "MATCH (n:Person)",
+			limit: 7,
+			skip:  1,
+			assert: func(t *testing.T, got string) {
+				assert.Equal(t, "MATCH (n:Person) SKIP 1 LIMIT 7", got)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exec.addLimitSkipToSubquery(tc.query, tc.limit, tc.skip)
+			tc.assert(t, got)
+		})
+	}
+}
