@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.15] - 2026-03-10
+
+### Added
+
+- **Coverage/report generation tooling in-repo**: Added `scripts/generate-coverage.sh` and expanded `scripts/filter-generated-coverage.sh` so CI coverage reporting is reproducible locally and can consistently exclude generated and hardware-specific paths.
+- **Developer hook automation**: Added `.githooks/pre-commit` plus `scripts/install-git-hooks.sh` to enforce formatting checks in local workflows.
+- **Llama CPU libs build path**: Added dedicated CPU llama-libs image build assets (`docker/Dockerfile.llama-cpu`, `scripts/hydrate-llama-cpu-libs.sh`) and corresponding workflow wiring.
+
+### Changed
+
+- **CI/CD workflow restructuring**: Updated `.github/workflows/ci.yml`, `cd.yml`, `cd-llama-cpu.yml`, and `cd-llama-cuda.yml` to separate llama library publishing, use prebuilt runtime assets in CI, and centralize coverage/report logic.
+- **UI asset embedding compatibility**:
+  - `ui/embed.go` now embeds `all:dist` to avoid empty-subdirectory embed failures.
+  - `pkg/server/ui.go` switched UI assets from `embed.FS` to `fs.FS` and added explicit nil-asset validation.
+- **Search service event routing while index builds run** (`pkg/nornicdb/search_services.go`): Introduced deferred mutation queues for index/remove events during build windows and deterministic post-build flush behavior.
+- **DB background-task lifecycle hardening** (`pkg/nornicdb/db.go`): Added tracked background-task startup helper, safer close sequencing, and cleaner goroutine ownership boundaries.
+- **GraphQL edge/node ID normalization** (`pkg/graphql/resolvers/helpers_namespaced.go`): Consolidated repeated source/target ID coercion paths into a shared helper for namespaced result handling.
+- **Ops/runtime guardrails**:
+  - `pkg/config/config.go`: perf gates moved to warn-level behavior.
+  - `pkg/inference/cooldown.go`: added default fallback lookup path for empty-label cooldown entries.
+  - `pkg/storage/namespaced.go`: bulk node/edge creation now rejects nil inputs with `ErrInvalidData`.
+  - `pkg/nornicdb/db_admin.go`: `FindSimilar` now validates `limit > 0`.
+
+### Fixed
+
+- **Cypher parser strictness and AST correctness**:
+  - Rejects invalid bare `OPTIONAL` forms and unterminated string literals (`pkg/cypher/parser.go`).
+  - Parses map literals into structured AST map expressions instead of permissive fallback handling (`pkg/cypher/ast_builder.go`).
+- **Cypher fulltext compatibility** (`pkg/cypher/call_fulltext.go`): fulltext parameter extraction now supports `db.index.fulltext.queryRelationships(...)` alongside node queries.
+- **Cypher traversal/query correctness**:
+  - Relationship pattern matching now fails fast on malformed bracket/paren patterns (`pkg/cypher/merge.go`).
+  - `SUM(...)` evaluation aligned with openCypher semantics, including arithmetic combinations and null-handling behavior (`pkg/cypher/clauses.go`).
+  - `CALL ... IN TRANSACTIONS` now guards against non-progressing iterative batching for non-batchable write subqueries (`pkg/cypher/executor_subqueries.go`).
+  - `MATCH ... CREATE` zero-row behavior now short-circuits CREATE as expected when upstream MATCH yields no rows (`pkg/cypher/create.go`).
+- **Embedder creation race** (`pkg/nornicdb/db.go`): added a second registry check inside single-flight creation lock to prevent duplicate concurrent embedder initialization.
+
+### Technical Details
+
+- **Range covered**: `v1.0.14..HEAD`
+- **Commits in range**: 95 (non-merge)
+- **Non-test surface changed**: 42 files, +1,257 / -490 lines
+- **Primary focus areas**: CI/CD + coverage pipeline hardening, Cypher compatibility/correctness fixes, search/build concurrency stabilization, UI embedding reliability.
+
 ## [1.0.14] - 2026-03-07
 
 ### Changed

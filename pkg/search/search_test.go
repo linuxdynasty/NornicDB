@@ -995,10 +995,16 @@ func TestSearchService_BuildIndexes_ForcedRebuildOnSettingsMismatch(t *testing.T
 	require.GreaterOrEqual(t, svc2.fulltextIndex.Count(), 1)
 	require.GreaterOrEqual(t, svc2.EmbeddingCount(), 1)
 
-	// Build must persist updated fingerprints (not stale old-* values).
-	gotSettings, err := loadSearchBuildSettings(settingsPath)
-	require.NoError(t, err)
-	require.NotNil(t, gotSettings)
+	// Build persists settings asynchronously; wait until updated fingerprints are visible.
+	var gotSettings *searchBuildSettingsSnapshot
+	require.Eventually(t, func() bool {
+		loaded, loadErr := loadSearchBuildSettings(settingsPath)
+		if loadErr != nil || loaded == nil {
+			return false
+		}
+		gotSettings = loaded
+		return true
+	}, 2*time.Second, 20*time.Millisecond)
 	require.NotEqual(t, "old-bm25-fingerprint", gotSettings.BM25)
 	require.NotEqual(t, "old-vector-fingerprint", gotSettings.Vector)
 	require.NotEqual(t, "old-hnsw-fingerprint", gotSettings.HNSW)
