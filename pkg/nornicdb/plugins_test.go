@@ -3,6 +3,8 @@ package nornicdb
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -366,6 +368,43 @@ func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "missing")
 	})
+
+	t.Run("loadPluginFile returns open error for invalid plugin file", func(t *testing.T) {
+		badPlugin := filepath.Join(t.TempDir(), "bad.so")
+		require.NoError(t, os.WriteFile(badPlugin, []byte("not-a-go-plugin"), 0644))
+
+		loaded, err := loadPluginFile(badPlugin, nil)
+		require.Error(t, err)
+		require.Nil(t, loaded)
+		require.Contains(t, err.Error(), "open")
+	})
+
+	t.Run("loadPluginsFromDir tolerates bad plugin files", func(t *testing.T) {
+		pluginsMu.Lock()
+		loadedPlugins = make(map[string]*LoadedPlugin)
+		pluginFunctions = make(map[string]PluginFunction)
+		pluginProcedures = make(map[string]PluginProcedure)
+		pluginsInitialized = false
+		pluginsMu.Unlock()
+
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.so"), []byte("bad"), 0644))
+		require.NoError(t, LoadPluginsFromDir(dir, nil))
+		require.True(t, PluginsInitialized())
+		require.Empty(t, ListLoadedPlugins())
+	})
+
+	t.Run("registerHeimdallPlugin returns start error with context", func(t *testing.T) {
+		p := &mockHeimdallPluginStartErr{
+			name:    "start-err-" + time.Now().Format("150405.000000000"),
+			version: "1.0.0",
+			ptype:   "heimdall",
+		}
+		loaded, err := registerHeimdallPlugin(p, "/tmp/start_err.so", &heimdall.SubsystemContext{})
+		require.Error(t, err)
+		require.Nil(t, loaded)
+		require.Contains(t, err.Error(), "start")
+	})
 }
 
 func TestExtractFunctions(t *testing.T) {
@@ -656,6 +695,34 @@ func (m mockReflectPluginErrors) ConfigSchema() []string          { return []str
 func (m mockReflectPluginErrors) Actions() []string               { return []string{"wrong-type"} }
 func (m mockReflectPluginErrors) Summary() string                 { return "bad-summary" }
 func (m mockReflectPluginErrors) RecentEvents(limit int) []string { return []string{"wrong-type"} }
+
+type mockHeimdallPluginStartErr struct {
+	name    string
+	version string
+	ptype   string
+}
+
+func (m *mockHeimdallPluginStartErr) Name() string    { return m.name }
+func (m *mockHeimdallPluginStartErr) Version() string { return m.version }
+func (m *mockHeimdallPluginStartErr) Type() string    { return m.ptype }
+func (m *mockHeimdallPluginStartErr) Description() string {
+	return "start error plugin"
+}
+func (m *mockHeimdallPluginStartErr) Initialize(ctx heimdall.SubsystemContext) error { return nil }
+func (m *mockHeimdallPluginStartErr) Start() error                                   { return errors.New("boom start") }
+func (m *mockHeimdallPluginStartErr) Stop() error                                    { return nil }
+func (m *mockHeimdallPluginStartErr) Shutdown() error                                { return nil }
+func (m *mockHeimdallPluginStartErr) Status() heimdall.SubsystemStatus               { return heimdall.StatusError }
+func (m *mockHeimdallPluginStartErr) Health() heimdall.SubsystemHealth {
+	return heimdall.SubsystemHealth{Status: heimdall.StatusError, Healthy: false}
+}
+func (m *mockHeimdallPluginStartErr) Metrics() map[string]interface{}                  { return nil }
+func (m *mockHeimdallPluginStartErr) Config() map[string]interface{}                   { return nil }
+func (m *mockHeimdallPluginStartErr) Configure(settings map[string]interface{}) error  { return nil }
+func (m *mockHeimdallPluginStartErr) ConfigSchema() map[string]interface{}             { return nil }
+func (m *mockHeimdallPluginStartErr) Actions() map[string]heimdall.ActionFunc          { return nil }
+func (m *mockHeimdallPluginStartErr) Summary() string                                  { return "start error" }
+func (m *mockHeimdallPluginStartErr) RecentEvents(limit int) []heimdall.SubsystemEvent { return nil }
 
 type mockProcedureMeta struct {
 	Handler       interface{}

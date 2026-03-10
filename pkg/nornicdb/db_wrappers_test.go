@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -9,6 +10,13 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type pendingCountEngine struct {
+	storage.Engine
+	count int
+}
+
+func (p *pendingCountEngine) PendingEmbeddingsCount() int { return p.count }
 
 func TestDBWrapperHelpers_StorageAccess(t *testing.T) {
 	base := storage.NewMemoryEngine()
@@ -124,4 +132,90 @@ func TestDBWrapperHelpers_VectorDimensionsHelpers(t *testing.T) {
 
 	require.NoError(t, db.Close())
 	require.Equal(t, 0, db.VectorIndexDimensions())
+}
+
+func TestDBWrapperHelpers_EmbeddingAndPendingCounts(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// No provider: only default DB count is returned.
+	defaultSvc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	require.NoError(t, defaultSvc.IndexNode(&storage.Node{
+		ID:              "n1",
+		Properties:      map[string]interface{}{"content": "alpha"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+	}))
+	require.Equal(t, 1, db.EmbeddingCount())
+
+	// Multi-db provider: system is skipped and other DBs are included.
+	db2Svc, err := db.GetOrCreateSearchService("tenant_cov", nil)
+	require.NoError(t, err)
+	require.NoError(t, db2Svc.IndexNode(&storage.Node{
+		ID:              "n2",
+		Properties:      map[string]interface{}{"content": "beta"},
+		ChunkEmbeddings: [][]float32{{0.3, 0.2, 0.1}},
+	}))
+	db.SetAllDatabasesProvider(func() []DatabaseAndStorage {
+		return []DatabaseAndStorage{
+			{Name: db.defaultDatabaseName(), Storage: db.storage},
+			{Name: "tenant_cov", Storage: nil},
+			{Name: "system", Storage: nil},
+		}
+	})
+	require.Equal(t, 2, db.EmbeddingCount())
+
+	// Pending count uses optional storage fast-path interface.
+	engine := &pendingCountEngine{Engine: storage.NewMemoryEngine(), count: 7}
+	db.baseStorage = engine
+	require.Equal(t, 7, db.PendingEmbeddingsCount())
+	db.baseStorage = storage.NewMemoryEngine()
+	require.Equal(t, 0, db.PendingEmbeddingsCount())
+}
+
+func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
+	origMode, hadMode := os.LookupEnv("NORNICDB_CLUSTER_MODE")
+	origDataDir, hadData := os.LookupEnv("NORNICDB_CLUSTER_DATA_DIR")
+	t.Cleanup(func() {
+		if hadMode {
+			_ = os.Setenv("NORNICDB_CLUSTER_MODE", origMode)
+		} else {
+			_ = os.Unsetenv("NORNICDB_CLUSTER_MODE")
+		}
+		if hadData {
+			_ = os.Setenv("NORNICDB_CLUSTER_DATA_DIR", origDataDir)
+		} else {
+			_ = os.Unsetenv("NORNICDB_CLUSTER_DATA_DIR")
+		}
+	})
+
+	base := storage.NewMemoryEngine()
+
+	db := &DB{config: DefaultConfig()}
+
+	_ = os.Unsetenv("NORNICDB_CLUSTER_MODE")
+	got, err := db.maybeEnableReplication(base)
+	require.NoError(t, err)
+	require.Same(t, base, got)
+
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_MODE", "standalone"))
+	got, err = db.maybeEnableReplication(base)
+	require.NoError(t, err)
+	require.Same(t, base, got)
+
+	// Non-standalone mode should attempt replication setup. Force adapter creation failure
+	// by pointing DataDir at a file path, so mkdir for replication/wal fails deterministically.
+	badPath := t.TempDir() + "/not-a-dir"
+	require.NoError(t, os.WriteFile(badPath, []byte("x"), 0644))
+	cfg := DefaultConfig()
+	cfg.Database.DataDir = badPath
+	db.config = cfg
+
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_MODE", "raft"))
+	_, err = db.maybeEnableReplication(base)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "replication: create storage adapter")
 }
