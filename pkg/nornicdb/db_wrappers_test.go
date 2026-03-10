@@ -132,6 +132,14 @@ func TestDBWrapperHelpers_VectorDimensionsHelpers(t *testing.T) {
 
 	require.NoError(t, db.Close())
 	require.Equal(t, 0, db.VectorIndexDimensions())
+
+	// Cached helper falls back to configured dims when no service exists, then to 0.
+	db2 := &DB{embeddingDims: 9, searchServices: map[string]*dbSearchService{}}
+	namespaced := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic")
+	db2.storage = namespaced
+	require.Equal(t, 9, db2.VectorIndexDimensionsCached())
+	db2.embeddingDims = 0
+	require.Equal(t, 0, db2.VectorIndexDimensionsCached())
 }
 
 func TestDBWrapperHelpers_EmbeddingAndPendingCounts(t *testing.T) {

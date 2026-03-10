@@ -277,6 +277,17 @@ func TestDB_EmbedQueryForDB_ResolverUnsetDimsOrNoVector(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, vec)
 	})
+
+	t.Run("embedConfigForDB enabled with nil queue falls back to global nil", func(t *testing.T) {
+		db := &DB{
+			embedConfigForDB: func(dbName string) (*embed.Config, error) {
+				return &embed.Config{Provider: "local", Model: "m", Dimensions: 4}, nil
+			},
+		}
+		vec, err := db.EmbedQueryForDB(context.Background(), "dbx", "hello")
+		require.NoError(t, err)
+		require.Nil(t, vec)
+	})
 }
 
 func TestEmbedConfigKey_LocalZeroAndAutoLayers_AreEquivalent(t *testing.T) {

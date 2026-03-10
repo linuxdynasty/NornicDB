@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -10,10 +11,20 @@ import (
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingCloseEngine struct {
+	storage.Engine
+	closeErr error
+}
+
+func (f *failingCloseEngine) Close() error {
+	return f.closeErr
+}
 
 func TestMemoryTierHalfLives(t *testing.T) {
 	// Verify our decay constants match expected half-lives
@@ -89,6 +100,52 @@ func TestClose(t *testing.T) {
 		// Second close should also succeed
 		err = db.Close()
 		assert.NoError(t, err)
+	})
+
+	t.Run("closeInternal aggregates close errors and cancels build context", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Database.PersistSearchIndexes = true
+		cfg.Database.DataDir = t.TempDir()
+
+		searchEngine := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+		svc := search.NewServiceWithDimensions(searchEngine, 3)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		db := &DB{
+			config: cfg,
+			baseStorage: &failingCloseEngine{
+				Engine:   storage.NewMemoryEngine(),
+				closeErr: errors.New("base close failed"),
+			},
+			searchServices: map[string]*dbSearchService{
+				"test": {dbName: "test", svc: svc},
+			},
+			embedQueue: NewEmbedWorker(nil, searchEngine, &EmbedWorkerConfig{
+				DeferWorkerStart: true,
+			}),
+			clusterTicker:     time.NewTicker(time.Hour),
+			clusterTickerStop: make(chan struct{}),
+			buildCtx:          ctx,
+			buildCancel:       cancel,
+		}
+		t.Cleanup(func() {
+			// closeInternal already calls Close() on this queue; this is just defensive.
+			if db.embedQueue != nil {
+				db.embedQueue.Close()
+			}
+		})
+
+		err := db.closeInternal()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "base close failed")
+
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatal("build context should be canceled by closeInternal")
+		}
+		require.Nil(t, db.clusterTicker)
+		require.Nil(t, db.clusterTickerStop)
 	})
 }
 
