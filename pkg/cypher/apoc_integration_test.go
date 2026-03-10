@@ -114,3 +114,60 @@ func TestAPOCFunctionsIntegration(t *testing.T) {
 		}
 	})
 }
+
+func TestAPOCPathHelpers_BranchCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Root"}, Properties: map[string]interface{}{"id": "root"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Keep"}, Properties: map[string]interface{}{"id": "keep"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Archive"}, Properties: map[string]interface{}{"id": "arch"}})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL"}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e2", StartNode: "n2", EndNode: "n3", Type: "OTHER"}))
+
+	types, dir := parseRelationshipFilter(">REL|OTHER")
+	assert.ElementsMatch(t, []string{"REL", "OTHER"}, types)
+	assert.Equal(t, "outgoing", dir)
+	inc, exc, term := parseLabelFilter("+Keep|-Archive|/Root")
+	assert.Equal(t, []string{"Keep"}, inc)
+	assert.Equal(t, []string{"Archive"}, exc)
+	assert.Equal(t, []string{"Root"}, term)
+
+	assert.Equal(t, "root", exec.extractStartNodeID("MATCH (n {id: 'root'}) CALL apoc.path.subgraphNodes(n,{})"))
+	assert.Equal(t, "keep", exec.extractStartNodeID("MATCH (n) WHERE n.id = 'keep' CALL apoc.path.subgraphNodes(n,{})"))
+	assert.Equal(t, "", exec.extractStartNodeID("CALL apoc.path.subgraphNodes($nodeId,{})"))
+	assert.Equal(t, "*", exec.extractStartNodeID("CALL apoc.path.subgraphNodes(n,{})"))
+
+	assert.True(t, passesLabelFilter(&storage.Node{Labels: []string{"Keep"}}, []string{"Keep"}, nil))
+	assert.False(t, passesLabelFilter(&storage.Node{Labels: []string{"Archive"}}, nil, []string{"Archive"}))
+	assert.True(t, isTerminateNode(&storage.Node{Labels: []string{"Root"}}, []string{"Root"}))
+
+	// Parameterized start node branch returns empty by design.
+	res, err := exec.callApocPathSubgraphNodes("CALL apoc.path.subgraphNodes($nodeId,{maxLevel: 2})")
+	require.NoError(t, err)
+	require.Empty(t, res.Rows)
+
+	// Traverse-all branch and config parsing branch.
+	res, err = exec.callApocPathSubgraphNodes("CALL apoc.path.subgraphNodes(n,{maxLevel:2,minLevel:1,relationshipFilter:'REL|OTHER',labelFilter:'+Keep|-Archive',limit:10,bfs:false})")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	startNode, err := store.GetNode("n1")
+	require.NoError(t, err)
+	require.NotNil(t, startNode)
+
+	cfg := apocPathConfig{
+		maxLevel:          3,
+		minLevel:          0,
+		relationshipTypes: []string{"REL", "OTHER"},
+		direction:         "both",
+		includeLabels:     []string{},
+		excludeLabels:     []string{"Archive"},
+	}
+	dfsEdges := exec.dfsSpanningTree(startNode, cfg)
+	require.NotEmpty(t, dfsEdges)
+}

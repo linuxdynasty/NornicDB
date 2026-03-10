@@ -356,9 +356,18 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "database name expected")
 
+		_, err = exec.executeDropCompositeDatabase(ctx, "DROP DATABASE c_drop")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid DROP COMPOSITE DATABASE syntax")
+
 		res, err := exec.executeDropCompositeDatabase(ctx, "DROP COMPOSITE DATABASE c_drop")
 		require.NoError(t, err)
 		require.Equal(t, [][]interface{}{{"c_drop"}}, res.Rows)
+
+		require.NoError(t, adapter.CreateCompositeDatabase("c_flex", constituents))
+		res, err = exec.executeDropCompositeDatabase(ctx, "DROP\tCOMPOSITE\tDATABASE\tc_flex")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_flex"}}, res.Rows)
 	})
 
 	t.Run("show composite and constituents direct branches", func(t *testing.T) {
@@ -393,10 +402,72 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.NotEmpty(t, res.Rows)
 		require.Equal(t, []string{"alias", "database", "type", "access_mode"}, res.Columns)
 
+		_, err = exec.executeShowConstituents(ctx, "SHOW PARTS FOR COMPOSITE DATABASE c_show")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid SHOW CONSTITUENTS syntax")
+
+		_, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE does_not_exist")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get constituents")
+
 		weird := &weirdConstituentAdapter{testDatabaseManagerAdapter: adapter}
 		exec.SetDatabaseManager(weird)
 		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE c_show")
 		require.NoError(t, err)
 		require.Equal(t, []interface{}{"", "", "", ""}, res.Rows[0])
 	})
+}
+
+func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
+	ctx := context.Background()
+
+	exec := &StorageExecutor{}
+	_, err := exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE c ADD ALIAS a FOR DATABASE d")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "database manager not available")
+
+	baseStore := storage.NewMemoryEngine()
+	inner := storage.NewMemoryEngine()
+	manager, _ := multidb.NewDatabaseManager(inner, nil)
+	adapter := &testDatabaseManagerAdapter{manager: manager}
+	exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
+	exec.SetDatabaseManager(adapter)
+
+	require.NoError(t, adapter.CreateDatabase("d1"))
+	require.NoError(t, adapter.CreateDatabase("d2"))
+	require.NoError(t, adapter.CreateCompositeDatabase("comp_err", []interface{}{
+		map[string]interface{}{"alias": "d1", "database_name": "d1", "type": "local", "access_mode": "read_write"},
+	}))
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE comp_err ADD ALIAS x FOR DATABASE d2")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "DATABASE expected after COMPOSITE")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "database name expected")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ADD ALIAS or DROP ALIAS expected")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS x")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "FOR DATABASE expected")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS   FOR DATABASE d2")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "alias name cannot be empty")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS x FOR DATABASE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "database name cannot be empty")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err DROP ALIAS")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "alias name cannot be empty")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err DROP ALIAS missing_alias")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to remove constituent")
 }

@@ -3,7 +3,10 @@ package cypher
 
 import (
 	"context"
+	"errors"
+	"math"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -11,6 +14,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type sequenceEmbedder struct {
+	embs  [][]float32
+	errs  []error
+	calls int
+}
+
+func (s *sequenceEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	i := s.calls
+	s.calls++
+	if i < len(s.errs) && s.errs[i] != nil {
+		return nil, s.errs[i]
+	}
+	if i < len(s.embs) {
+		return s.embs[i], nil
+	}
+	return []float32{1, 0}, nil
+}
 
 func TestCallDbLabelsWithError(t *testing.T) {
 	// This is tricky - MemoryEngine doesn't error on AllNodes
@@ -1950,4 +1971,506 @@ func TestRunSearchRequestBranches(t *testing.T) {
 	require.NotNil(t, res)
 	assert.Equal(t, []string{"node", "score", "rrf_score", "vector_rank", "bm25_rank", "search_method", "fallback_triggered"}, res.Columns)
 	require.NotNil(t, exec.searchService)
+}
+
+func TestExecuteMatchRelationshipsWithClauseBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "a1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "a2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "a3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carl"}})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "e1", StartNode: "a1", EndNode: "a2", Type: "KNOWS"})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "e2", StartNode: "a1", EndNode: "a3", Type: "KNOWS"})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "e3", StartNode: "a2", EndNode: "a3", Type: "KNOWS"})
+	require.NoError(t, err)
+
+	_, err = exec.executeMatchRelationshipsWithClause(ctx, "not-a-pattern", "", "WITH a RETURN a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid traversal pattern")
+
+	_, err = exec.executeMatchRelationshipsWithClause(ctx, "(a:Person)-[r:KNOWS]->(b:Person)", "", "WITH a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RETURN clause required")
+
+	pathRes, err := exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"p=(a:Person)-[r:KNOWS]->(b:Person)",
+		"a.name = 'alice'",
+		"WITH p AS path, b AS connected RETURN length(path) AS l, size(relationships(path)) AS relCount, labels(connected) AS labs ORDER BY l DESC SKIP 0 LIMIT 5",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, pathRes.Rows)
+	require.Len(t, pathRes.Rows[0], 3)
+	assert.EqualValues(t, 1, pathRes.Rows[0][0])
+	assert.EqualValues(t, 1, pathRes.Rows[0][1])
+
+	withAggRes, err := exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"(a:Person)-[r:KNOWS]->(b:Person)",
+		"",
+		"WITH b.name AS friend, count(*) AS c WHERE c >= 1 RETURN friend, c ORDER BY friend SKIP 0 LIMIT 10",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, withAggRes.Rows)
+
+	returnAggRes, err := exec.executeMatchRelationshipsWithClause(
+		ctx,
+		"(a:Person)-[r:KNOWS]->(b:Person)",
+		"",
+		"WITH b AS connected RETURN count(*) AS total, collect(DISTINCT connected.name) AS names",
+	)
+	require.NoError(t, err)
+	require.Len(t, returnAggRes.Rows, 1)
+	assert.Equal(t, int64(3), returnAggRes.Rows[0][0])
+}
+
+func TestCreateSetAndSetMergeBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// executeCreateSet: missing SET
+	_, err := exec.executeCreateSet(ctx, "CREATE (n:Person)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SET clause not found")
+
+	// parameter branches
+	_, err = exec.executeCreateSet(ctx, "CREATE (n:Person) SET n.age = $age RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires parameters to be provided")
+
+	ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{"x": int64(1)})
+	_, err = exec.executeCreateSet(ctxWithParams, "CREATE (n:Person) SET n.age = $age RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found in provided parameters")
+
+	// property replacement must use map
+	_, err = exec.executeCreateSet(ctx, "CREATE (n:Person) SET n = 1 RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a map")
+
+	// unknown variable branches
+	_, err = exec.executeCreateSet(ctx, "CREATE (n:Person) SET m.age = 1 RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown variable in SET clause")
+
+	_, err = exec.executeCreateSet(ctx, "CREATE (n:Person)-[r:KNOWS]->(m:Person) SET z += {x:1} RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown variable in SET +=")
+
+	// invalid label name in SET label assignment
+	_, err = exec.executeCreateSet(ctx, "CREATE (n:Person) SET n:bad-label RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid label name")
+
+	// successful node + edge property and merge updates
+	okRes, err := exec.executeCreateSet(
+		ctx,
+		"CREATE (a:Person {name:'a'})-[r:KNOWS]->(b:Person {name:'b'}) SET a.age = 30, r.weight = 2, a += {city:'X'}, b:Employee RETURN a.age AS aAge, type(r) AS rt",
+	)
+	require.NoError(t, err)
+	require.Len(t, okRes.Rows, 1)
+	assert.EqualValues(t, 30, okRes.Rows[0][0])
+	assert.Equal(t, "KNOWS", okRes.Rows[0][1])
+
+	noReturnRes, err := exec.executeCreateSet(ctx, "CREATE (n:DefaultNode {name:'d'}) SET n.flag = true")
+	require.NoError(t, err)
+	require.NotEmpty(t, noReturnRes.Rows)
+	require.Equal(t, "node", noReturnRes.Columns[0])
+
+	// executeSetMerge branches
+	target := &storage.Node{ID: "sm1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "merge"}}
+	_, err = store.CreateNode(target)
+	require.NoError(t, err)
+
+	matchResult := &ExecuteResult{
+		Columns: []string{"n", "props"},
+		Rows: [][]interface{}{
+			{target, map[string]interface{}{"k": int64(9)}},
+		},
+	}
+
+	mergeOut := &ExecuteResult{Stats: &QueryStats{}}
+	_, err = exec.executeSetMerge(ctx, matchResult, "n props", mergeOut, "MATCH (n) SET n props", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected += operator")
+
+	_, err = exec.executeSetMerge(ctx, matchResult, "n += ", mergeOut, "MATCH (n) SET n += ", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a map or parameter")
+
+	_, err = exec.executeSetMerge(ctx, matchResult, "n += $props", mergeOut, "MATCH (n) SET n += $props", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires parameters to be provided")
+
+	ctxParam := context.WithValue(ctx, paramsKey, map[string]interface{}{"props": map[interface{}]interface{}{1: "x"}})
+	_, err = exec.executeSetMerge(ctxParam, matchResult, "n += $props", mergeOut, "MATCH (n) SET n += $props", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "string keys")
+
+	_, err = exec.executeSetMerge(ctx, matchResult, "n += missingMap", mergeOut, "MATCH (n) SET n += missingMap", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing \"missingMap\"")
+
+	badMapResult := &ExecuteResult{Columns: []string{"n", "props"}, Rows: [][]interface{}{{target, true}}}
+	_, err = exec.executeSetMerge(ctx, badMapResult, "n += props", mergeOut, "MATCH (n) SET n += props", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a map")
+
+	okSetMergeResult := &ExecuteResult{Stats: &QueryStats{}}
+	ctxGoodParam := context.WithValue(ctx, paramsKey, map[string]interface{}{"props": map[string]interface{}{"age": int64(44)}})
+	retQuery := "MATCH (n) SET n += $props RETURN n.age AS age"
+	retIdx := strings.Index(strings.ToUpper(retQuery), "RETURN")
+	got, err := exec.executeSetMerge(ctxGoodParam, matchResult, "n += $props", okSetMergeResult, retQuery, retIdx)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Rows)
+	assert.EqualValues(t, 44, got.Rows[0][0])
+
+	noReturnSetMerge := &ExecuteResult{Stats: &QueryStats{}}
+	got, err = exec.executeSetMerge(ctx, matchResult, "n += {active: true}", noReturnSetMerge, "MATCH (n) SET n += {active: true}", -1)
+	require.NoError(t, err)
+	require.Equal(t, []string{"matched"}, got.Columns)
+	require.EqualValues(t, 1, got.Rows[0][0])
+}
+
+func TestEmbedQueryChunkedAndVectorQueryNodeBranches(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := embedQueryChunked(ctx, nil, "hello")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no embedder configured")
+
+	oneChunkEmbedder := &sequenceEmbedder{embs: [][]float32{{3, 4}}}
+	emb, err := embedQueryChunked(ctx, oneChunkEmbedder, "short")
+	require.NoError(t, err)
+	assert.Equal(t, []float32{3, 4}, emb)
+
+	multiChunkText := strings.Repeat("chunk ", 800)
+	multiEmbedder := &sequenceEmbedder{
+		embs: [][]float32{
+			{1, 0},
+			{0, 1},
+			{1, 1},
+		},
+		errs: []error{
+			errors.New("embed failed"),
+			nil,
+			nil,
+		},
+	}
+	emb, err = embedQueryChunked(ctx, multiEmbedder, multiChunkText)
+	require.NoError(t, err)
+	require.Len(t, emb, 2)
+	norm := math.Sqrt(float64(emb[0]*emb[0] + emb[1]*emb[1]))
+	assert.InDelta(t, 1.0, norm, 0.01)
+
+	errOnlyEmbedder := &sequenceEmbedder{errs: []error{errors.New("always fails"), errors.New("still fails"), errors.New("still fails")}}
+	_, err = embedQueryChunked(ctx, errOnlyEmbedder, multiChunkText)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "always fails")
+
+	emptyEmbedder := &sequenceEmbedder{embs: [][]float32{{}, {}, {}}}
+	_, err = embedQueryChunked(ctx, emptyEmbedder, multiChunkText)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no embeddings produced")
+
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err = exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx', 2, [0.1,0.2])")
+	require.NoError(t, err)
+
+	_, err = exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx', 2, 'hello')")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no embedder configured")
+
+	res, err := exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx', 2, $q)")
+	require.NoError(t, err)
+	assert.Empty(t, res.Rows)
+
+	ctxMissing := context.WithValue(ctx, paramsKey, map[string]interface{}{"x": []float32{0.1, 0.2}})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxMissing, "CALL db.index.vector.queryNodes('idx', 2, $q)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parameter $q not provided")
+
+	ctxBadType := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": true})
+	_, err = exec.callDbIndexVectorQueryNodes(ctxBadType, "CALL db.index.vector.queryNodes('idx', 2, $q)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
+
+	_, err = exec.callDbIndexVectorQueryNodes(ctxBadType, "CALL db.index.vector.queryNodes('idx', 2)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
+}
+
+func TestVectorParsingAndEmbedProcedureBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, _, _, err := exec.parseVectorQueryParams("CALL db.labels()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "procedure not found")
+
+	_, _, _, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes 'idx', 2, [1,2]")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing parameters")
+
+	_, _, _, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx', 2, [1,2]")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmatched parenthesis")
+
+	indexName, k, input, err := exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx', 3, [0.1, 0.2])")
+	require.NoError(t, err)
+	assert.Equal(t, "idx", indexName)
+	assert.Equal(t, 3, k)
+	assert.Equal(t, []float32{0.1, 0.2}, input.vector)
+
+	_, _, input, err = exec.parseVectorQueryParams("CALL db.index.vector.queryRelationships('idx2', 5, 'hello')")
+	require.NoError(t, err)
+	assert.Equal(t, "hello", input.stringQuery)
+
+	_, _, input, err = exec.parseVectorQueryParams("CALL db.index.vector.queryNodes('idx3', 7, $q)")
+	require.NoError(t, err)
+	assert.Equal(t, "q", input.paramName)
+
+	parts := splitParamsCarefully("'a,b',[1,2],{\"k\":\"v\"},\"x,y\"")
+	require.Len(t, parts, 4)
+	assert.Equal(t, "'a,b'", strings.TrimSpace(parts[0]))
+	assert.Equal(t, "[1,2]", strings.TrimSpace(parts[1]))
+
+	assert.Equal(t, []float32{1.5, -2}, parseInlineVector("[1.5, -2, nope]"))
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed('x')")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no embedder configured")
+
+	exec.embedder = &sequenceEmbedder{embs: [][]float32{{1, 2}}}
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires one argument")
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed(")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmatched parenthesis")
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed(123)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires STRING text")
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed('   ')")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires non-empty text")
+
+	_, err = exec.callDbIndexVectorEmbed(ctx, "CALL db.index.vector.embed($q)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parameter $q not provided")
+
+	ctxParams := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": 1})
+	_, err = exec.callDbIndexVectorEmbed(ctxParams, "CALL db.index.vector.embed($q)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be STRING")
+
+	res, err := exec.callDbIndexVectorEmbed(context.WithValue(ctx, paramsKey, map[string]interface{}{"q": "hello"}), "CALL db.index.vector.embed($q)")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+}
+
+func TestCollectSubqueryBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	p := &storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}}
+	f1 := &storage.Node{ID: "f1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}}
+	f2 := &storage.Node{ID: "f2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carl"}}
+	_, err := store.CreateNode(p)
+	require.NoError(t, err)
+	_, err = store.CreateNode(f1)
+	require.NoError(t, err)
+	_, err = store.CreateNode(f2)
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e1", StartNode: p.ID, EndNode: f1.ID, Type: "KNOWS"}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e2", StartNode: p.ID, EndNode: f2.ID, Type: "KNOWS"}))
+
+	_, err = exec.evaluateCollectSubquery(ctx, p, "p", "COLLECT bad")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid COLLECT subquery syntax")
+
+	_, err = exec.evaluateCollectSubquery(ctx, p, "p", "COLLECT { MATCH (p)-[:KNOWS]->(f) }")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must have a RETURN clause")
+
+	collected, err := exec.evaluateCollectSubquery(ctx, p, "p", "COLLECT { MATCH (p)-[:KNOWS]->(f) RETURN f.name }")
+	require.NoError(t, err)
+	require.Len(t, collected, 2)
+
+	collected, err = exec.evaluateCollectSubquery(ctx, p, "p", "COLLECT { MATCH (p)-[:KNOWS]->(f) WHERE f.name <> 'none' RETURN f.name }")
+	require.NoError(t, err)
+	require.Len(t, collected, 2)
+
+	// subquery execution error branch
+	_, err = exec.evaluateCollectSubquery(ctx, p, "p", "COLLECT { MATCH (p)-[:KNOWS]->(f) RETURN }")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution failed")
+}
+
+func TestExecuteMatchCreateBlock_AdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "a1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "b1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// No CREATE in block: branch returns empty result without error.
+	res, err := exec.executeMatchCreateBlock(ctx, "MATCH (a:Person {name: 'alice'})", map[string]*storage.Node{}, map[string]*storage.Edge{})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Empty(t, res.Rows)
+
+	// Relationship creation and edge-property return path.
+	nodeVars := map[string]*storage.Node{}
+	edgeVars := map[string]*storage.Edge{}
+	res, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name: 'alice'}), (b:Person {name: 'bob'}) CREATE (a)-[r:KNOWS {since: 2020}]->(b) RETURN r.since AS since",
+		nodeVars,
+		edgeVars,
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2020), res.Rows[0][0])
+	require.Contains(t, edgeVars, "r")
+
+	// Unknown variable in SET clause should error deterministically.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name: 'alice'}) CREATE (t:Temp {name:'tmp'}) SET missing.flag = true",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown variable in SET clause")
+
+	// CREATE ... WITH ... DELETE ... RETURN count() path.
+	res, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name: 'alice'}) CREATE (t:TempDel {name:'x'}) WITH t DELETE t RETURN count(t) AS deleted",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), res.Rows[0][0])
+}
+
+func TestExecuteMatchRelationshipsWithClause_AggregationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carol"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "n4", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "dave"}})
+	require.NoError(t, err)
+
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n3", Type: "KNOWS", Properties: map[string]interface{}{"weight": int64(2)}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e2", StartNode: "n1", EndNode: "n4", Type: "KNOWS", Properties: map[string]interface{}{"weight": int64(3)}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e3", StartNode: "n2", EndNode: "n4", Type: "KNOWS", Properties: map[string]interface{}{"weight": int64(5)}}))
+
+	pattern := "(a:Person)-[r:KNOWS]->(b:Person)"
+	withAndReturn := "WITH a.name AS person, count(*) AS c, sum(r.weight) AS s, avg(r.weight) AS av, min(r.weight) AS mn, max(r.weight) AS mx, collect(b.name) AS names, collect(DISTINCT b.name) AS dnames WHERE c >= 2 RETURN person, c, s, av, mn, mx, size(names) AS n ORDER BY person ASC SKIP 0 LIMIT 10"
+	res, err := exec.executeMatchRelationshipsWithClause(ctx, pattern, "", withAndReturn)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "alice", res.Rows[0][0])
+	require.Equal(t, int64(2), res.Rows[0][1])
+	require.Equal(t, int64(5), res.Rows[0][2])
+	require.InDelta(t, 2.5, res.Rows[0][3], 0.001)
+	require.Equal(t, int64(2), res.Rows[0][4])
+	require.Equal(t, int64(3), res.Rows[0][5])
+	require.Equal(t, int64(2), res.Rows[0][6])
+
+	// RETURN aggregation branch over computed rows.
+	res, err = exec.executeMatchRelationshipsWithClause(
+		ctx,
+		pattern,
+		"",
+		"WITH a.name AS person, r.weight AS w RETURN count(*), sum(w), avg(w), min(w), max(w), collect(person), collect(DISTINCT person)",
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(3), res.Rows[0][0])
+	require.InDelta(t, 10.0, res.Rows[0][1], 0.001)
+	require.InDelta(t, 10.0/3.0, res.Rows[0][2], 0.001)
+	require.Equal(t, int64(2), res.Rows[0][3])
+	require.Equal(t, int64(5), res.Rows[0][4])
+}
+
+func TestEvaluateExpressionFromValues_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	n := &storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Person", "Employee"},
+		Properties: map[string]interface{}{"name": "alice", "age": int64(30)},
+	}
+	path := map[string]interface{}{
+		"length": int64(2),
+		"rels": []*storage.Edge{
+			{ID: "e1", Type: "KNOWS", Properties: map[string]interface{}{"since": int64(2020)}},
+			{ID: "e2", Type: "WORKS_WITH", Properties: map[string]interface{}{"since": int64(2021)}},
+		},
+	}
+	values := map[string]interface{}{
+		"n":    n,
+		"path": path,
+		"xs":   []interface{}{"a", "b", "c"},
+		"m": map[string]interface{}{
+			"properties": map[string]interface{}{"title": "eng"},
+		},
+	}
+
+	require.Equal(t, "alice", exec.evaluateExpressionFromValues("n.name", values))
+	require.Equal(t, "eng", exec.evaluateExpressionFromValues("m.title", values))
+	require.Equal(t, int64(2), exec.evaluateExpressionFromValues("length(path)", values))
+	require.Equal(t, int64(3), exec.evaluateExpressionFromValues("size(xs)", values))
+	require.Equal(t, int64(6), exec.evaluateExpressionFromValues("size('abcd')", values))
+
+	labels := exec.evaluateExpressionFromValues("labels(n)", values)
+	require.NotNil(t, labels)
+
+	rels := exec.evaluateExpressionFromValues("relationships(path)", values)
+	require.Len(t, rels.([]interface{}), 2)
+
+	listComp := exec.evaluateExpressionFromValues("[r IN relationships(path) | type(r)]", values)
+	require.Equal(t, []interface{}{"KNOWS", "WORKS_WITH"}, listComp)
+
+	mapLit := exec.evaluateExpressionFromValues("{name: n.name, relCount: size(relationships(path))}", values)
+	require.NotNil(t, mapLit)
 }

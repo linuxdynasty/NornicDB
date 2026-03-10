@@ -260,6 +260,93 @@ func TestMergeRelationship_Idempotent(t *testing.T) {
 	assert.Equal(t, int64(1), countResult.Rows[0][0])
 }
 
+func TestMergeHelpers_ParseReturnAndClauseSplitBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+
+	a := &storage.Node{ID: "n-a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}}
+	b := &storage.Node{ID: "n-b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}}
+	_, err := store.CreateNode(a)
+	require.NoError(t, err)
+	_, err = store.CreateNode(b)
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e-ab", StartNode: a.ID, EndNode: b.ID, Type: "KNOWS"}))
+
+	nodeCtx := map[string]*storage.Node{"a": a, "b": b}
+	relCtx := map[string]*storage.Edge{"r": {ID: "e-ab", StartNode: a.ID, EndNode: b.ID, Type: "KNOWS"}}
+
+	cols, vals := e.parseReturnClauseWithContext("*", nodeCtx, relCtx)
+	require.Len(t, cols, 2)
+	require.Len(t, vals, 2)
+
+	cols, vals = e.parseReturnClauseWithContext("a.name AS name, id(a) AS aid", nodeCtx, relCtx)
+	require.Equal(t, []string{"name", "aid"}, cols)
+	require.Len(t, vals, 2)
+	require.Equal(t, "alice", vals[0])
+
+	assert.Nil(t, splitMergeChainClauseBlock(""))
+	parts := splitMergeChainClauseBlock("junk OPTIONAL MATCH (a) FOREACH (x IN [1] | SET a.v = x) RETURN a")
+	require.GreaterOrEqual(t, len(parts), 3)
+}
+
+func TestExecuteCompoundMatchMerge_OptionalAndContextRelationshipBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE (a:Person {name:'alice'})", nil)
+	require.NoError(t, err)
+	_, err = e.Execute(ctx, "CREATE (b:Person {name:'bob'})", nil)
+	require.NoError(t, err)
+	_, err = e.Execute(ctx, "MATCH (a:Person {name:'alice'}), (b:Person {name:'bob'}) CREATE (a)-[:KNOWS]->(b)", nil)
+	require.NoError(t, err)
+
+	// OPTIONAL MATCH with no matches still executes MERGE path.
+	res, err := e.executeCompoundMatchMerge(ctx, "OPTIONAL MATCH (m:Missing) MERGE (t:Target {name:'created'}) RETURN t.name")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+
+	// Relationship-context matcher error path via malformed match clause.
+	matches, rels, err := e.executeMatchForContextWithRelationships(
+		ctx,
+		"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN",
+		"(a:Person)-[:KNOWS]->(b:Person)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, matches)
+	require.NotNil(t, rels)
+}
+
+func TestExecuteMatchForContextWithRelationships_MapResolutionBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE (a:Person {name:'alice'}), (b:Person {name:'bob'}), (a)-[:KNOWS]->(b)", nil)
+	require.NoError(t, err)
+
+	// Map with explicit id key branch.
+	matches, _, err := e.executeMatchForContextWithRelationships(
+		ctx,
+		"MATCH (a:Person)-[:KNOWS]->(b:Person) WITH {id:'a'} AS a, b",
+		"(a:Person)-[:KNOWS]->(b:Person)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, matches)
+
+	// Map without id/_id branch should fall back to findNodeByProperties.
+	matches, _, err = e.executeMatchForContextWithRelationships(
+		ctx,
+		"MATCH (a:Person)-[:KNOWS]->(b:Person) WITH {name:'alice'} AS a, b",
+		"(a:Person)-[:KNOWS]->(b:Person)",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, matches)
+}
+
 // ========================================
 // FileIndexer Pattern Tests
 // ========================================

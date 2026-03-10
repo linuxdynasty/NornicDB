@@ -144,6 +144,21 @@ func (m *mockDatabaseManager) IsCompositeDatabase(name string) bool {
 	return false
 }
 
+type badLimitsTypeDBManager struct{ *mockDatabaseManager }
+
+func (m *badLimitsTypeDBManager) GetDatabaseLimits(databaseName string) (interface{}, error) {
+	if _, exists := m.databases[databaseName]; !exists {
+		return nil, fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+	return "bad-limits-type", nil
+}
+
+type failingSetLimitsDBManager struct{ *mockDatabaseManager }
+
+func (m *failingSetLimitsDBManager) SetDatabaseLimits(databaseName string, limits interface{}) error {
+	return fmt.Errorf("forced set limits failure")
+}
+
 func TestSystemCommands_CreateDatabase(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
@@ -507,6 +522,56 @@ func TestSystemCommands_AlterDatabaseSetLimit(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "limit assignment expected")
 	})
+
+	t.Run("error on malformed keyword layout", func(t *testing.T) {
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DB test_db SET LIMIT max_nodes = 1")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid ALTER DATABASE syntax")
+	})
+
+	t.Run("error when set limit clause missing", func(t *testing.T) {
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "SET LIMIT clause expected")
+	})
+
+	t.Run("error on invalid assignment format", func(t *testing.T) {
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid limit assignment syntax")
+	})
+
+	t.Run("error on invalid typed values", func(t *testing.T) {
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes = bad")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid max_nodes value")
+
+		_, err = exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_query_time = never")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid max_query_time value")
+
+		_, err = exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_connections = nope")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid max_connections value")
+	})
+
+	t.Run("error when get limits type is invalid", func(t *testing.T) {
+		bad := &badLimitsTypeDBManager{mockDatabaseManager: mockDBM}
+		exec.SetDatabaseManager(bad)
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes = 1")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid limits type returned")
+		exec.SetDatabaseManager(mockDBM)
+	})
+
+	t.Run("error when set limits fails", func(t *testing.T) {
+		fail := &failingSetLimitsDBManager{mockDatabaseManager: mockDBM}
+		exec.SetDatabaseManager(fail)
+		_, err := exec.executeAlterDatabase(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes = 1")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to set limits")
+		exec.SetDatabaseManager(mockDBM)
+	})
 }
 
 func TestSystemCommands_ShowLimits(t *testing.T) {
@@ -630,4 +695,38 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "database manager not available")
 	})
+}
+
+func TestSystemCommands_ShowDatabase_BranchCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "tenant_ns")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"T"}, Properties: map[string]interface{}{"name": "x"}})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n1", Type: "SELF"}))
+
+	// Default/fallback branch (dbManager nil): deterministic row.
+	res, err := exec.executeShowDatabase(ctx, "SHOW DATABASE")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "nornic", res.Rows[0][0])
+	require.NotNil(t, res.Stats)
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+
+	// dbManager + namespaced engine branch prefers namespace.
+	mockDBM := newMockDatabaseManager()
+	mockDBM.CreateDatabase("tenant_ns")
+	exec.SetDatabaseManager(mockDBM)
+	res, err = exec.executeShowDatabase(ctx, "SHOW DATABASE")
+	require.NoError(t, err)
+	require.Equal(t, "tenant_ns", res.Rows[0][0])
+
+	// USE-database context branch has highest priority.
+	useCtx := context.WithValue(ctx, ctxKeyUseDatabase, "tenant_ctx")
+	res, err = exec.executeShowDatabase(useCtx, "SHOW DATABASE")
+	require.NoError(t, err)
+	require.Equal(t, "tenant_ctx", res.Rows[0][0])
 }

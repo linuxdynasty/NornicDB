@@ -7,6 +7,7 @@ package cypher
 import (
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -2016,5 +2017,183 @@ func TestFunctionAdditionalListMapAndDegreeCoverage(t *testing.T) {
 	}
 	if !reflect.DeepEqual(map[string]interface{}{}, e.evaluateExpressionWithContext("apoc.map.clean('bad')", nodes, nil)) {
 		t.Fatalf("apoc.map.clean('bad') should return empty map")
+	}
+}
+
+func TestFunctionAdditionalMathNilAndFallbackBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	a := createTestNode(t, e, "m-a", []string{"T"}, map[string]interface{}{"name": "a"})
+	b := createTestNode(t, e, "m-b", []string{"T"}, map[string]interface{}{"name": "b"})
+	rel := &storage.Edge{ID: "m-r1", Type: "REL", StartNode: a.ID, EndNode: b.ID}
+	if err := e.storage.CreateEdge(rel); err != nil {
+		t.Fatalf("create edge failed: %v", err)
+	}
+	nodes := map[string]*storage.Node{"a": a, "b": b}
+	rels := map[string]*storage.Edge{"r": rel}
+
+	nilExprs := []string{
+		"sin('x')",
+		"atan2(1)",
+		"power(2)",
+		"startNode(missing)",
+		"endNode(missing)",
+		"nullIf('a')",
+		"btrim()",
+		"char_length(123)",
+		"character_length(123)",
+		"normalize(123)",
+		"percentileCont(1)",
+		"percentileDisc(1)",
+		"reduce(acc 0, x IN [1,2] | acc + x)", // malformed reduce syntax
+	}
+	for _, expr := range nilExprs {
+		if got := e.evaluateExpressionWithContext(expr, nodes, rels); got != nil {
+			t.Fatalf("%s should be nil, got %T %#v", expr, got, got)
+		}
+	}
+
+	if got := e.evaluateExpressionWithContext("isNaN('x')", nodes, rels); got != false {
+		t.Fatalf("isNaN('x') = %#v, want false", got)
+	}
+	if got := e.evaluateExpressionWithContext("isEmpty(123)", nodes, rels); got != false {
+		t.Fatalf("isEmpty(123) = %#v, want false", got)
+	}
+	if got := e.evaluateExpressionWithContext("isEmpty(NULL)", nodes, rels); got != true {
+		t.Fatalf("isEmpty(NULL) = %#v, want true", got)
+	}
+
+	if got := e.evaluateExpressionWithContext("coth(0)", nodes, rels); !math.IsNaN(got.(float64)) {
+		t.Fatalf("coth(0) should be NaN, got %#v", got)
+	}
+
+	// nodes()/relationships() empty fallback branches.
+	if got := e.evaluateExpressionWithContext("nodes(missingPath)", nodes, rels); !reflect.DeepEqual([]interface{}{}, got) {
+		t.Fatalf("nodes(missingPath) = %#v, want []", got)
+	}
+	if got := e.evaluateExpressionWithContext("relationships(missingPath)", nodes, rels); !reflect.DeepEqual([]interface{}{}, got) {
+		t.Fatalf("relationships(missingPath) = %#v, want []", got)
+	}
+}
+
+func TestFunctionFullMathAdditionalCoverage(t *testing.T) {
+	e := setupTestExecutor(t)
+	a := createTestNode(t, e, "fm-a", []string{"T"}, map[string]interface{}{"name": "a"})
+	b := createTestNode(t, e, "fm-b", []string{"T"}, map[string]interface{}{"name": "b"})
+	rel := &storage.Edge{ID: "fm-r", Type: "REL", StartNode: a.ID, EndNode: b.ID, Properties: map[string]interface{}{"w": int64(2)}}
+	if err := e.storage.CreateEdge(rel); err != nil {
+		t.Fatalf("create edge failed: %v", err)
+	}
+
+	nodes := map[string]*storage.Node{"a": a, "b": b}
+	rels := map[string]*storage.Edge{"r": rel}
+	paths := map[string]*PathResult{
+		"p": {Nodes: []*storage.Node{a, b}, Relationships: []*storage.Edge{rel}},
+	}
+
+	eval := func(expr string, allEdges []*storage.Edge, allNodes []*storage.Node, pathLen int) interface{} {
+		return e.evaluateExpressionWithContextFullMath(
+			expr,
+			strings.ToLower(expr),
+			nodes,
+			rels,
+			paths,
+			allEdges,
+			allNodes,
+			pathLen,
+		)
+	}
+
+	if got := eval("pi()", nil, nil, 0).(float64); math.Abs(got-math.Pi) > 0.0001 {
+		t.Fatalf("pi() = %v", got)
+	}
+	if got := eval("e()", nil, nil, 0).(float64); math.Abs(got-math.E) > 0.0001 {
+		t.Fatalf("e() = %v", got)
+	}
+	if got := eval("startNode(r)", nil, nil, 0).(*storage.Node); got.ID != a.ID {
+		t.Fatalf("startNode(r) = %s, want %s", got.ID, a.ID)
+	}
+	if got := eval("endNode(r)", nil, nil, 0).(*storage.Node); got.ID != b.ID {
+		t.Fatalf("endNode(r) = %s, want %s", got.ID, b.ID)
+	}
+
+	gotNodes := eval("nodes(p)", nil, nil, 0).([]interface{})
+	if len(gotNodes) != 2 {
+		t.Fatalf("nodes(p) len = %d, want 2", len(gotNodes))
+	}
+	gotNodes = eval("nodes(missing)", nil, []*storage.Node{a, b}, 0).([]interface{})
+	if len(gotNodes) != 2 {
+		t.Fatalf("nodes(allPathNodes) len = %d, want 2", len(gotNodes))
+	}
+	gotNodes = eval("nodes(a)", nil, nil, 0).([]interface{})
+	if len(gotNodes) != 1 {
+		t.Fatalf("nodes(a) len = %d, want 1", len(gotNodes))
+	}
+
+	gotRels := eval("relationships(p)", nil, nil, 0).([]interface{})
+	if len(gotRels) != 1 {
+		t.Fatalf("relationships(p) len = %d, want 1", len(gotRels))
+	}
+	gotRels = eval("relationships(missing)", []*storage.Edge{rel}, nil, 0).([]interface{})
+	if len(gotRels) != 1 {
+		t.Fatalf("relationships(allPathEdges) len = %d, want 1", len(gotRels))
+	}
+	gotRels = eval("relationships(r)", nil, nil, 0).([]interface{})
+	if len(gotRels) != 1 {
+		t.Fatalf("relationships(r) len = %d, want 1", len(gotRels))
+	}
+
+	if got := eval("point.x(point({x: 3, y: 4}))", nil, nil, 0); got != float64(3) {
+		t.Fatalf("point.x = %#v", got)
+	}
+	if got := eval("point.y(point({x: 3, y: 4}))", nil, nil, 0); got != float64(4) {
+		t.Fatalf("point.y = %#v", got)
+	}
+	if got := eval("point.srid(point({latitude: 1, longitude: 2}))", nil, nil, 0); got != int64(4326) {
+		t.Fatalf("point.srid(lat/lon) = %#v", got)
+	}
+	if got := eval("point.crs(point({x: 1, y: 2, z: 3}))", nil, nil, 0); got != "cartesian-3d" {
+		t.Fatalf("point.crs = %#v", got)
+	}
+	if got := eval("point.height(point({altitude: 7}))", nil, nil, 0); got != float64(7) {
+		t.Fatalf("point.height = %#v", got)
+	}
+	if got := eval("distance(point({x:0,y:0}), point({x:3,y:4}))", nil, nil, 0); got != float64(5) {
+		t.Fatalf("distance = %#v", got)
+	}
+	if got := eval("point.withinBBox(point({x:1,y:1}), point({x:0,y:0}), point({x:2,y:2}))", nil, nil, 0); got != true {
+		t.Fatalf("point.withinBBox = %#v", got)
+	}
+	if got := eval("point.withinDistance(point({x:1,y:1}), point({x:0,y:0}), 2)", nil, nil, 0); got != true {
+		t.Fatalf("point.withinDistance = %#v", got)
+	}
+	if got := eval("vector.similarity.cosine([1.0,0.0], [1.0,0.0])", nil, nil, 0); got == nil {
+		t.Fatal("vector.similarity.cosine should not be nil")
+	}
+	if got := eval("vector.similarity.euclidean([1.0,0.0], [1.0,0.0])", nil, nil, 0); got == nil {
+		t.Fatal("vector.similarity.euclidean should not be nil")
+	}
+	if got := eval("all(x IN [1,2,3] WHERE x > 0)", nil, nil, 0); got != true {
+		t.Fatalf("all(...) = %#v", got)
+	}
+	if got := eval("any(x IN [1,2,3] WHERE x = 2)", nil, nil, 0); got != true {
+		t.Fatalf("any(...) = %#v", got)
+	}
+	if got := eval("none(x IN [1,2,3] WHERE x < 0)", nil, nil, 0); got != true {
+		t.Fatalf("none(...) = %#v", got)
+	}
+	if got := eval("single(x IN [1,2,3] WHERE x = 2)", nil, nil, 0); got != true {
+		t.Fatalf("single(...) = %#v", got)
+	}
+	if got := eval("filter(x IN [1,2,3] WHERE x >= 2)", nil, nil, 0).([]interface{}); len(got) != 2 {
+		t.Fatalf("filter(...) len = %d, want 2", len(got))
+	}
+	if got := eval("extract(x IN [1,2,3] | x)", nil, nil, 0).([]interface{}); len(got) != 3 {
+		t.Fatalf("extract(...) len = %d, want 3", len(got))
+	}
+	if got := eval("[x IN [1,2,3] WHERE x > 1]", nil, nil, 0).([]interface{}); len(got) != 2 {
+		t.Fatalf("list comp filter len = %d, want 2", len(got))
+	}
+	if got := eval("[x IN [1,2,3]]", nil, nil, 0).([]interface{}); len(got) != 3 {
+		t.Fatalf("list comp identity len = %d, want 3", len(got))
 	}
 }

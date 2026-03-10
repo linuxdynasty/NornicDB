@@ -10,6 +10,8 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ============================================================================
@@ -1197,4 +1199,49 @@ func TestGenerateFastRPEmbeddings_LargeGraphStreamingBranch(t *testing.T) {
 	if len(out["n0"]) != 2 {
 		t.Fatalf("expected n0 to have embedding dimension 2, got %d", len(out["n0"]))
 	}
+}
+
+func TestCallGdsGraphProject_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (p:Person {name:'p'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (u:User {name:'u'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (m:Memory {name:'m'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (p:Person {name:'p'}), (u:User {name:'u'}) CREATE (p)-[:KNOWS]->(u)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (u:User {name:'u'}), (m:Memory {name:'m'}) CREATE (u)-[:RELATES_TO]->(m)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (m:Memory {name:'m'}), (p:Person {name:'p'}) CREATE (m)-[:REFERENCES]->(p)", nil)
+	require.NoError(t, err)
+
+	// Error branch: missing graph name.
+	_, err = exec.callGdsGraphProject("CALL gds.graph.project()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "graph name required")
+
+	// RETURN syntax extraction branch.
+	res, err := exec.callGdsGraphProject("RETURN gds.graph.project('g_return', ['Person'], ['KNOWS'])")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "g_return", res.Rows[0][0])
+
+	// Explicit label/type parsing branches.
+	res, err = exec.callGdsGraphProject("CALL gds.graph.project('g_parse', 'Person:User:Memory', 'KNOWS|RELATES_TO|REFERENCES')")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "g_parse", res.Rows[0][0])
+	assert.GreaterOrEqual(t, res.Rows[0][1].(int), 1)
+	assert.GreaterOrEqual(t, res.Rows[0][2].(int), 1)
+
+	// Default '*' label/type branch.
+	res, err = exec.callGdsGraphProject("CALL gds.graph.project('g_default', '*', '*')")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "g_default", res.Rows[0][0])
 }

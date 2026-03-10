@@ -2,10 +2,12 @@ package cypher
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestCreateCallDropProcedureDDL(t *testing.T) {
@@ -93,4 +95,110 @@ func TestProcedureCreateRejectedInsideActiveTransaction(t *testing.T) {
 	require.Contains(t, err.Error(), "not allowed inside an active transaction")
 
 	_, _ = exec.Execute(ctx, "ROLLBACK", nil)
+}
+
+func TestLoadPersistedProcedures_BranchCoverage(t *testing.T) {
+	ClearUserProcedures()
+	t.Cleanup(ClearUserProcedures)
+
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// no record property -> ignored
+	_, err := store.CreateNode(&storage.Node{
+		ID:         procedureCatalogNodeID("nornic.norecord"),
+		Labels:     []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{"name": "nornic.norecord"},
+	})
+	require.NoError(t, err)
+
+	// invalid base64 -> ignored
+	_, err = store.CreateNode(&storage.Node{
+		ID:     procedureCatalogNodeID("nornic.badb64"),
+		Labels: []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{
+			"record": "not-valid-base64",
+		},
+	})
+	require.NoError(t, err)
+
+	// invalid msgpack payload -> ignored
+	_, err = store.CreateNode(&storage.Node{
+		ID:     procedureCatalogNodeID("nornic.badpack"),
+		Labels: []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{
+			"record": base64.StdEncoding.EncodeToString([]byte("bad-msgpack")),
+		},
+	})
+	require.NoError(t, err)
+
+	// compile failure (invalid mode) -> ignored
+	invalidMode := persistedProcedureRecord{
+		Name:      "nornic.invalidMode",
+		Mode:      "NOPE",
+		Body:      "RETURN 1 AS value",
+		Signature: buildProcedureSignature("nornic.invalidMode", nil),
+	}
+	invalidBlob, err := msgpack.Marshal(invalidMode)
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     procedureCatalogNodeID("nornic.invalidMode"),
+		Labels: []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{
+			"record": base64.StdEncoding.EncodeToString(invalidBlob),
+		},
+	})
+	require.NoError(t, err)
+
+	valid := persistedProcedureRecord{
+		Name:      "nornic.loadedProc",
+		Mode:      "READ",
+		Body:      "RETURN 42 AS value",
+		Signature: buildProcedureSignature("nornic.loadedProc", nil),
+	}
+	validBlob, err := msgpack.Marshal(valid)
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     procedureCatalogNodeID("nornic.loadedProc"),
+		Labels: []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{
+			"record": base64.StdEncoding.EncodeToString(validBlob),
+		},
+	})
+	require.NoError(t, err)
+
+	validSecond := persistedProcedureRecord{
+		Name:      "nornic.loadedProcTwo",
+		Mode:      "READ",
+		Body:      "RETURN 7 AS value",
+		Signature: buildProcedureSignature("nornic.loadedProcTwo", nil),
+	}
+	validSecondBlob, err := msgpack.Marshal(validSecond)
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     procedureCatalogNodeID("nornic.loadedProcTwo"),
+		Labels: []string{procedureCatalogLabel},
+		Properties: map[string]interface{}{
+			"record": base64.StdEncoding.EncodeToString(validSecondBlob),
+		},
+	})
+	require.NoError(t, err)
+
+	ClearUserProcedures()
+	require.NoError(t, exec.loadPersistedProcedures())
+
+	res, err := exec.Execute(ctx, "CALL nornic.loadedProc()", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(42), res.Rows[0][0])
+
+	res, err = exec.Execute(ctx, "CALL nornic.loadedProcTwo()", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(7), res.Rows[0][0])
+
+	_, err = exec.Execute(ctx, "CALL nornic.invalidMode()", nil)
+	require.Error(t, err)
 }

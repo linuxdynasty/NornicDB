@@ -1435,3 +1435,68 @@ func TestMimirCompatibleWorkflow(t *testing.T) {
 		assert.NotNil(t, result)
 	})
 }
+
+func TestCallDbIndexVectorQueryNodes_AdditionalParameterBranches(t *testing.T) {
+	baseEngine := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:         "doc-1",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"embedding": []float64{0.1, 0.2, 0.3}},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:         "doc-2",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"embedding": []float64{0.1, 0.1, 0.1}},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE VECTOR INDEX idx_doc FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	// []float64 parameter path.
+	res, err := exec.callDbIndexVectorQueryNodes(
+		context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []float64{0.1, 0.2, 0.3}}),
+		"CALL db.index.vector.queryNodes('idx_doc', 5, $q)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.Rows)
+
+	// []interface{} numeric conversion path.
+	res, err = exec.callDbIndexVectorQueryNodes(
+		context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []interface{}{float64(0.1), int(0), int64(1)}}),
+		"CALL db.index.vector.queryNodes('idx_doc', 5, $q)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// string parameter embedding path.
+	exec.embedder = &sequenceEmbedder{embs: [][]float32{{0.1, 0.2, 0.3}}}
+	res, err = exec.callDbIndexVectorQueryNodes(
+		context.WithValue(ctx, paramsKey, map[string]interface{}{"q": "semantic query"}),
+		"CALL db.index.vector.queryNodes('idx_doc', 5, $q)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// No query input and params present with supported types -> deterministic error branch.
+	_, err = exec.callDbIndexVectorQueryNodes(
+		context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []float32{0.1, 0.2, 0.3}}),
+		"CALL db.index.vector.queryNodes('idx_doc', 5)",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parameter may have unsupported type")
+
+	// Build index state, then delete node and query again (covers stale/orphan-safe flow).
+	_, err = exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx_doc', 5, [0.1,0.2,0.3])")
+	require.NoError(t, err)
+	require.NoError(t, engine.DeleteNode("doc-1"))
+	res, err = exec.callDbIndexVectorQueryNodes(ctx, "CALL db.index.vector.queryNodes('idx_doc', 5, [0.1,0.2,0.3])")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+}

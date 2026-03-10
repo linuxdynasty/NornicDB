@@ -7,6 +7,45 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+func TestCompareWithOperatorCoverage(t *testing.T) {
+	if !compareWithOperator(nil, nil, "=") {
+		t.Fatalf("nil = nil should be true")
+	}
+	if compareWithOperator(nil, 1, "<") {
+		t.Fatalf("nil < 1 should be false")
+	}
+	if !compareWithOperator(nil, 1, "<>") {
+		t.Fatalf("nil <> 1 should be true")
+	}
+	if !compareWithOperator(int64(1), int64(2), "<") {
+		t.Fatalf("1 < 2 should be true")
+	}
+	if !compareWithOperator(2, 1, ">") {
+		t.Fatalf("2 > 1 should be true")
+	}
+	if !compareWithOperator(2, 2, ">=") {
+		t.Fatalf("2 >= 2 should be true")
+	}
+	if !compareWithOperator(2, 2, "<=") {
+		t.Fatalf("2 <= 2 should be true")
+	}
+	if !compareWithOperator("a", "b", "<") {
+		t.Fatalf("a < b should be true")
+	}
+	if !compareWithOperator("b", "a", ">") {
+		t.Fatalf("b > a should be true")
+	}
+	if !compareWithOperator("x", "x", "=") {
+		t.Fatalf("x = x should be true")
+	}
+	if !compareWithOperator("x", "y", "<>") {
+		t.Fatalf("x <> y should be true")
+	}
+	if compareWithOperator("x", "y", "??") {
+		t.Fatalf("unknown operator should be false")
+	}
+}
+
 func TestCaseExpressionSearched(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

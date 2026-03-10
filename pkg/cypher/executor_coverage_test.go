@@ -2143,3 +2143,274 @@ func TestExecuteAggregationWithNonNumeric(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), result.Rows[0][0])
 }
+
+func TestExecuteMatchCreateBlock_SetAndDeleteErrorBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "a1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+
+	// Invalid label name branch in SET label assignment.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (t:Temp {name:'x'}) SET t:123bad",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid label name")
+
+	// Missing parameter branch in SET assignment.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (t:Temp {name:'x'}) SET t.flag = $missing",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parameter $missing")
+
+	// Relationship delete target branch.
+	res, err := exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (b:TempNode {name:'b'}), (a)-[r:REL]->(b) WITH r DELETE r RETURN count(r) AS c",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(1), res.Rows[0][0])
+}
+
+func TestResolveReturnItem_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	node := &storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"id": "prop-id", "name": "alice", "age": int64(30), "embedding": []float32{0.1, 0.2}},
+	}
+
+	// Wildcard and direct variable branches.
+	assert.Equal(t, node, exec.resolveReturnItem(returnItem{expr: "*"}, "p", node))
+	assert.Equal(t, node, exec.resolveReturnItem(returnItem{expr: "p"}, "p", node))
+
+	// Collect subquery placeholder branch.
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "COLLECT { MATCH (p)-[:R]->(q) RETURN q }"}, "p", node))
+
+	// CASE/function/IS NULL/arithmetic evaluation branches.
+	assert.Equal(t, "adult", exec.resolveReturnItem(returnItem{expr: "CASE WHEN p.age > 20 THEN 'adult' ELSE 'child' END"}, "p", node))
+	assert.Equal(t, "30", exec.resolveReturnItem(returnItem{expr: "toString(p.age)"}, "p", node))
+	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.missing IS NULL"}, "p", node))
+	assert.Equal(t, int64(31), exec.resolveReturnItem(returnItem{expr: "p.age + 1"}, "p", node))
+
+	// Property-access branches.
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "q.age"}, "p", node))             // var mismatch
+	assert.Equal(t, "prop-id", exec.resolveReturnItem(returnItem{expr: "p.id"}, "p", node)) // id from property
+	assert.Equal(t, []float32{0.1, 0.2}, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", node))
+	assert.Equal(t, "alice", exec.resolveReturnItem(returnItem{expr: "p.name"}, "p", node))
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.unknown"}, "p", node))
+
+	// embedding summary branches (managed embedding and embed meta).
+	noEmbedding := &storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{}}
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", noEmbedding))
+	withChunk := &storage.Node{ID: "n3", Labels: []string{"Person"}, ChunkEmbeddings: [][]float32{{0.3, 0.4}}}
+	assert.NotNil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withChunk))
+	withMeta := &storage.Node{ID: "n4", Labels: []string{"Person"}, EmbedMeta: map[string]interface{}{"has_embedding": true}}
+	assert.NotNil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withMeta))
+
+	// has_embedding branches.
+	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", withMeta))
+	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", withChunk))
+	assert.Equal(t, false, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", noEmbedding))
+
+	// Fallback unresolved expression branch.
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "unknownExpressionToken"}, "p", node))
+}
+
+func TestExecuteCreateWithRefs_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Parameter substitution + function return item variable extraction.
+	ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{"name": "alice"})
+	res, nodes, edges, err := exec.executeCreateWithRefs(
+		ctxWithParams,
+		"CREATE (a:Person {name: $name})-[:KNOWS]->(b:Person {name:'bob'}) RETURN id(a) AS aid, b.name AS bname",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Contains(t, nodes, "a")
+	require.Contains(t, nodes, "b")
+	require.NotNil(t, edges)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 2)
+	assert.Equal(t, "bob", res.Rows[0][1])
+
+	// Chain remainder branch and relationship variable capture.
+	res, nodes, edges, err = exec.executeCreateWithRefs(
+		ctx,
+		"CREATE (x:A {name:'x'})-[r1:R1]->(y:B {name:'y'})-[r2:R2]->(z:C {name:'z'}) RETURN z.name",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, nodes["x"])
+	require.NotNil(t, nodes["y"])
+	require.NotNil(t, nodes["z"])
+	require.Contains(t, edges, "r1")
+	require.Contains(t, edges, "r2")
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "z", res.Rows[0][0])
+
+	// Reverse direction branch.
+	_, nodes, edges, err = exec.executeCreateWithRefs(
+		ctx,
+		"CREATE (l:Left {name:'l'})<-[rr:BACK]-(r:Right {name:'r'}) RETURN l.name, r.name",
+	)
+	require.NoError(t, err)
+	require.Contains(t, nodes, "l")
+	require.Contains(t, nodes, "r")
+	require.Contains(t, edges, "rr")
+
+	// Invalid relationship syntax branch.
+	_, _, _, err = exec.executeCreateWithRefs(ctx, "CREATE (a)-[:BROKEN](b)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid relationship pattern")
+}
+
+func TestLowLevelHelpers_AdditionalCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// extractFuncInner
+	assert.Equal(t, "", extractFuncInner("notAFunction"))
+	assert.Equal(t, "n", extractFuncInner("COUNT(n)"))
+	assert.Equal(t, "{a:1}", extractFuncInner("collect({a:1})[..10]"))
+	assert.Equal(t, "'(a) and )'", extractFuncInner("toString('(a) and )')"))
+
+	// apocCollMin
+	assert.Nil(t, apocCollMin([]interface{}{}))
+	assert.Equal(t, int64(1), apocCollMin([]interface{}{int64(3), int64(1), int64(2)}))
+	assert.Equal(t, int64(5), apocCollMin([]interface{}{int64(5), "x", int64(9)})) // non-numeric ignored
+	assert.Nil(t, apocCollMin("not-list"))
+
+	// executeCreateNodeSegment
+	_, _, err := exec.executeCreateNodeSegment(ctx, "CREATE (:Person {name:'x'})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must have a variable name")
+
+	_, _, err = exec.executeCreateNodeSegment(ctx, "CREATE (n:123Bad)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid label name")
+
+	_, _, err = exec.executeCreateNodeSegment(ctx, "CREATE (n:Person {1bad: 1})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid property key")
+
+	node, varName, err := exec.executeCreateNodeSegment(ctx, "CREATE (n:Person)")
+	require.NoError(t, err)
+	require.Equal(t, "n", varName)
+	require.NotNil(t, node)
+	require.NotNil(t, node.Properties) // initialized for empty-property create
+}
+
+func TestExecuteMatchCreateBlock_SetMergeAndDeleteBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "aa", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "bb", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// Direct DELETE (without WITH) branch on created relationship + count() return.
+	res, err := exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}), (b:Person {name:'bob'}) CREATE (a)-[r:REL {v:1}]->(b) DELETE r RETURN count(r) AS deleted",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(1), res.Rows[0][0])
+
+	// SET += merge branch on relationship properties.
+	nodeVars := map[string]*storage.Node{}
+	edgeVars := map[string]*storage.Edge{}
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}), (b:Person {name:'bob'}) CREATE (a)-[r:REL2 {x:1}]->(b) SET r += {y:2}",
+		nodeVars,
+		edgeVars,
+	)
+	require.NoError(t, err)
+	require.Contains(t, edgeVars, "r")
+	assert.Equal(t, int64(1), edgeVars["r"].Properties["x"])
+	assert.Equal(t, int64(2), edgeVars["r"].Properties["y"])
+
+	// Whole-map replacement on node/edge variable branches.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}), (b:Person {name:'bob'}) CREATE (a)-[r:REL3]->(b), (t:Temp {z:0}) SET t = {k: 7}, r = {w: 9} RETURN t.k, r.w",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+
+	// Additional label assignment path.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (t:Temp {name:'x'}) SET t:TagLabel",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+}
+func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	f1 := &storage.Node{ID: "f1", Labels: []string{"File"}, Properties: map[string]interface{}{"name": "a", "embedding": []float64{0.1}}}
+	f2 := &storage.Node{ID: "f2", Labels: []string{"File"}, Properties: map[string]interface{}{"name": "b"}}
+	c1 := &storage.Node{ID: "c1", Labels: []string{"Chunk"}, Properties: map[string]interface{}{"text": "x"}}
+	rows := []joinedRow{
+		{initialNode: f1, relatedNode: c1},
+		{initialNode: f1, relatedNode: nil},
+		{initialNode: f2, relatedNode: nil},
+	}
+
+	res, err := exec.processWithAggregation(
+		rows,
+		"f",
+		"c",
+		"WITH f, c, CASE WHEN c IS NOT NULL THEN 1 ELSE 0 END AS hasChunk WITH COUNT(DISTINCT f) AS files, COUNT(c) AS chunks, SUM(hasChunk) AS hasEmbeddings, COLLECT(DISTINCT f.name)[..10] AS sampleFiles RETURN files, chunks, hasEmbeddings, sampleFiles",
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(2), res.Rows[0][0])   // distinct files
+	assert.Equal(t, int64(1), res.Rows[0][1])   // count(c)
+	assert.Equal(t, float64(1), res.Rows[0][2]) // sum(case)
+	assert.NotEmpty(t, res.Rows[0][3])          // collect distinct
+
+	// Branch with no aggregation WITH: fall back to RETURN clause parsing.
+	res, err = exec.processWithAggregation(
+		rows,
+		"f",
+		"c",
+		"WITH f, c RETURN f.name AS name",
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "a", res.Rows[0][0])
+}

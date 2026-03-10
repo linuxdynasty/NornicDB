@@ -2400,3 +2400,19 @@ func TestCypherHelpers_ExplainInferenceAndCostHelpers(t *testing.T) {
 	require.NotNil(t, attached.Metadata["plan"])
 	require.Equal(t, string(ModeExplain), attached.Metadata["planType"])
 }
+
+func TestCypherHelpers_ExtractCreateVariableRefsBranches(t *testing.T) {
+	vars := extractCreateVariableRefs("CREATE (a)-[:KNOWS]->(b)")
+	assert.ElementsMatch(t, []string{"a", "b"}, vars)
+
+	vars = extractCreateVariableRefs("CREATE (a)<-[:KNOWS]-(b)")
+	assert.ElementsMatch(t, []string{"a", "b"}, vars)
+
+	// Inline node definitions are not simple variable refs.
+	vars = extractCreateVariableRefs("CREATE (:Person {name:'x'})-[:KNOWS]->(:Person {name:'y'})")
+	assert.Empty(t, vars)
+
+	// Mixed CREATE clauses deduplicate refs.
+	vars = extractCreateVariableRefs("CREATE (a)-[:R]->(b) CREATE (a)-[:R]->(c)")
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, vars)
+}

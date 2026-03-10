@@ -184,6 +184,32 @@ func TestKalmanVelocityPredict(t *testing.T) {
 	}
 }
 
+func TestKalmanVelocityPredict_EdgeBranches(t *testing.T) {
+	// Invalid JSON branch.
+	if got := kalmanVelocityPredict("not-json", 3); got != 0 {
+		t.Fatalf("expected 0 for invalid JSON, got %f", got)
+	}
+
+	// Non-positive dt falls back to 1.0.
+	state := KalmanVelocityState{Pos: 5.0, Vel: 2.0, Dt: 0}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if got := kalmanVelocityPredict(string(b), 3); got != 11.0 {
+		t.Fatalf("expected 11.0 with dt=0 fallback, got %f", got)
+	}
+
+	state.Dt = -2.0
+	b, err = json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if got := kalmanVelocityPredict(string(b), 3); got != 11.0 {
+		t.Fatalf("expected 11.0 with dt<0 fallback, got %f", got)
+	}
+}
+
 func TestKalmanAdaptiveInit_Default(t *testing.T) {
 	stateJSON := kalmanAdaptiveInit(nil)
 

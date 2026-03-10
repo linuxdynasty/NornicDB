@@ -154,3 +154,45 @@ func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
 	_, err = e.callApocExportCsvQuery(context.Background(), "CALL apoc.export.csv.query('', '"+csvOut+"', {})")
 	require.Error(t, err)
 }
+
+func TestApocLoadExportHelpers_CallApocLoadCsv_OptionsAndSources(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	withHeader := filepath.Join(dir, "with_header.csv")
+	noHeader := filepath.Join(dir, "no_header.csv")
+	empty := filepath.Join(dir, "empty.csv")
+
+	require.NoError(t, os.WriteFile(withHeader, []byte("name,age\nalice,30\nbob,31\n"), 0o644))
+	require.NoError(t, os.WriteFile(noHeader, []byte("x;1\ny;2\n"), 0o644))
+	require.NoError(t, os.WriteFile(empty, []byte(""), 0o644))
+
+	res, err := exec.callApocLoadCsv(ctx, "CALL apoc.load.csv('"+withHeader+"') YIELD lineNo, list, map")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "alice", res.Rows[0][2].(map[string]interface{})["name"])
+	require.Equal(t, "31", res.Rows[1][2].(map[string]interface{})["age"])
+
+	res, err = exec.callApocLoadCsv(ctx, "CALL apoc.load.csv('"+noHeader+"', {header:false, sep:';'}) YIELD lineNo, list, map")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "x", res.Rows[0][1].([]interface{})[0])
+	require.Empty(t, res.Rows[0][2].(map[string]interface{}))
+
+	res, err = exec.callApocLoadCsv(ctx, "CALL apoc.load.csv('"+empty+"') YIELD lineNo, list, map")
+	require.NoError(t, err)
+	require.Empty(t, res.Rows)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("c1,c2\nv1,v2\n"))
+	}))
+	defer srv.Close()
+
+	res, err = exec.callApocLoadCsv(ctx, "CALL apoc.load.csv('"+srv.URL+"') YIELD lineNo, list, map")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "v1", res.Rows[0][2].(map[string]interface{})["c1"])
+}
