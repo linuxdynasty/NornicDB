@@ -790,6 +790,59 @@ func TestSearchFilterByTypeBranches(t *testing.T) {
 	require.True(t, seenOrphans["missing"], "missing node should be handled as orphan")
 }
 
+func TestSearchEnrichResultsBranches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 3)
+
+	longContent := strings.Repeat("x", 260)
+	_, err := engine.CreateNode(&storage.Node{
+		ID:     "e1",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"type":        "Article",
+			"title":       "Title A",
+			"description": "Desc A",
+			"content":     longContent,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "e2",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"text": "text-fallback",
+		},
+	})
+	require.NoError(t, err)
+
+	input := []rrfResult{
+		{ID: "e1", RRFScore: 1.5, OriginalScore: 0.8, VectorRank: 1, BM25Rank: 2},
+		{ID: "e2", RRFScore: 1.2, OriginalScore: 0.7, VectorRank: 2, BM25Rank: 1},
+		{ID: "missing", RRFScore: 0.5, OriginalScore: 0.3},
+	}
+
+	seenOrphans := map[string]bool{}
+	out := svc.enrichResults(context.Background(), input, 3, seenOrphans)
+	require.Len(t, out, 2)
+
+	require.Equal(t, "e1", out[0].ID)
+	require.Equal(t, "Article", out[0].Type)
+	require.Equal(t, "Title A", out[0].Title)
+	require.Equal(t, "Desc A", out[0].Description)
+	require.Len(t, out[0].ContentPreview, 200)
+	require.True(t, strings.HasSuffix(out[0].ContentPreview, "..."))
+
+	require.Equal(t, "e2", out[1].ID)
+	require.Equal(t, "text-fallback", out[1].ContentPreview)
+	require.True(t, seenOrphans["missing"])
+
+	// limit branch: only the first input item should be considered.
+	limited := svc.enrichResults(context.Background(), input, 1, map[string]bool{})
+	require.Len(t, limited, 1)
+	require.Equal(t, "e1", limited[0].ID)
+}
+
 func TestSearchService_BuildIndexes_IteratorEngineBranches(t *testing.T) {
 	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
 	_, err := base.CreateNode(&storage.Node{

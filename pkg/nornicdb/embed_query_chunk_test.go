@@ -83,6 +83,36 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 func (e *chunkingTestEmbedder) Dimensions() int { return e.dims }
 func (e *chunkingTestEmbedder) Model() string   { return "chunking-test-embedder" }
 
+type scriptedBatchEmbedder struct {
+	embedVec  []float32
+	batchVecs [][]float32
+	batchErr  error
+}
+
+func (e *scriptedBatchEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if e.embedVec == nil {
+		return nil, nil
+	}
+	out := make([]float32, len(e.embedVec))
+	copy(out, e.embedVec)
+	return out, nil
+}
+
+func (e *scriptedBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(e.batchVecs))
+	for i := range e.batchVecs {
+		if e.batchVecs[i] == nil {
+			continue
+		}
+		out[i] = make([]float32, len(e.batchVecs[i]))
+		copy(out[i], e.batchVecs[i])
+	}
+	return out, e.batchErr
+}
+
+func (e *scriptedBatchEmbedder) Dimensions() int { return 0 }
+func (e *scriptedBatchEmbedder) Model() string   { return "scripted-batch" }
+
 func loadLargeDocQuery(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
@@ -170,6 +200,83 @@ func TestDB_EmbedQueryForDB_ResolverMismatchDims_ReturnsErrQueryEmbeddingDimensi
 	require.Nil(t, vec)
 	require.Contains(t, err.Error(), "index dims 768")
 	require.Contains(t, err.Error(), "query dims 8")
+}
+
+func TestDB_EmbedQueryWithEmbedder_EdgeBranches(t *testing.T) {
+	t.Run("nil embedder returns nil without error", func(t *testing.T) {
+		db := &DB{}
+		vec, err := db.embedQueryWithEmbedder(context.Background(), nil, "hello")
+		require.NoError(t, err)
+		require.Nil(t, vec)
+	})
+
+	t.Run("batch empty with error returns error", func(t *testing.T) {
+		db := &DB{}
+		emb := &scriptedBatchEmbedder{
+			batchVecs: nil,
+			batchErr:  errors.New("batch failed"),
+		}
+		vec, err := db.embedQueryWithEmbedder(context.Background(), emb, loadLargeDocQuery(t))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "batch failed")
+		require.Nil(t, vec)
+	})
+
+	t.Run("batch empty without error returns nil", func(t *testing.T) {
+		db := &DB{}
+		emb := &scriptedBatchEmbedder{
+			batchVecs: nil,
+			batchErr:  nil,
+		}
+		vec, err := db.embedQueryWithEmbedder(context.Background(), emb, loadLargeDocQuery(t))
+		require.NoError(t, err)
+		require.Nil(t, vec)
+	})
+
+	t.Run("batch averages only valid dimensions and normalizes", func(t *testing.T) {
+		db := &DB{}
+		emb := &scriptedBatchEmbedder{
+			batchVecs: [][]float32{
+				{1, 0, 0},
+				{},     // empty skipped
+				{1, 0}, // dimension mismatch skipped
+				{0, 1, 0},
+			},
+		}
+		vec, err := db.embedQueryWithEmbedder(context.Background(), emb, loadLargeDocQuery(t))
+		require.NoError(t, err)
+		require.Len(t, vec, 3)
+		// Average([1,0,0],[0,1,0]) => [0.5,0.5,0] then normalized.
+		require.InDelta(t, 0.7071, vec[0], 0.01)
+		require.InDelta(t, 0.7071, vec[1], 0.01)
+		require.InDelta(t, 0.0, vec[2], 0.0001)
+	})
+}
+
+func TestDB_EmbedQueryForDB_ResolverUnsetDimsOrNoVector(t *testing.T) {
+	t.Run("resolver <= 0 dims bypasses mismatch check", func(t *testing.T) {
+		emb := &chunkingTestEmbedder{dims: 5}
+		db := &DB{
+			embedQueue: &EmbedQueue{embedder: emb},
+			dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string) {
+				return 0, 0.5, ""
+			},
+		}
+		vec, err := db.EmbedQueryForDB(context.Background(), "dbx", "hello")
+		require.NoError(t, err)
+		require.Len(t, vec, 5)
+	})
+
+	t.Run("no embedder returns nil even when resolver exists", func(t *testing.T) {
+		db := &DB{
+			dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string) {
+				return 10, 0.5, ""
+			},
+		}
+		vec, err := db.EmbedQueryForDB(context.Background(), "dbx", "hello")
+		require.NoError(t, err)
+		require.Nil(t, vec)
+	})
 }
 
 func TestEmbedConfigKey_LocalZeroAndAutoLayers_AreEquivalent(t *testing.T) {

@@ -232,3 +232,44 @@ func TestRuntimeStrategyTransition_ReplayAndClearDeltaLog(t *testing.T) {
 	svc.strategyTransitionInProgress = false
 	svc.strategyTransitionMu.Unlock()
 }
+
+func TestRuntimeStrategyTransition_ReplayHelpers_BruteGPUAndClear(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	vi := svc.vectorIndex
+	require.NotNil(t, vi)
+	require.NoError(t, vi.Add("gpu-delta", []float32{0, 1, 0, 0}))
+
+	svc.strategyTransitionMu.Lock()
+	svc.strategyTransitionInProgress = true
+	svc.strategyTransitionMu.Unlock()
+
+	svc.appendStrategyDelta("gpu-delta", true)
+	svc.appendStrategyDelta("gpu-delta", false)
+
+	// BruteGPU branch with nil gpuEmbeddingIndex should still be a no-op without panic.
+	last := svc.replayTransitionDeltas(nil, strategyModeBruteGPU, vi, nil, 0)
+	require.Greater(t, last, uint64(0))
+
+	// applied == 0 clears full log branch.
+	svc.clearTransitionDeltaLogLocked(0)
+	svc.strategyTransitionMu.Lock()
+	require.Len(t, svc.strategyTransitionDeltas, 0)
+	svc.strategyTransitionMu.Unlock()
+
+	// selective clear keeps only seq > applied branch.
+	svc.appendStrategyDelta("gpu-delta", true)
+	svc.appendStrategyDelta("gpu-delta", false)
+	svc.strategyTransitionMu.Lock()
+	require.Len(t, svc.strategyTransitionDeltas, 2)
+	firstSeq := svc.strategyTransitionDeltas[0].seq
+	secondSeq := svc.strategyTransitionDeltas[1].seq
+	svc.strategyTransitionMu.Unlock()
+
+	svc.clearTransitionDeltaLogLocked(firstSeq)
+	svc.strategyTransitionMu.Lock()
+	require.Len(t, svc.strategyTransitionDeltas, 1)
+	require.Equal(t, secondSeq, svc.strategyTransitionDeltas[0].seq)
+	svc.strategyTransitionInProgress = false
+	svc.strategyTransitionMu.Unlock()
+}
