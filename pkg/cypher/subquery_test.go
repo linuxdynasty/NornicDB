@@ -2448,3 +2448,111 @@ func TestSubqueryHelpers_BatchingAndResultModifiers_Branches(t *testing.T) {
 	require.Len(t, modified.Rows, 1)
 	assert.Equal(t, "b", modified.Rows[0][0])
 }
+
+func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	// No MATCH in subquery => makeSubqueryReadOnly returns empty, using iterative batching.
+	// First batch then fails deterministically due invalid procedure call.
+	_, err := exec.executeCallInTransactions(ctx, "CALL totally.missing.procedure()", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subquery execution failed")
+}
+
+func TestSubqueryHelpers_CallInTransactions_NonBatchableWriteExecutesOnce(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	res, err := exec.executeCallInTransactions(ctx, "CREATE (n:TmpOnce {name:'once'}) RETURN n.name AS name", 1)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "once", res.Rows[0][0])
+
+	verify, err := exec.Execute(ctx, "MATCH (n:TmpOnce) RETURN count(*)", nil)
+	require.NoError(t, err)
+	require.Len(t, verify.Rows, 1)
+	assert.Equal(t, int64(1), verify.Rows[0][0])
+}
+
+func TestSubqueryHelpers_ParseCallSubquery_EdgeBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	body, after, inTx, batch := exec.parseCallSubquery("CALL db.info()")
+	assert.Empty(t, body)
+	assert.Empty(t, after)
+	assert.False(t, inTx)
+	assert.Equal(t, 1000, batch)
+
+	body, after, inTx, batch = exec.parseCallSubquery("CALL { RETURN 1 ")
+	assert.Empty(t, body)
+	assert.Empty(t, after)
+	assert.False(t, inTx)
+	assert.Equal(t, 1000, batch)
+
+	body, after, inTx, batch = exec.parseCallSubquery("CALL { RETURN 1 AS x } IN TRANSACTIONS OF nope ROWS RETURN x")
+	assert.Equal(t, "RETURN 1 AS x", body)
+	assert.Equal(t, "RETURN x", after)
+	assert.True(t, inTx)
+	// Invalid batch size falls back to default.
+	assert.Equal(t, 1000, batch)
+
+	body, after, inTx, batch = exec.parseCallSubquery("CALL { RETURN 1 AS x } IN TRANSACTIONS OF 7 ROWS RETURN x")
+	assert.Equal(t, "RETURN 1 AS x", body)
+	assert.Equal(t, "RETURN x", after)
+	assert.True(t, inTx)
+	assert.Equal(t, 7, batch)
+}
+
+func TestSubqueryHelpers_SubstituteBoundVariablesInCall_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	node := &storage.Node{
+		ID: "n1",
+		Properties: map[string]interface{}{
+			"s":         "alice",
+			"i":         int64(7),
+			"f":         float64(1.5),
+			"b":         true,
+			"obj":       map[string]interface{}{"x": 1},
+			"embedding": []interface{}{float64(0.1), int64(2), float32(0.3)},
+		},
+	}
+	ctxMap := map[string]*storage.Node{"n": node}
+
+	// Replacements for scalar property types and []interface{} embedding conversion.
+	got := exec.substituteBoundVariablesInCall(
+		"CALL x(n.s, n.i, n.f, n.b, n.embedding, n.obj)",
+		ctxMap,
+	)
+	assert.Contains(t, got, "'alice'")
+	assert.Contains(t, got, "7")
+	assert.Contains(t, got, "1.5")
+	assert.Contains(t, got, "true")
+	assert.Contains(t, got, "[0.1, 2, 0.3]")
+	assert.Contains(t, got, "map[x:1]")
+
+	// Quoted references should not be replaced.
+	quoted := exec.substituteBoundVariablesInCall("CALL x('n.s', \"n.i\")", ctxMap)
+	assert.Equal(t, "CALL x('n.s', \"n.i\")", quoted)
+
+	// ChunkEmbeddings takes precedence for embedding.
+	node.ChunkEmbeddings = [][]float32{{0.9, 0.8}}
+	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
+	assert.Contains(t, got, "[0.9, 0.8]")
+
+	// []float64 embedding conversion path.
+	node.ChunkEmbeddings = nil
+	node.Properties["embedding"] = []float64{0.4, 0.5}
+	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
+	assert.Contains(t, got, "[0.4, 0.5]")
+
+	// []float32 embedding conversion path.
+	node.Properties["embedding"] = []float32{0.6, 0.7}
+	got = exec.substituteBoundVariablesInCall("CALL x(n.embedding)", ctxMap)
+	assert.Contains(t, got, "[0.6, 0.7]")
+}

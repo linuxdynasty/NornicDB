@@ -84,6 +84,14 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 		return db2Svc.EmbeddingCount() == 1
 	}, 2*time.Second, 10*time.Millisecond)
 
+	// Wait for text search to be ready after indexing.
+	// The fulltext index updates are inline but may have small delays,
+	// especially in high-load CI environments.
+	require.Eventually(t, func() bool {
+		resp, err := defaultSvc.Search(ctx, "hello", nil, nil)
+		return err == nil && len(resp.Results) > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
 	// Verify text-only search does not cross-contaminate.
 	// Default DB should find alpha, not beta.
 	resp, err := defaultSvc.Search(ctx, "world", nil, nil)

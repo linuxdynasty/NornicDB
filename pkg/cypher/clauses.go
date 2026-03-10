@@ -1481,41 +1481,151 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			}
 
 		case strings.HasPrefix(upperExpr, "SUM("):
+			// Handle arithmetic of sum terms: SUM(x) + SUM(y) - SUM(z)
+			if (strings.Contains(upperExpr, "+") || strings.Contains(upperExpr, "-")) && strings.Contains(upperExpr, "SUM(") {
+				total := float64(0)
+				lastOp := byte('+')
+				start := 0
+				parenDepth := 0
+				inSingleQuote := false
+				inDoubleQuote := false
+
+				evalTerm := func(term string) (float64, bool, error) {
+					inner, _, ok := extractFuncArgsWithSuffix(strings.TrimSpace(term), "sum")
+					if !ok {
+						return 0, false, fmt.Errorf("unsupported SUM arithmetic term: %s", strings.TrimSpace(term))
+					}
+					sumVal := float64(0)
+					hasNonNull := false
+					for rowIdx, r := range rows {
+						var val interface{}
+						if cv, ok := computedValues[rowIdx]; ok {
+							if computed, exists := cv[strings.TrimSpace(inner)]; exists {
+								val = computed
+							}
+						}
+						if val == nil {
+							nodeCtx := make(map[string]*storage.Node)
+							relCtx := make(map[string]*storage.Edge)
+							if r.initialNode != nil {
+								nodeCtx[sourceVar] = r.initialNode
+							}
+							if r.relatedNode != nil {
+								nodeCtx[targetVar] = r.relatedNode
+							}
+							if r.relationship != nil {
+								relCtx["r"] = r.relationship
+							}
+							val = e.evaluateExpressionWithContext(strings.TrimSpace(inner), nodeCtx, relCtx)
+						}
+						if val == nil {
+							continue // SUM ignores NULLs
+						}
+						num, ok := toFloat64(val)
+						if !ok {
+							return 0, false, fmt.Errorf("SUM() requires numeric values, got %T in expression %q", val, strings.TrimSpace(inner))
+						}
+						hasNonNull = true
+						sumVal += num
+					}
+					return sumVal, hasNonNull, nil
+				}
+
+				for idx := 0; idx < len(item.expr); idx++ {
+					ch := item.expr[idx]
+					if ch == '\'' && !inDoubleQuote {
+						inSingleQuote = !inSingleQuote
+					} else if ch == '"' && !inSingleQuote {
+						inDoubleQuote = !inDoubleQuote
+					}
+					if inSingleQuote || inDoubleQuote {
+						continue
+					}
+					if ch == '(' {
+						parenDepth++
+						continue
+					}
+					if ch == ')' && parenDepth > 0 {
+						parenDepth--
+						continue
+					}
+					if parenDepth == 0 && (ch == '+' || ch == '-') {
+						term := strings.TrimSpace(item.expr[start:idx])
+						if term != "" {
+							termValue, _, err := evalTerm(term)
+							if err != nil {
+								return nil, err
+							}
+							if lastOp == '+' {
+								total += termValue
+							} else {
+								total -= termValue
+							}
+						}
+						lastOp = ch
+						start = idx + 1
+					}
+				}
+				lastTerm := strings.TrimSpace(item.expr[start:])
+				if lastTerm != "" {
+					termValue, _, err := evalTerm(lastTerm)
+					if err != nil {
+						return nil, err
+					}
+					if lastOp == '+' {
+						total += termValue
+					} else {
+						total -= termValue
+					}
+				}
+				row[i] = total
+				break
+			}
+
 			inner := item.expr[4 : len(item.expr)-1]
 			inner = strings.TrimSpace(inner)
-			sum := float64(0)
+			sumVal := float64(0)
+			hasNonNull := false
+			for rowIdx, r := range rows {
+				var val interface{}
 
-			// First check if inner refers to a computed value (from CASE WHEN)
-			hasComputedValues := false
-			for rowIdx := range rows {
+				// Prefer computed aliases from preceding WITH.
 				if cv, ok := computedValues[rowIdx]; ok {
-					if val, exists := cv[inner]; exists {
-						hasComputedValues = true
-						if num, ok := toFloat64(val); ok {
-							sum += num
-						}
+					if computed, exists := cv[inner]; exists {
+						val = computed
 					}
 				}
-			}
 
-			if !hasComputedValues {
-				// Fall back to embedding check
-				if strings.Contains(strings.ToUpper(inner), "EMBEDDING") {
-					for _, r := range rows {
-						if r.relatedNode != nil {
-							if _, hasEmb := r.relatedNode.Properties["embedding"]; hasEmb {
-								sum++
-							}
-						}
-						if r.initialNode != nil {
-							if _, hasEmb := r.initialNode.Properties["embedding"]; hasEmb {
-								sum++
-							}
-						}
+				if val == nil {
+					nodeCtx := make(map[string]*storage.Node)
+					relCtx := make(map[string]*storage.Edge)
+					if r.initialNode != nil {
+						nodeCtx[sourceVar] = r.initialNode
 					}
+					if r.relatedNode != nil {
+						nodeCtx[targetVar] = r.relatedNode
+					}
+					if r.relationship != nil {
+						relCtx["r"] = r.relationship
+					}
+					val = e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
 				}
+
+				if val == nil {
+					continue // SUM ignores NULLs
+				}
+				num, ok := toFloat64(val)
+				if !ok {
+					return nil, fmt.Errorf("SUM() requires numeric values, got %T in expression %q", val, inner)
+				}
+				hasNonNull = true
+				sumVal += num
 			}
-			row[i] = sum
+			if hasNonNull {
+				row[i] = sumVal
+			} else {
+				row[i] = nil
+			}
 
 		case strings.HasPrefix(upperExpr, "COLLECT(DISTINCT "):
 			// COLLECT(DISTINCT expression) - may have suffix like [..10]
@@ -1633,37 +1743,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			}
 
 		default:
-			// Check for arithmetic expressions: SUM(...) + SUM(...)
-			if strings.Contains(upperExpr, "+") && strings.Contains(upperExpr, "SUM(") {
-				// Handle SUM(x) + SUM(y) patterns used in VSCode stats query
-				// The CASE WHEN computed values check for embedding IS NOT NULL
-				// So SUM(chunkHasEmbedding) + SUM(fileHasEmbedding) counts embeddings
-				sum := int64(0)
-
-				// Count chunk embeddings (non-null)
-				seenChunks := make(map[storage.NodeID]bool)
-				for _, r := range rows {
-					if r.relatedNode != nil && !seenChunks[r.relatedNode.ID] {
-						if _, hasEmb := r.relatedNode.Properties["embedding"]; hasEmb {
-							seenChunks[r.relatedNode.ID] = true
-							sum++
-						}
-					}
-				}
-
-				// Count file embeddings (non-null)
-				seenFiles := make(map[storage.NodeID]bool)
-				for _, r := range rows {
-					if r.initialNode != nil && !seenFiles[r.initialNode.ID] {
-						if _, hasEmb := r.initialNode.Properties["embedding"]; hasEmb {
-							seenFiles[r.initialNode.ID] = true
-							sum++
-						}
-					}
-				}
-
-				row[i] = sum
-			} else if strings.Contains(item.expr, ".") {
+			if strings.Contains(item.expr, ".") {
 				// Handle simple property access: seed.name, connected.property, etc.
 				parts := strings.SplitN(item.expr, ".", 2)
 				varName := strings.TrimSpace(parts[0])

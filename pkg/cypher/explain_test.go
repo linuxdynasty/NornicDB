@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -485,4 +486,66 @@ func TestTruncate(t *testing.T) {
 			t.Errorf("truncate(%q, %d) = %q, want prefix of %q", tt.input, tt.maxLen, result, tt.expected)
 		}
 	}
+}
+
+func TestExplainHelpers_InferColumnsAndDBHitsBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	// YIELD * path.
+	cols := exec.inferExplainColumns("CALL db.labels() YIELD *")
+	require.NotNil(t, cols)
+
+	// YIELD + RETURN * path (projects yield aliases/names).
+	cols = exec.inferExplainColumns("CALL db.info() YIELD name AS dbName RETURN *")
+	require.Equal(t, []string{"dbName"}, cols)
+
+	// RETURN parsing path.
+	cols = exec.inferExplainColumns("MATCH (n) RETURN n.name AS name, n.age")
+	require.Equal(t, []string{"name", "n.age"}, cols)
+
+	// estimateDBHits operator-type switch coverage.
+	plan := &PlanOperator{
+		OperatorType:  "AllNodesScan",
+		EstimatedRows: 5,
+		Children: []*PlanOperator{
+			{OperatorType: "NodeIndexSeek", EstimatedRows: 4},
+			{OperatorType: "Filter", EstimatedRows: 3},
+			{OperatorType: "ShortestPath", EstimatedRows: 2},
+		},
+	}
+	hits := exec.estimateDBHits(plan)
+	require.Greater(t, hits, int64(0))
+	require.Equal(t, hits, plan.DBHits)
+}
+
+func TestExplainHelpers_InferColumnsAndDBHits_MoreBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	// YIELD items without RETURN should infer yielded column names.
+	cols := exec.inferExplainColumns("CALL db.info() YIELD name, version")
+	require.Equal(t, []string{"name", "version"}, cols)
+
+	// YIELD aliases without RETURN should use aliases.
+	cols = exec.inferExplainColumns("CALL db.info() YIELD name AS dbName, version AS ver")
+	require.Equal(t, []string{"dbName", "ver"}, cols)
+
+	// Nil plan branch.
+	assert.Equal(t, int64(0), exec.estimateDBHits(nil))
+
+	// Cover remaining operator-specific cost branches and recursive summation.
+	plan := &PlanOperator{
+		OperatorType:  "NodeByLabelScan",
+		EstimatedRows: 3,
+		Children: []*PlanOperator{
+			{OperatorType: "AllNodesScan", EstimatedRows: 2},
+			{OperatorType: "Expand", EstimatedRows: 4},
+			{OperatorType: "Custom", EstimatedRows: 5},
+		},
+	}
+	hits := exec.estimateDBHits(plan)
+	// 3*2 + 2*2 + 4*3 + 5 = 27
+	require.Equal(t, int64(27), hits)
+	require.Equal(t, int64(27), plan.DBHits)
 }

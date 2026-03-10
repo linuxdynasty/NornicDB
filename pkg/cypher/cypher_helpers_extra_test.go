@@ -2313,6 +2313,86 @@ func TestCypherHelpers_TryFastRevenueByProduct_Branches(t *testing.T) {
 	assert.Equal(t, float64(30), res.Rows[1][1])
 }
 
+func TestCypherHelpers_TryFastRevenueByProduct_TypeAndPaginationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	// Products with different unitPrice types.
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "A", "unitPrice": float32(10)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "B", "unitPrice": int(2)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p3", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "C", "unitPrice": int64(3)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p4", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "D", "unitPrice": "bad-number"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p5", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "E", "unitPrice": true}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o1", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(1)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o2", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(2)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o3", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(3)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o4", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(4)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o5", Labels: []string{"Order"}, Properties: map[string]interface{}{"id": int64(5)}})
+	require.NoError(t, err)
+
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e1", StartNode: "o1", EndNode: "p1", Type: "ORDERS", Properties: map[string]interface{}{"quantity": int(3)}}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e2", StartNode: "o2", EndNode: "p2", Type: "ORDERS", Properties: map[string]interface{}{"quantity": float32(5)}}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e3", StartNode: "o3", EndNode: "p3", Type: "ORDERS", Properties: map[string]interface{}{"quantity": int64(7)}}))
+	// Unusable unitPrice type/string should be skipped.
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e4", StartNode: "o4", EndNode: "p4", Type: "ORDERS", Properties: map[string]interface{}{"quantity": int64(1)}}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e5", StartNode: "o5", EndNode: "p5", Type: "ORDERS", Properties: map[string]interface{}{"quantity": "bad-qty"}}))
+
+	matches := &TraversalMatch{
+		StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}},
+		Relationship: RelationshipPattern{
+			Variable:  "r",
+			Types:     []string{"ORDERS"},
+			Direction: "incoming",
+			MinHops:   1,
+			MaxHops:   1,
+		},
+	}
+
+	res, ok, err := exec.tryFastRevenueByProduct(
+		matches,
+		"p, sum(p.unitPrice * r.quantity) as revenue",
+		"p.productName, revenue",
+		"revenue DESC",
+		1,
+		2,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []string{"p.productName", "revenue"}, res.Columns)
+	// Pagination branch should retain at least one row and keep numeric revenue values.
+	require.NotEmpty(t, res.Rows)
+	for _, row := range res.Rows {
+		require.Len(t, row, 2)
+		_, okName := row[0].(string)
+		require.True(t, okName)
+		_, okRev := row[1].(float64)
+		require.True(t, okRev)
+	}
+
+	// Skip beyond row count yields empty rows.
+	res, ok, err = exec.tryFastRevenueByProduct(
+		matches,
+		"p, sum(p.unitPrice * r.quantity) as revenue",
+		"p.productName, revenue",
+		"revenue DESC",
+		100,
+		0,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Empty(t, res.Rows)
+}
+
 func TestCypherHelpers_MergeRelationshipContextHelpers_Branches(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	eng := storage.NewNamespacedEngine(base, "test")
