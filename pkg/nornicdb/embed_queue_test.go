@@ -1896,6 +1896,24 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.Equal(t, storage.NodeID("fast-path"), n.ID)
 	})
 
+	t.Run("findNodeWithoutEmbedding falls back to storage helper", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     storage.NodeID("fallback-node"),
+			Labels: []string{"Memory"},
+			Properties: map[string]any{
+				"id":      "fallback-node",
+				"content": "needs embedding",
+			},
+		})
+		require.NoError(t, err)
+		ew := &EmbedWorker{storage: engine}
+		n := ew.findNodeWithoutEmbedding()
+		require.NotNil(t, n)
+		require.Equal(t, storage.NodeID("fallback-node"), n.ID)
+	})
+
 	t.Run("refreshEmbeddingIndex manager and fallback branches", func(t *testing.T) {
 		base := storage.NewMemoryEngine()
 		engine := storage.NewNamespacedEngine(base, "test")

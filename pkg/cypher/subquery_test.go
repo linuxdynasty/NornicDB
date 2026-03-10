@@ -2,12 +2,33 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingNodeLookupEngine struct {
+	storage.Engine
+	allNodesErr error
+	byLabelErr  error
+}
+
+func (e *failingNodeLookupEngine) AllNodes() ([]*storage.Node, error) {
+	if e.allNodesErr != nil {
+		return nil, e.allNodesErr
+	}
+	return e.Engine.AllNodes()
+}
+
+func (e *failingNodeLookupEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
+	if e.byLabelErr != nil {
+		return nil, e.byLabelErr
+	}
+	return e.Engine.GetNodesByLabel(label)
+}
 
 // TestCountSubqueryComparison tests COUNT { } subquery functionality
 func TestCountSubquery(t *testing.T) {
@@ -2750,4 +2771,72 @@ func TestExecuteMatchWithCallProcedure_ParseAndExecErrors(t *testing.T) {
 	require.NotNil(t, emptyRelVectorRes)
 	assert.Equal(t, []string{"relationship", "score"}, emptyRelVectorRes.Columns)
 	assert.Empty(t, emptyRelVectorRes.Rows)
+
+	// No matching rows + YIELD alias should preserve alias column name.
+	emptyAliasRes, err := exec.executeMatchWithCallProcedure(
+		ctx,
+		"MATCH (n:Person {name:'none'}) CALL db.info() YIELD name AS db_name RETURN db_name",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, emptyAliasRes)
+	assert.Equal(t, []string{"db_name"}, emptyAliasRes.Columns)
+	assert.Empty(t, emptyAliasRes.Rows)
+}
+
+func TestExecuteMatchWithCallProcedure_NodeLookupAndNilResultBranches(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("all nodes lookup error", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+		engine := &failingNodeLookupEngine{
+			Engine:      base,
+			allNodesErr: errors.New("all nodes failed"),
+		}
+		exec := NewStorageExecutor(engine)
+		_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n) CALL db.info()")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to get nodes")
+	})
+
+	t.Run("label lookup error", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+		engine := &failingNodeLookupEngine{
+			Engine:     base,
+			byLabelErr: errors.New("label lookup failed"),
+		}
+		exec := NewStorageExecutor(engine)
+		_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL db.info()")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to get nodes")
+	})
+
+	t.Run("matched rows but nil call result returns empty result", func(t *testing.T) {
+		base := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+		exec := NewStorageExecutor(base)
+
+		_, err := base.CreateNode(&storage.Node{
+			ID:     "p1",
+			Labels: []string{"Person"},
+			Properties: map[string]interface{}{
+				"name": "alice",
+			},
+		})
+		require.NoError(t, err)
+
+		// Register a deterministic procedure that returns nil result without error.
+		ClearUserProcedures()
+		t.Cleanup(ClearUserProcedures)
+		require.NoError(t, RegisterUserProcedure(
+			ProcedureSpec{Name: "custom.nil", MinArgs: 0, MaxArgs: 0},
+			func(context.Context, *StorageExecutor, string, []interface{}) (*ExecuteResult, error) {
+				return nil, nil
+			},
+		))
+
+		res, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL custom.nil()")
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Empty(t, res.Columns)
+		assert.Empty(t, res.Rows)
+	})
 }

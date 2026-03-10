@@ -116,6 +116,26 @@ func TestDB_Backup(t *testing.T) {
 		require.NoError(t, err)
 		assert.Greater(t, info.Size(), int64(0))
 	})
+
+	t.Run("backup closed database returns ErrClosed", func(t *testing.T) {
+		db, err := Open("", nil)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+
+		err = db.Backup(context.Background(), filepath.Join(t.TempDir(), "closed.json"))
+		require.ErrorIs(t, err, ErrClosed)
+	})
+
+	t.Run("backup write failure returns wrapped error", func(t *testing.T) {
+		db, err := Open("", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Writing backup to a directory path should fail in os.WriteFile.
+		err = db.Backup(context.Background(), t.TempDir())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to write backup")
+	})
 }
 
 func TestDB_ExportUserData_CSV(t *testing.T) {

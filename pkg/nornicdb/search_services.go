@@ -354,9 +354,7 @@ func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context)
 		ctx = context.Background()
 	}
 	entry.buildOnce.Do(func() {
-		db.bgWg.Add(1)
-		go func() {
-			defer db.bgWg.Done()
+		if !db.startBackgroundTask(func() {
 			err := entry.svc.BuildIndexes(ctx)
 			entry.buildErrMu.Lock()
 			entry.buildErr = err
@@ -369,7 +367,12 @@ func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context)
 			}
 			entry.buildErrMu.Unlock()
 			close(entry.buildDone)
-		}()
+		}) {
+			entry.buildErrMu.Lock()
+			entry.buildErr = ErrClosed
+			entry.buildErrMu.Unlock()
+			close(entry.buildDone)
+		}
 	})
 }
 
@@ -378,9 +381,7 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 		return
 	}
 	entry.pendingFlush.Do(func() {
-		db.bgWg.Add(1)
-		go func() {
-			defer db.bgWg.Done()
+		_ = db.startBackgroundTask(func() {
 			<-entry.buildDone
 
 			for {
@@ -409,7 +410,7 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 					}
 				}
 			}
-		}()
+		})
 	})
 }
 

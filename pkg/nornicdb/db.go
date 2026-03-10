@@ -1163,9 +1163,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Use a context cancelled on DB close so the build stops when the process is killed.
 	defaultDBName := db.defaultDatabaseName()
 	db.buildCtx, db.buildCancel = context.WithCancel(context.Background())
-	db.bgWg.Add(1)
-	go func() {
-		defer db.bgWg.Done()
+	_ = db.startBackgroundTask(func() {
 		ctx, cancel := context.WithTimeout(db.buildCtx, 4*time.Hour)
 		defer cancel()
 
@@ -1248,7 +1246,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		if db.embedQueue != nil {
 			db.embedQueue.StartWorkers()
 		}
-	}()
+	})
 
 	// Note: Auto-embed queue is initialized via SetEmbedder() after the server creates
 	// the embedder. This avoids duplicate embedder creation and ensures consistency
@@ -1611,6 +1609,24 @@ func (db *DB) StopEmbedQueue() {
 	}
 }
 
+// startBackgroundTask tracks DB-owned goroutines and prevents new tracked tasks
+// from being launched once shutdown has started.
+func (db *DB) startBackgroundTask(fn func()) bool {
+	db.mu.RLock()
+	if db.closed {
+		db.mu.RUnlock()
+		return false
+	}
+	db.bgWg.Add(1)
+	db.mu.RUnlock()
+
+	go func() {
+		defer db.bgWg.Done()
+		fn()
+	}()
+	return true
+}
+
 // Close closes the database.
 func (db *DB) Close() error {
 	db.mu.Lock()
@@ -1627,6 +1643,10 @@ func (db *DB) Close() error {
 // closeInternal performs cleanup without requiring the lock.
 // Used during initialization failures and normal close.
 func (db *DB) closeInternal() error {
+	db.mu.Lock()
+	db.closed = true
+	db.mu.Unlock()
+
 	// Stop clustering timer first (before waiting for goroutines)
 	db.stopClusteringTimer()
 
