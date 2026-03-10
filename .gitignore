@@ -67,3 +67,4 @@ nornic_vs_qdrant
 neural/models/
 llama.cpp/
 macos/MenuBarApp/.build
+pkg/cypher/file:

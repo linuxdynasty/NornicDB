@@ -578,10 +578,37 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 		"CALL apoc.path.expand('n1', 'KNOWS>', '', 1, 2)",
 		"CALL apoc.algo.pageRank({iterations: 2})",
 		"CALL apoc.algo.louvain()",
+		"CALL apoc.algo.betweenness()",
+		"CALL apoc.algo.closeness()",
+		"CALL apoc.algo.labelPropagation()",
+		"CALL apoc.algo.wcc()",
 		"CALL apoc.neighbors.tohop('n1','KNOWS',1)",
 		"CALL apoc.neighbors.byhop('n1','KNOWS',2)",
 		"CALL gds.version()",
 		"CALL gds.graph.list()",
+		"CALL apoc.periodic.iterate('RETURN 1 AS n','RETURN n',{})",
+		"CALL apoc.periodic.commit('RETURN 1')",
+		"CALL apoc.periodic.rock_n_roll('RETURN 1 AS n','RETURN n',{})",
+		"CALL apoc.export.csv.all('file:///missing.csv',{})",
+		"CALL apoc.export.csv.query('MATCH (n) RETURN n','file:///missing.csv',{})",
+		"CALL apoc.export.json.all('file:///missing.json',{})",
+		"CALL apoc.export.json.query('MATCH (n) RETURN n','file:///missing.json',{})",
+		"CALL apoc.load.jsonarray('file:///missing.json')",
+		"CALL apoc.load.json('file:///missing.json')",
+		"CALL apoc.load.csv('file:///missing.csv')",
+		"CALL apoc.import.json('file:///missing.json')",
+		"CALL gds.graph.project('g_cov', ['L1'], ['KNOWS'])",
+		"CALL gds.fastRP.stream('g_cov')",
+		"CALL gds.fastRP.stats('g_cov')",
+		"CALL db.index.vector.queryNodes('idx', 2, [0.1,0.2])",
+		"CALL db.index.vector.createNodeIndex('idx_cov','L1','embedding',2,'cosine')",
+		"CALL db.index.vector.createRelationshipIndex('idx_cov_rel','KNOWS','embedding',2,'cosine')",
+		"CALL db.index.fulltext.createNodeIndex('idx_txt_cov',['L1'],['name'])",
+		"CALL db.index.fulltext.createRelationshipIndex('idx_rel_cov',['KNOWS'],['text'])",
+		"CALL db.index.fulltext.drop('idx_txt_cov')",
+		"CALL db.index.vector.drop('idx_cov')",
+		"CALL db.create.setNodeVectorProperty('n1','embedding',[0.1,0.2])",
+		"CALL db.create.setRelationshipVectorProperty('rel1','embedding',[0.1,0.2])",
 		"CALL apoc.cypher.run('RETURN 1', {})",
 		"CALL apoc.cypher.runMany('RETURN 1; RETURN 2', {})",
 		"CALL db.retrieve({query:'x'})",
@@ -602,11 +629,19 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 	}
 
 	expectError := []string{
-		"CALL apoc.load.jsonarray('file:///missing.json')",
-		"CALL apoc.load.json('file:///missing.json')",
-		"CALL apoc.load.csv('file:///missing.csv')",
-		"CALL apoc.import.json('file:///missing.json')",
+		"CALL apoc.algo.dijkstra()",
+		"CALL apoc.algo.astar()",
+		"CALL apoc.algo.allSimplePaths()",
 		"CALL apoc.path.spanningTree('n1', {maxLevel: 1})",
+		"CALL gds.graph.drop('missing')",
+		"CALL gds.linkprediction.adamicAdar.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL gds.linkprediction.commonNeighbors.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL gds.linkprediction.resourceAllocation.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL gds.linkprediction.preferentialAttachment.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL gds.linkprediction.jaccard.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL gds.linkprediction.predict.stream('g_cov',{sourceNode:'n1',targetNode:'n2'})",
+		"CALL db.index.fulltext.queryNodes('idx','hello')",
+		"CALL db.index.vector.embed('hello')",
 		"CALL db.rerank({query:'x', candidates: []})",
 		"CALL db.infer({prompt:'x'})",
 		"CALL db.txlog.entries(1, 10)",
@@ -1664,7 +1699,8 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 		"CALL dbms.functions()",
 		"CALL db.index.fulltext.listAvailableAnalyzers()",
 		"CALL db.index.fulltext.queryRelationships('idx', 'nothing')",
-		"CALL db.index.vector.queryRelationships('idx', 2, $q)",
+		"CALL db.index.vector.queryRelationships('idx', 2, [0.1, 0.2])",
+		"CALL db.index.vector.queryNodes('idx', 2, [0.1, 0.2])",
 		"CALL gds.version()",
 		"CALL gds.graph.list()",
 		"CALL nornicdb.version()",
@@ -1677,7 +1713,10 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 		"CALL db.stats.clear()",
 		"CALL db.stats.collect()",
 		"CALL db.stats.retrieve()",
+		"CALL db.stats.retrieveAllAnTheStats()",
 		"CALL db.awaitIndexes()",
+		"CALL db.awaitIndex('idx', 1)",
+		"CALL db.resampleIndex('idx')",
 		"CALL apoc.algo.pageRank()",
 		"CALL apoc.algo.betweenness()",
 		"CALL apoc.algo.closeness()",
@@ -1698,9 +1737,11 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 	expectError := []string{
 		"CALL db.index.vector.queryRelationships('idx', 2, 'search text')", // no embedder
 		"CALL db.index.vector.queryNodes('idx', 2, 'search text')",         // no embedder
+		"CALL db.index.fulltext.queryNodes('idx', 'nothing')",              // missing fulltext index
 		"CALL db.txlog.entries(1, 2)",                                      // no WAL on memory engine
 		"CALL db.txlog.byTxId('x', 2)",                                     // no WAL on memory engine
 		"CALL db.index.vector.embed('hello')",                              // no embedder
+		"CALL tx.setMetaData({app:'test'})",                                // no active tx
 		"CALL db.rerank('x')",                                              // missing/invalid args
 		"CALL db.infer('x')",                                               // missing/invalid args
 		"CALL db.temporal.assertNoOverlap()",                               // malformed
@@ -1736,8 +1777,6 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 		"CALL db.index.fulltext.createRelationshipIndex()",                 // malformed
 		"CALL db.create.setNodeVectorProperty()",                           // malformed
 		"CALL db.create.setRelationshipVectorProperty()",                   // malformed
-		"CALL db.awaitIndex()",                                             // malformed
-		"CALL db.resampleIndex()",                                          // malformed
 	}
 	for _, q := range expectError {
 		t.Run("error_"+q, func(t *testing.T) {

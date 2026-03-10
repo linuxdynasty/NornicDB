@@ -4,6 +4,7 @@ package cypher
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -1778,4 +1779,175 @@ func TestMultipleCreatesPropertyAccess(t *testing.T) {
 	assert.True(t, foundCharlie, "should find Charlie node")
 	assert.True(t, foundDiana, "should find Diana node")
 	assert.True(t, foundOrder, "should find Order node")
+}
+
+func TestMatchMultiAndUnwindBranchCoverage(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(30), "items": []interface{}{"x", "y", "z"}}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(40), "items": []interface{}{"x", "x"}}})
+	require.NoError(t, err)
+
+	_, err = exec.executeMultiMatch(ctx, "MATCH (a:Person) MATCH (b:Person) WHERE a <> b")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires RETURN")
+
+	_, err = exec.executeMultiMatch(ctx, "MATCH (a:Person) RETURN a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected multiple MATCH clauses")
+
+	aggRes, err := exec.executeMultiMatch(ctx, "MATCH (a:Person) MATCH (b:Person) WHERE a <> b RETURN count(*) AS c, sum(a.age) AS s, avg(a.age) AS av, min(a.age) AS mn, max(a.age) AS mx, collect(b.name) AS names")
+	require.NoError(t, err)
+	require.Len(t, aggRes.Rows, 1)
+	assert.Equal(t, int64(2), aggRes.Rows[0][0])
+	assert.Equal(t, float64(70), aggRes.Rows[0][1])
+	assert.Equal(t, float64(35), aggRes.Rows[0][2])
+	assert.Equal(t, int64(30), aggRes.Rows[0][3])
+	assert.Equal(t, int64(40), aggRes.Rows[0][4])
+	require.Len(t, aggRes.Rows[0][5].([]interface{}), 2)
+
+	b := binding{
+		"a": &storage.Node{ID: "p1", Properties: map[string]interface{}{"age": int64(30)}},
+		"b": &storage.Node{ID: "p2", Properties: map[string]interface{}{"age": int64(40)}},
+	}
+	assert.True(t, exec.evaluateBindingWhere(b, "a <> b AND a.age < b.age"))
+	assert.True(t, exec.evaluateBindingWhere(b, "NOT a.age > b.age"))
+	assert.True(t, exec.evaluateBindingWhere(b, "a.age > b.age OR a = b"))
+	assert.True(t, exec.evaluateWhereForContext("a.age < b.age", map[string]*storage.Node{"a": b["a"], "b": b["b"]}))
+	assert.False(t, exec.evaluateWhereForContext("a.name", map[string]*storage.Node{"a": b["a"]}))
+	assert.False(t, isSystemNode(nil))
+	assert.True(t, isSystemNode(&storage.Node{Labels: []string{"_meta"}}))
+	assert.False(t, isSystemNode(&storage.Node{Labels: []string{"Person"}}))
+
+	_, err = exec.executeMatchUnwind(ctx, "MATCH (n:Person) UNWIND n.items RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNWIND requires AS clause")
+
+	unwindRes, err := exec.executeMatchUnwind(ctx, "MATCH (n:Person) UNWIND n.items AS item WHERE item <> 'y' RETURN item ORDER BY item DESC SKIP 1 LIMIT 2")
+	require.NoError(t, err)
+	require.Len(t, unwindRes.Rows, 2)
+	assert.Equal(t, "y", unwindRes.Rows[0][0])
+
+	aggUnwindRes, err := exec.executeMatchUnwind(ctx, "MATCH (n:Person {name:'alice'}) UNWIND n.items AS item RETURN count(*) AS c, collect(item) AS allItems")
+	require.NoError(t, err)
+	require.Len(t, aggUnwindRes.Rows, 1)
+	assert.Equal(t, int64(3), aggUnwindRes.Rows[0][0])
+	require.Len(t, aggUnwindRes.Rows[0][1].([]interface{}), 3)
+}
+
+func TestCypherUtilityConstructorsAndProcedureDDLBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// findStandaloneWithIndex should ignore STARTS/ENDS WITH and find standalone WITH.
+	s := "RETURN n WHERE n.name STARTS WITH 'a' WITH n RETURN n"
+	withIdx := findStandaloneWithIndex(s)
+	require.Greater(t, withIdx, 0)
+	assert.Equal(t, "WITH", s[withIdx:withIdx+4])
+	assert.Equal(t, -1, findStandaloneWithIndex("RETURN n WHERE n.name ENDS WITH 'z'"))
+
+	// Query analyzer constructor default branch.
+	qa := NewQueryAnalyzer(0)
+	require.NotNil(t, qa)
+	assert.Equal(t, 1000, qa.maxSize)
+
+	// Query plan cache constructor/default and LRU branches.
+	pc := NewQueryPlanCache(0)
+	require.NotNil(t, pc)
+	assert.Equal(t, 500, pc.maxSize)
+	pc.Put("MATCH (n) RETURN n", nil, QueryMatch)
+	_, qt, found := pc.Get("MATCH   (n)\nRETURN n")
+	require.True(t, found)
+	assert.Equal(t, QueryMatch, qt)
+
+	pcSmall := NewQueryPlanCache(1)
+	pcSmall.Put("RETURN 1", nil, QueryReturn)
+	pcSmall.Put("RETURN 2", nil, QueryReturn)
+	_, _, found = pcSmall.Get("RETURN 1")
+	assert.False(t, found)
+	_, _, found = pcSmall.Get("RETURN 2")
+	assert.True(t, found)
+
+	// Worker pool constructor/default + execution branches.
+	pool := NewWorkerPool(0)
+	require.NotNil(t, pool)
+	require.Greater(t, pool.numWorkers, 0)
+	pool.Start()
+	var jobsRun atomic.Int32
+	for i := 0; i < 5; i++ {
+		pool.Submit(func() { jobsRun.Add(1) })
+	}
+	pool.Wait()
+	assert.Equal(t, int32(5), jobsRun.Load())
+	pool.Stop()
+	pool.Stop() // idempotent stop
+
+	// Flush on non-async engine is a no-op nil.
+	require.NoError(t, exec.Flush())
+
+	// queryDeletesNodes helper behavior.
+	assert.True(t, queryDeletesNodes("MATCH (n) DETACH DELETE n"))
+	assert.False(t, queryDeletesNodes("MATCH (a)-[r]->(b) DELETE r"))
+	assert.True(t, queryDeletesNodes("MATCH (n) DELETE n"))
+
+	// CREATE PROCEDURE: active tx disallowed.
+	exec.txContext = &TransactionContext{active: true}
+	_, err := exec.executeCreateProcedure(ctx, "CREATE PROCEDURE p_cov() MODE READ AS RETURN 1 AS v")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed inside an active transaction")
+	exec.txContext = nil
+
+	// CREATE PROCEDURE: syntax + arg parsing error branches.
+	_, err = exec.executeCreateProcedure(ctx, "CREATE PROCEDURE bad syntax")
+	require.Error(t, err)
+	_, err = exec.executeCreateProcedure(ctx, "CREATE PROCEDURE p_cov_dup(a,a) MODE READ AS RETURN 1 AS v")
+	require.Error(t, err)
+
+	// CREATE PROCEDURE: create, duplicate without replace, and replace.
+	_, err = exec.executeCreateProcedure(ctx, "CREATE PROCEDURE p_cov(v) MODE READ AS RETURN v AS value")
+	require.NoError(t, err)
+	_, err = exec.executeCreateProcedure(ctx, "CREATE PROCEDURE p_cov(v) MODE READ AS RETURN v AS value")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	_, err = exec.executeCreateProcedure(ctx, "CREATE OR REPLACE PROCEDURE p_cov(v) MODE READ AS RETURN v AS value")
+	require.NoError(t, err)
+}
+
+func TestRunSearchRequestBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.runSearchRequest(ctx, map[string]interface{}{}, false, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query is required")
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "doc1",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"name": "alpha", "text": "alpha beta"},
+	})
+	require.NoError(t, err)
+
+	req := map[string]interface{}{
+		"query":          "alpha",
+		"limit":          int64(5),
+		"types":          []interface{}{"Doc"},
+		"minSimilarity":  0.01,
+		"rerankTopK":     int64(3),
+		"rerankMinScore": 0.0,
+		"embedding":      []interface{}{0.1, 0.2, 0.3},
+	}
+	res, err := exec.runSearchRequest(ctx, req, true, true)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, []string{"node", "score", "rrf_score", "vector_rank", "bm25_rank", "search_method", "fallback_triggered"}, res.Columns)
+	require.NotNil(t, exec.searchService)
 }

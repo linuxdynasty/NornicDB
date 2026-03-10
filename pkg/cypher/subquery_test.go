@@ -2380,3 +2380,71 @@ func TestSubqueryHelpers_ExecuteMatchWithCallProcedure_Branches(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, okRes.Rows, 2)
 }
+
+func TestSubqueryHelpers_BatchingAndResultModifiers_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "a", "age": int64(10)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "b", "age": int64(20)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "c", "age": int64(30)}})
+	require.NoError(t, err)
+
+	readOnlyRes, err := exec.executeCallInTransactions(ctx, "MATCH (n:Person) RETURN n.name AS name", 0)
+	require.NoError(t, err)
+	require.Len(t, readOnlyRes.Rows, 3)
+
+	writeRes, err := exec.executeCallInTransactions(ctx, "MATCH (n:Person) SET n.flag = true RETURN n.name AS name", 2)
+	require.NoError(t, err)
+	require.Len(t, writeRes.Rows, 3)
+	for _, row := range writeRes.Rows {
+		require.Len(t, row, 1)
+		require.NotEmpty(t, row[0])
+	}
+
+	_, err = exec.executeCallInTransactions(ctx, "MATCH (n:Person) SET n.bad = true RETURN", 1)
+	require.Error(t, err)
+
+	withLimit := exec.addLimitSkipToSubquery("MATCH (n:Person) SET n.flag = true RETURN n.name AS name", 2, 1)
+	assert.Contains(t, withLimit, "WITH n SKIP 1 LIMIT 2")
+	withOnlyLimit := exec.addLimitSkipToSubquery("MATCH (n:Person) SET n.flag = true RETURN n.name AS name", 2, 0)
+	assert.Contains(t, withOnlyLimit, "WITH n LIMIT 2")
+	fallbackNoReturn := exec.addLimitSkipToSubquery("CREATE (n:Tmp)", 2, 1)
+	assert.Equal(t, "CREATE (n:Tmp) SKIP 1 LIMIT 2", fallbackNoReturn)
+	fallbackExistingLimit := exec.addLimitSkipToSubquery("MATCH (n:Person) RETURN n.name LIMIT 1", 2, 0)
+	assert.Contains(t, fallbackExistingLimit, "LIMIT 2")
+
+	inner := &ExecuteResult{
+		Columns: []string{"name", "age"},
+		Rows: [][]interface{}{
+			{"a", int64(10)},
+			{"b", int64(20)},
+			{"c", int64(30)},
+		},
+		Stats: &QueryStats{},
+	}
+	retRes, err := exec.processCallSubqueryReturn(inner, "RETURN name AS n, age ORDER BY age DESC SKIP 1 LIMIT 1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"n", "age"}, retRes.Columns)
+	require.Len(t, retRes.Rows, 1)
+	assert.Equal(t, "b", retRes.Rows[0][0])
+
+	aggRes, err := exec.processCallSubqueryReturn(inner, "RETURN count(*) AS c, sum(age) AS s, avg(age) AS av, min(age) AS mn, max(age) AS mx, collect(name) AS names")
+	require.NoError(t, err)
+	require.Len(t, aggRes.Rows, 1)
+	assert.Equal(t, int64(3), aggRes.Rows[0][0])
+	assert.Equal(t, float64(60), aggRes.Rows[0][1])
+	assert.Equal(t, float64(20), aggRes.Rows[0][2])
+
+	_, err = exec.processAfterCallSubquery(ctx, inner, "SET x = 1")
+	require.Error(t, err)
+
+	modified, err := exec.applyResultModifiers(inner, "ORDER BY age DESC SKIP 1 LIMIT 1")
+	require.NoError(t, err)
+	require.Len(t, modified.Rows, 1)
+	assert.Equal(t, "b", modified.Rows[0][0])
+}
