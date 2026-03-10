@@ -168,3 +168,20 @@ func TestTransactionStorageWrapper_ToUserNode_NilSafe(t *testing.T) {
 	assert.Equal(t, storage.NodeID("n1"), out.ID)
 	assert.EqualValues(t, 1, out.Properties["x"])
 }
+
+func TestTransactionStorageWrapper_BulkDelete_ErrorPaths(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	tx, err := eng.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	w := &transactionStorageWrapper{tx: tx, underlying: eng, namespace: "", separator: ":"}
+
+	err = w.BulkDeleteNodes([]storage.NodeID{"missing-node"})
+	require.Error(t, err)
+
+	err = w.BulkDeleteEdges([]storage.EdgeID{"missing-edge"})
+	require.Error(t, err)
+}

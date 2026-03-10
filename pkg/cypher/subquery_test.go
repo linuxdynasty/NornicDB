@@ -2686,3 +2686,58 @@ func TestSubqueryHelpers_AddLimitSkipToSubquery_OperationBranches(t *testing.T) 
 		})
 	}
 }
+
+func TestExistsSubqueryHelpers_DirectBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'}),
+		       (c:Person {name: 'Charlie'})
+	`, nil)
+	require.NoError(t, err)
+
+	nodes, err := store.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	var alice *storage.Node
+	for _, n := range nodes {
+		if n.Properties["name"] == "Alice" {
+			alice = n
+			break
+		}
+	}
+	require.NotNil(t, alice)
+
+	// Empty/malformed clauses intentionally default to true to avoid false negatives.
+	assert.True(t, exec.evaluateExistsSubquery(alice, "p", "name = 'x'"))
+	assert.True(t, exec.evaluateNotExistsSubquery(alice, "p", "name = 'x'"))
+
+	assert.True(t, exec.evaluateExistsSubquery(alice, "p", "EXISTS { MATCH (p)-[:KNOWS]->() }"))
+	assert.False(t, exec.evaluateNotExistsSubquery(alice, "p", "NOT EXISTS { MATCH (p)-[:KNOWS]->() }"))
+}
+
+func TestExecuteMatchWithCallProcedure_ParseAndExecErrors(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	// Pattern that cannot be parsed into a node variable.
+	_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH () CALL db.info() YIELD name RETURN name")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not parse node pattern")
+
+	// Valid parsed node, but CALL execution should error for unknown procedure.
+	_, err = exec.Execute(ctx, "CREATE (n:Person {name:'a'})", nil)
+	require.NoError(t, err)
+	_, err = exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL db.missingProcedure()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to execute CALL")
+
+	// No matching rows, no YIELD, non-vector procedure => empty columns branch.
+	emptyRes, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person {name:'none'}) CALL db.info()")
+	require.NoError(t, err)
+	require.NotNil(t, emptyRes)
+	assert.Empty(t, emptyRes.Columns)
+	assert.Empty(t, emptyRes.Rows)
+}

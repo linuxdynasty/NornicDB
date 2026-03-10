@@ -2197,3 +2197,33 @@ func TestFunctionFullMathAdditionalCoverage(t *testing.T) {
 		t.Fatalf("list comp identity len = %d, want 3", len(got))
 	}
 }
+
+func TestFunctionEvaluator_ArrayIndexingAdditionalBranches(t *testing.T) {
+	e := setupTestExecutor(t)
+	node := createTestNode(t, e, "idx-n", []string{"Person"}, map[string]interface{}{
+		"arrAny": []interface{}{int64(7), int64(8), int64(9)},
+		"arrStr": []string{"aa", "bb", "cc"},
+		"text":   "hello",
+	})
+	nodes := map[string]*storage.Node{"n": node}
+
+	assertEqual(t, "n.arrAny[1]", int64(8), e.evaluateExpressionWithContext("n.arrAny[1]", nodes, nil))
+	assertEqual(t, "n.arrAny[-1]", int64(9), e.evaluateExpressionWithContext("n.arrAny[-1]", nodes, nil))
+	assertEqual(t, "n.arrStr[0]", "aa", e.evaluateExpressionWithContext("n.arrStr[0]", nodes, nil))
+	assertEqual(t, "n.arrStr[-1]", "cc", e.evaluateExpressionWithContext("n.arrStr[-1]", nodes, nil))
+	assertEqual(t, "n.text[1]", "e", e.evaluateExpressionWithContext("n.text[1]", nodes, nil))
+	assertEqual(t, "n.text[-1]", "o", e.evaluateExpressionWithContext("n.text[-1]", nodes, nil))
+
+	if got := e.evaluateExpressionWithContext("n.arrAny[99]", nodes, nil); got != nil {
+		t.Fatalf("n.arrAny[99] should be nil, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("1 IN [1,2,3]", nodes, nil); got != true {
+		t.Fatalf("1 IN [1,2,3] should be true, got %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("n.arrAny[..2]", nodes, nil); !reflect.DeepEqual([]interface{}{int64(7), int64(8)}, got) {
+		t.Fatalf("n.arrAny[..2] unexpected: %#v", got)
+	}
+	if got := e.evaluateExpressionWithContext("n.arrAny[1..]", nodes, nil); !reflect.DeepEqual([]interface{}{int64(8), int64(9)}, got) {
+		t.Fatalf("n.arrAny[1..] unexpected: %#v", got)
+	}
+}

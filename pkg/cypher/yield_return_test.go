@@ -287,6 +287,37 @@ func TestYieldReturnIntegration(t *testing.T) {
 	})
 }
 
+func TestCallDbIndexFulltextQueryNodes_DirectBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"content": "alpha beta"},
+	})
+	require.NoError(t, err)
+
+	// Empty query branch returns empty result without error.
+	res, err := exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('default', '')")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Empty(t, res.Rows)
+
+	// Query with only negated terms yields no include terms.
+	res, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('default', '-alpha NOT beta')")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Empty(t, res.Rows)
+
+	// Malformed call extraction path.
+	res, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Empty(t, res.Rows)
+}
+
 // TestYieldReturnWithOtherProcedures tests YIELD...RETURN with various procedures
 func TestYieldReturnWithOtherProcedures(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()

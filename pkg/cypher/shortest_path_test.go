@@ -374,3 +374,41 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 	assert.True(t, isShortestPathQuery("MATCH p = allShortestPaths((a)-[*]-(b)) RETURN p"))
 	assert.False(t, isShortestPathQuery("MATCH (n) RETURN n"))
 }
+
+func TestFindNodeByPattern_HelperBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "p1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "x1",
+		Labels:     []string{"Other"},
+		Properties: map[string]interface{}{"name": "X"},
+	})
+	require.NoError(t, err)
+
+	byLabel := exec.findNodeByPattern(nodePatternInfo{
+		labels:     []string{"Person"},
+		properties: map[string]interface{}{"name": "Alice"},
+	})
+	require.NotNil(t, byLabel)
+	assert.Equal(t, storage.NodeID("p1"), byLabel.ID)
+
+	allNodesPath := exec.findNodeByPattern(nodePatternInfo{
+		properties: map[string]interface{}{"name": "X"},
+	})
+	require.NotNil(t, allNodesPath)
+	assert.Equal(t, storage.NodeID("x1"), allNodesPath.ID)
+
+	notFound := exec.findNodeByPattern(nodePatternInfo{
+		labels:     []string{"Person"},
+		properties: map[string]interface{}{"name": "Missing"},
+	})
+	assert.Nil(t, notFound)
+}

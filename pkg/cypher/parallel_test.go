@@ -122,6 +122,18 @@ func TestParallelCount(t *testing.T) {
 			t.Errorf("expected 2500, got %d", count)
 		}
 	})
+
+	t.Run("sequential disabled", func(t *testing.T) {
+		SetParallelConfig(ParallelConfig{
+			Enabled:      false,
+			MaxWorkers:   4,
+			MinBatchSize: 10,
+		})
+		count := parallelCount(nodes[:5], nil)
+		if count != 5 {
+			t.Fatalf("expected 5, got %d", count)
+		}
+	})
 }
 
 func TestParallelSum(t *testing.T) {
@@ -147,6 +159,24 @@ func TestParallelSum(t *testing.T) {
 	sum := parallelSum(nodes, "amount")
 	if sum != expectedSum {
 		t.Errorf("expected sum %f, got %f", expectedSum, sum)
+	}
+}
+
+func TestParallelSum_IgnoresMissingOrNonNumeric(t *testing.T) {
+	nodes := []*storage.Node{
+		{ID: "n1", Properties: map[string]interface{}{"amount": float64(10)}},
+		{ID: "n2", Properties: map[string]interface{}{"amount": "bad"}},
+		{ID: "n3", Properties: map[string]interface{}{"other": float64(99)}},
+	}
+
+	SetParallelConfig(ParallelConfig{
+		Enabled:      false, // force sequential branch
+		MaxWorkers:   2,
+		MinBatchSize: 1,
+	})
+	sum := parallelSum(nodes, "amount")
+	if sum != 10 {
+		t.Fatalf("expected sum 10, got %f", sum)
 	}
 }
 

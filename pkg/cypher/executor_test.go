@@ -75,6 +75,26 @@ func TestExecuteInvalidSyntax(t *testing.T) {
 	}
 }
 
+func TestExecuteCompoundCreateWithDelete_Branches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeCompoundCreateWithDelete(ctx, "CREATE (n:Tmp {name:'x'}) RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid CREATE...WITH...DELETE")
+
+	// Edge delete branch.
+	res, err := exec.executeCompoundCreateWithDelete(ctx, "CREATE (a:TmpA)-[r:REL]->(b:TmpB) WITH r DELETE r RETURN count(r)")
+	require.NoError(t, err)
+	require.NotNil(t, res.Stats)
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+	assert.Equal(t, 1, res.Stats.RelationshipsDeleted)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(1), res.Rows[0][0])
+}
+
 func TestExecuteUnsupportedQuery(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

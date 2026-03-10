@@ -545,3 +545,76 @@ func TestMerge_WithParameters(t *testing.T) {
 	require.Len(t, result.Rows, 1)
 	assert.Equal(t, "Test Node", result.Rows[0][0])
 }
+
+func TestExecuteMergeRelSegment_ErrorBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	a := &storage.Node{ID: "a1", Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	b := &storage.Node{ID: "b1", Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err := store.CreateNode(a)
+	require.NoError(t, err)
+	_, err = store.CreateNode(b)
+	require.NoError(t, err)
+
+	// Missing start node closing paren.
+	err = e.executeMergeRelSegment(ctx, "(a-[:REL]->(b)", map[string]*storage.Node{"a": a, "b": b})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "start node variable")
+
+	// Missing relationship brackets.
+	err = e.executeMergeRelSegment(ctx, "(a)-REL->(b)", map[string]*storage.Node{"a": a, "b": b})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing relationship brackets")
+
+	// Missing start var in context.
+	err = e.executeMergeRelSegment(ctx, "(a)-[:REL]->(b)", map[string]*storage.Node{"b": b})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "start node variable")
+
+	// Missing end var in context.
+	err = e.executeMergeRelSegment(ctx, "(a)-[:REL]->(b)", map[string]*storage.Node{"a": a})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "end node variable")
+}
+
+func TestSplitMergeChainClauseBlock_Branches(t *testing.T) {
+	assert.Nil(t, splitMergeChainClauseBlock("   "))
+
+	// No recognized keyword -> returns whole block as one clause.
+	one := splitMergeChainClauseBlock("x = 1")
+	require.Len(t, one, 1)
+	assert.Equal(t, "x = 1", one[0])
+
+	// Leading noise should be skipped to first recognized keyword.
+	clauses := splitMergeChainClauseBlock("foo bar MATCH (n) RETURN n")
+	require.Len(t, clauses, 2)
+	assert.Equal(t, "MATCH (n)", clauses[0])
+	assert.Equal(t, "RETURN n", clauses[1])
+}
+
+func TestApplyWithProjection_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	n := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{}}
+	r := &storage.Edge{ID: "e1", Type: "KNOWS", StartNode: "n1", EndNode: "n1", Properties: map[string]interface{}{}}
+	nodeCtx := map[string]*storage.Node{"n": n}
+	relCtx := map[string]*storage.Edge{"r": r}
+
+	remaining, keptNodes, keptRels := exec.applyWithProjection("* MATCH (n) RETURN n", nodeCtx, relCtx)
+	assert.Equal(t, "MATCH (n) RETURN n", remaining)
+	assert.Equal(t, nodeCtx, keptNodes)
+	assert.Equal(t, relCtx, keptRels)
+
+	remaining, keptNodes, keptRels = exec.applyWithProjection("n RETURN n", nodeCtx, relCtx)
+	assert.Equal(t, "RETURN n", remaining)
+	require.Contains(t, keptNodes, "n")
+	assert.Empty(t, keptRels)
+
+	// Non-matching projection drops context keys not explicitly projected.
+	remaining, keptNodes, keptRels = exec.applyWithProjection("n + 1", nodeCtx, relCtx)
+	assert.Equal(t, "", remaining)
+	assert.Empty(t, keptNodes)
+	assert.Empty(t, keptRels)
+}

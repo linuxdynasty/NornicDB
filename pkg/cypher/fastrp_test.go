@@ -1245,3 +1245,10 @@ func TestCallGdsGraphProject_AdditionalBranches(t *testing.T) {
 	require.Len(t, res.Rows, 1)
 	assert.Equal(t, "g_default", res.Rows[0][0])
 }
+
+func TestExtractStringConfigArg_Branches(t *testing.T) {
+	assert.Equal(t, "euclidean", extractStringConfigArg("{similarityMetric: 'euclidean'}", "similarityMetric"))
+	assert.Equal(t, "", extractStringConfigArg("{alpha: 1}", "similarityMetric"))
+	assert.Equal(t, "", extractStringConfigArg("{similarityMetric: euclidean}", "similarityMetric"))
+	assert.Equal(t, "", extractStringConfigArg("{similarityMetric: 'euclidean}", "similarityMetric"))
+}

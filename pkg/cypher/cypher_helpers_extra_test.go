@@ -28,6 +28,17 @@ type testTimeStringer string
 
 func (ts testTimeStringer) String() string { return string(ts) }
 
+type failingEmbedder struct {
+	err error
+}
+
+func (f *failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	if f.err == nil {
+		f.err = fmt.Errorf("embed failed")
+	}
+	return nil, f.err
+}
+
 func TestCypherHelpers_DecodeMapAndAssignValue(t *testing.T) {
 	m := map[string]interface{}{
 		"name":       "alice",
@@ -120,6 +131,43 @@ func TestCypherHelpers_ProcedureRegistryAndPatternNames(t *testing.T) {
 	assert.Equal(t, "OutgoingCountAgg", PatternOutgoingCountAgg.String())
 	assert.Equal(t, "EdgePropertyAgg", PatternEdgePropertyAgg.String())
 	assert.Equal(t, "LargeResultSet", PatternLargeResultSet.String())
+}
+
+func TestCypherHelpers_ProcedureRegistryAndArgParsing_Errors(t *testing.T) {
+	reg := NewProcedureRegistry()
+
+	err := reg.RegisterBuiltIn(ProcedureSpec{Name: "db.bad", MinArgs: 0, MaxArgs: 0}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil handler")
+
+	err = reg.RegisterUser(ProcedureSpec{Name: "", MinArgs: 0, MaxArgs: 0}, func(context.Context, *StorageExecutor, string, []interface{}) (*ExecuteResult, error) {
+		return &ExecuteResult{}, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name cannot be empty")
+
+	err = reg.RegisterUser(ProcedureSpec{Name: "custom.bad", MinArgs: 2, MaxArgs: 1}, func(context.Context, *StorageExecutor, string, []interface{}) (*ExecuteResult, error) {
+		return &ExecuteResult{}, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxArgs")
+
+	// parseProcedureArgLiteral branches.
+	v, err := parseProcedureArgLiteral("")
+	require.NoError(t, err)
+	assert.Equal(t, "", v)
+	v, err = parseProcedureArgLiteral("\"abc\"")
+	require.NoError(t, err)
+	assert.Equal(t, "abc", v)
+	v, err = parseProcedureArgLiteral("$param")
+	require.NoError(t, err)
+	assert.Equal(t, "$param", v)
+	v, err = parseProcedureArgLiteral("{a:1}")
+	require.NoError(t, err)
+	assert.Equal(t, "{a:1}", v)
+	v, err = parseProcedureArgLiteral("3.25")
+	require.NoError(t, err)
+	assert.Equal(t, 3.25, v)
 }
 
 func TestCypherHelpers_LooksNumericAndSkipString(t *testing.T) {
@@ -1786,6 +1834,130 @@ func TestCypherHelpers_VectorAndFulltextRelationshipQueryBranches(t *testing.T) 
 	require.Error(t, err)
 }
 
+func TestCypherHelpers_VectorRelationshipQuery_AdditionalBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	// Setup small graph with relationship embeddings.
+	_, err := exec.storage.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "a"}})
+	require.NoError(t, err)
+	_, err = exec.storage.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "b"}})
+	require.NoError(t, err)
+	_, err = exec.storage.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "c"}})
+	require.NoError(t, err)
+	require.NoError(t, exec.storage.CreateEdge(&storage.Edge{
+		ID:        "r1",
+		StartNode: "a",
+		EndNode:   "b",
+		Type:      "LINKS",
+		Properties: map[string]interface{}{
+			"emb": []float32{1, 0},
+		},
+	}))
+	require.NoError(t, exec.storage.CreateEdge(&storage.Edge{
+		ID:        "r2",
+		StartNode: "a",
+		EndNode:   "c",
+		Type:      "LINKS",
+		Properties: map[string]interface{}{
+			"emb": []float64{0, 1},
+		},
+	}))
+	// Different type should be filtered by index relType.
+	require.NoError(t, exec.storage.CreateEdge(&storage.Edge{
+		ID:        "r3",
+		StartNode: "b",
+		EndNode:   "c",
+		Type:      "OTHER",
+		Properties: map[string]interface{}{
+			"emb": []float32{1, 0},
+		},
+	}))
+	// Dimension mismatch edge should be skipped.
+	require.NoError(t, exec.storage.CreateEdge(&storage.Edge{
+		ID:        "r4",
+		StartNode: "c",
+		EndNode:   "a",
+		Type:      "LINKS",
+		Properties: map[string]interface{}{
+			"emb": []float32{1, 0, 0},
+		},
+	}))
+
+	schema := exec.storage.GetSchema()
+	require.NoError(t, schema.AddVectorIndex("idx_euclid", "LINKS", "emb", 2, "euclidean"))
+	require.NoError(t, schema.AddVectorIndex("idx_dot", "LINKS", "emb", 2, "dot"))
+
+	// Euclidean branch + k limiting branch.
+	res, err := exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx_euclid', 1, [1,0])")
+	require.NoError(t, err)
+	require.Equal(t, []string{"relationship", "score"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+
+	// Dot branch.
+	res, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx_dot', 5, [1,0])")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+
+	// Parameter []float64 branch.
+	ctxF64 := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []float64{1, 0}})
+	res, err = exec.callDbIndexVectorQueryRelationships(ctxF64, "CALL db.index.vector.queryRelationships('idx_dot', 5, $q)")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	// String parameter with embedder branch.
+	exec.SetEmbedder(&mockQueryEmbedder{embedding: []float32{1, 0}})
+	ctxString := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": "hello"})
+	res, err = exec.callDbIndexVectorQueryRelationships(ctxString, "CALL db.index.vector.queryRelationships('idx_dot', 5, $q)")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	// No-input + params provided but all values have supported types => generic no-input error branch.
+	ctxSupported := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []float32{1, 0}})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxSupported, "CALL db.index.vector.queryRelationships('idx_dot', 5, 123)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no query vector or search text provided")
+
+	// Missing vector/text with no params branch.
+	_, err = exec.callDbIndexVectorQueryRelationships(context.Background(), "CALL db.index.vector.queryRelationships('idx_dot', 5, 123)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no query vector or search text provided")
+
+	// []float32 parameter branch.
+	ctxF32 := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []float32{1, 0}})
+	res, err = exec.callDbIndexVectorQueryRelationships(ctxF32, "CALL db.index.vector.queryRelationships('idx_dot', 5, $q)")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	// []interface{} numeric branch.
+	ctxIface := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": []interface{}{1, float64(0)}})
+	res, err = exec.callDbIndexVectorQueryRelationships(ctxIface, "CALL db.index.vector.queryRelationships('idx_dot', 5, $q)")
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	// String parameter with failing embedder branch.
+	exec.SetEmbedder(&failingEmbedder{err: fmt.Errorf("forced embed error")})
+	ctxStringFail := context.WithValue(ctx, paramsKey, map[string]interface{}{"q": "hello"})
+	_, err = exec.callDbIndexVectorQueryRelationships(ctxStringFail, "CALL db.index.vector.queryRelationships('idx_dot', 5, $q)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to embed parameter")
+
+	// Direct string query with failing embedder branch.
+	_, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx_dot', 5, 'hello')")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to embed query")
+
+	// Parse error branch.
+	_, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx_dot', 5")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vector query parse error")
+
+	// Index missing branch: no property filter means no embeddings picked from relationships.
+	res, err = exec.callDbIndexVectorQueryRelationships(ctx, "CALL db.index.vector.queryRelationships('idx_missing', 5, [1,0])")
+	require.NoError(t, err)
+	assert.Empty(t, res.Rows)
+}
+
 func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
 	ctx := context.Background()
@@ -1952,6 +2124,54 @@ func TestCypherHelpers_ExecuteCartesianProductMatch_Branches(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, aggOut.Rows, 1)
 	assert.Equal(t, int64(4), aggOut.Rows[0][0]) // 2x2 cartesian product
+}
+
+func TestCypherHelpers_ExecuteCartesianProductMatch_LabelAndAnonymousBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person", "Employee"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// Additional-label filtering path (:Person:Employee).
+	retItems := []returnItem{{expr: "p.name", alias: "name"}}
+	res := &ExecuteResult{Columns: []string{"name"}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+	out, err := exec.executeCartesianProductMatch(
+		ctx,
+		"MATCH (p:Person:Employee) RETURN p.name AS name",
+		"MATCH (p:Person:Employee)",
+		[]string{"(p:Person:Employee)"},
+		-1,
+		strings.Index(strings.ToUpper("MATCH (p:Person:Employee) RETURN p.name AS name"), "RETURN"),
+		retItems,
+		false,
+		false,
+		res,
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Rows, 1)
+	assert.Equal(t, "alice", out.Rows[0][0])
+
+	// Anonymous pattern (no variable) results in no pattern matches and empty rows.
+	anon := &ExecuteResult{Columns: []string{"x"}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+	anonOut, err := exec.executeCartesianProductMatch(
+		ctx,
+		"MATCH (:Person) RETURN 1 AS x",
+		"MATCH (:Person)",
+		[]string{"(:Person)"},
+		-1,
+		strings.Index(strings.ToUpper("MATCH (:Person) RETURN 1 AS x"), "RETURN"),
+		[]returnItem{{expr: "1", alias: "x"}},
+		false,
+		false,
+		anon,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, anonOut.Rows)
 }
 
 func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {

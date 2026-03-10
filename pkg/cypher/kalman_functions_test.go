@@ -122,6 +122,12 @@ func TestKalmanVelocityValue(t *testing.T) {
 	}
 }
 
+func TestKalmanStateValue_InvalidJSON(t *testing.T) {
+	if got := kalmanStateValue("not-json"); got != 0 {
+		t.Fatalf("expected 0 on invalid json, got %f", got)
+	}
+}
+
 func TestKalmanVelocityInit_Default(t *testing.T) {
 	stateJSON := kalmanVelocityInit(0, 0, false)
 

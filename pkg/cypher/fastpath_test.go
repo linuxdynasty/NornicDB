@@ -243,6 +243,45 @@ func TestFastPath_CreateDeleteRelCount_HelperBranches(t *testing.T) {
 	assert.Nil(t, noneRes)
 }
 
+func TestFastPath_CreateDeleteRel_HelperBranches(t *testing.T) {
+	baseEngine := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:     "a1",
+		Labels: []string{"Actor"},
+		Properties: map[string]interface{}{
+			"name": "A",
+		},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "m1",
+		Labels: []string{"Movie"},
+		Properties: map[string]interface{}{
+			"title": "M",
+		},
+	})
+	require.NoError(t, err)
+
+	okRes, ok := executor.executeFastPathCreateDeleteRel("Actor", "Movie", "", nil, "", nil, "TEMP")
+	require.True(t, ok)
+	require.NotNil(t, okRes)
+	assert.Equal(t, 1, okRes.Stats.RelationshipsCreated)
+	assert.Equal(t, 1, okRes.Stats.RelationshipsDeleted)
+
+	// Property-miss branch.
+	missRes, missOK := executor.executeFastPathCreateDeleteRel("Actor", "Movie", "name", "A", "title", "missing", "TEMP")
+	assert.False(t, missOK)
+	assert.Nil(t, missRes)
+
+	// Missing-label branch.
+	noneRes, noneOK := executor.executeFastPathCreateDeleteRel("NoLabelA", "NoLabelB", "", nil, "", nil, "TEMP")
+	assert.False(t, noneOK)
+	assert.Nil(t, noneRes)
+}
+
 // BenchmarkFastPath_WithLimit benchmarks the WITH LIMIT pattern.
 func BenchmarkFastPath_WithLimit(b *testing.B) {
 	baseEngine := storage.NewMemoryEngine()

@@ -268,6 +268,22 @@ func TestDurationFromMap(t *testing.T) {
 	}
 }
 
+func TestDurationFromMap_AllFields(t *testing.T) {
+	m := map[string]interface{}{
+		"years":       int64(2),
+		"months":      int64(6),
+		"days":        int64(10),
+		"hours":       int64(4),
+		"minutes":     int64(15),
+		"seconds":     int64(20),
+		"nanoseconds": int64(300),
+	}
+	got := durationFromMap(m)
+	if got.Years != 2 || got.Months != 6 || got.Days != 10 || got.Hours != 4 || got.Minutes != 15 || got.Seconds != 20 || got.Nanos != 300 {
+		t.Fatalf("durationFromMap() = %+v, want all fields populated", got)
+	}
+}
+
 func TestAddDurationToDate(t *testing.T) {
 	dur := &CypherDuration{Days: 5}
 	result := addDurationToDate("2025-01-01", dur)

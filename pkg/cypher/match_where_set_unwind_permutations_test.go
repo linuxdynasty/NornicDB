@@ -449,3 +449,27 @@ func factorial(n int) int {
 	}
 	return n * factorial(n-1)
 }
+
+func TestEvaluateWithWhereCondition_DirectBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	vals := map[string]interface{}{
+		"n":      int64(10),
+		"exists": "x",
+		"nilVal": nil,
+	}
+
+	assert.True(t, exec.evaluateWithWhereCondition("exists IS NOT NULL", vals))
+	assert.False(t, exec.evaluateWithWhereCondition("nilVal IS NOT NULL", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("nilVal IS NULL", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("missing IS NULL", vals))
+
+	assert.True(t, exec.evaluateWithWhereCondition("n >= 10", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("n <= 10", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("n = 10", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("n != 11", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("n > 9", vals))
+	assert.True(t, exec.evaluateWithWhereCondition("n < 11", vals))
+
+	// Unknown pattern defaults to pass-through.
+	assert.True(t, exec.evaluateWithWhereCondition("totally_unknown_condition", vals))
+}

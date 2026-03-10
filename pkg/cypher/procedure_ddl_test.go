@@ -202,3 +202,28 @@ func TestLoadPersistedProcedures_BranchCoverage(t *testing.T) {
 	_, err = exec.Execute(ctx, "CALL nornic.invalidMode()", nil)
 	require.Error(t, err)
 }
+
+func TestDropProcedure_ErrorBranches(t *testing.T) {
+	ClearUserProcedures()
+	t.Cleanup(ClearUserProcedures)
+
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeDropProcedure(ctx, "DROP PROCEDURE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid DROP PROCEDURE syntax")
+
+	_, err = exec.executeDropProcedure(ctx, "DROP PROCEDURE nornic.missing")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to drop procedure")
+
+	_, err = exec.Execute(ctx, "BEGIN TRANSACTION", nil)
+	require.NoError(t, err)
+	_, err = exec.executeDropProcedure(ctx, "DROP PROCEDURE nornic.any")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not allowed inside an active transaction")
+	_, _ = exec.Execute(ctx, "ROLLBACK", nil)
+}

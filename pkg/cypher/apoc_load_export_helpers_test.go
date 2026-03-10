@@ -204,3 +204,75 @@ func TestApocLoadExportHelpers_CallApocLoadCsv_OptionsAndSources(t *testing.T) {
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, "v1", res.Rows[0][2].(map[string]interface{})["c1"])
 }
+
+func TestApocLoadExportHelpers_CallApocLoadJson_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.callApocLoadJson(ctx, "CALL apoc.load.json()")
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	arrayPath := filepath.Join(dir, "arr.json")
+	objectPath := filepath.Join(dir, "obj.json")
+	scalarPath := filepath.Join(dir, "scalar.json")
+
+	require.NoError(t, os.WriteFile(arrayPath, []byte(`[1,2,3]`), 0o644))
+	require.NoError(t, os.WriteFile(objectPath, []byte(`{"a":1}`), 0o644))
+	require.NoError(t, os.WriteFile(scalarPath, []byte(`42`), 0o644))
+
+	res, err := exec.callApocLoadJson(ctx, "CALL apoc.load.json('"+arrayPath+"') YIELD value")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 3)
+
+	res, err = exec.callApocLoadJson(ctx, "CALL apoc.load.json('"+objectPath+"') YIELD value")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	_, ok := res.Rows[0][0].(map[string]interface{})
+	require.True(t, ok)
+
+	res, err = exec.callApocLoadJson(ctx, "CALL apoc.load.json('"+scalarPath+"') YIELD value")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.EqualValues(t, 42.0, res.Rows[0][0])
+}
+
+func TestApocLoadExportHelpers_CallApocExportJsonAll_NoFile(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice"},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.callApocExportJsonAll(ctx, "CALL apoc.export.json.all('', {})")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "", res.Rows[0][0])
+	assert.EqualValues(t, 1, res.Rows[0][1])
+	assert.Contains(t, res.Rows[0][4].(string), "\"nodes\"")
+}
+func TestApocLoadExportHelpers_CallApocExportJsonAll_WriteError(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice"},
+	})
+	require.NoError(t, err)
+
+	// /dev/null is a file on Unix-like systems, so creating /dev/null/subdir should fail.
+	_, err = exec.callApocExportJsonAll(ctx, "CALL apoc.export.json.all('/dev/null/subdir/out.json', {})")
+	require.Error(t, err)
+}

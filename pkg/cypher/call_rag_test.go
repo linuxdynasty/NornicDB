@@ -117,3 +117,14 @@ func TestCallDbIndexVectorEmbed(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []float32{0.1, 0.2, 0.3, 0.4}, embedding)
 }
+
+func TestCallDbRetrieveWrappers_ParseErrors(t *testing.T) {
+	ctx := context.Background()
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	_, err := exec.callDbRetrieve(ctx, "CALL db.retrieve(")
+	require.Error(t, err)
+
+	_, err = exec.callDbRRetrieve(ctx, "CALL db.rretrieve(")
+	require.Error(t, err)
+}

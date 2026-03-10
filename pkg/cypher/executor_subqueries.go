@@ -777,15 +777,6 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 		}
 	} else {
 		// Known row count: process exact number of batches
-		if totalRows == 0 {
-			// No rows to process
-			return &ExecuteResult{
-				Columns: resultColumns,
-				Rows:    [][]interface{}{},
-				Stats:   &QueryStats{},
-			}, nil
-		}
-
 		// Calculate number of batches
 		numBatches := (totalRows + batchSize - 1) / batchSize
 
