@@ -992,6 +992,29 @@ func TestWAL_ApplyRetention(t *testing.T) {
 		require.Len(t, manifest.Segments, 1)
 		assert.Equal(t, newerSeg.Path, manifest.Segments[0].Path)
 	})
+
+	t.Run("invalid manifest json returns load error", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultWALConfig()
+		cfg.Dir = dir
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		require.NoError(t, os.WriteFile(walManifestPath(dir), []byte("{bad-json"), 0644))
+		err = wal.ApplyRetention(10)
+		require.Error(t, err)
+	})
+
+	t.Run("zero snapshot sequence is no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultWALConfig()
+		cfg.Dir = dir
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+		require.NoError(t, wal.ApplyRetention(0))
+	})
 }
 
 func TestSnapshot_CreateAndLoad(t *testing.T) {
@@ -2162,6 +2185,34 @@ func TestWAL_TruncateAfterSnapshot(t *testing.T) {
 
 		err = w.TruncateAfterSnapshot(0)
 		require.ErrorContains(t, err, "failed to create temp WAL")
+	})
+
+	t.Run("truncate_handles_read_entries_error_by_salvaging_or_fresh_start", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{
+			Node: &Node{ID: NodeID(prefixTestID("corrupt-manifest-node"))},
+		}))
+		require.NoError(t, wal.Sync())
+
+		// Force ReadWALEntriesFromDir error in truncate path.
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version: walManifestVersion,
+			Segments: []WALSegment{
+				{FirstSeq: 1, LastSeq: 1, Path: "../bad-segment.wal"},
+			},
+		}))
+
+		require.NoError(t, wal.TruncateAfterSnapshot(0))
+
+		// Truncate should recover by creating a usable WAL file.
+		entries, readErr := ReadWALEntries(walActivePath(dir))
+		require.NoError(t, readErr)
+		assert.NotNil(t, entries)
 	})
 }
 

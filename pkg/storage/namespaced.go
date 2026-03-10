@@ -502,6 +502,9 @@ func (n *NamespacedEngine) GetSchema() *SchemaManager {
 func (n *NamespacedEngine) BulkCreateNodes(nodes []*Node) error {
 	namespacedNodes := make([]*Node, len(nodes))
 	for i, node := range nodes {
+		if node == nil {
+			return ErrInvalidData
+		}
 		namespacedNode := *node
 		namespacedNode.ID = n.prefixNodeID(node.ID)
 		namespacedNodes[i] = &namespacedNode
@@ -512,6 +515,9 @@ func (n *NamespacedEngine) BulkCreateNodes(nodes []*Node) error {
 func (n *NamespacedEngine) BulkCreateEdges(edges []*Edge) error {
 	namespacedEdges := make([]*Edge, len(edges))
 	for i, edge := range edges {
+		if edge == nil {
+			return ErrInvalidData
+		}
 		namespacedEdge := *edge
 		namespacedEdge.ID = n.prefixEdgeID(edge.ID)
 		namespacedEdge.StartNode = n.prefixNodeID(edge.StartNode)

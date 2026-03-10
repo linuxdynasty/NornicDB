@@ -464,6 +464,14 @@ func TestNamespacedEngine_BulkOperations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, allNodes, 1)
 	assert.Equal(t, "n3", string(allNodes[0].ID))
+
+	t.Run("bulk create rejects nil node and edge entries", func(t *testing.T) {
+		err := tenantA.BulkCreateNodes([]*Node{nil})
+		require.ErrorIs(t, err, ErrInvalidData)
+
+		err = tenantA.BulkCreateEdges([]*Edge{nil})
+		require.ErrorIs(t, err, ErrInvalidData)
+	})
 }
 
 func TestNamespacedEngine_Close(t *testing.T) {

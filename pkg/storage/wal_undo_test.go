@@ -843,6 +843,66 @@ func TestRecoverWithTransactions_ErrorBranches(t *testing.T) {
 		_, _, err := RecoverWithTransactions(dir, "")
 		require.ErrorContains(t, err, "failed to read WAL")
 	})
+
+	t.Run("snapshot restore succeeds with namespaced replay base", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+		require.NoError(t, SaveSnapshot(&Snapshot{
+			Sequence: 7,
+			Nodes: []*Node{
+				{ID: "tx-snap-n1", Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "n1"}},
+				{ID: "tx-snap-n2", Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "n2"}},
+			},
+			Edges: []*Edge{
+				{ID: "tx-snap-e1", StartNode: "tx-snap-n1", EndNode: "tx-snap-n2", Type: "LINKS"},
+			},
+			Version: "1.0",
+		}, snapshotPath))
+
+		baseEngine, result, err := RecoverWithTransactions(filepath.Join(dir, "wal"), snapshotPath)
+		require.NoError(t, err)
+		require.NotNil(t, baseEngine)
+		require.Equal(t, uint64(7), result.SnapshotSeq)
+
+		ns := NewNamespacedEngine(baseEngine, "nornic")
+		node, getErr := ns.GetNode("tx-snap-n1")
+		require.NoError(t, getErr)
+		require.NotNil(t, node)
+		edge, getErr := ns.GetEdge("tx-snap-e1")
+		require.NoError(t, getErr)
+		require.NotNil(t, edge)
+	})
+
+	t.Run("snapshot restore returns node restore error", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot-dupe.json")
+		require.NoError(t, SaveSnapshot(&Snapshot{
+			Sequence: 1,
+			Nodes: []*Node{
+				nil, // invalid node should cause BulkCreateNodes to fail
+			},
+			Version: "1.0",
+		}, snapshotPath))
+
+		_, _, err := RecoverWithTransactions(filepath.Join(dir, "wal"), snapshotPath)
+		require.ErrorContains(t, err, "failed to restore nodes")
+	})
+
+	t.Run("snapshot restore returns edge restore error", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot-bad-edge.json")
+		require.NoError(t, SaveSnapshot(&Snapshot{
+			Sequence: 1,
+			Nodes:    []*Node{},
+			Edges: []*Edge{
+				{ID: "e-missing", StartNode: "missing-a", EndNode: "missing-b", Type: "REL"},
+			},
+			Version: "1.0",
+		}, snapshotPath))
+
+		_, _, err := RecoverWithTransactions(filepath.Join(dir, "wal"), snapshotPath)
+		require.ErrorContains(t, err, "failed to restore edges")
+	})
 }
 
 func mustGetNodeForWALTest(t *testing.T, engine *NamespacedEngine, id NodeID) *Node {
