@@ -888,6 +888,41 @@ func TestSearchService_BuildIndexes_IteratorEngineBranches(t *testing.T) {
 	})
 }
 
+func TestSearchService_BuildIndexes_SkipIterationFromDisk(t *testing.T) {
+	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	_, err := base.CreateNode(&storage.Node{
+		ID:              "disk-1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "persisted"},
+	})
+	require.NoError(t, err)
+
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+
+	// First build materializes on-disk BM25/vector artifacts.
+	svc1 := NewServiceWithDimensions(base, 3)
+	svc1.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc1.SetPersistenceEnabled(false) })
+	svc1.SetFulltextIndexPath(bm25Path)
+	svc1.SetVectorIndexPath(vectorPath)
+	require.NoError(t, svc1.BuildIndexes(context.Background()))
+	svc1.PersistIndexesToDisk()
+
+	// If BuildIndexes iterates storage again, iteratorEngine will return this error.
+	iterErr := errors.New("should-not-iterate")
+	svc2 := NewServiceWithDimensions(&iteratorEngine{Engine: base, iterateErr: iterErr}, 3)
+	svc2.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc2.SetPersistenceEnabled(false) })
+	svc2.SetFulltextIndexPath(bm25Path)
+	svc2.SetVectorIndexPath(vectorPath)
+	require.NoError(t, svc2.BuildIndexes(context.Background()))
+	require.GreaterOrEqual(t, svc2.fulltextIndex.Count(), 1)
+	require.GreaterOrEqual(t, svc2.EmbeddingCount(), 1)
+}
+
 func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
 	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
 	svc := NewServiceWithDimensions(engine, 2)
@@ -944,6 +979,52 @@ func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {
 	_, err = os.Stat(vectorPath + ".meta")
 	require.NoError(t, err)
 	svc.buildInProgress.Store(false)
+}
+
+func TestEnableClustering_ReentrantAndEnvOverrides(t *testing.T) {
+	t.Run("reentrant same mode keeps existing cluster index", func(t *testing.T) {
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 2)
+		require.NotNil(t, svc.clusterIndex)
+		first := svc.clusterIndex
+
+		// Same CPU mode: second call should be a no-op and preserve pointer.
+		svc.EnableClustering(nil, 9)
+		require.Same(t, first, svc.clusterIndex)
+	})
+
+	t.Run("env overrides cluster count and clamps low max iterations", func(t *testing.T) {
+		t.Setenv("NORNICDB_KMEANS_NUM_CLUSTERS", "11")
+		t.Setenv("NORNICDB_KMEANS_MAX_ITERATIONS", "1")
+
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 0)
+		require.NotNil(t, svc.clusterIndex)
+		cfg := svc.clusterIndex.Config()
+		require.Equal(t, 11, cfg.NumClusters)
+		require.False(t, cfg.AutoK)
+		require.Equal(t, 5, cfg.MaxIterations)
+	})
+
+	t.Run("auto cluster count and max iteration upper clamp", func(t *testing.T) {
+		t.Setenv("NORNICDB_KMEANS_NUM_CLUSTERS", "")
+		t.Setenv("NORNICDB_KMEANS_MAX_ITERATIONS", "9999")
+
+		svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+		svc.EnableClustering(nil, 0)
+		require.NotNil(t, svc.clusterIndex)
+		cfg := svc.clusterIndex.Config()
+		require.Equal(t, 0, cfg.NumClusters)
+		require.True(t, cfg.AutoK)
+		require.Equal(t, 500, cfg.MaxIterations)
+	})
+
+	t.Run("nil vector index is ignored safely", func(t *testing.T) {
+		svc := &Service{}
+		svc.EnableClustering(nil, 3)
+		require.Nil(t, svc.clusterIndex)
+		require.False(t, svc.clusterEnabled)
+	})
 }
 
 func TestSearchService_EnsureBuildVectorFileStore_Branches(t *testing.T) {

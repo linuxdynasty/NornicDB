@@ -144,6 +144,17 @@ func TestCachedEmbedder_Concurrent(t *testing.T) {
 	cached := NewCachedEmbedder(mock, 1000)
 	ctx := context.Background()
 
+	// Warm the two keys first so this test verifies concurrent cache hits
+	// deterministically instead of relying on goroutine scheduling.
+	_, err := cached.Embed(ctx, "text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cached.Embed(ctx, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
@@ -167,9 +178,15 @@ func TestCachedEmbedder_Concurrent(t *testing.T) {
 		t.Errorf("Expected 2 unique cached, got %d", stats.Size)
 	}
 
-	// Should have high hit rate (100 calls, only 2 unique = 98% hits)
-	if stats.HitRate < 90 {
-		t.Errorf("Expected >90%% hit rate, got %.2f%%", stats.HitRate)
+	// After warm-up all concurrent requests should be hits.
+	if stats.Hits < 100 {
+		t.Errorf("Expected at least 100 cache hits, got %d", stats.Hits)
+	}
+	if stats.Misses != 2 {
+		t.Errorf("Expected exactly 2 warm-up misses, got %d", stats.Misses)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("Expected exactly 2 underlying embed calls, got %d", mock.CallCount())
 	}
 }
 

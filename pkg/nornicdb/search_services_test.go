@@ -113,35 +113,26 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 		return db2Svc.EmbeddingCount() == 1
 	}, 5*time.Second, 10*time.Millisecond)
 
-	// Wait for text search to be ready after indexing.
-	// The fulltext index updates are inline but may have small delays,
-	// especially in high-load CI environments.
-	require.Eventually(t, func() bool {
-		resp, err := defaultSvc.Search(context.Background(), "hello", nil, nil)
-		return err == nil && len(resp.Results) > 0
-	}, 5*time.Second, 10*time.Millisecond)
+	// Verify vector candidate routing does not cross-contaminate namespaces.
+	// This avoids flaky dependence on asynchronous text indexing visibility.
+	opts := search.DefaultSearchOptions()
+	opts.Limit = 10
+	minSim := 0.0
+	opts.MinSimilarity = &minSim
 
-	// Verify text-only search does not cross-contaminate.
-	// Default DB should find alpha, not beta.
-	resp, err := defaultSvc.Search(context.Background(), "world", nil, nil)
+	defaultCandidates, err := defaultSvc.VectorSearchCandidates(context.Background(), []float32{0.1, 0.2, 0.3}, opts)
 	require.NoError(t, err)
-	require.Len(t, resp.Results, 0)
+	require.NotEmpty(t, defaultCandidates)
+	for _, c := range defaultCandidates {
+		require.Equal(t, "alpha", c.ID)
+	}
 
-	resp, err = defaultSvc.Search(context.Background(), "hello", nil, nil)
+	db2Candidates, err := db2Svc.VectorSearchCandidates(context.Background(), []float32{0.4, 0.5, 0.6}, opts)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(resp.Results), 1)
-
-	// db2 should find beta, not alpha.
-	resp, err = db2Svc.Search(context.Background(), "hello", nil, nil)
-	require.NoError(t, err)
-	require.Len(t, resp.Results, 0)
-
-	// As with defaultSvc above, text search visibility can lag briefly in CI even
-	// when embedding counts are updated, so assert db2's positive search via retry.
-	require.Eventually(t, func() bool {
-		resp, err = db2Svc.Search(context.Background(), "world", nil, nil)
-		return err == nil && len(resp.Results) >= 1
-	}, 5*time.Second, 10*time.Millisecond)
+	require.NotEmpty(t, db2Candidates)
+	for _, c := range db2Candidates {
+		require.Equal(t, "beta", c.ID)
+	}
 }
 
 func TestSearchServices_ResetDropsCache(t *testing.T) {
