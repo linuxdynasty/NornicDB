@@ -9,6 +9,7 @@ package storage
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -796,6 +797,51 @@ func TestReplayAndUndoWALEntry_ErrorBranches(t *testing.T) {
 		data, _ = json.Marshal(WALBulkDeleteEdgesData{IDs: []string{"e1"}})
 		err = UndoWALEntry(engine, WALEntry{Operation: OpBulkDeleteEdges, Data: data, Database: "test"})
 		require.ErrorIs(t, err, ErrNoUndoData)
+	})
+
+	t.Run("single entity undo requires before image", func(t *testing.T) {
+		data, _ := json.Marshal(WALDeleteData{ID: "n1"})
+		err := UndoWALEntry(engine, WALEntry{Operation: OpDeleteNode, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+
+		data, _ = json.Marshal(WALEdgeData{Edge: nil})
+		err = UndoWALEntry(engine, WALEntry{Operation: OpCreateEdge, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+
+		data, _ = json.Marshal(WALEdgeData{OldEdge: nil})
+		err = UndoWALEntry(engine, WALEntry{Operation: OpUpdateEdge, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+
+		data, _ = json.Marshal(WALDeleteData{ID: "e1"})
+		err = UndoWALEntry(engine, WALEntry{Operation: OpDeleteEdge, Data: data, Database: "test"})
+		require.ErrorIs(t, err, ErrNoUndoData)
+	})
+}
+
+func TestRecoverWithTransactions_ErrorBranches(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("invalid snapshot returns load error", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+		require.NoError(t, os.WriteFile(snapshotPath, []byte("{bad-json"), 0644))
+
+		_, _, err := RecoverWithTransactions(filepath.Join(dir, "wal"), snapshotPath)
+		require.ErrorContains(t, err, "failed to load snapshot")
+	})
+
+	t.Run("invalid wal manifest returns read error", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, writeWALManifest(dir, &WALManifest{
+			Version: walManifestVersion,
+			Segments: []WALSegment{
+				{FirstSeq: 1, LastSeq: 1, Path: "../bad-segment.wal"},
+			},
+		}))
+
+		_, _, err := RecoverWithTransactions(dir, "")
+		require.ErrorContains(t, err, "failed to read WAL")
 	})
 }
 

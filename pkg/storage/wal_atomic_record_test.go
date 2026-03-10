@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
 )
 
@@ -74,4 +77,55 @@ func TestWriteAtomicRecordV2_MatchesBuild(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("record bytes mismatch")
 	}
+}
+
+type shortWriter struct {
+	limit int
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if w.limit <= 0 {
+		return 0, nil
+	}
+	if len(p) > w.limit {
+		return w.limit, nil
+	}
+	return len(p), nil
+}
+
+type errWriter struct {
+	err error
+}
+
+func (w *errWriter) Write(_ []byte) (int, error) {
+	return 0, w.err
+}
+
+func TestWriteAtomicRecordV2Bufio_ErrorBranches(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+
+	t.Run("flush failure is returned", func(t *testing.T) {
+		bw := bufio.NewWriterSize(&errWriter{err: errors.New("flush fail")}, 16)
+		_, err := writeAtomicRecordV2Bufio(bw, payload)
+		if err == nil {
+			t.Fatalf("expected flush error")
+		}
+	})
+
+	t.Run("short write returns io.ErrShortWrite", func(t *testing.T) {
+		_, err := writeAtomicRecordV2Bufio(&shortWriter{limit: 4}, payload)
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Fatalf("expected short write error, got %v", err)
+		}
+	})
+
+	t.Run("writer error is returned", func(t *testing.T) {
+		_, err := writeAtomicRecordV2Bufio(&errWriter{err: errors.New("write fail")}, payload)
+		if err == nil {
+			t.Fatalf("expected write error")
+		}
+	})
 }

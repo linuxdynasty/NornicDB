@@ -1375,6 +1375,29 @@ func TestRecoverFromWALWithResult_ErrorAndRoutingBranches(t *testing.T) {
 		_, _, err := RecoverFromWALWithResult(dir, "")
 		require.ErrorContains(t, err, "failed to read WAL")
 	})
+
+	t.Run("RecoverFromWAL returns wrapped error on invalid snapshot", func(t *testing.T) {
+		dir := t.TempDir()
+		snapshotPath := filepath.Join(dir, "snapshot-bad.json")
+		require.NoError(t, os.WriteFile(snapshotPath, []byte("{bad-json"), 0644))
+		_, err := RecoverFromWAL(filepath.Join(dir, "wal"), snapshotPath)
+		require.ErrorContains(t, err, "failed to load snapshot")
+	})
+
+	t.Run("RecoverFromWAL succeeds even when replay has failed entries", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		wal, err := NewWAL("", &WALConfig{Dir: walDir, SyncMode: "immediate"})
+		require.NoError(t, err)
+		require.NoError(t, wal.AppendWithDatabase(OpUpdateNode, WALNodeData{
+			Node: &Node{ID: "missing", Labels: []string{"Missing"}},
+		}, "test"))
+		require.NoError(t, wal.Close())
+
+		engine, err := RecoverFromWAL(walDir, "")
+		require.NoError(t, err)
+		require.NotNil(t, engine)
+	})
 }
 
 func TestSaveSnapshot_ErrorPaths(t *testing.T) {

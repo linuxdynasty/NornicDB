@@ -103,6 +103,23 @@ func TestWALManifestHelpers(t *testing.T) {
 		err := writeWALManifest(t.TempDir(), nil)
 		require.ErrorContains(t, err, "manifest is nil")
 	})
+
+	t.Run("load returns decode error for malformed manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		segmentsDir := walSegmentsDir(dir)
+		require.NoError(t, os.MkdirAll(segmentsDir, 0o755))
+		require.NoError(t, os.WriteFile(walManifestPath(dir), []byte("{bad-json"), 0o644))
+
+		_, err := loadWALManifest(dir)
+		require.Error(t, err)
+	})
+
+	t.Run("write returns mkdir error when segments path is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(walSegmentsDir(dir), []byte("not-dir"), 0o644))
+		err := writeWALManifest(dir, &WALManifest{Version: walManifestVersion})
+		require.Error(t, err)
+	})
 }
 
 func TestWALSegmentPathHelpers(t *testing.T) {

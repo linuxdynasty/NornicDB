@@ -1065,6 +1065,41 @@ func TestAsyncEngine_RefreshPendingEmbeddingsIndex(t *testing.T) {
 	})
 }
 
+func TestAsyncEngine_AdaptiveFlushInterval_Branches(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+
+	ae.minFlushInterval = 10 * time.Millisecond
+	ae.maxFlushInterval = 100 * time.Millisecond
+	ae.targetFlushSize = 100
+
+	t.Run("pending non-positive returns max interval", func(t *testing.T) {
+		assert.Equal(t, 100*time.Millisecond, ae.adaptiveFlushInterval(0))
+	})
+
+	t.Run("target non-positive returns max interval", func(t *testing.T) {
+		ae.targetFlushSize = 0
+		assert.Equal(t, 100*time.Millisecond, ae.adaptiveFlushInterval(10))
+		ae.targetFlushSize = 100
+	})
+
+	t.Run("max less than min returns min interval", func(t *testing.T) {
+		ae.minFlushInterval = 50 * time.Millisecond
+		ae.maxFlushInterval = 40 * time.Millisecond
+		assert.Equal(t, 50*time.Millisecond, ae.adaptiveFlushInterval(10))
+		ae.minFlushInterval = 10 * time.Millisecond
+		ae.maxFlushInterval = 100 * time.Millisecond
+	})
+
+	t.Run("ratio capped at one for large pending", func(t *testing.T) {
+		assert.Equal(t, 100*time.Millisecond, ae.adaptiveFlushInterval(1000))
+	})
+
+	t.Run("interpolates between min and max", func(t *testing.T) {
+		// pending=50 => ratio=0.5 => 10ms + 0.5*(90ms) = 55ms
+		assert.Equal(t, 55*time.Millisecond, ae.adaptiveFlushInterval(50))
+	})
+}
+
 // ============================================================================
 // GetSchema / GetSchemaForNamespace / GetEngine
 // ============================================================================

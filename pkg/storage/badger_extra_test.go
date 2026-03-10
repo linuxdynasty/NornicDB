@@ -86,6 +86,12 @@ func TestBadgerEngine_BatchGetNodes_Missing(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+func TestBadgerEngine_InvalidatePendingEmbeddingsIndex_NoOp(t *testing.T) {
+	b := createTestBadgerEngine(t)
+	// Badger pending embeddings index is persistent; invalidation is a no-op.
+	b.InvalidatePendingEmbeddingsIndex()
+}
+
 func TestBadgerEngine_QueryHelpers_Extra(t *testing.T) {
 	t.Run("GetFirstNodeByLabel skips stale and corrupt indexed entries", func(t *testing.T) {
 		b := createTestBadgerEngine(t)
@@ -164,6 +170,45 @@ func TestBadgerEngine_QueryHelpers_Extra(t *testing.T) {
 		assert.True(t, cachedStored)
 	})
 
+	t.Run("BatchGetNodes all cache hits returns copies without DB read", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		n1 := &Node{ID: NodeID(prefixTestID("cache-only-1")), Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "one"}}
+		n2 := &Node{ID: NodeID(prefixTestID("cache-only-2")), Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "two"}}
+		b.cacheStoreNode(n1)
+		b.cacheStoreNode(n2)
+
+		result, err := b.BatchGetNodes([]NodeID{n1.ID, n2.ID})
+		require.NoError(t, err)
+		require.Len(t, result, 2)
+		require.NotSame(t, n1, result[n1.ID])
+		require.NotSame(t, n2, result[n2.ID])
+		assert.Equal(t, "one", result[n1.ID].Properties["name"])
+		assert.Equal(t, "two", result[n2.ID].Properties["name"])
+	})
+
+	t.Run("BatchGetNodes skips corrupt payloads and missing keys", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		valid := &Node{ID: NodeID(prefixTestID("batch-valid")), Labels: []string{"Doc"}, Properties: map[string]interface{}{"name": "valid"}}
+		corruptID := NodeID(prefixTestID("batch-corrupt"))
+		_, err := b.CreateNode(valid)
+		require.NoError(t, err)
+		require.NoError(t, b.withUpdate(func(txn *badger.Txn) error {
+			return txn.Set(nodeKey(corruptID), []byte("not-a-node"))
+		}))
+
+		result, err := b.BatchGetNodes([]NodeID{valid.ID, corruptID, NodeID(prefixTestID("batch-missing"))})
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		assert.Equal(t, valid.ID, result[valid.ID].ID)
+	})
+
+	t.Run("BatchGetNodes returns error when view transaction fails", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		require.NoError(t, b.Close())
+		_, err := b.BatchGetNodes([]NodeID{NodeID(prefixTestID("after-close"))})
+		require.Error(t, err)
+	})
+
 	t.Run("edge query helpers validate ids and skip corrupt payloads", func(t *testing.T) {
 		b := createTestBadgerEngine(t)
 		_, err := b.GetOutgoingEdges("")
@@ -204,6 +249,74 @@ func TestBadgerEngine_QueryHelpers_Extra(t *testing.T) {
 		byType, err := b.GetEdgesByType("REL")
 		require.NoError(t, err)
 		assert.Len(t, byType, 1)
+	})
+
+	t.Run("UpdateEdge endpoint changes require existing nodes", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		start := testNode(prefixTestID("upd-start"))
+		end := testNode(prefixTestID("upd-end"))
+		_, err := b.CreateNode(start)
+		require.NoError(t, err)
+		_, err = b.CreateNode(end)
+		require.NoError(t, err)
+
+		edge := &Edge{
+			ID:         EdgeID(prefixTestID("upd-e1")),
+			StartNode:  start.ID,
+			EndNode:    end.ID,
+			Type:       "REL",
+			Properties: map[string]interface{}{},
+		}
+		require.NoError(t, b.CreateEdge(edge))
+
+		edge.StartNode = NodeID(prefixTestID("missing-node"))
+		err = b.UpdateEdge(edge)
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+
+	t.Run("UpdateEdge returns decode error for corrupt stored edge", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		start := testNode(prefixTestID("upd2-start"))
+		end := testNode(prefixTestID("upd2-end"))
+		_, err := b.CreateNode(start)
+		require.NoError(t, err)
+		_, err = b.CreateNode(end)
+		require.NoError(t, err)
+		edge := &Edge{
+			ID:         EdgeID(prefixTestID("upd2-e1")),
+			StartNode:  start.ID,
+			EndNode:    end.ID,
+			Type:       "REL",
+			Properties: map[string]interface{}{},
+		}
+		require.NoError(t, b.CreateEdge(edge))
+		require.NoError(t, b.withUpdate(func(txn *badger.Txn) error {
+			return txn.Set(edgeKey(edge.ID), []byte("not-an-edge"))
+		}))
+		err = b.UpdateEdge(edge)
+		require.Error(t, err)
+	})
+
+	t.Run("DeleteEdge succeeds for typeless edge", func(t *testing.T) {
+		b := createTestBadgerEngine(t)
+		start := testNode(prefixTestID("del-start"))
+		end := testNode(prefixTestID("del-end"))
+		_, err := b.CreateNode(start)
+		require.NoError(t, err)
+		_, err = b.CreateNode(end)
+		require.NoError(t, err)
+
+		edge := &Edge{
+			ID:         EdgeID(prefixTestID("del-typeless")),
+			StartNode:  start.ID,
+			EndNode:    end.ID,
+			Type:       "",
+			Properties: map[string]interface{}{},
+		}
+		require.NoError(t, b.CreateEdge(edge))
+		require.NoError(t, b.DeleteEdge(edge.ID))
+		_, err = b.GetEdge(edge.ID)
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 

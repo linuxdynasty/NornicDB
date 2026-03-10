@@ -2,6 +2,9 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +18,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func buildAtomicIntegrityPayload(t *testing.T, seq uint64) []byte {
+	t.Helper()
+	entry := WALEntry{
+		Sequence:  seq,
+		Operation: OpCreateNode,
+		Data:      mustMarshal(WALNodeData{Node: &Node{ID: NodeID(prefixTestID(fmt.Sprintf("ic-%d", seq)))}}),
+	}
+	entry.Checksum = crc32Checksum(entry.Data)
+	payload, err := json.Marshal(entry)
+	require.NoError(t, err)
+	return payload
+}
+
+type snapshotErrorEngine struct {
+	*MemoryEngine
+	allNodesErr error
+	allEdgesErr error
+}
+
+func (e *snapshotErrorEngine) AllNodes() ([]*Node, error) {
+	if e.allNodesErr != nil {
+		return nil, e.allNodesErr
+	}
+	return e.MemoryEngine.AllNodes()
+}
+
+func (e *snapshotErrorEngine) AllEdges() ([]*Edge, error) {
+	if e.allEdgesErr != nil {
+		return nil, e.allEdgesErr
+	}
+	return e.MemoryEngine.AllEdges()
+}
 
 // TestWALCompactionConfig tests WAL configuration options for compaction.
 
@@ -50,6 +86,119 @@ func TestWALCompactionConfig(t *testing.T) {
 		cfg := DefaultWALConfig()
 		assert.Equal(t, 3, cfg.SnapshotRetentionMaxCount)
 		assert.Equal(t, time.Duration(0), cfg.SnapshotRetentionMaxAge)
+	})
+}
+
+func TestCheckWALIntegrity_AtomicBranches(t *testing.T) {
+	t.Run("invalid payload size is reported", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		header := make([]byte, 9)
+		binary.LittleEndian.PutUint32(header[0:4], walMagic)
+		header[4] = walFormatVersion
+		binary.LittleEndian.PutUint32(header[5:9], walMaxEntrySize+1)
+		require.NoError(t, os.WriteFile(path, header, 0o644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.False(t, report.Healthy)
+		require.NotEmpty(t, report.Errors)
+	})
+
+	t.Run("truncated payload is reported", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wal.log")
+		header := make([]byte, 9)
+		binary.LittleEndian.PutUint32(header[0:4], walMagic)
+		header[4] = walFormatVersion
+		binary.LittleEndian.PutUint32(header[5:9], 32)
+		require.NoError(t, os.WriteFile(path, header, 0o644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotEmpty(t, report.Errors)
+		assert.Contains(t, strings.Join(report.Errors, " "), "truncated payload")
+	})
+
+	t.Run("missing trailer is reported", func(t *testing.T) {
+		payload := buildAtomicIntegrityPayload(t, 1)
+		var buf bytes.Buffer
+		_, err := writeAtomicRecordV2(&buf, payload)
+		require.NoError(t, err)
+		record := buf.Bytes()
+		require.Greater(t, len(record), 8)
+
+		path := filepath.Join(t.TempDir(), "wal.log")
+		require.NoError(t, os.WriteFile(path, record[:len(record)-8], 0o644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotEmpty(t, report.Errors)
+		assert.Contains(t, strings.Join(report.Errors, " "), "missing trailer")
+	})
+
+	t.Run("invalid magic after good record is reported", func(t *testing.T) {
+		payload := buildAtomicIntegrityPayload(t, 1)
+		var buf bytes.Buffer
+		_, err := writeAtomicRecordV2(&buf, payload)
+		require.NoError(t, err)
+		// Append malformed header-like bytes with wrong magic.
+		_, err = buf.Write([]byte{0x00, 0x01, 0x02, 0x03, walFormatVersion, 0, 0, 0, 0})
+		require.NoError(t, err)
+
+		path := filepath.Join(t.TempDir(), "wal.log")
+		require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
+
+		report, err := CheckWALIntegrity(path)
+		require.NoError(t, err)
+		require.NotEmpty(t, report.Errors)
+		assert.Contains(t, strings.Join(report.Errors, " "), "invalid magic")
+	})
+}
+
+func TestSnapshotAndSaveSnapshot_ErrorBranches(t *testing.T) {
+	t.Run("CreateSnapshot returns ErrWALClosed when closed", func(t *testing.T) {
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		require.NoError(t, wal.Close())
+		_, err = wal.CreateSnapshot(NewMemoryEngine())
+		require.ErrorIs(t, err, ErrWALClosed)
+	})
+
+	t.Run("CreateSnapshot returns wrapped all-nodes error", func(t *testing.T) {
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		defer wal.Close()
+		engine := &snapshotErrorEngine{
+			MemoryEngine: NewMemoryEngine(),
+			allNodesErr:  fmt.Errorf("nodes-fail"),
+		}
+		_, err = wal.CreateSnapshot(engine)
+		require.ErrorContains(t, err, "failed to get nodes")
+	})
+
+	t.Run("CreateSnapshot returns wrapped all-edges error", func(t *testing.T) {
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		defer wal.Close()
+		engine := &snapshotErrorEngine{
+			MemoryEngine: NewMemoryEngine(),
+			allEdgesErr:  fmt.Errorf("edges-fail"),
+		}
+		_, err = wal.CreateSnapshot(engine)
+		require.ErrorContains(t, err, "failed to get edges")
+	})
+
+	t.Run("SaveSnapshot returns directory creation error", func(t *testing.T) {
+		blocked := filepath.Join(t.TempDir(), "blocked-parent")
+		require.NoError(t, os.WriteFile(blocked, []byte("file"), 0o644))
+		err := SaveSnapshot(&Snapshot{Version: "1.0"}, filepath.Join(blocked, "snapshot.json"))
+		require.ErrorContains(t, err, "failed to create snapshot directory")
+	})
+
+	t.Run("SaveSnapshot returns file creation error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "snapshots", "snapshot.json")
+		require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(path), filepath.Base(path)+".tmp"), 0o755))
+		err := SaveSnapshot(&Snapshot{Version: "1.0"}, path)
+		require.ErrorContains(t, err, "failed to create snapshot file")
 	})
 }
 
