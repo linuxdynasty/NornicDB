@@ -2561,3 +2561,82 @@ func TestExecuteMatchWithClause_ChainedWithAndStorageFailureBranches(t *testing.
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "forced-allnodes-error")
 }
+
+func TestExecuteMatchWithOptionalMatch_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "om1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "age": int64(31)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "om2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "age": int64(29)}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "om3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carol"}})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "omr1", StartNode: "om1", EndNode: "om2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "omr2", StartNode: "om1", EndNode: "om3", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	// Validation branch: required clauses.
+	_, err = exec.executeMatchWithOptionalMatch(ctx, "MATCH (n:Person) WITH n RETURN n")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "WITH, OPTIONAL MATCH, and RETURN clauses required")
+
+	// sourceNode=nil branch (WITH projection drops node object) + ORDER/SKIP/LIMIT branch.
+	noNodeRes, err := exec.executeMatchWithOptionalMatch(
+		ctx,
+		"MATCH (n:Person) WITH n.name AS name OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN name, m.name ORDER BY name SKIP 1 LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.Len(t, noNodeRes.Rows, 1)
+	require.NotNil(t, noNodeRes.Rows[0][0])
+	require.Nil(t, noNodeRes.Rows[0][1], "optional side should be nil when WITH removed source node")
+
+	// Optional WHERE filters all related nodes -> left-join null row retained.
+	filteredRes, err := exec.executeMatchWithOptionalMatch(
+		ctx,
+		"MATCH (n:Person {name:'alice'}) WITH n OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age > 100 RETURN n.name, m.name",
+	)
+	require.NoError(t, err)
+	require.Len(t, filteredRes.Rows, 1)
+	require.Equal(t, "alice", filteredRes.Rows[0][0])
+	require.Nil(t, filteredRes.Rows[0][1])
+}
+
+func TestExecuteMatchWithClause_AggregationAndWindowBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	seed := []*storage.Node{
+		{ID: "mwc1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice", "dept": "eng", "age": int64(30)}},
+		{ID: "mwc2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob", "dept": "eng", "age": int64(20)}},
+		{ID: "mwc3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "cara", "dept": "sales", "age": int64(25)}},
+	}
+	for _, n := range seed {
+		_, err := store.CreateNode(n)
+		require.NoError(t, err)
+	}
+
+	// Aggregated WITH path + post-WITH filtering + ORDER/LIMIT.
+	aggRes, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Person) WITH n.dept AS dept, count(n) AS c, collect(n.name) AS names WHERE c >= 1 RETURN dept, c, names ORDER BY dept LIMIT 2",
+	)
+	require.NoError(t, err)
+	require.Len(t, aggRes.Rows, 2)
+	require.Equal(t, "eng", aggRes.Rows[0][0])
+	require.Equal(t, int64(2), aggRes.Rows[0][1])
+	require.NotEmpty(t, aggRes.Rows[0][2])
+
+	// Non-aggregation WITH path + expression evaluation + ORDER/SKIP/LIMIT windowing.
+	windowRes, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Person) WITH n.name AS name, n.age AS age RETURN name, age + 1 ORDER BY name SKIP 1 LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.Len(t, windowRes.Rows, 1)
+	require.NotNil(t, windowRes.Rows[0][0])
+	require.NotNil(t, windowRes.Rows[0][1])
+}

@@ -157,3 +157,77 @@ func TestFeatureFlags_ParserTypeSettersAndScopes(t *testing.T) {
 		t.Fatalf("expected parser restored to antlr after cleanup")
 	}
 }
+
+func TestFeatureFlags_GPUClusteringFlagsAndScopes(t *testing.T) {
+	ResetFeatureFlags()
+	defer ResetFeatureFlags()
+
+	if IsGPUClusteringEnabled() {
+		t.Fatalf("gpu clustering should start disabled after reset")
+	}
+
+	EnableGPUClustering()
+	if !IsGPUClusteringEnabled() {
+		t.Fatalf("expected gpu clustering enabled")
+	}
+	DisableGPUClustering()
+	if IsGPUClusteringEnabled() {
+		t.Fatalf("expected gpu clustering disabled")
+	}
+
+	cleanup := WithGPUClusteringEnabled()
+	if !IsGPUClusteringEnabled() {
+		t.Fatalf("expected gpu clustering enabled in scoped helper")
+	}
+	cleanup()
+	if IsGPUClusteringEnabled() {
+		t.Fatalf("expected scoped cleanup to restore disabled state")
+	}
+
+	EnableGPUClustering()
+	cleanup = WithGPUClusteringDisabled()
+	if IsGPUClusteringEnabled() {
+		t.Fatalf("expected gpu clustering disabled in scoped helper")
+	}
+	cleanup()
+	if !IsGPUClusteringEnabled() {
+		t.Fatalf("expected scoped cleanup to restore enabled state")
+	}
+}
+
+func TestFeatureFlags_GPUAutoIntegrationFlagsAndScopes(t *testing.T) {
+	ResetFeatureFlags()
+	defer ResetFeatureFlags()
+
+	if IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("gpu auto-integration should start disabled after reset")
+	}
+
+	EnableGPUClusteringAutoIntegration()
+	if !IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected gpu auto-integration enabled")
+	}
+	DisableGPUClusteringAutoIntegration()
+	if IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected gpu auto-integration disabled")
+	}
+
+	cleanup := WithGPUClusteringAutoIntegrationEnabled()
+	if !IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected gpu auto-integration enabled in scoped helper")
+	}
+	cleanup()
+	if IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected scoped cleanup to restore disabled state")
+	}
+
+	EnableGPUClusteringAutoIntegration()
+	cleanup = WithGPUClusteringAutoIntegrationDisabled()
+	if IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected gpu auto-integration disabled in scoped helper")
+	}
+	cleanup()
+	if !IsGPUClusteringAutoIntegrationEnabled() {
+		t.Fatalf("expected scoped cleanup to restore enabled state")
+	}
+}

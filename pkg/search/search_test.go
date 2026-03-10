@@ -33,6 +33,11 @@ type iteratorEngine struct {
 	iterateErr error
 }
 
+type lastWriteEngine struct {
+	storage.Engine
+	writeTime time.Time
+}
+
 func (e *iteratorEngine) IterateNodes(fn func(*storage.Node) bool) error {
 	if e.iterateErr != nil {
 		return e.iterateErr
@@ -47,6 +52,10 @@ func (e *iteratorEngine) IterateNodes(fn func(*storage.Node) bool) error {
 		}
 	}
 	return nil
+}
+
+func (e *lastWriteEngine) LastWriteTime() time.Time {
+	return e.writeTime
 }
 
 func (r *testReranker) Name() string                         { return "test_reranker" }
@@ -995,6 +1004,101 @@ func TestSearchService_BuildIndexes_ForcedRebuildOnSettingsMismatch(t *testing.T
 	require.NotEqual(t, "old-hnsw-fingerprint", gotSettings.HNSW)
 	require.NotEqual(t, "old-routing-fingerprint", gotSettings.Routing)
 	require.NotEqual(t, "old-strategy-fingerprint", gotSettings.Strategy)
+}
+
+func TestSearchService_BuildIndexes_RestartsVectorStoreWhenStorageIsNewer(t *testing.T) {
+	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	_, err := base.CreateNode(&storage.Node{
+		ID:              "lv-1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "alpha"},
+	})
+	require.NoError(t, err)
+
+	tmp := t.TempDir()
+	vectorPath := filepath.Join(tmp, "vectors")
+
+	// Seed vector store from storage.
+	svc1 := NewServiceWithDimensions(base, 3)
+	svc1.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc1.SetPersistenceEnabled(false) })
+	svc1.SetVectorIndexPath(vectorPath)
+	require.NoError(t, svc1.BuildIndexes(context.Background()))
+	require.Equal(t, 1, svc1.EmbeddingCount())
+
+	// Inject a stale vector entry not present in storage.
+	vfs, err := NewVectorFileStore(vectorPath, 3)
+	require.NoError(t, err)
+	require.NoError(t, vfs.Load())
+	require.NoError(t, vfs.Add("stale-id", []float32{0, 1, 0}))
+	require.NoError(t, vfs.Save())
+	require.NoError(t, vfs.Sync())
+	require.NoError(t, vfs.Close())
+
+	// Ensure vec file timestamp is older than storage LastWriteTime.
+	vecPath := vectorPath + ".vec"
+	infoBefore, err := os.Stat(vecPath)
+	require.NoError(t, err)
+	newerWrite := infoBefore.ModTime().Add(2 * time.Second)
+	engineWithWrite := &lastWriteEngine{Engine: base, writeTime: newerWrite}
+
+	svc2 := NewServiceWithDimensions(engineWithWrite, 3)
+	svc2.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc2.SetPersistenceEnabled(false) })
+	svc2.SetVectorIndexPath(vectorPath)
+	require.NoError(t, svc2.BuildIndexes(context.Background()))
+
+	// Restart path should rebuild from storage and drop stale vector.
+	require.Equal(t, 1, svc2.EmbeddingCount())
+	infoAfter, err := os.Stat(vecPath)
+	require.NoError(t, err)
+	require.True(t, infoAfter.ModTime().After(infoBefore.ModTime()) || infoAfter.ModTime().Equal(infoBefore.ModTime()))
+}
+
+func TestSearchService_BuildIndexes_SkipIterationWarmsHNSWWhenDiskIndexMissing(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+	hnswPath := filepath.Join(tmp, "missing-hnsw")
+
+	// Seed persisted BM25 snapshot with at least one document.
+	bm := NewFulltextIndex()
+	bm.Index("doc-1", "alpha beta")
+	require.NoError(t, bm.Save(bm25Path))
+
+	// Seed persisted vector file store with >= NSmallMax vectors to force HNSW warmup path.
+	vfs, err := NewVectorFileStore(vectorPath, 3)
+	require.NoError(t, err)
+	for i := 0; i < NSmallMax; i++ {
+		id := fmt.Sprintf("seed-%d", i)
+		vec := []float32{1, 0, 0}
+		if i%2 == 1 {
+			vec = []float32{0, 1, 0}
+		}
+		require.NoError(t, vfs.Add(id, vec))
+	}
+	require.NoError(t, vfs.Save())
+	require.NoError(t, vfs.Sync())
+	require.NoError(t, vfs.Close())
+
+	svc := NewServiceWithDimensions(engine, 3)
+	svc.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc.SetPersistenceEnabled(false) })
+	svc.SetFulltextIndexPath(bm25Path)
+	svc.SetVectorIndexPath(vectorPath)
+	svc.SetHNSWIndexPath(hnswPath) // intentionally missing on disk
+
+	require.NoError(t, svc.BuildIndexes(context.Background()))
+	require.True(t, svc.IsReady())
+	require.GreaterOrEqual(t, svc.EmbeddingCount(), NSmallMax)
+
+	// Missing on-disk HNSW should trigger warmup build.
+	svc.hnswMu.RLock()
+	defer svc.hnswMu.RUnlock()
+	require.NotNil(t, svc.hnswIndex)
+	require.GreaterOrEqual(t, svc.hnswIndex.Size(), NSmallMax)
 }
 
 func TestSearchService_PersistBaseIndexes_Branches(t *testing.T) {

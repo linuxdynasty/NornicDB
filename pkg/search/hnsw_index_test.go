@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestNewHNSWIndex(t *testing.T) {
@@ -695,4 +696,268 @@ func TestHNSW_IVFClusterPersistenceAndDeriveCentroids(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, centroids)
 	require.Nil(t, idToCluster)
+}
+
+func TestHNSWIndex_InternalGuardBranches(t *testing.T) {
+	index := NewHNSWIndex(3, HNSWConfig{
+		M:               2,
+		EfConstruction:  16,
+		EfSearch:        8,
+		LevelMultiplier: 1.0,
+	})
+	require.NoError(t, index.Add("n1", []float32{1, 0, 0}))
+	require.NoError(t, index.Add("n2", []float32{0, 1, 0}))
+
+	index.mu.Lock()
+	defer index.mu.Unlock()
+
+	require.Nil(t, index.vectorAtLocked(9999), "out-of-range internal id must return nil")
+	require.NotNil(t, index.vectorAtLocked(0), "valid internal id should resolve vector")
+
+	index.vecOff[0] = -1
+	index.vectorLookup = func(string) ([]float32, bool) { return []float32{1, 0, 0}, true }
+	require.NotNil(t, index.vectorAtLocked(0), "lookup vector with matching dims should resolve")
+	index.vectorLookup = func(string) ([]float32, bool) { return []float32{1, 0}, true }
+	require.Nil(t, index.vectorAtLocked(0), "lookup vector with wrong dims should be rejected")
+	index.vectorLookup = nil
+	index.vecOff[0] = int32(len(index.vectors) + 10)
+	require.Nil(t, index.vectorAtLocked(0), "offset beyond vectors arena should be rejected")
+
+	_, ok := index.neighborsAtLevelLocked(9999, 0)
+	require.False(t, ok, "out-of-range node id should fail")
+	_, ok = index.neighborsAtLevelLocked(0, -1)
+	require.False(t, ok, "negative level should fail")
+	_, ok = index.neighborsAtLevelLocked(0, int(index.nodeLevel[0])+1)
+	require.False(t, ok, "level above node level should fail")
+	oldM := index.config.M
+	index.config.M = 0
+	_, ok = index.neighborsAtLevelLocked(0, 0)
+	require.False(t, ok, "non-positive M should fail")
+	index.config.M = oldM
+
+	index.setNeighborsAtLevelLocked(0, 0, []uint32{1, 2, 3})
+	neighbors, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Len(t, neighbors, 2)
+	require.Equal(t, uint32(1), neighbors[0])
+	require.Equal(t, uint32(2), neighbors[1])
+
+	index.insertNeighborAtLevelLocked(0, 0, 1)
+	neighbors, ok = index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Len(t, neighbors, 2, "neighbor count must remain capped at M")
+
+	index.deleted[0] = true
+	index.insertNeighborAtLevelLocked(0, 0, 1)
+	neighborsAfterDeleted, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Equal(t, neighbors, neighborsAfterDeleted, "deleted guard should keep neighbors unchanged")
+}
+
+func TestLoadIVFClusterMemberIDs_Branches(t *testing.T) {
+	t.Run("empty directory argument returns nil slice", func(t *testing.T) {
+		memberIDs, err := loadIVFClusterMemberIDs("", 0)
+		require.NoError(t, err)
+		require.Nil(t, memberIDs)
+	})
+
+	t.Run("missing cluster file returns error", func(t *testing.T) {
+		_, err := loadIVFClusterMemberIDs(filepath.Join(t.TempDir(), "hnsw_ivf"), 7)
+		require.Error(t, err)
+	})
+
+	t.Run("corrupt cluster file returns decode error", func(t *testing.T) {
+		ivfDir := filepath.Join(t.TempDir(), "hnsw_ivf")
+		require.NoError(t, os.MkdirAll(ivfDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(ivfDir, "3"), []byte("not-msgpack"), 0o644))
+		_, err := loadIVFClusterMemberIDs(ivfDir, 3)
+		require.Error(t, err)
+	})
+
+	t.Run("snapshot without InternalToID returns nil slice", func(t *testing.T) {
+		tmp := t.TempDir()
+		clusterFile := filepath.Join(tmp, "cluster")
+		idx := NewHNSWIndex(2, DefaultHNSWConfig())
+		require.NoError(t, idx.Save(clusterFile))
+
+		f, err := os.Open(clusterFile)
+		require.NoError(t, err)
+		var snap hnswIndexSnapshot
+		require.NoError(t, msgpack.NewDecoder(f).Decode(&snap))
+		require.NoError(t, f.Close())
+		snap.InternalToID = nil
+
+		outPath := filepath.Join(tmp, "hnsw_ivf")
+		require.NoError(t, os.MkdirAll(outPath, 0o755))
+		outFile := filepath.Join(outPath, "0")
+		of, err := os.Create(outFile)
+		require.NoError(t, err)
+		require.NoError(t, msgpack.NewEncoder(of).Encode(&snap))
+		require.NoError(t, of.Close())
+
+		memberIDs, err := loadIVFClusterMemberIDs(outPath, 0)
+		require.NoError(t, err)
+		require.Nil(t, memberIDs)
+	})
+}
+
+func TestHNSWIndex_SetNeighborsAtLevelLocked_InvalidBoundsNoMutation(t *testing.T) {
+	index := NewHNSWIndex(2, HNSWConfig{M: 2, EfConstruction: 16, EfSearch: 8, LevelMultiplier: 1.0})
+	require.NoError(t, index.Add("a", []float32{1, 0}))
+	require.NoError(t, index.Add("b", []float32{0, 1}))
+
+	index.mu.Lock()
+	index.setNeighborsAtLevelLocked(0, 0, []uint32{1})
+	before, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Len(t, before, 1)
+
+	// Invalid level should leave neighbor set unchanged.
+	index.setNeighborsAtLevelLocked(0, int(index.nodeLevel[0])+3, []uint32{0, 1})
+	afterInvalidLevel, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Equal(t, before, afterInvalidLevel)
+
+	// Invalid node ID should leave neighbor set unchanged.
+	index.setNeighborsAtLevelLocked(9999, 0, []uint32{0, 1})
+	afterInvalidNode, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Equal(t, before, afterInvalidNode)
+	index.mu.Unlock()
+}
+
+func TestHNSWIndex_InsertNeighborAtLevelLocked_InvalidConfigGuards(t *testing.T) {
+	index := NewHNSWIndex(2, HNSWConfig{M: 2, EfConstruction: 16, EfSearch: 8, LevelMultiplier: 1.0})
+	require.NoError(t, index.Add("a", []float32{1, 0}))
+	require.NoError(t, index.Add("b", []float32{0, 1}))
+
+	index.mu.Lock()
+	index.setNeighborsAtLevelLocked(0, 0, []uint32{1})
+	before, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Len(t, before, 1)
+
+	// m <= 0 guard
+	oldM := index.config.M
+	index.config.M = 0
+	index.insertNeighborAtLevelLocked(0, 0, 1)
+	index.config.M = oldM
+
+	// invalid level guard
+	index.insertNeighborAtLevelLocked(0, int(index.nodeLevel[0])+4, 1)
+
+	after, ok := index.neighborsAtLevelLocked(0, 0)
+	require.True(t, ok)
+	require.Equal(t, before, after)
+	index.mu.Unlock()
+}
+
+func TestHNSWIndex_VectorAtLocked_VectorLookupMissBranches(t *testing.T) {
+	index := NewHNSWIndex(2, HNSWConfig{M: 2, EfConstruction: 16, EfSearch: 8, LevelMultiplier: 1.0})
+	require.NoError(t, index.Add("a", []float32{1, 0}))
+
+	index.mu.Lock()
+	index.vecOff[0] = -1
+	index.vectorLookup = func(string) ([]float32, bool) { return nil, false }
+	require.Nil(t, index.vectorAtLocked(0), "lookup miss should return nil")
+
+	index.vectorLookup = func(string) ([]float32, bool) { return []float32{1}, true }
+	require.Nil(t, index.vectorAtLocked(0), "lookup wrong dimensions should return nil")
+	index.mu.Unlock()
+}
+
+func TestLoadHNSWIndex_GraphOnlyRequiresLookup(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "hnsw")
+
+	snap := hnswIndexSnapshot{
+		Version:           hnswIndexFormatVersionGraphOnly,
+		Config:            HNSWConfig{M: 16, EfConstruction: 100, EfSearch: 50, LevelMultiplier: 1.0},
+		Dimensions:        2,
+		NodeLevel:         []uint16{0},
+		NeighborsArena:    []uint32{},
+		NeighborsOff:      []int32{0},
+		NeighborCountsAr:  []uint16{0},
+		NeighborCountsOff: []int32{0},
+		IDToInternal:      map[string]uint32{"n1": 0},
+		InternalToID:      []string{"n1"},
+		Deleted:           []bool{false},
+		LiveCount:         1,
+		EntryPoint:        0,
+		HasEntryPoint:     true,
+	}
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(f).Encode(&snap))
+	require.NoError(t, f.Close())
+
+	loaded, err := LoadHNSWIndex(path, nil)
+	require.NoError(t, err)
+	require.Nil(t, loaded, "graph-only snapshots must not load without vector lookup")
+}
+
+func TestLoadHNSWIndex_LegacySnapshotAndDefaultConfig(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "hnsw")
+
+	snap := hnswIndexSnapshot{
+		Version:           hnswIndexFormatVersion,
+		Config:            HNSWConfig{M: 0}, // triggers default config branch
+		Dimensions:        2,
+		NodeLevel:         []uint16{0},
+		VecOff:            []int32{0},
+		Vectors:           []float32{1, 0},
+		NeighborsArena:    []uint32{},
+		NeighborsOff:      []int32{0},
+		NeighborCountsAr:  []uint16{0},
+		NeighborCountsOff: []int32{0},
+		IDToInternal:      map[string]uint32{"n1": 0},
+		InternalToID:      []string{"n1"},
+		Deleted:           []bool{false},
+		LiveCount:         1,
+		EntryPoint:        0,
+		HasEntryPoint:     true,
+	}
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(f).Encode(&snap))
+	require.NoError(t, f.Close())
+
+	loaded, err := LoadHNSWIndex(path, nil)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, 16, loaded.Config().M)
+	require.Equal(t, 1, loaded.Size())
+}
+
+func TestLoadHNSWIndex_InvalidSnapshotReturnsNil(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "hnsw")
+
+	// Unsupported version.
+	snap := hnswIndexSnapshot{
+		Version:      "9.9.9",
+		Dimensions:   2,
+		InternalToID: []string{"n1"},
+	}
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(f).Encode(&snap))
+	require.NoError(t, f.Close())
+
+	loaded, err := LoadHNSWIndex(path, nil)
+	require.NoError(t, err)
+	require.Nil(t, loaded)
+
+	// Missing InternalToID.
+	snap.Version = hnswIndexFormatVersionGraphOnly
+	snap.InternalToID = nil
+	f, err = os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, msgpack.NewEncoder(f).Encode(&snap))
+	require.NoError(t, f.Close())
+
+	loaded, err = LoadHNSWIndex(path, func(string) ([]float32, bool) { return []float32{1, 0}, true })
+	require.NoError(t, err)
+	require.Nil(t, loaded)
 }
