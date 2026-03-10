@@ -988,6 +988,9 @@ func (db *DB) FindSimilar(ctx context.Context, nodeID string, limit int) ([]*Sea
 	if db.closed {
 		return nil, ErrClosed
 	}
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be greater than 0")
+	}
 
 	// Get target node
 	target, err := db.storage.GetNode(storage.NodeID(nodeID))

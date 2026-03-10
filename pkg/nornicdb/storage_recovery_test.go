@@ -140,6 +140,78 @@ func TestRecoverBadgerFromSnapshotAndWAL_HandlesEmptyRecoveryInputs(t *testing.T
 	require.Empty(t, nodes)
 }
 
+func TestRecoverBadgerFromSnapshotAndWAL_SnapshotAndWALReplay(t *testing.T) {
+	dataDir := t.TempDir()
+	walDir := filepath.Join(dataDir, "wal")
+	snapshotDir := filepath.Join(dataDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+
+	wal, err := storage.NewWAL(walDir, &storage.WALConfig{Dir: walDir, SyncMode: "immediate"})
+	require.NoError(t, err)
+
+	mem := storage.NewMemoryEngine()
+	ns := storage.NewNamespacedEngine(mem, "test")
+	_, err = ns.CreateNode(&storage.Node{
+		ID:     "seed-1",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "from-snapshot",
+		},
+	})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{
+		ID:     "seed-2",
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "from-snapshot-2",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ns.CreateEdge(&storage.Edge{
+		ID:        "edge-1",
+		StartNode: "seed-1",
+		EndNode:   "seed-2",
+		Type:      "LINK",
+	}))
+
+	snapshot, err := wal.CreateSnapshot(mem)
+	require.NoError(t, err)
+	snapshotPath := filepath.Join(snapshotDir, "snapshot-current.json")
+	require.NoError(t, storage.SaveSnapshot(snapshot, snapshotPath))
+
+	// Post-snapshot write must be replayed from WAL.
+	require.NoError(t, wal.AppendWithDatabase(storage.OpCreateNode, storage.WALNodeData{
+		Node: &storage.Node{
+			ID:     "after-1",
+			Labels: []string{"Doc"},
+			Properties: map[string]any{
+				"content": "from-wal",
+			},
+		},
+	}, "test"))
+	require.NoError(t, wal.Close())
+
+	recovered, backupDir, err := recoverBadgerFromSnapshotAndWAL(dataDir, storage.BadgerOptions{DataDir: dataDir})
+	require.NoError(t, err)
+	require.NotNil(t, recovered)
+	require.NotEmpty(t, backupDir)
+	t.Cleanup(func() { _ = recovered.Close() })
+	t.Cleanup(func() { _ = os.RemoveAll(backupDir) })
+
+	snapNode, err := recovered.GetNode(storage.NodeID("test:seed-1"))
+	require.NoError(t, err)
+	require.Equal(t, "from-snapshot", snapNode.Properties["content"])
+
+	walNode, err := recovered.GetNode(storage.NodeID("test:after-1"))
+	require.NoError(t, err)
+	require.Equal(t, "from-wal", walNode.Properties["content"])
+
+	edge, err := recovered.GetEdge(storage.EdgeID("test:edge-1"))
+	require.NoError(t, err)
+	require.Equal(t, storage.NodeID("test:seed-1"), edge.StartNode)
+	require.Equal(t, storage.NodeID("test:seed-2"), edge.EndNode)
+}
+
 func TestRecoverBadgerFromSnapshotAndWAL_WALReplayError(t *testing.T) {
 	// Use a file path as dataDir so walDir cannot be opened as a proper directory.
 	filePath := filepath.Join(t.TempDir(), "not-a-dir")
