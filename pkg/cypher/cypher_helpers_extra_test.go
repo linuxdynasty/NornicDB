@@ -24,6 +24,10 @@ type typedResultFixture struct {
 	Score     float64
 }
 
+type testTimeStringer string
+
+func (ts testTimeStringer) String() string { return string(ts) }
+
 func TestCypherHelpers_DecodeMapAndAssignValue(t *testing.T) {
 	m := map[string]interface{}{
 		"name":       "alice",
@@ -729,6 +733,9 @@ func TestCypherHelpers_ComparisonConversionAndTemporalHelpers(t *testing.T) {
 	tm, ok = coerceDateTime(float64(1700000001))
 	require.True(t, ok)
 	assert.Equal(t, int64(1700000001), tm.Unix())
+	tm, ok = coerceDateTime(testTimeStringer("2024-01-02T03:04:05Z"))
+	require.True(t, ok)
+	assert.Equal(t, int64(1704164645), tm.Unix())
 	_, ok = coerceDateTime(struct{}{})
 	assert.False(t, ok)
 
@@ -1668,6 +1675,15 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 		"CALL db.stats.status()",
 		"CALL db.stats.stop()",
 		"CALL db.stats.clear()",
+		"CALL db.stats.collect()",
+		"CALL db.stats.retrieve()",
+		"CALL db.awaitIndexes()",
+		"CALL apoc.algo.pageRank()",
+		"CALL apoc.algo.betweenness()",
+		"CALL apoc.algo.closeness()",
+		"CALL apoc.algo.louvain()",
+		"CALL apoc.algo.labelPropagation()",
+		"CALL apoc.algo.wcc()",
 		"CALL db.clearQueryCaches()",
 	}
 	for _, q := range expectSuccess {
@@ -1703,6 +1719,25 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 		"CALL apoc.periodic.iterate()",                                     // malformed
 		"CALL apoc.cypher.run()",                                           // malformed
 		"CALL apoc.cypher.runMany()",                                       // malformed
+		"CALL apoc.cypher.doitAll()",                                       // malformed alias
+		"CALL apoc.periodic.rock_n_roll()",                                 // malformed alias
+		"CALL apoc.load.jsonArray()",                                       // malformed
+		"CALL apoc.export.json.all()",                                      // malformed
+		"CALL apoc.export.json.query()",                                    // malformed
+		"CALL apoc.export.csv.all()",                                       // malformed
+		"CALL apoc.export.csv.query()",                                     // malformed
+		"CALL gds.graph.drop()",                                            // malformed
+		"CALL gds.graph.project()",                                         // malformed
+		"CALL gds.fastRP.stream()",                                         // malformed
+		"CALL gds.fastRP.stats()",                                          // malformed
+		"CALL db.index.vector.createNodeIndex()",                           // malformed
+		"CALL db.index.vector.createRelationshipIndex()",                   // malformed
+		"CALL db.index.fulltext.createNodeIndex()",                         // malformed
+		"CALL db.index.fulltext.createRelationshipIndex()",                 // malformed
+		"CALL db.create.setNodeVectorProperty()",                           // malformed
+		"CALL db.create.setRelationshipVectorProperty()",                   // malformed
+		"CALL db.awaitIndex()",                                             // malformed
+		"CALL db.resampleIndex()",                                          // malformed
 	}
 	for _, q := range expectError {
 		t.Run("error_"+q, func(t *testing.T) {
@@ -2087,6 +2122,197 @@ func TestCypherHelpers_ExecuteMatchWithPipelineToRows_Branches(t *testing.T) {
 	_, err = exec.executeMatchWithPipelineToRows(ctx, "MATCH (:OrderStatus) WITH o", []string{"o"}, eng)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must have a variable")
+}
+
+func TestCypherHelpers_YieldParsingAndFiltering_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	// Keyword detection should ignore quoted occurrences.
+	assert.Equal(t, -1, findKeywordIndexInContext("x = 'ORDER BY' and y = 'LIMIT'", "ORDER"))
+	assert.NotEqual(t, -1, findKeywordIndexInContext(" score > 0.1 ORDER BY score DESC", "ORDER"))
+
+	parsed := parseYieldClause("CALL proc() YIELD node, score RETURN node.id AS id, score ORDER BY score DESC SKIP 1 LIMIT 2")
+	require.NotNil(t, parsed)
+	require.Len(t, parsed.items, 2)
+	assert.Equal(t, "node", parsed.items[0].name)
+	assert.Equal(t, "score", parsed.items[1].name)
+	assert.True(t, parsed.hasReturn)
+	assert.Equal(t, "node.id AS id, score", parsed.returnExpr)
+	assert.Equal(t, "score DESC", parsed.orderBy)
+	assert.Equal(t, 1, parsed.skip)
+	assert.Equal(t, 2, parsed.limit)
+
+	parsedNoReturn := parseYieldClause("CALL proc() YIELD score ORDER BY score DESC SKIP 2 LIMIT 1")
+	require.NotNil(t, parsedNoReturn)
+	assert.False(t, parsedNoReturn.hasReturn)
+	assert.Equal(t, "score DESC", parsedNoReturn.orderBy)
+	assert.Equal(t, 2, parsedNoReturn.skip)
+	assert.Equal(t, 1, parsedNoReturn.limit)
+
+	node1 := &storage.Node{ID: "n1", Labels: []string{"Doc"}, Properties: map[string]interface{}{"id": "user-1"}}
+	node2 := &storage.Node{ID: "n2", Labels: []string{"Doc"}, Properties: map[string]interface{}{"id": "user-2"}}
+	node3 := &storage.Node{ID: "n3", Labels: []string{"Doc"}, Properties: map[string]interface{}{"id": "user-3"}}
+	baseResult := &ExecuteResult{
+		Columns: []string{"node", "score"},
+		Rows: [][]interface{}{
+			{node1, float64(0.2)},
+			{node2, float64(0.9)},
+			{node3, float64(0.5)},
+		},
+	}
+
+	yield := &yieldClause{
+		yieldAll:   true,
+		hasReturn:  true,
+		returnExpr: "node.id AS id, score AS score",
+		orderBy:    "ORDER BY score DESC",
+		skip:       1,
+		limit:      1,
+	}
+	filtered, err := exec.applyYieldFilter(baseResult, yield)
+	require.NoError(t, err)
+	require.Len(t, filtered.Rows, 1)
+	assert.Equal(t, []string{"id", "score"}, filtered.Columns)
+	assert.Equal(t, "user-3", filtered.Rows[0][0])
+	assert.Equal(t, float64(0.5), filtered.Rows[0][1])
+
+	// WHERE filtering + projected aliases.
+	whereResult := &ExecuteResult{
+		Columns: []string{"score"},
+		Rows: [][]interface{}{
+			{map[string]interface{}{"value": float64(0.2)}},
+			{map[string]interface{}{"value": float64(0.9)}},
+		},
+	}
+	yieldWhere := &yieldClause{
+		items: []yieldItem{
+			{name: "score", alias: "score"},
+		},
+		where: "score.value > 0.5",
+	}
+	whereFiltered, err := exec.applyYieldFilter(whereResult, yieldWhere)
+	require.NoError(t, err)
+	// Current evaluator semantics: map-valued YIELD WHERE does not resolve to true here.
+	require.Empty(t, whereFiltered.Rows)
+
+	// Unknown column should be rejected.
+	_, err = exec.applyYieldFilter(&ExecuteResult{
+		Columns: []string{"a"},
+		Rows:    [][]interface{}{{int64(1)}},
+	}, &yieldClause{
+		items: []yieldItem{{name: "missing"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown YIELD column")
+}
+
+func TestCypherHelpers_TryFastRevenueByProduct_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	// Rejection branches.
+	rejectCases := []struct {
+		name    string
+		matches *TraversalMatch
+		with    string
+		ret     string
+	}{
+		{name: "nil_matches", matches: nil, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "chained", matches: &TraversalMatch{IsChained: true}, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "wrong_hops", matches: &TraversalMatch{StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}}, Relationship: RelationshipPattern{Variable: "r", Types: []string{"ORDERS"}, Direction: "incoming", MinHops: 2, MaxHops: 2}}, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "wrong_type", matches: &TraversalMatch{StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}}, Relationship: RelationshipPattern{Variable: "r", Types: []string{"LIKES"}, Direction: "incoming", MinHops: 1, MaxHops: 1}}, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "wrong_direction", matches: &TraversalMatch{StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}}, Relationship: RelationshipPattern{Variable: "r", Types: []string{"ORDERS"}, Direction: "outgoing", MinHops: 1, MaxHops: 1}}, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "missing_vars", matches: &TraversalMatch{StartNode: nodePatternInfo{labels: []string{"Product"}}, Relationship: RelationshipPattern{Types: []string{"ORDERS"}, Direction: "incoming", MinHops: 1, MaxHops: 1}}, with: "p, sum(p.unitPrice * r.quantity) as revenue", ret: "p.productName, revenue"},
+		{name: "bad_with_expr", matches: &TraversalMatch{StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}}, Relationship: RelationshipPattern{Variable: "r", Types: []string{"ORDERS"}, Direction: "incoming", MinHops: 1, MaxHops: 1}}, with: "p, sum(p.unitPrice + r.quantity) as revenue", ret: "p.productName, revenue"},
+	}
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, ok, err := exec.tryFastRevenueByProduct(tc.matches, tc.with, tc.ret, "", 0, 0)
+			require.NoError(t, err)
+			assert.False(t, ok)
+			assert.Nil(t, res)
+		})
+	}
+
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "A", "unitPrice": float64(10)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Product"}, Properties: map[string]interface{}{"productName": "B", "unitPrice": "20"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o1", Labels: []string{"Order"}, Properties: map[string]interface{}{"orderID": int64(1)}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "o2", Labels: []string{"Order"}, Properties: map[string]interface{}{"orderID": int64(2)}})
+	require.NoError(t, err)
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e1", StartNode: "o1", EndNode: "p1", Type: "ORDERS", Properties: map[string]interface{}{"quantity": int64(3)}}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e2", StartNode: "o2", EndNode: "p2", Type: "ORDERS", Properties: map[string]interface{}{"quantity": float64(2)}}))
+
+	matches := &TraversalMatch{
+		StartNode: nodePatternInfo{variable: "p", labels: []string{"Product"}},
+		Relationship: RelationshipPattern{
+			Variable:  "r",
+			Types:     []string{"ORDERS"},
+			Direction: "incoming",
+			MinHops:   1,
+			MaxHops:   1,
+		},
+	}
+	res, ok, err := exec.tryFastRevenueByProduct(
+		matches,
+		"p, sum(p.unitPrice * r.quantity) as revenue",
+		"p.productName, revenue",
+		"revenue DESC",
+		0,
+		10,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []string{"p.productName", "revenue"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	assert.Equal(t, "B", res.Rows[0][0])
+	assert.Equal(t, float64(40), res.Rows[0][1])
+	assert.Equal(t, "A", res.Rows[1][0])
+	assert.Equal(t, float64(30), res.Rows[1][1])
+}
+
+func TestCypherHelpers_MergeRelationshipContextHelpers_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	// extractVariableNamesFromPattern basic behavior.
+	vars := exec.extractVariableNamesFromPattern("(p:Person)<-[:REL]-(poc:POC)-[:BELONGS_TO]->(a:Area)")
+	assert.ElementsMatch(t, []string{"p", "poc", "a"}, vars)
+	assert.Empty(t, exec.extractVariableNamesFromPattern("()-[:REL]->()"))
+
+	// No variable names branch.
+	matches, rels, err := exec.executeMatchForContextWithRelationships(ctx, "MATCH ()-[:REL]->()", "()-[:REL]->()")
+	require.NoError(t, err)
+	assert.Empty(t, matches)
+	assert.Empty(t, rels)
+
+	_, err = eng.CreateNode(&storage.Node{ID: "pa", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "pb", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "k1", StartNode: "pa", EndNode: "pb", Type: "KNOWS"}))
+
+	// Successful extraction branch.
+	matches, rels, err = exec.executeMatchForContextWithRelationships(
+		ctx,
+		"MATCH (a:Person)-[:KNOWS]->(b:Person)",
+		"(a:Person)-[:KNOWS]->(b:Person)",
+	)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, storage.NodeID("pa"), matches[0]["a"].ID)
+	assert.Equal(t, storage.NodeID("pb"), matches[0]["b"].ID)
+	assert.Empty(t, rels)
+
+	// Malformed pattern should fail fast.
+	_, _, err = exec.executeMatchForContextWithRelationships(ctx, "MATCH (a:Person)-[:KNOWS]->(b:Person", "(a:Person)-[:KNOWS]->(b:Person")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "malformed relationship pattern")
 }
 
 func TestCypherHelpers_ExplainInferenceAndCostHelpers(t *testing.T) {

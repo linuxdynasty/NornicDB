@@ -212,4 +212,68 @@ func TestDateComponentFunctions(t *testing.T) {
 			t.Errorf("Expected 27, got %d", got)
 		}
 	})
+
+	t.Run("additional date components and truncation", func(t *testing.T) {
+		result, err := executor.Execute(ctx, "RETURN date.week('2025-11-27') AS w, date.quarter('2025-11-27') AS q, date.dayOfWeek('2025-11-27') AS dow, date.dayOfYear('2025-11-27') AS doy, date.ordinalDay('2025-11-27') AS od, date.weekYear('2025-11-27') AS wy", nil)
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		row := result.Rows[0]
+		if row[0].(int64) != 48 {
+			t.Fatalf("date.week expected 48, got %v", row[0])
+		}
+		if row[1].(int64) != 4 {
+			t.Fatalf("date.quarter expected 4, got %v", row[1])
+		}
+		if row[2].(int64) != 4 {
+			t.Fatalf("date.dayOfWeek expected 4, got %v", row[2])
+		}
+		if row[3].(int64) != 331 || row[4].(int64) != 331 {
+			t.Fatalf("date day-of-year mismatch: %v / %v", row[3], row[4])
+		}
+		if row[5].(int64) != 2025 {
+			t.Fatalf("date.weekYear expected 2025, got %v", row[5])
+		}
+
+		result, err = executor.Execute(ctx, "RETURN date.truncate('year','2025-11-27') AS y, date.truncate('quarter','2025-11-27') AS q, date.truncate('month','2025-11-27') AS m, date.truncate('week','2025-11-27') AS w, date.truncate('day','2025-11-27') AS d", nil)
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		row = result.Rows[0]
+		if row[0] != "2025-01-01" || row[1] != "2025-10-01" || row[2] != "2025-11-01" || row[3] != "2025-11-24" || row[4] != "2025-11-27" {
+			t.Fatalf("unexpected date.truncate output: %#v", row)
+		}
+	})
+
+	t.Run("datetime/time truncate and datetime components", func(t *testing.T) {
+		result, err := executor.Execute(ctx, "RETURN datetime.truncate('hour','2025-11-27T14:35:50Z') AS h, datetime.truncate('minute','2025-11-27T14:35:50Z') AS m, datetime.truncate('second','2025-11-27T14:35:50Z') AS s, datetime.truncate('day','2025-11-27T14:35:50Z') AS d, time.truncate('hour','14:35:50') AS th, time.truncate('minute','14:35:50') AS tm", nil)
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		row := result.Rows[0]
+		if !strings.HasPrefix(row[0].(string), "2025-11-27T14:00:00") {
+			t.Fatalf("unexpected datetime.truncate hour: %v", row[0])
+		}
+		if !strings.HasPrefix(row[1].(string), "2025-11-27T14:35:00") {
+			t.Fatalf("unexpected datetime.truncate minute: %v", row[1])
+		}
+		if !strings.HasPrefix(row[2].(string), "2025-11-27T14:35:50") {
+			t.Fatalf("unexpected datetime.truncate second: %v", row[2])
+		}
+		if !strings.HasPrefix(row[3].(string), "2025-11-27T00:00:00") {
+			t.Fatalf("unexpected datetime.truncate day: %v", row[3])
+		}
+		if row[4] != "14:00:00" || row[5] != "14:35:00" {
+			t.Fatalf("unexpected time.truncate outputs: %#v", row[4:6])
+		}
+
+		result, err = executor.Execute(ctx, "RETURN datetime.hour('2025-11-27T14:35:50Z') AS h, datetime.minute('2025-11-27T14:35:50Z') AS m, datetime.second('2025-11-27T14:35:50Z') AS s, datetime.year('2025-11-27T14:35:50Z') AS y, datetime.month('2025-11-27T14:35:50Z') AS mo, datetime.day('2025-11-27T14:35:50Z') AS d", nil)
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		row = result.Rows[0]
+		if row[0].(int64) != 14 || row[1].(int64) != 35 || row[2].(int64) != 50 || row[3].(int64) != 2025 || row[4].(int64) != 11 || row[5].(int64) != 27 {
+			t.Fatalf("unexpected datetime component outputs: %#v", row)
+		}
+	})
 }

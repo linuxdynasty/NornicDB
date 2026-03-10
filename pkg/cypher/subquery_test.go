@@ -2288,3 +2288,95 @@ func TestSubqueryHelpers_AddLimitSkipAndAfterCallProcessing(t *testing.T) {
 	require.Len(t, agg.Rows, 1)
 	assert.Equal(t, int64(2), agg.Rows[0][0])
 }
+
+func TestSubqueryHelpers_ExecuteMatchWithCallSubquery_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.executeMatchWithCallSubquery(ctx, "MATCH (n) RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CALL not found")
+
+	_, err = exec.executeMatchWithCallSubquery(ctx, "CALL { RETURN 1 AS x } RETURN x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MATCH not found")
+
+	_, err = exec.executeMatchWithCallSubquery(ctx, "MATCH (:Person) CALL { WITH seed RETURN seed } RETURN seed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not parse node pattern")
+
+	// No seed nodes branch.
+	emptyRes, err := exec.executeMatchWithCallSubquery(ctx, "MATCH (seed:Person) WHERE seed.name = 'none' CALL { WITH seed RETURN seed } RETURN seed")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"seed", "neighbors"}, emptyRes.Columns)
+	assert.Empty(t, emptyRes.Rows)
+
+	_, err = eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// Empty CALL body branch.
+	_, err = exec.executeMatchWithCallSubquery(ctx, "MATCH (seed:Person) CALL { } RETURN seed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty body")
+
+	// No WITH branch routes through executeCallSubquery.
+	noWithRes, err := exec.executeMatchWithCallSubquery(ctx, "MATCH (seed:Person) CALL { RETURN 1 AS x } RETURN x")
+	require.NoError(t, err)
+	require.NotEmpty(t, noWithRes.Rows)
+	assert.Equal(t, int64(1), noWithRes.Rows[0][0])
+
+	// Correlated WITH branch and after-CALL RETURN processing.
+	withRes, err := exec.executeMatchWithCallSubquery(ctx, "MATCH (seed:Person) CALL { WITH seed RETURN seed } RETURN seed")
+	require.NoError(t, err)
+	require.Len(t, withRes.Rows, 2)
+}
+
+func TestSubqueryHelpers_ExecuteMatchWithCallProcedure_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n) RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CALL not found")
+
+	_, err = exec.executeMatchWithCallProcedure(ctx, "CALL db.info()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MATCH not found")
+
+	_, err = exec.executeMatchWithCallProcedure(ctx, "MATCH (:Person) CALL db.info()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not parse node pattern")
+
+	// No matched nodes -> columns from YIELD.
+	emptyYieldRes, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person {name: 'none'}) CALL db.info() YIELD name RETURN name")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"name"}, emptyYieldRes.Columns)
+	assert.Empty(t, emptyYieldRes.Rows)
+
+	// No matched nodes -> vector-query defaults.
+	emptyVectorRes, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person {name: 'none'}) CALL db.index.vector.queryNodes('idx', 2, n.embedding)")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node", "score"}, emptyVectorRes.Columns)
+	assert.Empty(t, emptyVectorRes.Rows)
+
+	_, err = eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+
+	// Matched nodes + failing call path.
+	_, err = exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL db.unknownProcedure()")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to execute CALL")
+
+	// Matched nodes + successful call, results merged across seeds.
+	okRes, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL db.info() YIELD name RETURN name")
+	require.NoError(t, err)
+	require.Len(t, okRes.Rows, 2)
+}

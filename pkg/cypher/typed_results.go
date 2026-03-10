@@ -232,36 +232,6 @@ func assignValue(field reflect.Value, val interface{}) error {
 
 	// Handle numeric conversions
 	switch field.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		switch v := val.(type) {
-		case float64:
-			field.SetInt(int64(v))
-			return nil
-		case float32:
-			field.SetInt(int64(v))
-			return nil
-		case int:
-			field.SetInt(int64(v))
-			return nil
-		case int64:
-			field.SetInt(v)
-			return nil
-		}
-	case reflect.Float32, reflect.Float64:
-		switch v := val.(type) {
-		case int:
-			field.SetFloat(float64(v))
-			return nil
-		case int64:
-			field.SetFloat(float64(v))
-			return nil
-		case float64:
-			field.SetFloat(v)
-			return nil
-		case float32:
-			field.SetFloat(float64(v))
-			return nil
-		}
 	case reflect.String:
 		field.SetString(fmt.Sprintf("%v", val))
 		return nil

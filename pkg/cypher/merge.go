@@ -423,6 +423,13 @@ func (e *StorageExecutor) executeMatchForContextWithRelationships(ctx context.Co
 	relMatches := make(map[string]*storage.Edge)
 	store := e.getStorage(ctx)
 
+	// Fail fast on malformed relationship patterns instead of returning
+	// an implicit empty context. This keeps behavior strict and predictable.
+	if strings.Count(patternPart, "(") != strings.Count(patternPart, ")") ||
+		strings.Count(patternPart, "[") != strings.Count(patternPart, "]") {
+		return nil, relMatches, fmt.Errorf("malformed relationship pattern: %s", patternPart)
+	}
+
 	// Extract all variable names from the pattern
 	varNames := e.extractVariableNamesFromPattern(patternPart)
 	if len(varNames) == 0 {

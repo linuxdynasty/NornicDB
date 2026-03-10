@@ -6,6 +6,7 @@ package cypher
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -1935,5 +1936,85 @@ func TestFunctionAdditionalGeometryAndPathCoverage(t *testing.T) {
 	gotRelsFallback := e.evaluateExpressionWithContextFull("relationships(p)", nil, nil, nil, pathEdges, nil, 0)
 	if arr, ok := gotRelsFallback.([]interface{}); !ok || len(arr) != 1 {
 		t.Fatalf("relationships(p) fallback expected 1 entry, got %T %#v", gotRelsFallback, gotRelsFallback)
+	}
+}
+
+func TestFunctionAdditionalListMapAndDegreeCoverage(t *testing.T) {
+	e := setupTestExecutor(t)
+
+	a := createTestNode(t, e, "fn-a", []string{"Person", "Employee"}, map[string]interface{}{
+		"requiredLabels": []interface{}{"Person", "Employee"},
+		"cleanMap":       map[string]interface{}{"a": int64(1), "b": int64(2), "c": nil},
+	})
+	b := createTestNode(t, e, "fn-b", []string{"Person"}, map[string]interface{}{})
+	if err := e.storage.CreateEdge(&storage.Edge{
+		ID:        "fn-rel-1",
+		Type:      "KNOWS",
+		StartNode: a.ID,
+		EndNode:   b.ID,
+	}); err != nil {
+		t.Fatalf("create edge failed: %v", err)
+	}
+
+	nodes := map[string]*storage.Node{"a": a, "b": b}
+
+	// list/map helpers in evaluateExpressionWithContextFullFunctions.
+	assertEqual(t, "indexOf([10,20,30], 20)", int64(1), e.evaluateExpressionWithContext("indexOf([10,20,30], 20)", nodes, nil))
+	gotRange := e.evaluateExpressionWithContext("range(1,3)", nodes, nil)
+	if !reflect.DeepEqual([]interface{}{int64(1), int64(2), int64(3)}, gotRange) {
+		t.Fatalf("range(1,3) = %#v, want [1 2 3]", gotRange)
+	}
+	gotRangeNeg := e.evaluateExpressionWithContext("range(5,1,-2)", nodes, nil)
+	if !reflect.DeepEqual([]interface{}{int64(5), int64(3), int64(1)}, gotRangeNeg) {
+		t.Fatalf("range(5,1,-2) = %#v, want [5 3 1]", gotRangeNeg)
+	}
+	gotRangeZero := e.evaluateExpressionWithContext("range(1,3,0)", nodes, nil)
+	if !reflect.DeepEqual([]interface{}{int64(1), int64(2), int64(3)}, gotRangeZero) {
+		t.Fatalf("range(1,3,0) = %#v, want [1 2 3]", gotRangeZero)
+	}
+	gotSliceEmpty := e.evaluateExpressionWithContext("slice([1,2,3], 2, 1)", nodes, nil)
+	if !reflect.DeepEqual([]interface{}{}, gotSliceEmpty) {
+		t.Fatalf("slice([1,2,3],2,1) = %#v, want []", gotSliceEmpty)
+	}
+	gotSliceNonList := e.evaluateExpressionWithContext("slice('not-list', 0, 1)", nodes, nil)
+	if !reflect.DeepEqual([]interface{}{}, gotSliceNonList) {
+		t.Fatalf("slice('not-list',0,1) = %#v, want []", gotSliceNonList)
+	}
+	assertEqual(t, "inDegree(missing)", int64(0), e.evaluateExpressionWithContext("inDegree(missing)", nodes, nil))
+	assertEqual(t, "outDegree(missing)", int64(0), e.evaluateExpressionWithContext("outDegree(missing)", nodes, nil))
+	assertEqual(t, "hasLabels(a, 'bad')", false, e.evaluateExpressionWithContext("hasLabels(a, 'bad')", nodes, nil))
+	assertEqual(t, "hasLabels(missing, ['Person'])", false, e.evaluateExpressionWithContext("hasLabels(missing, ['Person'])", nodes, nil))
+
+	fromPairs := e.evaluateExpressionWithContext("apoc.map.fromPairs([['a',1],['b',2]])", nodes, nil)
+	fromPairsMap, ok := fromPairs.(map[string]interface{})
+	if !ok {
+		t.Fatalf("fromPairs result type = %T, want map[string]interface{}", fromPairs)
+	}
+	if fromPairsMap["a"] != int64(1) || fromPairsMap["b"] != int64(2) {
+		t.Fatalf("unexpected fromPairs result: %#v", fromPairsMap)
+	}
+
+	clean := e.evaluateExpressionWithContext("apoc.map.clean(a.cleanMap, ['b'], [null])", nodes, nil)
+	cleanMap, ok := clean.(map[string]interface{})
+	if !ok {
+		t.Fatalf("clean result type = %T, want map[string]interface{}", clean)
+	}
+	if cleanMap["a"] != int64(1) {
+		t.Fatalf("clean map missing expected a=1: %#v", cleanMap)
+	}
+	_, hasB := cleanMap["b"]
+	if hasB {
+		t.Fatalf("clean map should not contain key b: %#v", cleanMap)
+	}
+	_, hasC := cleanMap["c"]
+	if hasC {
+		t.Fatalf("clean map should not contain key c: %#v", cleanMap)
+	}
+
+	if !reflect.DeepEqual(map[string]interface{}{}, e.evaluateExpressionWithContext("apoc.map.fromPairs('bad')", nodes, nil)) {
+		t.Fatalf("apoc.map.fromPairs('bad') should return empty map")
+	}
+	if !reflect.DeepEqual(map[string]interface{}{}, e.evaluateExpressionWithContext("apoc.map.clean('bad')", nodes, nil)) {
+		t.Fatalf("apoc.map.clean('bad') should return empty map")
 	}
 }
