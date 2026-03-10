@@ -1814,4 +1814,97 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.False(t, didWork)
 		require.Equal(t, []storage.NodeID{"n3", "n3"}, qe.marked)
 	})
+
+	t.Run("worker waits for embedder then ticker picks up new node", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+
+		cfg := &EmbedWorkerConfig{
+			NumWorkers:   1,
+			ScanInterval: 25 * time.Millisecond,
+			BatchDelay:   time.Millisecond,
+			MaxRetries:   1,
+			ChunkSize:    64,
+			ChunkOverlap: 8,
+			// Start explicitly so we can set embedder after worker starts.
+			DeferWorkerStart: true,
+		}
+		worker := NewEmbedWorker(nil, engine, cfg)
+		defer worker.Close()
+		worker.StartWorkers()
+
+		// Worker should be waiting for embedder and not processing yet.
+		require.Equal(t, 0, worker.Stats().Processed)
+
+		worker.SetEmbedder(newMockEmbedder())
+
+		// Create node after worker activation; ticker path should discover it without explicit Trigger.
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     storage.NodeID("ticker-node"),
+			Labels: []string{"Doc"},
+			Properties: map[string]any{
+				"content": "picked by ticker",
+			},
+		})
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			return worker.Stats().Processed >= 1
+		}, 4*time.Second, 25*time.Millisecond)
+
+		n, err := engine.GetNode("ticker-node")
+		require.NoError(t, err)
+		require.NotEmpty(t, n.ChunkEmbeddings)
+	})
+
+	t.Run("worker exits promptly when closed before embedder is set", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		ew := &EmbedWorker{
+			config:            DefaultEmbedWorkerConfig(),
+			ctx:               ctx,
+			cancel:            cancel,
+			trigger:           make(chan struct{}, 1),
+			recentlyProcessed: make(map[string]time.Time),
+			loggedSkip:        make(map[string]bool),
+		}
+		done := make(chan struct{}, 1)
+		ew.wg.Add(1)
+		go func() {
+			ew.worker()
+			done <- struct{}{}
+		}()
+
+		// Closed branch in the wait-for-embedder loop should exit quickly.
+		ew.closed.Store(true)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("worker did not exit after closed=true without embedder")
+		}
+	})
+
+	t.Run("findNodeWithoutEmbedding uses EmbeddingFinder fast path", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		qe := &queueBranchEngine{
+			Engine:   engine,
+			findNode: &storage.Node{ID: storage.NodeID("fast-path")},
+		}
+		ew := &EmbedWorker{storage: qe}
+		n := ew.findNodeWithoutEmbedding()
+		require.NotNil(t, n)
+		require.Equal(t, storage.NodeID("fast-path"), n.ID)
+	})
+
+	t.Run("refreshEmbeddingIndex manager and fallback branches", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+
+		qe := &queueBranchEngine{Engine: engine, refreshCount: 7}
+		ew := &EmbedWorker{storage: qe}
+		require.Equal(t, 7, ew.refreshEmbeddingIndex())
+
+		ew.storage = engine
+		require.Equal(t, 0, ew.refreshEmbeddingIndex())
+	})
 }

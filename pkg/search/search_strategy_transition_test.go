@@ -177,3 +177,58 @@ func TestRuntimeStrategyTransition_CPUToGPUBruteNoRebuild(t *testing.T) {
 	defer svc.hnswMu.RUnlock()
 	require.Nil(t, svc.hnswIndex)
 }
+
+func TestRuntimeStrategyTransition_ReplayAndClearDeltaLog(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+
+	vi := svc.vectorIndex
+	require.NotNil(t, vi)
+	require.NoError(t, vi.Add("delta-a", []float32{1, 0, 0, 0}))
+	require.NoError(t, vi.Add("delta-b", []float32{0, 1, 0, 0}))
+
+	target := NewHNSWIndex(4, HNSWConfigFromEnv())
+	require.NotNil(t, target)
+
+	svc.strategyTransitionMu.Lock()
+	svc.strategyTransitionInProgress = true
+	svc.strategyTransitionMu.Unlock()
+
+	svc.appendStrategyDelta("delta-a", true)
+	svc.appendStrategyDelta("delta-b", true)
+
+	last := svc.replayTransitionDeltas(target, strategyModeHNSW, vi, nil, 0)
+	require.Greater(t, last, uint64(0))
+
+	results, err := target.Search(context.Background(), []float32{1, 0, 0, 0}, 10, 0.0)
+	require.NoError(t, err)
+	foundA := false
+	for _, r := range results {
+		if r.ID == "delta-a" {
+			foundA = true
+			break
+		}
+	}
+	require.True(t, foundA, "added delta should be replayed into HNSW target")
+
+	// Replay only deltas after the prior sequence and validate remove path.
+	svc.appendStrategyDelta("delta-a", false)
+	next := svc.replayTransitionDeltas(target, strategyModeHNSW, vi, nil, last)
+	require.Greater(t, next, last)
+
+	svc.clearTransitionDeltaLogLocked(next)
+	results, err = target.Search(context.Background(), []float32{1, 0, 0, 0}, 10, 0.0)
+	require.NoError(t, err)
+	foundA = false
+	for _, r := range results {
+		if r.ID == "delta-a" {
+			foundA = true
+			break
+		}
+	}
+	require.False(t, foundA, "remove delta should be replayed into HNSW target")
+
+	svc.strategyTransitionMu.Lock()
+	svc.strategyTransitionInProgress = false
+	svc.strategyTransitionMu.Unlock()
+}

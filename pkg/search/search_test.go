@@ -731,6 +731,65 @@ func TestSearchService_BuildIndexes_ContextCanceled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestVectorOverfetchLimitBoundaries(t *testing.T) {
+	cases := []struct {
+		limit int
+		want  int
+	}{
+		{limit: 0, want: 20},     // default when unset/invalid
+		{limit: -5, want: 20},    // default when negative
+		{limit: 1, want: 50},     // minimum floor
+		{limit: 5, want: 50},     // minimum floor
+		{limit: 100, want: 1000}, // normal scale
+		{limit: 500, want: 5000}, // hard cap
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, vectorOverfetchLimit(tc.limit))
+	}
+}
+
+func TestSearchFilterByTypeBranches(t *testing.T) {
+	engine := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
+	svc := NewServiceWithDimensions(engine, 3)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Person"},
+		Properties: map[string]any{"content": "alpha"},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:         "n2",
+		Labels:     []string{"Doc"},
+		Properties: map[string]any{"type": "Person", "content": "beta"},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:         "n3",
+		Labels:     []string{"Other"},
+		Properties: map[string]any{"content": "gamma"},
+	})
+	require.NoError(t, err)
+
+	in := []indexResult{
+		{ID: "n1", Score: 1},
+		{ID: "n2", Score: 1},
+		{ID: "n3", Score: 1},
+		{ID: "missing", Score: 1},
+	}
+
+	// Empty type filter returns input as-is.
+	same := svc.filterByType(context.Background(), in, nil, nil)
+	require.Equal(t, in, same)
+
+	seenOrphans := map[string]bool{}
+	filtered := svc.filterByType(context.Background(), in, []string{"person"}, seenOrphans)
+	require.Len(t, filtered, 2)
+	require.Equal(t, "n1", filtered[0].ID)
+	require.Equal(t, "n2", filtered[1].ID)
+	require.True(t, seenOrphans["missing"], "missing node should be handled as orphan")
+}
+
 func TestSearchService_BuildIndexes_IteratorEngineBranches(t *testing.T) {
 	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
 	_, err := base.CreateNode(&storage.Node{
