@@ -219,6 +219,17 @@ func TestDBWrapperHelpers_MaybeEnableReplicationPaths(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "replication: create storage adapter")
 
+	// Invalid mode reaches replicator-construction error branch.
+	goodDataDir := t.TempDir()
+	cfg.Database.DataDir = goodDataDir
+	db.config = cfg
+	require.NoError(t, os.Unsetenv("NORNICDB_CLUSTER_DATA_DIR"))
+	require.NoError(t, os.Setenv("NORNICDB_CLUSTER_MODE", "invalid_mode"))
+	_, err = db.maybeEnableReplication(base)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "replication: create replicator")
+	require.Contains(t, err.Error(), "unknown replication mode")
+
 	// Explicit cluster data dir override path is honored when set.
 	overridePath := t.TempDir() + "/not-a-dir-override"
 	require.NoError(t, os.WriteFile(overridePath, []byte("x"), 0644))

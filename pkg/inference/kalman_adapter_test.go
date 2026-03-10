@@ -159,6 +159,65 @@ func TestKalmanAdapter_WithTracker(t *testing.T) {
 	}
 }
 
+func TestKalmanAdapter_SessionCoAccessBranches(t *testing.T) {
+	engine := New(DefaultConfig())
+	cfg := DefaultKalmanAdapterConfig()
+	cfg.EnableSessionTracking = true
+	adapter := NewKalmanAdapter(engine, cfg)
+
+	// No session detector configured.
+	if got := adapter.getSessionCoAccessSuggestions("node-1"); got != nil {
+		t.Fatalf("expected nil without session detector, got %v", got)
+	}
+
+	sessionCfg := temporal.DefaultSessionDetectorConfig()
+	sessionCfg.TimeGapThresholdSeconds = 0.05 // 50ms for deterministic new-session testing
+	session := temporal.NewSessionDetector(sessionCfg)
+	adapter.SetSessionDetector(session)
+
+	// No current session yet.
+	if got := adapter.getSessionCoAccessSuggestions("node-1"); got != nil {
+		t.Fatalf("expected nil without current session, got %v", got)
+	}
+
+	now := time.Now()
+	session.RecordAccess("node-1", now)
+	// Single-node session should not generate suggestions.
+	if got := adapter.getSessionCoAccessSuggestions("node-1"); got != nil {
+		t.Fatalf("expected nil for single-node session, got %v", got)
+	}
+
+	session.RecordAccess("node-2", now.Add(10*time.Millisecond))
+	// SessionDetector tracks sessions per node. Current implementation keeps
+	// per-node Session.NodeIDs, so cross-node session suggestions remain empty.
+	got := adapter.getSessionCoAccessSuggestions("node-1")
+	if len(got) != 0 {
+		t.Fatalf("expected 0 session suggestions, got %d", len(got))
+	}
+
+	key := adapter.makeEdgeKey("node-1", "node-2")
+	if sessions := adapter.getSessionCount(key); sessions != 0 {
+		t.Fatalf("session count = %d, want 0", sessions)
+	}
+}
+
+func TestKalmanAdapter_OnStoreErrorPath(t *testing.T) {
+	engine := New(DefaultConfig())
+	engine.SetSimilaritySearch(func(ctx context.Context, embedding []float32, k int) ([]SimilarityResult, error) {
+		return nil, context.DeadlineExceeded
+	})
+	adapter := NewKalmanAdapter(engine, DefaultKalmanAdapterConfig())
+
+	suggestions, err := adapter.OnStore(context.Background(), "node-err", []float32{0.1, 0.2})
+	// Engine similarity failures are fail-open and should not error.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(suggestions) != 0 {
+		t.Fatalf("expected no suggestions on similarity errors, got %d", len(suggestions))
+	}
+}
+
 func TestKalmanAdapter_ConfidenceSmoothing(t *testing.T) {
 	// Enable Kalman filtering
 	cleanup := config.WithKalmanEnabled()
