@@ -1484,3 +1484,71 @@ func TestRaceConditionPrevention(t *testing.T) {
 		t.Log("✓ No race condition detected during concurrent node access")
 	})
 }
+
+func TestEmbedQueueSmallWrappers(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(base, "test")
+	cfg := DefaultEmbedQueueConfig()
+	cfg.DeferWorkerStart = true
+	worker := NewEmbedQueue(nil, engine, cfg)
+	defer worker.Close()
+
+	worker.SetOnQueueEmpty(func(processedCount int) {})
+	require.NotNil(t, worker.onQueueEmpty)
+
+	worker.SetEmbedder(newMockEmbedder())
+	require.NotNil(t, worker.embedder)
+	require.Equal(t, 1, len(worker.trigger), "SetEmbedder should trigger immediate processing")
+
+	worker.Enqueue("node-1")
+	require.Equal(t, 1, len(worker.trigger), "Enqueue delegates to Trigger and keeps single wakeup signal")
+
+	payload, err := WorkerStats{Running: true, Processed: 3, Failed: 1}.MarshalJSON()
+	require.NoError(t, err)
+	require.Contains(t, string(payload), "\"running\":true")
+	require.Contains(t, string(payload), "\"processed\":3")
+	require.Contains(t, string(payload), "\"failed\":1")
+}
+
+type pendingAdderEngine struct {
+	storage.Engine
+	added []storage.NodeID
+}
+
+func (p *pendingAdderEngine) AddToPendingEmbeddings(id storage.NodeID) {
+	p.added = append(p.added, id)
+}
+
+func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
+	t.Run("debounce accumulates and fires when threshold met", func(t *testing.T) {
+		var got []int
+		ew := &EmbedWorker{
+			config: &EmbedWorkerConfig{
+				ClusterDebounceDelay: 15 * time.Millisecond,
+				ClusterMinBatchSize:  2,
+			},
+			onQueueEmpty: func(processedCount int) {
+				got = append(got, processedCount)
+			},
+		}
+
+		ew.scheduleClusteringDebounced(1)
+		ew.scheduleClusteringDebounced(2)
+		require.Eventually(t, func() bool { return len(got) == 1 }, 300*time.Millisecond, 5*time.Millisecond)
+		require.Equal(t, 3, got[0])
+	})
+
+	t.Run("addNodeToPendingEmbeddings delegates when supported", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		adder := &pendingAdderEngine{Engine: storage.NewNamespacedEngine(base, "test")}
+		ew := &EmbedWorker{storage: adder}
+		ew.addNodeToPendingEmbeddings(storage.NodeID("n-1"))
+		require.Equal(t, []storage.NodeID{"n-1"}, adder.added)
+	})
+
+	t.Run("averageEmbeddings handles edge cases", func(t *testing.T) {
+		require.Nil(t, averageEmbeddings(nil))
+		require.Equal(t, []float32{1, 2}, averageEmbeddings([][]float32{{1, 2}}))
+		require.Equal(t, []float32{2, 3}, averageEmbeddings([][]float32{{1, 2}, {3, 4}}))
+	})
+}

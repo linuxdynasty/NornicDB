@@ -1,9 +1,14 @@
 package nornicdb
 
 import (
+	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,6 +57,32 @@ func TestPluginFunctionRegistry(t *testing.T) {
 		_, found = GetPluginFunction("test.plugin.sum")
 		assert.True(t, found)
 	})
+}
+
+func TestPluginProcedureRegistry(t *testing.T) {
+	pluginsMu.Lock()
+	pluginProcedures = make(map[string]PluginProcedure)
+	pluginsMu.Unlock()
+
+	_, found := GetPluginProcedure("missing.proc")
+	require.False(t, found)
+	require.Empty(t, ListPluginProcedures())
+
+	pluginsMu.Lock()
+	pluginProcedures["test.proc"] = PluginProcedure{
+		Name:        "test.proc",
+		Mode:        "READ",
+		Description: "test proc",
+	}
+	pluginsMu.Unlock()
+
+	proc, found := GetPluginProcedure("test.proc")
+	require.True(t, found)
+	require.Equal(t, "test.proc", proc.Name)
+	require.Equal(t, "READ", proc.Mode)
+
+	names := ListPluginProcedures()
+	require.Contains(t, names, "test.proc")
 }
 
 func TestLoadedPluginTracking(t *testing.T) {
@@ -150,6 +181,13 @@ func TestPluginFunctionHandlerTypes(t *testing.T) {
 }
 
 func TestPluginTypeDetection(t *testing.T) {
+	t.Run("detectPluginType direct coverage", func(t *testing.T) {
+		require.Equal(t, PluginTypeFunction, detectPluginType(mockTypeFunctionValue{}))
+		require.Equal(t, PluginTypeHeimdall, detectPluginType(mockTypeHeimdallValue{}))
+		require.Equal(t, PluginTypeUnknown, detectPluginType(&mockPluginNoType{}))
+		require.Equal(t, PluginTypeUnknown, detectPluginType(&mockTypeNonString{}))
+	})
+
 	t.Run("detects function plugin type from reflection", func(t *testing.T) {
 		plugin := &mockFunctionPlugin{
 			name:    "testfunc",
@@ -213,6 +251,120 @@ func TestPluginTypeDetection(t *testing.T) {
 				assert.Equal(t, tc.expected, result)
 			})
 		}
+	})
+}
+
+func TestCallStringMethodAndReflectWrapperBranches(t *testing.T) {
+	t.Run("callStringMethod validates method shape", func(t *testing.T) {
+		_, err := callStringMethod(reflect.ValueOf(struct{}{}), "Missing")
+		require.Error(t, err)
+
+		_, err = callStringMethod(reflect.ValueOf(mockStringMethodBadReturn{}), "Name")
+		require.Error(t, err)
+	})
+
+	t.Run("reflect wrapper happy path", func(t *testing.T) {
+		w := &reflectHeimdallWrapper{val: reflect.ValueOf(mockReflectPlugin{})}
+
+		require.Equal(t, "mock", w.Name())
+		require.Equal(t, "1.0.0", w.Version())
+		require.Equal(t, "heimdall", w.Type())
+		require.Equal(t, "desc", w.Description())
+		require.NoError(t, w.Initialize(heimdall.SubsystemContext{}))
+		require.NoError(t, w.Start())
+		require.NoError(t, w.Stop())
+		require.NoError(t, w.Shutdown())
+		require.Equal(t, heimdall.StatusRunning, w.Status())
+		require.True(t, w.Health().Healthy)
+		require.Equal(t, "mock", w.Metrics()["name"])
+		require.Equal(t, "mock", w.Config()["name"])
+		require.NoError(t, w.Configure(map[string]interface{}{"k": "v"}))
+		require.Equal(t, "string", w.ConfigSchema()["type"])
+		require.Len(t, w.Actions(), 1)
+		require.Equal(t, "summary", w.Summary())
+		require.Len(t, w.RecentEvents(1), 1)
+	})
+
+	t.Run("reflect wrapper fallback and error branches", func(t *testing.T) {
+		w := &reflectHeimdallWrapper{val: reflect.ValueOf(mockReflectPluginErrors{})}
+
+		require.Error(t, w.Initialize(heimdall.SubsystemContext{}))
+		require.Error(t, w.Start())
+		require.Error(t, w.Stop())
+		require.Error(t, w.Shutdown())
+		require.Equal(t, heimdall.StatusError, w.Status())
+		require.False(t, w.Health().Healthy)
+		require.Nil(t, w.Metrics())
+		require.Nil(t, w.Config())
+		require.Error(t, w.Configure(map[string]interface{}{"k": "v"}))
+		require.Nil(t, w.ConfigSchema())
+		require.Nil(t, w.Actions())
+		require.Nil(t, w.RecentEvents(2))
+	})
+}
+
+func TestPluginLoadAndProcedureExtractionHelpers(t *testing.T) {
+	t.Run("extractProcedures parses defaults and explicit fields", func(t *testing.T) {
+		procs, err := extractProcedures(reflect.ValueOf(mockFunctionPluginWithProcedures{}), "covplug")
+		require.NoError(t, err)
+		require.Len(t, procs, 2)
+
+		byName := map[string]PluginProcedure{}
+		for _, p := range procs {
+			byName[p.Name] = p
+		}
+		require.Contains(t, byName, "covplug.readProc")
+		require.Contains(t, byName, "apoc.custom.proc")
+
+		require.Equal(t, "READ", byName["covplug.readProc"].Mode)
+		require.Contains(t, byName["covplug.readProc"].Signature, "covplug.readProc")
+		require.Equal(t, 1, byName["covplug.readProc"].MinArgs)
+		require.Equal(t, 3, byName["covplug.readProc"].MaxArgs)
+		require.True(t, byName["apoc.custom.proc"].WorksOnSystem)
+	})
+
+	t.Run("loadFunctionPlugin builds loaded metadata", func(t *testing.T) {
+		loaded, err := loadFunctionPlugin(mockFunctionPluginWithProcedures{}, "/tmp/covplug.so")
+		require.NoError(t, err)
+		require.Equal(t, "covplug", loaded.Name)
+		require.Equal(t, PluginTypeFunction, loaded.Type)
+		require.Len(t, loaded.Functions, 1)
+		require.Len(t, loaded.Procedures, 2)
+	})
+
+	t.Run("registerProcedureWithCypher handles handler types", func(t *testing.T) {
+		before := len(cypher.ListRegisteredProcedures())
+		registerProcedureWithCypher(PluginProcedure{
+			Name:    "cov.invalid.handler",
+			Handler: "not-a-func",
+		})
+		require.Equal(t, before, len(cypher.ListRegisteredProcedures()))
+
+		name := "cov.proc." + strings.ReplaceAll(t.Name(), "/", "_") + "." + time.Now().Format("150405")
+		registerProcedureWithCypher(PluginProcedure{
+			Name:          name,
+			Signature:     name + "()",
+			Mode:          "WRITE",
+			WorksOnSystem: false,
+			MinArgs:       0,
+			MaxArgs:       1,
+			Handler: func(context.Context, string, []interface{}) (*cypher.ExecuteResult, error) {
+				return &cypher.ExecuteResult{}, nil
+			},
+		})
+		require.Greater(t, len(cypher.ListRegisteredProcedures()), before)
+	})
+
+	t.Run("loadHeimdallPlugin reflection and validation branches", func(t *testing.T) {
+		loaded, err := loadHeimdallPlugin(mockReflectPluginErrors{}, "/tmp/heim.so", nil)
+		require.Error(t, err)
+		require.ErrorIs(t, err, errHeimdallContextRequired)
+		require.NotNil(t, loaded)
+		require.Equal(t, PluginTypeHeimdall, loaded.Type)
+
+		_, err = loadHeimdallPlugin(mockPluginNoType{}, "/tmp/invalid.so", nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing")
 	})
 }
 
@@ -424,6 +576,135 @@ type mockPluginNoType struct {
 
 func (m *mockPluginNoType) Name() string    { return m.name }
 func (m *mockPluginNoType) Version() string { return m.version }
+
+type mockTypeNonString struct{}
+
+func (m *mockTypeNonString) Type() int { return 7 }
+
+type mockTypeFunctionValue struct{}
+
+func (m mockTypeFunctionValue) Type() string { return "function" }
+
+type mockTypeHeimdallValue struct{}
+
+func (m mockTypeHeimdallValue) Type() string { return "heimdall" }
+
+type mockStringMethodBadReturn struct{}
+
+func (m mockStringMethodBadReturn) Name() (string, string) {
+	return "x", "y"
+}
+
+type mockReflectPlugin struct{}
+
+func (m mockReflectPlugin) Name() string                                   { return "mock" }
+func (m mockReflectPlugin) Version() string                                { return "1.0.0" }
+func (m mockReflectPlugin) Type() string                                   { return "heimdall" }
+func (m mockReflectPlugin) Description() string                            { return "desc" }
+func (m mockReflectPlugin) Initialize(ctx heimdall.SubsystemContext) error { return nil }
+func (m mockReflectPlugin) Start() error                                   { return nil }
+func (m mockReflectPlugin) Stop() error                                    { return nil }
+func (m mockReflectPlugin) Shutdown() error                                { return nil }
+func (m mockReflectPlugin) Status() heimdall.SubsystemStatus               { return heimdall.StatusRunning }
+func (m mockReflectPlugin) Health() heimdall.SubsystemHealth {
+	return heimdall.SubsystemHealth{Status: heimdall.StatusRunning, Healthy: true}
+}
+func (m mockReflectPlugin) Metrics() map[string]interface{} {
+	return map[string]interface{}{"name": "mock"}
+}
+func (m mockReflectPlugin) Config() map[string]interface{} {
+	return map[string]interface{}{"name": "mock"}
+}
+func (m mockReflectPlugin) Configure(map[string]interface{}) error { return nil }
+func (m mockReflectPlugin) ConfigSchema() map[string]interface{} {
+	return map[string]interface{}{"type": "string"}
+}
+func (m mockReflectPlugin) Actions() map[string]heimdall.ActionFunc {
+	return map[string]heimdall.ActionFunc{
+		"noop": {
+			Name:        "heimdall.mock.noop",
+			Description: "no-op",
+			Category:    "test",
+		},
+	}
+}
+func (m mockReflectPlugin) Summary() string { return "summary" }
+func (m mockReflectPlugin) RecentEvents(limit int) []heimdall.SubsystemEvent {
+	return []heimdall.SubsystemEvent{{Type: "event", Message: "ok"}}
+}
+
+type mockReflectPluginErrors struct{}
+
+func (m mockReflectPluginErrors) Name() string        { return "bad" }
+func (m mockReflectPluginErrors) Version() string     { return "0" }
+func (m mockReflectPluginErrors) Type() string        { return "heimdall" }
+func (m mockReflectPluginErrors) Description() string { return "bad" }
+func (m mockReflectPluginErrors) Initialize(ctx heimdall.SubsystemContext) error {
+	return errors.New("init error")
+}
+func (m mockReflectPluginErrors) Start() error      { return errors.New("start error") }
+func (m mockReflectPluginErrors) Stop() error       { return errors.New("stop error") }
+func (m mockReflectPluginErrors) Shutdown() error   { return errors.New("shutdown error") }
+func (m mockReflectPluginErrors) Status() string    { return "wrong-type" }
+func (m mockReflectPluginErrors) Health() string    { return "wrong-type" }
+func (m mockReflectPluginErrors) Metrics() []string { return []string{"wrong-type"} }
+func (m mockReflectPluginErrors) Config() []string  { return []string{"wrong-type"} }
+func (m mockReflectPluginErrors) Configure(map[string]interface{}) error {
+	return errors.New("configure error")
+}
+func (m mockReflectPluginErrors) ConfigSchema() []string          { return []string{"wrong-type"} }
+func (m mockReflectPluginErrors) Actions() []string               { return []string{"wrong-type"} }
+func (m mockReflectPluginErrors) Summary() string                 { return "bad-summary" }
+func (m mockReflectPluginErrors) RecentEvents(limit int) []string { return []string{"wrong-type"} }
+
+type mockProcedureMeta struct {
+	Handler       interface{}
+	Description   string
+	Signature     string
+	Mode          string
+	WorksOnSystem bool
+	MinArgs       int
+	MaxArgs       int
+}
+
+type mockFunctionPluginWithProcedures struct{}
+
+func (m mockFunctionPluginWithProcedures) Name() string    { return "covplug" }
+func (m mockFunctionPluginWithProcedures) Version() string { return "0.1.0" }
+func (m mockFunctionPluginWithProcedures) Functions() map[string]interface{} {
+	return map[string]interface{}{
+		"double": struct {
+			Handler     interface{}
+			Description string
+		}{
+			Handler:     func(x float64) float64 { return x * 2 },
+			Description: "double input",
+		},
+	}
+}
+func (m mockFunctionPluginWithProcedures) Procedures() map[string]mockProcedureMeta {
+	return map[string]mockProcedureMeta{
+		"readProc": {
+			Handler: func(context.Context, string, []interface{}) (*cypher.ExecuteResult, error) {
+				return &cypher.ExecuteResult{}, nil
+			},
+			Description: "reads data",
+			MinArgs:     1,
+			MaxArgs:     3,
+		},
+		"apoc.custom.proc": {
+			Handler: func(context.Context, string, []interface{}) (*cypher.ExecuteResult, error) {
+				return &cypher.ExecuteResult{}, nil
+			},
+			Description:   "custom fully-qualified proc",
+			Signature:     "apoc.custom.proc() :: (value :: ANY)",
+			Mode:          "DBMS",
+			WorksOnSystem: true,
+			MinArgs:       0,
+			MaxArgs:       0,
+		},
+	}
+}
 
 // Helper to get reflect.Value from interface
 func reflectValueOf(i interface{}) reflect.Value {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -263,4 +264,124 @@ func TestEscapeCSV(t *testing.T) {
 			assert.Equal(t, tc.expected, result)
 		})
 	}
+}
+
+func TestDB_GetEdgesForNode(t *testing.T) {
+	db, err := Open("", nil)
+	require.NoError(t, err)
+	defer db.Close()
+
+	ctx := context.Background()
+	src, err := db.CreateNode(ctx, []string{"Person"}, map[string]interface{}{"name": "a"})
+	require.NoError(t, err)
+	dst, err := db.CreateNode(ctx, []string{"Person"}, map[string]interface{}{"name": "b"})
+	require.NoError(t, err)
+
+	_, err = db.CreateEdge(ctx, src.ID, dst.ID, "KNOWS", map[string]interface{}{"since": 2024})
+	require.NoError(t, err)
+
+	edges, err := db.GetEdgesForNode(ctx, src.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, src.ID, edges[0].Source)
+	require.Equal(t, dst.ID, edges[0].Target)
+
+	_, err = db.GetEdgesForNode(ctx, "")
+	require.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestTypedCypherDecodeHelpers(t *testing.T) {
+	type personRow struct {
+		Name  string `cypher:"name"`
+		Age   int    `cypher:"age"`
+		Score float64
+		Alive bool
+	}
+
+	var row personRow
+	err := decodeRow([]string{"name", "age", "score", "alive"}, []interface{}{"alice", float64(42), int64(9), true}, &row)
+	require.NoError(t, err)
+	require.Equal(t, "alice", row.Name)
+	require.Equal(t, 42, row.Age)
+	require.Equal(t, 9.0, row.Score)
+	require.True(t, row.Alive)
+
+	// Map decode path with nested properties.
+	row = personRow{}
+	err = decodeRow([]string{"n"}, []interface{}{
+		map[string]interface{}{
+			"properties": map[string]interface{}{"name": "bob", "age": int64(33)},
+		},
+	}, &row)
+	require.NoError(t, err)
+	require.Equal(t, "bob", row.Name)
+	require.Equal(t, 33, row.Age)
+
+	// Invalid destination.
+	err = decodeRow([]string{"name"}, []interface{}{"x"}, row)
+	require.Error(t, err)
+
+	// assignValue conversion branches.
+	var asInt int
+	require.NoError(t, assignValue(reflect.ValueOf(&asInt).Elem(), float64(12)))
+	require.Equal(t, 12, asInt)
+	var asFloat float64
+	require.NoError(t, assignValue(reflect.ValueOf(&asFloat).Elem(), int64(7)))
+	require.Equal(t, 7.0, asFloat)
+	var asString string
+	require.NoError(t, assignValue(reflect.ValueOf(&asString).Elem(), struct{ A int }{A: 123}))
+	require.Equal(t, "{123}", asString)
+	var asBool bool
+	require.NoError(t, assignValue(reflect.ValueOf(&asBool).Elem(), true))
+	require.True(t, asBool)
+	err = assignValue(reflect.ValueOf(&asBool).Elem(), "not-bool")
+	require.Error(t, err)
+}
+
+func TestExecuteCypherTypedAndFirst(t *testing.T) {
+	db, err := Open("", nil)
+	require.NoError(t, err)
+	defer db.Close()
+
+	type row struct {
+		Name string `cypher:"name"`
+		Age  int    `cypher:"age"`
+	}
+
+	_, err = db.ExecuteCypher(context.Background(), "CREATE (:Person {name:'alice', age:42})", nil)
+	require.NoError(t, err)
+
+	typed, err := ExecuteCypherTyped[row](db, context.Background(), "MATCH (n:Person) RETURN n.name as name, n.age as age", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, typed.Rows)
+
+	first, ok := typed.First()
+	require.True(t, ok)
+	require.Equal(t, "alice", first.Name)
+	require.Equal(t, 42, first.Age)
+
+	empty := &TypedCypherResult[row]{Rows: nil}
+	_, ok = empty.First()
+	require.False(t, ok)
+}
+
+func TestDB_AdminSmallHelpers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Database.AsyncWritesEnabled = true
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.True(t, db.IsAsyncWritesEnabled())
+
+	// Cached count paths when no search service exists yet.
+	require.Equal(t, 0, db.EmbeddingCountCached())
+	require.Equal(t, 1024, db.VectorIndexDimensionsCached())
+
+	db.SetAllDatabasesProvider(func() []DatabaseAndStorage { return nil })
+	require.NotNil(t, db.allDatabasesProvider)
+
+	stats := db.GetSearchStats()
+	// Service should initialize and return stats (non-nil path).
+	require.NotNil(t, stats)
 }

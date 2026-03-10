@@ -6,6 +6,7 @@ import (
 	"time"
 
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -282,4 +283,58 @@ func TestTriggerSearchClustering_DoesNotPanic(t *testing.T) {
 		err = db.TriggerSearchClustering()
 		require.NoError(t, err)
 	})
+}
+
+func TestSearchServices_RerankerStatusAndBuildStartHelpers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Explicitly store odd cache entries so setter loop skips nils safely.
+	db.searchServicesMu.Lock()
+	db.searchServices["nil_entry"] = nil
+	db.searchServices["nil_svc"] = &dbSearchService{}
+	db.searchServicesMu.Unlock()
+
+	// Global reranker setter should tolerate nil/empty entries.
+	db.SetSearchReranker(nil)
+
+	// Resolver should be consulted for new DB services.
+	calledDB := ""
+	db.SetRerankerResolver(func(dbName string) search.Reranker {
+		calledDB = dbName
+		return nil
+	})
+
+	svc, err := db.GetOrCreateSearchService("tenant_cov", nil)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+	require.Equal(t, "tenant_cov", calledDB)
+
+	// Not initialized path: missing entry and nil-svc entry both report not_initialized.
+	missing := db.GetDatabaseSearchStatus("missing_cov")
+	require.False(t, missing.Ready)
+	require.False(t, missing.Building)
+	require.False(t, missing.Initialized)
+	require.Equal(t, "not_initialized", missing.Phase)
+	require.Equal(t, int64(-1), missing.ETASeconds)
+
+	nilSvc := db.GetDatabaseSearchStatus("nil_svc")
+	require.False(t, nilSvc.Initialized)
+	require.Equal(t, "not_initialized", nilSvc.Phase)
+
+	// Start build without waiting; helper should return service and initialize status.
+	startedSvc, err := db.EnsureSearchIndexesBuildStarted("tenant_cov", nil)
+	require.NoError(t, err)
+	require.Same(t, svc, startedSvc)
+
+	// Ensure completion so this test does not leak in-flight builders.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, db.ensureSearchIndexesBuilt(ctx, "tenant_cov"))
+
+	ready := db.GetDatabaseSearchStatus("tenant_cov")
+	require.True(t, ready.Initialized)
 }

@@ -112,3 +112,16 @@ func TestDBWrapperHelpers_QueueAndExecutorAccess(t *testing.T) {
 	require.Error(t, err)
 	require.Error(t, db.ResetEmbedWorker())
 }
+
+func TestDBWrapperHelpers_VectorDimensionsHelpers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 7
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+
+	require.Equal(t, 7, db.VectorIndexDimensions())
+	require.Equal(t, 7, db.VectorIndexDimensionsCached())
+
+	require.NoError(t, db.Close())
+	require.Equal(t, 0, db.VectorIndexDimensions())
+}
