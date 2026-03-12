@@ -464,6 +464,16 @@ func TestReplaceParameters(t *testing.T) {
 			input:    "WHERE n.x = $unknown",
 			expected: "WHERE n.x = $unknown",
 		},
+		{
+			name:     "dangling dollar at end",
+			input:    "RETURN $",
+			expected: "RETURN $",
+		},
+		{
+			name:     "invalid identifier after dollar",
+			input:    "RETURN $1 + $-",
+			expected: "RETURN $1 + $-",
+		},
 	}
 
 	replacer := func(param string) string {

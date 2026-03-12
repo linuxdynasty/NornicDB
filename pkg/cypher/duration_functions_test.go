@@ -64,6 +64,22 @@ func TestParseDuration(t *testing.T) {
 				Seconds: 6,
 			},
 		},
+		{
+			name:  "quoted value is trimmed",
+			input: "'P2DT3H'",
+			expected: &CypherDuration{
+				Days:  2,
+				Hours: 3,
+			},
+		},
+		{
+			name:  "fractional seconds",
+			input: "PT1.25S",
+			expected: &CypherDuration{
+				Seconds: 1,
+				Nanos:   250000000,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -81,6 +97,10 @@ func TestParseDuration(t *testing.T) {
 				t.Errorf("parseDuration(%q) = %+v, want %+v", tt.input, got, tt.expected)
 			}
 		})
+	}
+
+	if got := parseDuration("1D"); got != nil {
+		t.Fatalf("parseDuration without P prefix should return nil, got %+v", got)
 	}
 }
 

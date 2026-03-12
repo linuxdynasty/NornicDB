@@ -13,31 +13,22 @@ if [ "${#staged_go_files[@]}" -eq 0 ]; then
     exit 0
 fi
 
-orig_stash_ref="$(git rev-parse -q --verify refs/stash 2>/dev/null || true)"
-created_stash=0
-
-restore_unstaged() {
-    local exit_code=$?
-
-    if [ "$created_stash" -eq 1 ]; then
-        if ! git stash pop --quiet >/dev/null 2>&1; then
-            echo "pre-commit: formatted staged Go files, but failed to restore unstaged changes cleanly." >&2
-            echo "pre-commit: resolve the stash pop manually, then re-run commit." >&2
-            exit 1
-        fi
+# Conflict-safe mode:
+# do not stash/pop. If a staged Go file also has unstaged edits, refuse and ask
+# the user to split/stage cleanly first. This avoids stash-pop merge conflicts.
+conflicted_files=()
+for file in "${staged_go_files[@]}"; do
+    if ! git diff --quiet -- "$file"; then
+        conflicted_files+=("$file")
     fi
+done
 
-    exit "$exit_code"
-}
-
-trap restore_unstaged EXIT
-
-if ! git diff --quiet -- . || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    git stash push --quiet --keep-index --include-untracked -m "pre-commit-gofmt"
-    new_stash_ref="$(git rev-parse -q --verify refs/stash 2>/dev/null || true)"
-    if [ -n "$new_stash_ref" ] && [ "$new_stash_ref" != "$orig_stash_ref" ]; then
-        created_stash=1
-    fi
+if [ "${#conflicted_files[@]}" -gt 0 ]; then
+    echo "pre-commit: unstaged edits detected in staged Go files." >&2
+    echo "pre-commit: refusing to auto-format to avoid merge conflicts." >&2
+    printf '  %s\n' "${conflicted_files[@]}" >&2
+    echo "pre-commit: stage/commit those edits first (or stash manually), then retry." >&2
+    exit 1
 fi
 
 gofmt -w -s "${staged_go_files[@]}"

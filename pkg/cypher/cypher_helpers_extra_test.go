@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -81,6 +82,11 @@ func TestCypherHelpers_DecodeMapAndAssignValue(t *testing.T) {
 }
 
 func TestCypherHelpers_ExtractorsAndEnsureLabel(t *testing.T) {
+	assert.Equal(t, "g_cov", extractStringArg("CALL gds.graph.project('g_cov', ['A'], ['R'])", "gds.graph.project"))
+	assert.Equal(t, "A", extractStringArg("CALL gds.graph.project(g_cov, ['A'], ['R'])", "gds.graph.project"))
+	assert.Equal(t, "", extractStringArg("RETURN 1", "gds.graph.project"))
+	assert.Equal(t, "", extractStringArg("CALL gds.graph.project('unterminated)", "gds.graph.project"))
+
 	assert.Equal(t, "myGraph", extractGraphNameFromReturn("RETURN gds.graph.project('myGraph', ['A'], ['R'])"))
 	assert.Equal(t, "", extractGraphNameFromReturn("RETURN 1"))
 	assert.Equal(t, 0.75, extractFloatArg("{dampingFactor: 0.75, iterations: 20}", "dampingFactor"))
@@ -1803,6 +1809,104 @@ func TestCypherHelpers_ExecuteCreateConstraint_MultiSyntaxCoverage(t *testing.T)
 	assert.Contains(t, err.Error(), "TEMPORAL constraint requires 3 properties")
 }
 
+func TestCypherHelpers_ExecuteCreateConstraint_ValidationFailureBranches(t *testing.T) {
+	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Duplicate unique value should fail validation on CREATE CONSTRAINT ... IS UNIQUE.
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "u1",
+		Labels:     []string{"User"},
+		Properties: map[string]interface{}{"email": "dup@example.com"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "u2",
+		Labels:     []string{"User"},
+		Properties: map[string]interface{}{"email": "dup@example.com"},
+	})
+	require.NoError(t, err)
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT uq_user_email FOR (n:User) REQUIRE n.email IS UNIQUE")
+	require.Error(t, err)
+
+	// Existing invalid type should fail property-type validation.
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "p1",
+		Labels:     []string{"Profile"},
+		Properties: map[string]interface{}{"age": "not-an-int"},
+	})
+	require.NoError(t, err)
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT profile_age_type FOR (n:Profile) REQUIRE n.age IS :: INTEGER")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_MatchRowsHelpers_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	nodes := []*storage.Node{
+		{ID: "n1", Labels: []string{"X"}, Properties: map[string]interface{}{"a": int64(3), "b": int64(4)}},
+		{ID: "n2", Labels: []string{"X"}, Properties: map[string]interface{}{"a": float64(1.5), "b": int64(2)}},
+	}
+
+	// SUM arithmetic branches: mixed SUM terms, numeric literal, unary negative.
+	assert.Equal(t, 10.5, exec.evaluateSumArithmetic("SUM(n.a) + SUM(n.b)", nodes, "n"))
+	assert.Equal(t, 2.5, exec.evaluateSumArithmetic("SUM(n.a) + 4 - SUM(n.b)", nodes, "n"))
+	assert.Equal(t, -2.0, exec.evaluateSumArithmetic("-2", nodes, "n"))
+	assert.Equal(t, 0.0, exec.evaluateSumArithmetic("SUM(n.missing)", nodes, "n"))
+
+	// filterNodesByWhereClause branches.
+	all := exec.filterNodesByWhereClause(nodes, "", "n")
+	require.Len(t, all, 2)
+	filtered := exec.filterNodesByWhereClause(nodes, "n.a >= 3", "n")
+	require.Len(t, filtered, 1)
+	assert.Equal(t, storage.NodeID("n1"), filtered[0].ID)
+}
+
+func TestCypherHelpers_EvaluateMapLiteralFromValues_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	values := map[string]interface{}{
+		"name": "alice",
+		"age":  int64(30),
+		"rels": []interface{}{
+			map[string]interface{}{"type": "KNOWS"},
+			map[string]interface{}{"type": "WORKS_WITH"},
+		},
+	}
+
+	// Normal map literal with value substitution and list-comprehension transform.
+	out := exec.evaluateMapLiteralFromValues("{person: name, age: age, relTypes: [r IN rels | type(r)]}", values)
+	require.Equal(t, "alice", out["person"])
+	require.Equal(t, int64(30), out["age"])
+	require.Equal(t, []interface{}{"KNOWS", "WORKS_WITH"}, out["relTypes"])
+
+	// Invalid/non-map/empty shapes are deterministic empties.
+	assert.Empty(t, exec.evaluateMapLiteralFromValues("not-a-map", values))
+	assert.Empty(t, exec.evaluateMapLiteralFromValues("{}", values))
+	// Pair without colon should be skipped, not panic.
+	out = exec.evaluateMapLiteralFromValues("{good: age, badpair}", values)
+	require.Equal(t, int64(30), out["good"])
+}
+
+func TestCypherHelpers_KalmanPredict_Branches(t *testing.T) {
+	state := KalmanState{
+		X:     10.0,
+		LastX: 8.0,
+		P:     1.0,
+		Q:     0.01,
+		R:     0.1,
+		K:     0.5,
+	}
+	blob, err := json.Marshal(state)
+	require.NoError(t, err)
+
+	// velocity = 2; predict 3 steps => 16
+	assert.Equal(t, 16.0, kalmanPredict(string(blob), 3))
+	// invalid state JSON branch
+	assert.Equal(t, 0.0, kalmanPredict("{bad-json", 5))
+}
+
 func TestCypherHelpers_CompareValuesForSort(t *testing.T) {
 	assert.Equal(t, 0, compareValuesForSort(nil, nil))
 	assert.Equal(t, -1, compareValuesForSort(nil, 1))
@@ -3192,6 +3296,8 @@ func TestCypherHelpers_ExplainInferenceAndCostHelpers(t *testing.T) {
 	assert.Equal(t, int64(2), plan.ActualRows)
 	require.Len(t, plan.Children, 2)
 	assert.Equal(t, int64(2), plan.Children[0].ActualRows)
+	// Nil-plan branch should be a no-op.
+	exec.updatePlanWithStats(nil, res)
 
 	attached := exec.attachPlanMetadata(&ExecuteResult{}, &ExecutionPlan{Mode: ModeExplain, Root: plan})
 	require.NotNil(t, attached.Metadata["planString"])

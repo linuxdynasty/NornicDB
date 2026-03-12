@@ -21,6 +21,18 @@ type sequenceEmbedder struct {
 	calls int
 }
 
+type beginFailEngine struct {
+	storage.Engine
+}
+
+func (e *beginFailEngine) BeginTransaction() (*storage.BadgerTransaction, error) {
+	return nil, errors.New("begin failed")
+}
+
+type nonTransactionalEngine struct {
+	storage.Engine
+}
+
 func (s *sequenceEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	i := s.calls
 	s.calls++
@@ -489,6 +501,91 @@ func TestDbTxlogProcedures_WithWALStack(t *testing.T) {
 		require.GreaterOrEqual(t, len(row), 4)
 		assert.Equal(t, "tx-test-1", row[3])
 	}
+}
+
+func TestExecuteWithImplicitTransaction_Branches(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fallback when tx unsupported", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(&nonTransactionalEngine{Engine: store})
+
+		result, err := exec.executeWithImplicitTransaction(ctx, "CREATE (:FallbackTx {id:'1'})", "CREATE (:FALLBACKTX {ID:'1'})")
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		readBack, err := exec.Execute(ctx, "MATCH (n:FallbackTx {id:'1'}) RETURN count(n)", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), readBack.Rows[0][0])
+	})
+
+	t.Run("begin transaction failure", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(&beginFailEngine{Engine: store})
+
+		_, err := exec.executeWithImplicitTransaction(ctx, "CREATE (:BeginFail {id:'1'})", "CREATE (:BEGINFAIL {ID:'1'})")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to start implicit transaction")
+	})
+
+	t.Run("execution error rolls back", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+
+		_, err := exec.executeWithImplicitTransaction(ctx, "CALL definitely.unknown.procedure()", "CALL DEFINITELY.UNKNOWN.PROCEDURE()")
+		require.Error(t, err)
+
+		readBack, readErr := exec.Execute(ctx, "MATCH (n:RollbackMe {id:'1'}) RETURN count(n)", nil)
+		require.NoError(t, readErr)
+		require.Equal(t, int64(0), readBack.Rows[0][0])
+	})
+
+	t.Run("commit failure wraps error", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+
+		_, err := exec.Execute(ctx, "CREATE CONSTRAINT c_commit_unique IF NOT EXISTS FOR (n:CommitFail) REQUIRE n.id IS UNIQUE", nil)
+		require.NoError(t, err)
+
+		_, err = exec.executeWithImplicitTransaction(
+			ctx,
+			"CREATE (:CommitFail {id:'dup'}), (:CommitFail {id:'dup'})",
+			"CREATE (:COMMITFAIL {ID:'DUP'}), (:COMMITFAIL {ID:'DUP'})",
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to commit implicit transaction")
+	})
+}
+
+func TestExecuteWithImplicitTransaction_WALBeginError(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cypher-implicit-wal-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	badger, err := storage.NewBadgerEngine(tmpDir)
+	require.NoError(t, err)
+	defer badger.Close()
+
+	wal, err := storage.NewWAL(tmpDir+"/wal", nil)
+	require.NoError(t, err)
+
+	walEngine := storage.NewWALEngine(badger, wal)
+	store := storage.NewNamespacedEngine(walEngine, "test")
+	exec := NewStorageExecutor(store)
+
+	require.NoError(t, wal.Close())
+
+	_, err = exec.executeWithImplicitTransaction(
+		context.Background(),
+		"CREATE (:WalBegin {id:'1'})",
+		"CREATE (:WALBEGIN {ID:'1'})",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to write WAL tx begin")
 }
 
 // =============================================================================

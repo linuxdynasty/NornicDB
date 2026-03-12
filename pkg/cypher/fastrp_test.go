@@ -582,6 +582,24 @@ func TestGdsFastRPNoGraph(t *testing.T) {
 	t.Logf("✓ FastRP correctly errors for non-existent graph")
 }
 
+func TestGdsFastRPStats_ErrorBranches(t *testing.T) {
+	engine := setupFastRPTestStorage(t)
+	defer engine.Close()
+
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	// Missing graph argument.
+	_, err := exec.Execute(ctx, "CALL gds.fastRP.stats()", nil)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "requires at least 1 arguments")
+
+	// Non-existent projected graph for stats.
+	_, err = exec.Execute(ctx, "CALL gds.fastRP.stats('missing-graph')", nil)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "does not exist")
+}
+
 // ============================================================================
 // Embedding Quality and Correctness Tests
 // ============================================================================

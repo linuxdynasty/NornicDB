@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -207,4 +208,62 @@ func TestTemporalProcedures_RequiredStringArgsBranches(t *testing.T) {
 	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('', 'fact_key','k1','valid_from','valid_to','2024-01-01T00:00:00Z') YIELD node", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "label cannot be empty")
+}
+
+func TestTemporalProcedures_LabelLookupErrorBranches(t *testing.T) {
+	failStore := &failingNodeLookupEngine{
+		Engine:     storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"),
+		byLabelErr: errors.New("label lookup failed"),
+	}
+	exec := NewStorageExecutor(failStore)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.temporal.assertNoOverlap('FactVersion','fact_key','valid_from','valid_to','k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to read nodes for label")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('FactVersion','fact_key','k1','valid_from','valid_to','2024-01-01T00:00:00Z') YIELD node", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to read nodes for label")
+}
+
+func TestTemporalProcedures_StrictArgValidationAdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	// Invalid call name/syntax branches.
+	_, err := exec.callDbTemporalAssertNoOverlap(ctx, "CALL db.temporal.wrong()")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid db.temporal.assertnooverlap syntax")
+	_, err = exec.callDbTemporalAsOf(ctx, "CALL db.temporal.other()")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid db.temporal.asof syntax")
+
+	// assertNoOverlap: required string args beyond label.
+	_, err = exec.Execute(ctx, "CALL db.temporal.assertNoOverlap('FactVersion',null,'valid_from','valid_to','k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keyProp is required")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.assertNoOverlap('FactVersion','fact_key',null,'valid_to','k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validFromProp is required")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.assertNoOverlap('FactVersion','fact_key','valid_from',null,'k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validToProp is required")
+
+	// asOf: required string args for key/from/to props.
+	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('FactVersion',null,'k1','valid_from','valid_to','2024-01-01T00:00:00Z') YIELD node", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keyProp is required")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('FactVersion','fact_key','k1',null,'valid_to','2024-01-01T00:00:00Z') YIELD node", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validFromProp is required")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('FactVersion','fact_key','k1','valid_from',null,'2024-01-01T00:00:00Z') YIELD node", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validToProp is required")
 }

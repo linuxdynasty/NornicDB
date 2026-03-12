@@ -708,3 +708,112 @@ func TestSchemaCommandDispatcherAndTypeParserBranches(t *testing.T) {
 		t.Fatal("expected parsePropertyType unsupported type error")
 	}
 }
+
+func TestCreateConstraint_SyntaxVariantCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	valid := []string{
+		"CREATE CONSTRAINT IF NOT EXISTS ON (u:LegacyExists) ASSERT exists(u.email)",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (u:LegacyNotNull) ASSERT u.email IS NOT NULL",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (u:LegacyUnique) ASSERT u.email IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (u:LegacyNodeKey) ASSERT (u.a, u.b) IS NODE KEY",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (t:TempUnnamed) REQUIRE (t.key, t.from, t.to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (p:TypedUnnamed) REQUIRE p.age IS :: INTEGER",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (p:TypedLegacy) ASSERT p.age IS TYPED INTEGER",
+	}
+	for _, q := range valid {
+		_, err := exec.Execute(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("expected valid constraint syntax to pass for %q: %v", q, err)
+		}
+	}
+
+	_, err := exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT bad_node_key FOR (u:BrokenNK) REQUIRE (u) IS NODE KEY")
+	if err == nil || !strings.Contains(err.Error(), "NODE KEY constraint requires properties") {
+		t.Fatalf("expected NODE KEY property validation error, got: %v", err)
+	}
+
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT bad_temporal FOR (t:BrokenTemporal) REQUIRE (t.key, t.from) IS TEMPORAL")
+	if err == nil || !strings.Contains(err.Error(), "TEMPORAL constraint requires 3 properties") {
+		t.Fatalf("expected TEMPORAL property-count validation error, got: %v", err)
+	}
+}
+
+func TestCreateConstraint_EachParserPattern(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	queries := []string{
+		// NODE KEY variants
+		"CREATE CONSTRAINT nk_named IF NOT EXISTS FOR (n:NKNamed) REQUIRE (n.k1, n.k2) IS NODE KEY",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:NKUnnamed) REQUIRE (n.k1, n.k2) IS NODE KEY",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:NKAssert) ASSERT (n.k1, n.k2) IS NODE KEY",
+
+		// TEMPORAL variants
+		"CREATE CONSTRAINT t_named IF NOT EXISTS FOR (n:TNamed) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:TUnnamed) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL",
+
+		// EXISTS / NOT NULL variants
+		"CREATE CONSTRAINT nn_named IF NOT EXISTS FOR (n:NNNamed) REQUIRE n.email IS NOT NULL",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:NNUnnamed) REQUIRE n.email IS NOT NULL",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:NNExists) ASSERT exists(n.email)",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:NNAssert) ASSERT n.email IS NOT NULL",
+
+		// TYPE variants
+		"CREATE CONSTRAINT tp_named IF NOT EXISTS FOR (n:TPNamed) REQUIRE n.age IS :: INTEGER",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:TPUnnamed) REQUIRE n.age IS TYPED INTEGER",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:TPAssert) ASSERT n.age IS :: INTEGER",
+
+		// UNIQUE variants
+		"CREATE CONSTRAINT uq_named IF NOT EXISTS FOR (n:UQNamed) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:UQUnnamed) REQUIRE n.id IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:UQAssert) ASSERT n.id IS UNIQUE",
+	}
+
+	for _, q := range queries {
+		_, err := exec.executeCreateConstraint(ctx, q)
+		if err != nil {
+			t.Fatalf("expected query to match a CREATE CONSTRAINT parser pattern, got error for %q: %v", q, err)
+		}
+	}
+}
+
+func TestCreateConstraint_ValidationAndDuplicateErrorBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:DupUser {email:'a@x'}), (:DupUser {email:'a@x'})", nil)
+	if err != nil {
+		t.Fatalf("failed to seed duplicate users: %v", err)
+	}
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT uq_dup IF NOT EXISTS FOR (n:DupUser) REQUIRE n.email IS UNIQUE")
+	if err == nil {
+		t.Fatal("expected unique constraint validation error on existing duplicate data")
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:NullUser {name:'x'})", nil)
+	if err != nil {
+		t.Fatalf("failed to seed null property user: %v", err)
+	}
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT nn_dup IF NOT EXISTS FOR (n:NullUser) REQUIRE n.email IS NOT NULL")
+	if err == nil {
+		t.Fatal("expected NOT NULL constraint validation error on existing null property data")
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:TypedBad {age:'not-an-int'})", nil)
+	if err != nil {
+		t.Fatalf("failed to seed wrong-typed data: %v", err)
+	}
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT tp_dup IF NOT EXISTS FOR (n:TypedBad) REQUIRE n.age IS :: INTEGER")
+	if err == nil {
+		t.Fatal("expected type constraint validation error on existing wrong-typed data")
+	}
+
+}

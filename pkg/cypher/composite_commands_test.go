@@ -331,6 +331,20 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.NoError(t, err)
 		require.NotNil(t, res)
 		require.Equal(t, [][]interface{}{{"c1"}}, res.Rows)
+
+		// Flexible whitespace parsing branch.
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE\tCOMPOSITE\tDATABASE\tc_ws ALIAS a1 FOR DATABASE db1")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_ws"}}, res.Rows)
+
+		// Invalid alias/database extraction branches.
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad ALIAS   FOR DATABASE db1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "alias name cannot be empty")
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad2 ALIAS a1 FOR DATABASE   ")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "database name cannot be empty")
 	})
 
 	t.Run("drop composite direct branches", func(t *testing.T) {
