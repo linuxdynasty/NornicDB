@@ -2121,6 +2121,10 @@ func TestCreateSetAndSetMergeBranches(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing \"missingMap\"")
 
+	_, err = exec.executeSetMerge(ctx, matchResult, "n += {invalid}", mergeOut, "MATCH (n) SET n += {invalid}", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse properties in SET +=")
+
 	badMapResult := &ExecuteResult{Columns: []string{"n", "props"}, Rows: [][]interface{}{{target, true}}}
 	_, err = exec.executeSetMerge(ctx, badMapResult, "n += props", mergeOut, "MATCH (n) SET n += props", -1)
 	require.Error(t, err)

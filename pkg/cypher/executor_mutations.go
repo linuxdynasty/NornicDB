@@ -979,7 +979,11 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 
 	if strings.HasPrefix(right, "{") {
 		// Inline properties: {key: value, ...}
-		propsToMerge = e.parseProperties(right)
+		parsedProps, err := e.parseSetMergeMapLiteralStrict(right)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse properties in SET +=: %w", err)
+		}
+		propsToMerge = parsedProps
 	} else if strings.HasPrefix(right, "$") {
 		// Parameter reference: $properties
 		// Extract parameter name (remove $ prefix)

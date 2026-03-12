@@ -37,6 +37,38 @@ func TestTemporalAssertNoOverlap(t *testing.T) {
 	require.Equal(t, true, result.Rows[0][0])
 }
 
+func TestTemporalProcedures_HelperBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	// parseTemporalCallArgs malformed syntax branches.
+	_, err := parseTemporalCallArgs(ctx, "CALL db.temporal.assertNoOverlap('x'", "DB.TEMPORAL.ASSERTNOOVERLAP")
+	require.Error(t, err)
+
+	// coerceStringArg fallback (non-string gets fmt.Sprint conversion).
+	res, err := exec.Execute(ctx, "CALL db.temporal.assertNoOverlap(123,456,789,1011,12,1700000000,null)", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, true, res.Rows[0][0])
+
+	// asOf with numeric datetime (int64 parsing branch).
+	_, err = engine.CreateNode(&storage.Node{
+		ID:     "num-time",
+		Labels: []string{"123"},
+		Properties: map[string]interface{}{
+			"456":  int64(12),
+			"789":  int64(1699999999),
+			"1011": nil,
+		},
+	})
+	require.NoError(t, err)
+	asOfRes, err := exec.Execute(ctx, "CALL db.temporal.asOf(123,456,12,789,1011,1700000000) YIELD node", nil)
+	require.NoError(t, err)
+	require.Len(t, asOfRes.Rows, 1)
+}
+
 func TestTemporalAsOf(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	engine := storage.NewNamespacedEngine(base, "test")

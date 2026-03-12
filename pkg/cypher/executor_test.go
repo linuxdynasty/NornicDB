@@ -93,6 +93,24 @@ func TestExecuteCompoundCreateWithDelete_Branches(t *testing.T) {
 	assert.Equal(t, 1, res.Stats.RelationshipsDeleted)
 	require.Len(t, res.Rows, 1)
 	assert.Equal(t, int64(1), res.Rows[0][0])
+
+	// Node delete with non-count RETURN branch should return nil placeholder.
+	res, err = exec.executeCompoundCreateWithDelete(ctx, "CREATE (n:TmpNode {name:'y'}) WITH n DELETE n RETURN n.name")
+	require.NoError(t, err)
+	require.NotNil(t, res.Stats)
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.NodesDeleted)
+	require.Equal(t, []string{"n.name"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	assert.Nil(t, res.Rows[0][0])
+
+	// Delete target missing from created vars/edges should be a no-op for deletion stats.
+	res, err = exec.executeCompoundCreateWithDelete(ctx, "CREATE (n:TmpNode {name:'z'}) WITH n DELETE missing RETURN count(missing)")
+	require.NoError(t, err)
+	require.NotNil(t, res.Stats)
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 0, res.Stats.NodesDeleted)
+	assert.Equal(t, int64(1), res.Rows[0][0])
 }
 
 func TestExecuteUnsupportedQuery(t *testing.T) {

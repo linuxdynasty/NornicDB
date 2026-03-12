@@ -2362,10 +2362,11 @@ func (e *StorageExecutor) applySetMergeToCreated(ctx context.Context, setPart st
 		props = propsMap
 	} else {
 		// Inline map literal: {key: value, ...}
-		props = e.parseMapLiteral(propsStr)
-		if props == nil {
-			return fmt.Errorf("failed to parse properties in SET +=")
+		parsedProps, err := e.parseSetMergeMapLiteralStrict(propsStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse properties in SET +=: %w", err)
 		}
+		props = parsedProps
 	}
 
 	// Apply to node or edge

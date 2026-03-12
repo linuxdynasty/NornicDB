@@ -301,3 +301,23 @@ func TestTransactionScript_CaseRollbackAdditionalErrorBranches(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not evaluate to boolean")
 }
+
+func TestTransactionScript_ProjectAndConditionAdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	// Empty return expression should not error and should produce deterministic output.
+	out, err := exec.projectTransactionReturn(&ExecuteResult{
+		Columns: []string{"x"},
+		Rows:    [][]interface{}{{1}},
+	}, "")
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.NotEmpty(t, out.Columns)
+
+	// evaluateConditionExpression nil branch.
+	ok, err := exec.evaluateConditionExpression("", map[string]*storage.Node{}, map[string]*storage.Edge{})
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
