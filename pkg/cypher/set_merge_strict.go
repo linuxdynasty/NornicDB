@@ -20,7 +20,7 @@ func (e *StorageExecutor) parseSetMergeMapLiteralStrict(s string) (map[string]in
 	}
 
 	props := make(map[string]interface{})
-	pairs := splitTopLevelComma(inner)
+	pairs := splitTopLevelCommaKeepEmpty(inner)
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
@@ -45,4 +45,49 @@ func (e *StorageExecutor) parseSetMergeMapLiteralStrict(s string) (map[string]in
 	}
 
 	return props, nil
+}
+
+// splitTopLevelCommaKeepEmpty is like splitTopLevelComma but preserves empty
+// entries so strict callers can reject malformed forms such as trailing commas.
+func splitTopLevelCommaKeepEmpty(input string) []string {
+	if strings.TrimSpace(input) == "" {
+		return nil
+	}
+
+	var parts []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	depth := 0
+
+	for i, r := range input {
+		switch r {
+		case '\'':
+			if !inDouble && (i == 0 || input[i-1] != '\\') {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && (i == 0 || input[i-1] != '\\') {
+				inDouble = !inDouble
+			}
+		case '(', '[', '{':
+			if !inSingle && !inDouble {
+				depth++
+			}
+		case ')', ']', '}':
+			if !inSingle && !inDouble && depth > 0 {
+				depth--
+			}
+		case ',':
+			if !inSingle && !inDouble && depth == 0 {
+				parts = append(parts, strings.TrimSpace(current.String()))
+				current.Reset()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+
+	parts = append(parts, strings.TrimSpace(current.String()))
+	return parts
 }

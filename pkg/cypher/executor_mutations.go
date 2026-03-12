@@ -369,7 +369,11 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			mapVarName := ""
 			paramMapUsed := false
 			if strings.HasPrefix(right, "{") {
-				propsToMerge = e.parseProperties(right)
+				parsedProps, err := e.parseSetMergeMapLiteralStrict(right)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse properties in SET +=: %w", err)
+				}
+				propsToMerge = parsedProps
 			} else if strings.HasPrefix(right, "$") {
 				paramName := strings.TrimSpace(right[1:])
 				if paramName == "" {

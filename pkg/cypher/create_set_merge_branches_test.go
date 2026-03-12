@@ -53,6 +53,12 @@ func TestApplySetMergeToCreated_Branches(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to parse properties")
 	})
 
+	t.Run("inline map trailing comma failure", func(t *testing.T) {
+		err := exec.applySetMergeToCreated(ctx, "n += {a: 1,}", map[string]*storage.Node{"n": node}, nil, &ExecuteResult{Stats: &QueryStats{}}, store)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse properties")
+	})
+
 	t.Run("unknown variable", func(t *testing.T) {
 		err := exec.applySetMergeToCreated(ctx, "x += {a: 1}", map[string]*storage.Node{"n": node}, map[string]*storage.Edge{"r": edge}, &ExecuteResult{Stats: &QueryStats{}}, store)
 		require.Error(t, err)

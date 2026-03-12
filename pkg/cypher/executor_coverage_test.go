@@ -696,6 +696,20 @@ func TestExecuteSetInvalidPropertyAccess(t *testing.T) {
 	}
 }
 
+func TestExecuteSetMergeRejectsMalformedInlineMap(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (n:SetMergeMalformed {name: 'x'})", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "MATCH (n:SetMergeMalformed) SET n += {a: 1,}", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse properties in SET +=")
+}
+
 func TestExecuteAggregationCountStar(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
