@@ -321,3 +321,53 @@ func TestTransactionScript_ProjectAndConditionAdditionalBranches(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+func TestTransactionScript_SimpleAndCaseCommitBranches(t *testing.T) {
+	ClearUserProcedures()
+	t.Cleanup(ClearUserProcedures)
+
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:User {id: 'u-commit-tx', age: 30, last_seen: null})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+CREATE OR REPLACE PROCEDURE nornic.touchUserTx($id, $ts)
+MODE WRITE
+AS
+MATCH (u:User {id: $id})
+SET u.last_seen = $ts
+RETURN u
+`, nil)
+	require.NoError(t, err)
+
+	// executeSimpleTransactionScript: explicit ROLLBACK action branch.
+	rollbackRes, err := exec.executeSimpleTransactionScript(ctx, "RETURN 1 AS x", "ROLLBACK")
+	require.NoError(t, err)
+	require.Equal(t, []string{"status"}, rollbackRes.Columns)
+	require.Len(t, rollbackRes.Rows, 1)
+	assert.Equal(t, "Transaction rolled back", rollbackRes.Rows[0][0])
+
+	// executeCaseRollbackTransactionScript: commit projection branch (condition false).
+	caseCommitRes, err := exec.executeCaseRollbackTransactionScript(ctx, `
+CALL nornic.touchUserTx('u-commit-tx', datetime())
+YIELD u
+CASE WHEN u.age < 18 THEN ROLLBACK ELSE RETURN u.id AS id, u.last_seen AS seen COMMIT`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id", "seen"}, caseCommitRes.Columns)
+	require.Len(t, caseCommitRes.Rows, 1)
+	assert.Equal(t, "u-commit-tx", caseCommitRes.Rows[0][0])
+	assert.NotNil(t, caseCommitRes.Rows[0][1])
+
+	// projectTransactionReturn: direct row map fallback (non-expression column alias).
+	projected, err := exec.projectTransactionReturn(&ExecuteResult{
+		Columns: []string{"plain"},
+		Rows:    [][]interface{}{{int64(7)}},
+	}, "plain AS p")
+	require.NoError(t, err)
+	require.Equal(t, []string{"p"}, projected.Columns)
+	require.Len(t, projected.Rows, 1)
+	assert.Equal(t, int64(7), projected.Rows[0][0])
+}

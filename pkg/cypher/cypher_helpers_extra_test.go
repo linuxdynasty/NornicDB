@@ -3181,3 +3181,122 @@ func TestCypherHelpers_ValueToCypherLiteralAndPipelineRowsBranches(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
+
+func TestCypherHelpers_SetTrailingWithReturnAndRowNormalizationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	node := &storage.Node{
+		ID:         "norm-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"flag": true, "name": "norm"},
+	}
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
+
+	// normalizeSetMatchRowsToNodes: map with _nodeId is converted; non-map and map without _nodeId stay untouched.
+	mr := &ExecuteResult{
+		Columns: []string{"n", "literal", "raw"},
+		Rows: [][]interface{}{{
+			map[string]interface{}{"_nodeId": "norm-node"},
+			"keep",
+			map[string]interface{}{"name": "unchanged"},
+		}, {
+			map[string]interface{}{"_nodeId": 123}, // invalid node ID type branch
+			map[string]interface{}{"_nodeId": "missing-node"},
+			map[string]interface{}{"_nodeId": ""}, // empty node ID branch
+		}},
+	}
+	exec.normalizeSetMatchRowsToNodes(mr, store)
+	require.Len(t, mr.Rows, 2)
+	require.Len(t, mr.Rows[0], 3)
+	n, ok := mr.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	assert.Equal(t, "norm-node", string(n.ID))
+	assert.Equal(t, "keep", mr.Rows[0][1])
+	raw, ok := mr.Rows[0][2].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "unchanged", raw["name"])
+	for _, v := range mr.Rows[1] {
+		_, mapOK := v.(map[string]interface{})
+		require.True(t, mapOK)
+	}
+
+	// resolveSetTrailingValue: direct column hit.
+	row := []interface{}{"vcol", node}
+	colIndex := map[string]int{"col": 0, "n": 1}
+	val, resolved := resolveSetTrailingValue("col", row, colIndex, map[string]*storage.Node{"n": node})
+	require.True(t, resolved)
+	assert.Equal(t, "vcol", val)
+
+	// resolveSetTrailingValue: property hit through node scope.
+	val, resolved = resolveSetTrailingValue("n.flag", row, colIndex, map[string]*storage.Node{"n": node})
+	require.True(t, resolved)
+	assert.Equal(t, true, val)
+
+	// resolveSetTrailingValue: unresolved branch.
+	val, resolved = resolveSetTrailingValue("missing.prop", row, colIndex, map[string]*storage.Node{})
+	require.False(t, resolved)
+	assert.Nil(t, val)
+
+	// executeSetTrailingWithReturn: non-WITH trailing text => handled=false.
+	out, handled, err := exec.executeSetTrailingWithReturn(ctx, "UNWIND [1] AS x RETURN x", mr, &ExecuteResult{Stats: &QueryStats{}})
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.Nil(t, out)
+
+	// executeSetTrailingWithReturn: WITH without RETURN => handled=false.
+	out, handled, err = exec.executeSetTrailingWithReturn(ctx, "WITH n", mr, &ExecuteResult{Stats: &QueryStats{}})
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.Nil(t, out)
+
+	// executeSetTrailingWithReturn: empty WITH body => handled=true with error.
+	_, handled, err = exec.executeSetTrailingWithReturn(ctx, "WITH   RETURN n", mr, &ExecuteResult{Stats: &QueryStats{}})
+	require.Error(t, err)
+	assert.True(t, handled)
+
+	// executeSetTrailingWithReturn: malformed WITH item => handled=true with error.
+	_, handled, err = exec.executeSetTrailingWithReturn(ctx, "WITH n AS RETURN n", mr, &ExecuteResult{Stats: &QueryStats{}})
+	require.Error(t, err)
+	assert.True(t, handled)
+
+	// executeSetTrailingWithReturn: unsupported additional clause in WITH => falls back (handled=false).
+	out, handled, err = exec.executeSetTrailingWithReturn(ctx, "WITH n MATCH (m) RETURN n", mr, &ExecuteResult{Stats: &QueryStats{}})
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.Nil(t, out)
+
+	// executeSetTrailingWithReturn: handled path, projection through WITH alias and property access.
+	matchResult := &ExecuteResult{
+		Columns: []string{"n"},
+		Rows: [][]interface{}{{
+			node,
+		}},
+	}
+	res := &ExecuteResult{Stats: &QueryStats{}}
+	out, handled, err = exec.executeSetTrailingWithReturn(ctx, "WITH n AS person RETURN person.flag AS flag, person.name AS name", matchResult, res)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.NotNil(t, out)
+	require.Equal(t, []string{"flag", "name"}, out.Columns)
+	require.Len(t, out.Rows, 1)
+	require.Len(t, out.Rows[0], 2)
+	assert.Equal(t, true, out.Rows[0][0])
+	assert.Equal(t, "norm", out.Rows[0][1])
+
+	// executeSetTrailingWithReturn: map-property projection branch from WITH alias value.
+	mapOut, handled, err := exec.executeSetTrailingWithReturn(
+		ctx,
+		"WITH {flag: true, name: 'map'} AS person RETURN person.flag AS flag, person.name AS name",
+		matchResult,
+		&ExecuteResult{Stats: &QueryStats{}},
+	)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Len(t, mapOut.Rows, 1)
+	assert.Equal(t, true, mapOut.Rows[0][0])
+	assert.Equal(t, "map", mapOut.Rows[0][1])
+}

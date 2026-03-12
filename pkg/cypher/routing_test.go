@@ -3,6 +3,8 @@ package cypher
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // =============================================================================
@@ -143,4 +145,26 @@ func TestExecuteWithoutTransaction_DeleteRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestContainsOutsideStrings_Branches(t *testing.T) {
+	assert.False(t, containsOutsideStrings("MATCH (n)", ""))
+	assert.True(t, containsOutsideStrings("MATCH (a)-[:R]->(b)", "->"))
+
+	// Inside single quotes should be ignored.
+	assert.False(t, containsOutsideStrings("MATCH (n {txt:'a->b'})", "->"))
+	// Escaped quotes branch.
+	assert.False(t, containsOutsideStrings("MATCH (n {txt:'a\\'->\\'b'})", "->"))
+	// Doubled single-quote escape branch.
+	assert.False(t, containsOutsideStrings("MATCH (n {txt:'a''->''b'})", "->"))
+
+	// Inside double quotes should be ignored.
+	assert.False(t, containsOutsideStrings("MATCH (n {txt:\"a->b\"})", "->"))
+	// Backtick identifier branch.
+	assert.False(t, containsOutsideStrings("MATCH (`a->b`)-[:R]->(n)", "a->b"))
+
+	// Line comment branch.
+	assert.False(t, containsOutsideStrings("MATCH (n) // -> in comment\nRETURN n", "->"))
+	// Block comment branch.
+	assert.False(t, containsOutsideStrings("MATCH (n) /* -> in comment */ RETURN n", "->"))
 }

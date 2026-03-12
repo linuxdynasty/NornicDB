@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParallelFilterNodes(t *testing.T) {
@@ -233,6 +234,37 @@ func TestParallelMap(t *testing.T) {
 	if len(result) != 2000 {
 		t.Errorf("expected 2000 items, got %d", len(result))
 	}
+}
+
+func TestParallelCollectAndMap_SmallChunksBreakBranches(t *testing.T) {
+	nodes := []*storage.Node{
+		{ID: "n1", Properties: map[string]interface{}{"name": "a", "value": 1}},
+		{ID: "n2", Properties: map[string]interface{}{"value": 2}}, // missing "name"
+		{ID: "n3", Properties: map[string]interface{}{"name": "c", "value": 3}},
+	}
+
+	// Force parallel path with more workers than nodes to exercise start>=len break logic.
+	SetParallelConfig(ParallelConfig{
+		Enabled:      true,
+		MaxWorkers:   8,
+		MinBatchSize: 1,
+	})
+
+	collected := parallelCollect(nodes, "name")
+	require.Len(t, collected, 2)
+	require.Equal(t, "a", collected[0])
+	require.Equal(t, "c", collected[1])
+
+	mapped := parallelMap(nodes, func(node *storage.Node) interface{} {
+		if v, ok := node.Properties["value"].(int); ok {
+			return v * 10
+		}
+		return 0
+	})
+	require.Len(t, mapped, 3)
+	require.Equal(t, 10, mapped[0])
+	require.Equal(t, 20, mapped[1])
+	require.Equal(t, 30, mapped[2])
 }
 
 func TestWorkerPool(t *testing.T) {

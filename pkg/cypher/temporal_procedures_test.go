@@ -189,3 +189,22 @@ func TestTemporalProcedures_ErrorAndSelectionBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, noneRes.Rows)
 }
+
+func TestTemporalProcedures_RequiredStringArgsBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.temporal.assertNoOverlap(null,'fact_key','valid_from','valid_to','k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "label is required")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.assertNoOverlap('','fact_key','valid_from','valid_to','k1','2024-01-01T00:00:00Z',null)", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "label cannot be empty")
+
+	_, err = exec.Execute(ctx, "CALL db.temporal.asOf('', 'fact_key','k1','valid_from','valid_to','2024-01-01T00:00:00Z') YIELD node", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "label cannot be empty")
+}
