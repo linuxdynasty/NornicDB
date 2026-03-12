@@ -732,12 +732,19 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 	if useIterativeBatching {
 		// Iterative batching: process batches until we get no results
 		batchNum := 0
+		prevBatchSig := ""
 		for {
 			skip := batchNum * batchSize
 			limit := batchSize
 
 			// Create a modified subquery with LIMIT and SKIP to process this batch
 			modifiedSubquery := e.addLimitSkipToSubquery(subquery, limit, skip)
+			// If we cannot inject pagination once skip > 0, this query shape cannot
+			// make forward progress in iterative mode. Stop after the first batch to
+			// preserve correctness and avoid infinite re-processing.
+			if skip > 0 && strings.TrimSpace(modifiedSubquery) == strings.TrimSpace(subquery) {
+				break
+			}
 
 			// Execute this batch in its own transaction
 			batchResult, err := e.executeWithImplicitTransaction(ctx, modifiedSubquery, strings.ToUpper(modifiedSubquery))
@@ -750,6 +757,11 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 			if batchResult == nil || len(batchResult.Rows) == 0 {
 				break
 			}
+			currBatchSig := fmt.Sprintf("%v", batchResult.Rows)
+			if skip > 0 && prevBatchSig != "" && currBatchSig == prevBatchSig {
+				break
+			}
+			prevBatchSig = currBatchSig
 
 			// Set columns from first batch if not set
 			if len(combinedResult.Columns) == 0 && len(batchResult.Columns) > 0 {

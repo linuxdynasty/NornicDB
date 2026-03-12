@@ -187,6 +187,39 @@ func TestTransactionStorageWrapper_BulkDelete_ErrorPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestTransactionStorageWrapper_BulkCreate_ErrorPaths(t *testing.T) {
+	eng := storage.NewMemoryEngine()
+	defer eng.Close()
+
+	tx, err := eng.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	// Non-namespaced bulk create: duplicate ID should fail on second create.
+	w := &transactionStorageWrapper{tx: tx, underlying: eng, namespace: "", separator: ":"}
+	err = w.BulkCreateNodes([]*storage.Node{
+		{ID: "dup", Labels: []string{"X"}, Properties: map[string]interface{}{}},
+		{ID: "dup", Labels: []string{"X"}, Properties: map[string]interface{}{}},
+	})
+	require.Error(t, err)
+
+	// Namespaced bulk edge create: duplicate edge ID should fail.
+	tx2, err := eng.BeginTransaction()
+	require.NoError(t, err)
+	defer tx2.Rollback()
+	wNS := &transactionStorageWrapper{tx: tx2, underlying: eng, namespace: "tenant", separator: ":"}
+	err = wNS.BulkCreateNodes([]*storage.Node{
+		{ID: "n1", Labels: []string{"X"}, Properties: map[string]interface{}{}},
+		{ID: "n2", Labels: []string{"X"}, Properties: map[string]interface{}{}},
+	})
+	require.NoError(t, err)
+	err = wNS.BulkCreateEdges([]*storage.Edge{
+		{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL", Properties: map[string]interface{}{}},
+		{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL", Properties: map[string]interface{}{}},
+	})
+	require.Error(t, err)
+}
+
 func TestExecuteSetTrailingUnwind_ErrorAndProjectionBranches(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	store := storage.NewNamespacedEngine(base, "test")

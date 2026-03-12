@@ -32,6 +32,26 @@ type failingEmbedder struct {
 	err error
 }
 
+type fastPathFailEngine struct {
+	storage.Engine
+	batchErr error
+	edgesErr error
+}
+
+func (f *fastPathFailEngine) BatchGetNodes(ids []storage.NodeID) (map[storage.NodeID]*storage.Node, error) {
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	return f.Engine.BatchGetNodes(ids)
+}
+
+func (f *fastPathFailEngine) GetEdgesByType(edgeType string) ([]*storage.Edge, error) {
+	if f.edgesErr != nil {
+		return nil, f.edgesErr
+	}
+	return f.Engine.GetEdgesByType(edgeType)
+}
+
 func (f *failingEmbedder) Embed(context.Context, string) ([]float32, error) {
 	if f.err == nil {
 		f.err = fmt.Errorf("embed failed")
@@ -1612,6 +1632,175 @@ func TestCypherHelpers_AssignValueAdditionalCases(t *testing.T) {
 	var dst struct{ A int }
 	err = assignValue(reflect.ValueOf(&dst).Elem(), "bad")
 	require.Error(t, err)
+}
+
+func TestCypherHelpers_ModuloAndMapLiteralFullBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	// modulo: integer coercion, divide-by-zero, and invalid operand branches.
+	assert.Equal(t, int64(1), exec.modulo(int64(10), int64(3)))
+	assert.Nil(t, exec.modulo(int64(10), int64(0)))
+	assert.Nil(t, exec.modulo("bad", int64(2)))
+
+	nodes := map[string]*storage.Node{
+		"n": {ID: "n1", Properties: map[string]interface{}{"name": "alice", "age": int64(30)}},
+	}
+	rels := map[string]*storage.Edge{}
+
+	// map-literal parser should normalize quoted/backticked keys and evaluate known values.
+	out := exec.evaluateMapLiteralFull("{`k1`: n.name, 'k2': 3, \"k3\": true, badPair}", nodes, rels, nil, nil, nil, 0)
+	assert.Equal(t, "alice", out["k1"])
+	assert.Equal(t, int64(3), out["k2"])
+	assert.Equal(t, true, out["k3"])
+
+	// Non-map shapes return deterministic empty map.
+	assert.Empty(t, exec.evaluateMapLiteralFull("not-a-map", nodes, rels, nil, nil, nil, 0))
+}
+
+func TestCypherHelpers_QueryPatternAndFastPathHelpers(t *testing.T) {
+	// extractRelationshipType branches.
+	assert.Equal(t, "KNOWS", extractRelationshipType("(a)-[:KNOWS]-(b)"))
+	assert.Equal(t, "RATED", extractRelationshipType("(a)-[r:RATED]-(b)"))
+	assert.Equal(t, "", extractRelationshipType("(a)-->(b)"))
+
+	// isReturnEdgePropertyAggNameShape strictness.
+	assert.True(t, isReturnEdgePropertyAggNameShape(
+		"MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS name, avg(r.rating) AS score, count(r) AS cnt",
+		"r",
+		"rating",
+	))
+	assert.False(t, isReturnEdgePropertyAggNameShape(
+		"MATCH (c)-[r:REVIEWED]->(p) RETURN p.id AS id, avg(r.rating) AS score",
+		"r",
+		"rating",
+	))
+	assert.False(t, isReturnEdgePropertyAggNameShape(
+		"MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS name, avg(r.other) AS score",
+		"r",
+		"rating",
+	))
+	assert.False(t, isReturnEdgePropertyAggNameShape("RETURN p.name", "r", "rating"))
+
+	base := storage.NewMemoryEngine()
+	ns := storage.NewNamespacedEngine(base, "tenant_fast_cov")
+	exec := NewStorageExecutor(ns)
+
+	_, err := ns.CreateNode(&storage.Node{ID: "n1", Labels: []string{"X"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{ID: "n2", Labels: []string{"X"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	require.NoError(t, ns.CreateEdge(&storage.Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL"}))
+
+	// getEdgesByTypeFast: namespace filter branch.
+	edges, prefix, err := exec.getEdgesByTypeFast("REL")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant_fast_cov:", prefix)
+	for _, e := range edges {
+		assert.True(t, strings.HasPrefix(string(e.ID), prefix))
+	}
+
+	// batchGetNodesFast happy path.
+	nodes, gotPrefix, err := exec.batchGetNodesFast([]storage.NodeID{"tenant_fast_cov:n1"})
+	require.NoError(t, err)
+	assert.Equal(t, "tenant_fast_cov:", gotPrefix)
+	require.NotNil(t, nodes["tenant_fast_cov:n1"])
+
+	// error branches from underlying engine.
+	failExec := &StorageExecutor{
+		storage: &fastPathFailEngine{
+			Engine:   base,
+			batchErr: fmt.Errorf("batch fail"),
+			edgesErr: fmt.Errorf("edges fail"),
+		},
+		analyzer: NewQueryAnalyzer(64),
+	}
+	_, _, err = failExec.batchGetNodesFast([]storage.NodeID{"n1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "batch fail")
+	_, _, err = failExec.getEdgesByTypeFast("REL")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "edges fail")
+}
+
+func TestCypherHelpers_ExecuteCreateConstraint_TypeAndErrorBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	// Named Neo4j 5 style property type constraint.
+	_, err := exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT person_age_type IF NOT EXISTS FOR (n:Person) REQUIRE n.age IS :: INTEGER")
+	require.NoError(t, err)
+
+	// Unsupported type should error deterministically.
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT person_bad_type IF NOT EXISTS FOR (n:Person) REQUIRE n.age IS :: UUID")
+	require.Error(t, err)
+	assert.Contains(t, strings.ToUpper(err.Error()), "UNSUPPORTED PROPERTY TYPE")
+
+	// Completely malformed constraint command should error.
+	_, err = exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT nonsense")
+	require.Error(t, err)
+}
+
+func TestCypherHelpers_UnregisterVectorSpace_StandaloneBranches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "vreg_cov"))
+	exec.SetVectorRegistry(vectorspace.NewIndexRegistry())
+
+	// Non-existing key with non-nil map.
+	exec.vectorIndexSpaces = map[string]vectorspace.VectorSpaceKey{}
+	exec.unregisterVectorSpace("missing")
+
+	// Existing key removal branch.
+	k := vectorspace.VectorSpaceKey{
+		DB:         "vreg_cov",
+		Type:       "doc",
+		VectorName: "embedding",
+		Dims:       3,
+		Distance:   vectorspace.DistanceCosine,
+	}
+	canonical, err := k.Canonical()
+	require.NoError(t, err)
+	_, err = exec.vectorRegistry.CreateSpace(canonical, vectorspace.BackendAuto)
+	require.NoError(t, err)
+	exec.vectorIndexSpaces["idx1"] = canonical
+	exec.unregisterVectorSpace("idx1")
+	_, ok := exec.vectorIndexSpaces["idx1"]
+	assert.False(t, ok)
+	_, exists := exec.vectorRegistry.GetSpace(canonical)
+	assert.False(t, exists)
+
+	// Nil registry early-return branch.
+	exec.vectorRegistry = nil
+	exec.unregisterVectorSpace("idx1")
+}
+
+func TestCypherHelpers_ExecuteCreateConstraint_MultiSyntaxCoverage(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	ctx := context.Background()
+
+	valid := []string{
+		"CREATE CONSTRAINT c_named_unique IF NOT EXISTS FOR (n:Person) REQUIRE n.email IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Person) REQUIRE n.username IS UNIQUE",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:Person) ASSERT n.legacy IS UNIQUE",
+		"CREATE CONSTRAINT c_named_notnull IF NOT EXISTS FOR (n:Person) REQUIRE n.name IS NOT NULL",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Person) REQUIRE n.display IS NOT NULL",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:Person) ASSERT exists(n.bio)",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:Person) ASSERT n.alias IS NOT NULL",
+		"CREATE CONSTRAINT c_named_nodekey IF NOT EXISTS FOR (n:Person) REQUIRE (n.tenant, n.external) IS NODE KEY",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Person) REQUIRE (n.region, n.account) IS NODE KEY",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:Person) ASSERT (n.org, n.localId) IS NODE KEY",
+		"CREATE CONSTRAINT c_named_temporal IF NOT EXISTS FOR (n:Versioned) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Versioned) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL",
+		"CREATE CONSTRAINT IF NOT EXISTS FOR (n:Person) REQUIRE n.score IS TYPED FLOAT",
+		"CREATE CONSTRAINT IF NOT EXISTS ON (n:Person) ASSERT n.age IS :: INTEGER",
+	}
+	for _, q := range valid {
+		_, err := exec.executeCreateConstraint(ctx, q)
+		require.NoError(t, err, q)
+	}
+
+	// Temporal constraint requires exactly 3 properties.
+	_, err := exec.executeCreateConstraint(ctx, "CREATE CONSTRAINT bad_temporal FOR (n:Versioned) REQUIRE (n.key, n.valid_from) IS TEMPORAL")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TEMPORAL constraint requires 3 properties")
 }
 
 func TestCypherHelpers_CompareValuesForSort(t *testing.T) {

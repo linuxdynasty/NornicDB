@@ -2541,6 +2541,32 @@ func TestSubqueryHelpers_CallInTransactions_IterativeBatchingWithUnwind(t *testi
 	require.Equal(t, int64(3), verify.Rows[0][0])
 }
 
+func TestSubqueryHelpers_CallInTransactions_IterativeBatchingWithMatchMerge(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "carol"}})
+	require.NoError(t, err)
+
+	// makeSubqueryReadOnly cannot rewrite MATCH...MERGE, forcing iterative batching.
+	res, err := exec.executeCallInTransactions(ctx, "MATCH (n:Person) MERGE (m:Tag {name:n.name}) RETURN n.name AS name", 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"name"}, res.Columns)
+	require.Len(t, res.Rows, 3)
+	require.NotNil(t, res.Stats)
+	assert.GreaterOrEqual(t, res.Stats.NodesCreated, 1)
+
+	verify, err := exec.Execute(ctx, "MATCH (m:Tag) RETURN count(*)", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), verify.Rows[0][0])
+}
+
 func TestSubqueryHelpers_ParseCallSubquery_EdgeBranches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
 
