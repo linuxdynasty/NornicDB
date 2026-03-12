@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -110,6 +111,92 @@ RETURN n._mongo_collection, n._mongo_database, n._mongo_id
 	}
 	if got := result.Rows[0][0]; got != "caremark_translation" {
 		t.Fatalf("expected _mongo_collection=caremark_translation, got %#v", got)
+	}
+}
+
+func TestUnwindCreateSetWholeMapFromParameter_LargeBatch(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	const total = 6000
+	rows := make([]map[string]interface{}, 0, total)
+	for i := 0; i < total; i++ {
+		rows = append(rows, map[string]interface{}{
+			"mongo_id":    fmt.Sprintf("bulk-%d", i),
+			"source":      "caremark_translation",
+			"code":        i,
+			"description": fmt.Sprintf("entry-%d", i),
+		})
+	}
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoRecord)
+SET n = row
+`, map[string]interface{}{"rows": rows})
+	if err != nil {
+		t.Fatalf("UNWIND large-batch CREATE/SET with row failed: %v", err)
+	}
+
+	result, err := exec.Execute(ctx, `MATCH (n:MongoRecord) RETURN count(n)`, nil)
+	if err != nil {
+		t.Fatalf("MATCH count after large UNWIND failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one count row, got %d", len(result.Rows))
+	}
+	got, ok := result.Rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("expected int64 count, got %T (%#v)", result.Rows[0][0], result.Rows[0][0])
+	}
+	if got != total {
+		t.Fatalf("expected %d nodes after large UNWIND, got %d", total, got)
+	}
+}
+
+func TestUnwindCreateSetWholeMapFromParameter_LargeBatch_RowPropertiesWorks(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	const total = 6000
+	rows := make([]map[string]interface{}, 0, total)
+	for i := 0; i < total; i++ {
+		rows = append(rows, map[string]interface{}{
+			"properties": map[string]interface{}{
+				"mongo_id":    fmt.Sprintf("bulk-%d", i),
+				"source":      "caremark_translation",
+				"code":        i,
+				"description": fmt.Sprintf("entry-%d", i),
+			},
+		})
+	}
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoRecord)
+SET n = row.properties
+`, map[string]interface{}{"rows": rows})
+	if err != nil {
+		t.Fatalf("UNWIND large-batch CREATE/SET with row.properties failed: %v", err)
+	}
+
+	result, err := exec.Execute(ctx, `MATCH (n:MongoRecord) RETURN count(n)`, nil)
+	if err != nil {
+		t.Fatalf("MATCH count after large UNWIND failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one count row, got %d", len(result.Rows))
+	}
+	got, ok := result.Rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("expected int64 count, got %T (%#v)", result.Rows[0][0], result.Rows[0][0])
+	}
+	if got != total {
+		t.Fatalf("expected %d nodes after large UNWIND, got %d", total, got)
 	}
 }
 

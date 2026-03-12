@@ -1987,26 +1987,8 @@ func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, 
 		value = valueMap
 	}
 
-	// For simple values, convert to string representation
-	var valueStr string
-	switch v := value.(type) {
-	case string:
-		// Escape single quotes in string values
-		escaped := strings.ReplaceAll(v, "'", "\\'")
-		valueStr = fmt.Sprintf("'%s'", escaped)
-	case int, int64, int32:
-		valueStr = fmt.Sprintf("%d", v)
-	case float64, float32:
-		valueStr = fmt.Sprintf("%f", v)
-	case bool:
-		if v {
-			valueStr = "true"
-		} else {
-			valueStr = "false"
-		}
-	default:
-		valueStr = fmt.Sprintf("%v", v)
-	}
+	// Convert to a Cypher literal so maps/lists remain valid expressions.
+	valueStr := e.valueToLiteral(value)
 
 	// Replace standalone variable references
 	// Need to be careful not to replace variable names that are part of other identifiers
