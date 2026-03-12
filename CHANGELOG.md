@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.16] - 2026-03-12
+
+### Changed
+
+- **Cypher openCypher strictness hardening**:
+  - Tightened `SET +=` inline map parsing to reject malformed map literals.
+  - Tightened `CREATE ... RETURN` and related parser/validation paths to reject permissive invalid forms.
+  - Ensured `UNWIND ... SET n = row` map-literal handling follows expected Cypher semantics.
+- **Cypher execution correctness**:
+  - Fixed `SET ... WITH ... RETURN` row semantics so property updates remain visible in trailing pipeline clauses.
+  - Added protection against non-progressing `CALL ... IN TRANSACTIONS` iterative loops.
+  - Added strict malformed relationship-pattern rejection in traversal/match paths.
+- **Cypher schema/index compatibility**:
+  - Restored Neo4j-compatible `CREATE INDEX` parsing for parenthesized node patterns.
+  - Added compatibility support for additional `CREATE INDEX` / `CREATE FULLTEXT INDEX` syntax variants and persistence paths.
+  - Added qualified `SHOW ... INDEXES` routing/handling (`FULLTEXT`, `RANGE`, `VECTOR`) with deterministic type filtering.
+- **Web UI routing behavior**: Updated UI router behavior to preserve/enforce trailing slash paths for proxy compatibility.
+- **Heimdall model source update**: Updated Docker model-download source for Qwen GGUF in Heimdall images.
+
+### Fixed
+
+- **Index parsing bug**: Fixed `CREATE INDEX FOR (n:Label) ON (n.prop)` label parsing edge case where `)` could be captured as part of label token.
+- **Silent schema no-op bug**: Fixed successful-but-non-persisted index creation paths for compatibility syntaxes.
+- **SHOW INDEX compatibility gap**: Fixed `SHOW FULLTEXT INDEXES` command handling and added qualified `SHOW RANGE/VECTOR INDEXES` support instead of unsupported-command errors.
+- **Pre-commit conflict handling**: Hardened `.githooks/pre-commit` workflow behavior to avoid merge-conflict-inducing side effects.
+
+### Tests
+
+- Expanded Cypher deterministic branch coverage across parser, schema/index, dispatch, transaction, mutation, traversal, APOC/call wrappers, and compatibility paths.
+- Added targeted regression tests for schema routing with async storage stacks and Neo4j-compatible index command variants.
+
+### Technical Details
+
+- **Range covered**: `v1.0.15..HEAD`
+- **Commits in range**: 19 (non-merge)
+- **Repository delta**: 57 files changed, +5,185 / -165 lines
+- **Non-test surface changed**: 20 files
+- **Primary focus areas**: Cypher correctness/compatibility, index semantics, deterministic coverage expansion, UI routing compatibility, Heimdall model-source resiliency.
+
 ## [1.0.15] - 2026-03-10
 
 ### Added

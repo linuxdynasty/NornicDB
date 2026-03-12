@@ -1,43 +1,52 @@
 # Latest (Untagged) Changelog
 
-This document tracks the currently untagged changes on `main`. These changes are the release-candidate notes for the planned `v1.0.14` maintenance release.
+This document tracks the currently untagged changes on `main`. These changes are the release-candidate notes for the planned `v1.0.16` maintenance release.
 
 ---
 
-## Planned `v1.0.14`
+## Planned `v1.0.16`
 
 ### Release Summary
 
-`v1.0.14` is a maintenance-focused release centered on compatibility completion, operational hardening, CI/CD cleanup, and broader regression coverage. The overall theme is stability rather than headline product expansion.
+`v1.0.16` is a Cypher correctness and compatibility maintenance release focused on strict openCypher semantics, schema/index compatibility with Neo4j tooling, and deterministic regression coverage expansion.
 
 ### Changed
 
-- **Stored procedure compatibility work completed**: Finished the procedure-parity tranche with startup-compiled procedure DDL, msgpack-backed procedure catalog persistence, startup registry preloading, and transaction-script support for `BEGIN TRANSACTION`, `BEGIN`, `COMMIT`, and rollback-oriented flows.
-- **CI/CD pipeline simplified**: Consolidated the repo onto a cleaner CI path, updated coverage reporting behavior, and added Docker CD workflows for release tags and manual dispatch.
-- **CUDA base-image publishing isolated**: Split `llama-cuda-libs` into its own workflow so CUDA / llama.cpp base-image publishing only happens when that layer actually changes.
-- **Dockerfiles made self-sufficient**: Release image builds now download their own required models during `docker build` instead of depending on a preloaded host `models/` directory.
-- **Memory-limit parsing standardized**: Configuration parsing now uses a single integer-megabytes model with fail-fast validation for invalid values.
+- **Cypher strictness hardening**:
+  - Tightened `SET +=` map-literal parsing and invalid syntax rejection.
+  - Tightened permissive `CREATE/RETURN` and mutation parser paths.
+  - Corrected `UNWIND ... SET n = row` map-literal handling.
+- **Cypher execution correctness**:
+  - Preserved property update semantics across `SET ... WITH ... RETURN` pipelines.
+  - Added non-progress loop protection for `CALL ... IN TRANSACTIONS`.
+  - Hardened malformed relationship pattern handling in traversal/match paths.
+- **Schema/index compatibility work**:
+  - Restored Neo4j-compatible index parsing for parenthesized node patterns.
+  - Added compatibility support for additional `CREATE INDEX` and `CREATE FULLTEXT INDEX` command variants.
+  - Added qualified `SHOW FULLTEXT/RANGE/VECTOR INDEXES` routing with filtered results.
+- **UI routing compatibility**: Browser path handling now preserves/enforces trailing slash for reverse-proxy compatibility.
+- **Heimdall image robustness**: Updated Docker Qwen model source path for more reliable model hydration.
 
 ### Fixed
 
-- **MCP production build regression**: Fixed the missing `containsLabel()` helper path so production builds no longer depend on a test-only symbol.
-- **Storage snapshot overwrite edge case**: Fixed a recovery-path collision risk where fast consecutive snapshots could overwrite or confuse later recovery selection.
-- **Coverage reporting noise**: Corrected coverage scoping and exclusion rules so CI reports reflect handwritten package code rather than generated or hardware-specific paths.
-- **Test-exposed helper regressions**: Addressed small but real regressions surfaced during the coverage push across storage, namespacing, transaction, WAL, and helper branches.
+- **Index parser label-token bug**: Fixed `CREATE INDEX FOR (n:Label) ON (n.prop)` edge case that could capture `)` in label parsing.
+- **Index persistence no-op bug**: Fixed compatibility syntax paths that returned success without persisting schema indexes.
+- **SHOW command compatibility gap**: Fixed `SHOW FULLTEXT INDEXES` unsupported-command behavior and added qualified SHOW index variants.
+- **Pre-commit workflow stability**: Hardened local pre-commit behavior to reduce merge-conflict side effects during staged updates.
 
 ### Test and Hardening Work
 
-- **Large handwritten coverage expansion** across `pkg/storage`, `pkg/cypher`, handwritten `pkg/cypher/antlr`, `pkg/mcp`, `pkg/nornicdb`, `pkg/auth`, and `pkg/config`.
-- **Procedure, parser, and storage regression tests** were extended to cover more compatibility, recovery, and edge-case branches.
-- **Flaky-path coverage** was added around snapshot recovery and helper behavior to make CI failures more reproducible and actionable.
+- **Large Cypher coverage expansion** across parser, schema, transaction, dispatch, subquery, mutation, traversal, and APOC compatibility branches.
+- **Deterministic regression tests** added for async schema routing, Neo4j index syntax variants, and qualified SHOW index command families.
+- **Assertion hardening** to reduce permissive/non-deterministic branches in existing tests.
 
 ### Documentation
 
-- Added and refined stored-procedure parity documentation and examples.
-- Updated supporting docs and release/coverage references to match the current automation and packaging flow.
+- Updated `CHANGELOG.md` with a dedicated `v1.0.16` release section and release-range metadata.
 
 ### Technical Details
 
-- **Range**: `v1.0.13..main`
-- **Statistics**: 30 commits, 341 files changed, +23,539 / -4,441 lines
-- **Primary focus areas**: Cypher procedure compatibility, CI/CD and Docker release automation, storage/MCP hardening, and regression coverage expansion
+- **Range**: `v1.0.15..main`
+- **Statistics**: 19 commits (non-merge), 57 files changed, +5,185 / -165 lines
+- **Non-test surface**: 20 files
+- **Primary focus areas**: Cypher semantics/compatibility, schema/index correctness, deterministic test hardening, UI trailing-slash routing compatibility.
