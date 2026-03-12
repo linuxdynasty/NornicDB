@@ -2,11 +2,32 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
+
+type updateErrorEngine struct {
+	storage.Engine
+	nodeErr error
+	edgeErr error
+}
+
+func (e *updateErrorEngine) UpdateNode(node *storage.Node) error {
+	if e.nodeErr != nil {
+		return e.nodeErr
+	}
+	return e.Engine.UpdateNode(node)
+}
+
+func (e *updateErrorEngine) UpdateEdge(edge *storage.Edge) error {
+	if e.edgeErr != nil {
+		return e.edgeErr
+	}
+	return e.Engine.UpdateEdge(edge)
+}
 
 // TestCompositeIndex tests composite (multi-property) index creation
 func TestCompositeIndex(t *testing.T) {
@@ -103,6 +124,135 @@ func TestLegacyIndexProcedureCompatibilityBranches(t *testing.T) {
 	_, err = exec.callDbIndexVectorDrop("CALL db.index.vector.drop 'rel_vec_idx'")
 	if err == nil {
 		t.Fatal("expected missing parentheses error for vector drop")
+	}
+}
+
+func TestVectorPropertyProcedureBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "n1",
+		Labels:     []string{"Node"},
+		Properties: map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("seed node failed: %v", err)
+	}
+	err = store.CreateEdge(&storage.Edge{
+		ID:         "e1",
+		StartNode:  "n1",
+		EndNode:    "n1",
+		Type:       "SELF",
+		Properties: map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("seed edge failed: %v", err)
+	}
+
+	// Success paths.
+	_, err = exec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty('n1','embedding',[1.0,2.0])")
+	if err != nil {
+		t.Fatalf("setNodeVectorProperty success path failed: %v", err)
+	}
+	_, err = exec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty('e1','embedding',[1.0,2.0])")
+	if err != nil {
+		t.Fatalf("setRelationshipVectorProperty success path failed: %v", err)
+	}
+
+	// Argument/syntax errors.
+	_, err = exec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty")
+	if err == nil {
+		t.Fatal("expected invalid syntax error for setNodeVectorProperty")
+	}
+	_, err = exec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty('n1')")
+	if err == nil {
+		t.Fatal("expected requires 3 arguments error for setNodeVectorProperty")
+	}
+	_, err = exec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty('n1','embedding')")
+	if err == nil {
+		t.Fatal("expected missing vector argument error for setNodeVectorProperty")
+	}
+	_, err = exec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty('missing','embedding',[1.0])")
+	if err == nil || !strings.Contains(err.Error(), "node not found") {
+		t.Fatalf("expected node not found error, got: %v", err)
+	}
+
+	_, err = exec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty")
+	if err == nil {
+		t.Fatal("expected invalid syntax error for setRelationshipVectorProperty")
+	}
+	_, err = exec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty('e1')")
+	if err == nil {
+		t.Fatal("expected requires 3 arguments error for setRelationshipVectorProperty")
+	}
+	_, err = exec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty('e1','embedding')")
+	if err == nil {
+		t.Fatal("expected missing vector argument error for setRelationshipVectorProperty")
+	}
+	_, err = exec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty('missing','embedding',[1.0])")
+	if err == nil || !strings.Contains(err.Error(), "relationship not found") {
+		t.Fatalf("expected relationship not found error, got: %v", err)
+	}
+
+	// Update failure branches.
+	errStore := &updateErrorEngine{
+		Engine:  store,
+		nodeErr: errors.New("update node boom"),
+		edgeErr: errors.New("update edge boom"),
+	}
+	errExec := NewStorageExecutor(errStore)
+
+	_, err = errExec.callDbCreateSetNodeVectorProperty(ctx, "CALL db.create.setNodeVectorProperty('n1','embedding',[1.0])")
+	if err == nil || !strings.Contains(err.Error(), "failed to update node") {
+		t.Fatalf("expected failed to update node error, got: %v", err)
+	}
+	_, err = errExec.callDbCreateSetRelationshipVectorProperty(ctx, "CALL db.create.setRelationshipVectorProperty('e1','embedding',[1.0])")
+	if err == nil || !strings.Contains(err.Error(), "failed to update relationship") {
+		t.Fatalf("expected failed to update relationship error, got: %v", err)
+	}
+}
+
+func TestLegacyIndexProcedureErrorBranches_Additional(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Node vector index: invalid keyword and missing parentheses.
+	_, err := exec.callDbIndexVectorCreateNodeIndex(ctx, "CALL db.index.vector.nope('x')")
+	if err == nil {
+		t.Fatal("expected invalid createNodeIndex syntax error")
+	}
+	_, err = exec.callDbIndexVectorCreateNodeIndex(ctx, "CALL db.index.vector.createNodeIndex 'x'")
+	if err == nil {
+		t.Fatal("expected missing parentheses for createNodeIndex")
+	}
+	_, err = exec.callDbIndexVectorCreateNodeIndex(ctx, "CALL db.index.vector.createNodeIndex('x')")
+	if err == nil {
+		t.Fatal("expected too-few-args error for createNodeIndex")
+	}
+
+	// Relationship vector index: invalid keyword and missing parentheses.
+	_, err = exec.callDbIndexVectorCreateRelationshipIndex(ctx, "CALL db.index.vector.nope('x')")
+	if err == nil {
+		t.Fatal("expected invalid createRelationshipIndex syntax error")
+	}
+	_, err = exec.callDbIndexVectorCreateRelationshipIndex(ctx, "CALL db.index.vector.createRelationshipIndex 'x'")
+	if err == nil {
+		t.Fatal("expected missing parentheses for createRelationshipIndex")
+	}
+
+	// Fulltext create node/relationship: invalid keyword.
+	_, err = exec.callDbIndexFulltextCreateNodeIndex(ctx, "CALL db.index.fulltext.nope('x')")
+	if err == nil {
+		t.Fatal("expected invalid fulltext node index syntax error")
+	}
+	_, err = exec.callDbIndexFulltextCreateRelationshipIndex(ctx, "CALL db.index.fulltext.nope('x')")
+	if err == nil {
+		t.Fatal("expected invalid fulltext relationship index syntax error")
 	}
 }
 

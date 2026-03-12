@@ -325,6 +325,70 @@ func TestTransactionHandleCommit_ErrorBranchAfterClosedTx_WithWAL(t *testing.T) 
 	assert.Nil(t, exec.txContext)
 }
 
+func TestTransactionHandleRollback_ErrorBranchAfterClosedTx(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := exec.handleBegin()
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+
+	tx, ok := exec.txContext.tx.(*storage.BadgerTransaction)
+	require.True(t, ok)
+	require.NoError(t, tx.Rollback())
+
+	_, err = exec.handleRollback()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rollback failed")
+	assert.Nil(t, exec.txContext)
+}
+
+func TestExecuteInTransaction_SuccessPath(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.handleBegin()
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+	defer func() {
+		if exec.txContext != nil {
+			_, _ = exec.handleRollback()
+		}
+	}()
+
+	res, err := exec.executeInTransaction(ctx, "RETURN 1 AS x", "RETURN 1 AS X")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"x"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), res.Rows[0][0])
+}
+
+func TestExecuteInTransaction_SuccessPath_NoNamespace(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(base)
+	ctx := context.Background()
+
+	_, err := exec.handleBegin()
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+	defer func() {
+		if exec.txContext != nil {
+			_, _ = exec.handleRollback()
+		}
+	}()
+
+	res, err := exec.executeInTransaction(ctx, "RETURN 2 AS y", "RETURN 2 AS Y")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"y"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2), res.Rows[0][0])
+}
+
 func TestTransactionHandleBegin_NoTransactionEngine(t *testing.T) {
 	exec := &StorageExecutor{} // no storage engine configured
 	_, err := exec.handleBegin()
