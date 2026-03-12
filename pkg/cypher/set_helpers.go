@@ -85,8 +85,21 @@ func (e *StorageExecutor) applySetToNode(node *storage.Node, varName string, set
 		propName := strings.TrimSpace(assignment[len(varName)+1 : eqIdx])
 		propValue := strings.TrimSpace(assignment[eqIdx+1:])
 
-		// Evaluate the expression and set the property
-		setNodeProperty(node, propName, e.evaluateSetExpression(propValue))
+		// Evaluate with variable context first so expressions like
+		// "n.count + 1" are computed instead of stored as raw text.
+		evalNodes := map[string]*storage.Node{varName: node}
+		evaluated := e.evaluateExpressionWithContext(propValue, evalNodes, nil)
+
+		// Fallback to SET-specific evaluator when generic expression evaluation
+		// leaves the expression unresolved.
+		if s, ok := evaluated.(string); ok && strings.TrimSpace(s) == strings.TrimSpace(propValue) {
+			evaluated = e.evaluateSetExpression(propValue)
+		}
+		if evaluated == nil && !strings.EqualFold(strings.TrimSpace(propValue), "null") {
+			evaluated = e.evaluateSetExpression(propValue)
+		}
+
+		setNodeProperty(node, propName, evaluated)
 	}
 }
 

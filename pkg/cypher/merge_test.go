@@ -133,9 +133,7 @@ func TestMergeNode_OnMatchSet(t *testing.T) {
 	`, nil)
 	require.NoError(t, err)
 	require.Len(t, verifyResult.Rows, 1)
-	// Note: The count may or may not be incremented depending on implementation
-	// Just verify the node exists
-	assert.NotNil(t, verifyResult.Rows[0][0])
+	assert.Equal(t, int64(2), verifyResult.Rows[0][0])
 }
 
 // ========================================

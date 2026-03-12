@@ -661,3 +661,50 @@ func TestSchemaCommandExecution(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaCommandDispatcherAndTypeParserBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Unknown schema command branch.
+	_, err := exec.executeSchemaCommand(ctx, "CREATE UNKNOWN THING")
+	if err == nil {
+		t.Fatal("expected unknown schema command error")
+	}
+
+	// DROP CONSTRAINT IF EXISTS branch should swallow missing constraint errors.
+	_, err = exec.executeDropConstraint(ctx, "DROP CONSTRAINT missing_name IF EXISTS")
+	if err != nil {
+		t.Fatalf("DROP CONSTRAINT IF EXISTS should not error for missing constraint: %v", err)
+	}
+
+	typeCases := map[string]storage.PropertyType{
+		"STRING":         storage.PropertyTypeString,
+		"INT":            storage.PropertyTypeInteger,
+		"INTEGER":        storage.PropertyTypeInteger,
+		"FLOAT":          storage.PropertyTypeFloat,
+		"BOOL":           storage.PropertyTypeBoolean,
+		"BOOLEAN":        storage.PropertyTypeBoolean,
+		"DATE":           storage.PropertyTypeDate,
+		"DATETIME":       storage.PropertyTypeZonedDateTime,
+		"ZONED DATETIME": storage.PropertyTypeZonedDateTime,
+		"LOCAL DATETIME": storage.PropertyTypeLocalDateTime,
+		"LOCALDATETIME":  storage.PropertyTypeLocalDateTime,
+		"ZONEDDATETIME":  storage.PropertyTypeZonedDateTime,
+	}
+	for input, want := range typeCases {
+		got, err := parsePropertyType(input)
+		if err != nil {
+			t.Fatalf("parsePropertyType(%q) unexpected error: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("parsePropertyType(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := parsePropertyType("UNSUPPORTED_TYPE"); err == nil {
+		t.Fatal("expected parsePropertyType unsupported type error")
+	}
+}

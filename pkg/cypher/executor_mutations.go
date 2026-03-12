@@ -2322,7 +2322,7 @@ func (e *StorageExecutor) evaluateCountSubqueryComparison(node *storage.Node, va
 	// Extract the subquery from COUNT { ... }
 	subquery := e.extractSubquery(whereClause, "COUNT")
 	if subquery == "" {
-		return true // No valid subquery, pass through
+		return false // Malformed COUNT subquery
 	}
 
 	// Count matching relationships
@@ -2441,13 +2441,28 @@ func (e *StorageExecutor) countSubqueryMatches(node *storage.Node, variable, sub
 	var checkIncoming, checkOutgoing bool
 	var relTypes []string
 
-	if strings.Contains(pattern, "<-[") {
+	// Variable on left side of "<-[" means incoming to variable.
+	if strings.Contains(pattern, "("+variable+")<-[") || strings.Contains(pattern, "("+variable+":") && strings.Contains(pattern, "<-[") {
 		checkIncoming = true
 		relTypes = e.extractRelTypesFromPattern(pattern, "<-[")
 	}
-	if strings.Contains(pattern, "]->(") || strings.Contains(pattern, "]->") {
+	// Variable on left side of "-[" means outgoing from variable.
+	if strings.Contains(pattern, "("+variable+")-[") || strings.Contains(pattern, "("+variable+":") && strings.Contains(pattern, ")-[") {
 		checkOutgoing = true
 		relTypes = e.extractRelTypesFromPattern(pattern, "-[")
+	}
+
+	// Variable on right side of "]->" means incoming to variable.
+	if strings.Contains(pattern, "]->("+variable+")") || strings.Contains(pattern, "]->("+variable+":") {
+		checkIncoming = true
+		relTypes = e.extractRelTypesFromPattern(pattern, "-[")
+	}
+	// Variable on right side of "]-(...)" in an incoming-arrow pattern means outgoing from variable:
+	// e.g. ()<-[r]-(n)
+	if (strings.Contains(pattern, "]-("+variable+")") || strings.Contains(pattern, "]-("+variable+":")) &&
+		strings.Contains(pattern, "<-[") {
+		checkOutgoing = true
+		relTypes = e.extractRelTypesFromPattern(pattern, "<-[")
 	}
 
 	// Count matching edges

@@ -2381,6 +2381,55 @@ func TestCypherHelpers_ExecuteMatchRelationshipsWithClause_Branches(t *testing.T
 	assert.Contains(t, err.Error(), "invalid traversal pattern")
 }
 
+func TestCypherHelpers_CountSubqueryAndComparison_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+
+	_, err := eng.CreateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "a"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "b"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "c", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "c"}})
+	require.NoError(t, err)
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e1", Type: "KNOWS", StartNode: "a", EndNode: "b"}))
+	require.NoError(t, eng.CreateEdge(&storage.Edge{ID: "e2", Type: "LIKES", StartNode: "c", EndNode: "a"}))
+
+	a, err := eng.GetNode("a")
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 0, exec.countSubqueryMatches(a, "n", "RETURN 1"))
+	assert.EqualValues(t, 0, exec.countSubqueryMatches(a, "n", "MATCH (x)-[:KNOWS]->()"))
+	assert.EqualValues(t, 1, exec.countSubqueryMatches(a, "n", "MATCH (n)-[:KNOWS]->()"))
+	assert.EqualValues(t, 1, exec.countSubqueryMatches(a, "n", "MATCH ()-[:LIKES]->(n)"))
+	assert.EqualValues(t, 1, exec.countSubqueryMatches(a, "n", "MATCH ()-[r]->(n)"))
+
+	assert.True(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() }"))
+	assert.True(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() } = 1"))
+	assert.True(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() } != 2"))
+	assert.True(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() } <= 1"))
+	assert.False(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() } > 1"))
+	assert.False(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() } = nope"))
+	assert.False(t, exec.evaluateCountSubqueryComparison(a, "n", "COUNT { MATCH (n)-[:KNOWS]->() "))
+}
+
+func TestCypherHelpers_ExtractionHelpers_Branches(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+
+	assert.Equal(t, "", extractVariableNameFromReturnItem(""))
+	assert.Equal(t, "n", extractVariableNameFromReturnItem("n"))
+	assert.Equal(t, "n", extractVariableNameFromReturnItem("n.name"))
+	assert.Equal(t, "n", extractVariableNameFromReturnItem("id(n)"))
+	assert.Equal(t, "n", extractVariableNameFromReturnItem("id(n.name)"))
+
+	assert.Equal(t, "b", exec.extractTargetVariable("(a)-[:KNOWS]->(b:Person)", "a"))
+	assert.Equal(t, "a", exec.extractTargetVariable("(a:Person)<-[:KNOWS]-(b)", "b"))
+	assert.Equal(t, "", exec.extractTargetVariable("(a)-[:KNOWS]-", "a"))
+
+	got := dedupeNonEmpty([]string{"a", "", "a", " b ", "b"}, []string{"", "c", "a"})
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
 func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
 	node := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(21), "name": "alice"}}
