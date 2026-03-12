@@ -817,3 +817,86 @@ func TestCreateConstraint_ValidationAndDuplicateErrorBranches(t *testing.T) {
 	}
 
 }
+
+func TestCreateIndex_BranchCoverage(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Named index branch (composite properties).
+	_, err := exec.executeCreateIndex(ctx, "CREATE INDEX idx_person_name_age FOR (n:Person) ON (n.name, n.age)")
+	if err != nil {
+		t.Fatalf("expected named composite index creation to succeed: %v", err)
+	}
+
+	// Unnamed index branch (auto-generated name).
+	_, err = exec.executeCreateIndex(ctx, "CREATE INDEX FOR (n:Product) ON (n.sku, n.region)")
+	if err != nil {
+		t.Fatalf("expected unnamed composite index creation to succeed: %v", err)
+	}
+
+	// Named no-properties branch.
+	_, err = exec.executeCreateIndex(ctx, "CREATE INDEX idx_empty FOR (n:EmptyIdx) ON (n)")
+	if err == nil {
+		t.Fatal("expected no properties specified for named index")
+	}
+
+	// Unnamed no-properties branch.
+	_, err = exec.executeCreateIndex(ctx, "CREATE INDEX FOR (n:EmptyIdx2) ON (n)")
+	if err == nil {
+		t.Fatal("expected no properties specified for unnamed index")
+	}
+
+	// Invalid syntax fallback branch.
+	_, err = exec.executeCreateIndex(ctx, "CREATE INDEX idx_invalid")
+	if err == nil {
+		t.Fatal("expected invalid CREATE INDEX syntax error")
+	}
+}
+
+func TestCreateConstraint_DuplicateNamedDefinitionErrors(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "unique",
+			query: "CREATE CONSTRAINT uq_dup_name FOR (n:DupUnique) REQUIRE n.id IS UNIQUE",
+		},
+		{
+			name:  "exists_not_null",
+			query: "CREATE CONSTRAINT nn_dup_name FOR (n:DupExists) REQUIRE n.email IS NOT NULL",
+		},
+		{
+			name:  "node_key",
+			query: "CREATE CONSTRAINT nk_dup_name FOR (n:DupNodeKey) REQUIRE (n.k1, n.k2) IS NODE KEY",
+		},
+		{
+			name:  "temporal",
+			query: "CREATE CONSTRAINT tp_dup_name FOR (n:DupTemporal) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
+		},
+		{
+			name:  "property_type",
+			query: "CREATE CONSTRAINT ty_dup_name FOR (n:DupType) REQUIRE n.age IS :: INTEGER",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := exec.executeCreateConstraint(ctx, tt.query)
+			if err != nil {
+				t.Fatalf("first create constraint should succeed: %v", err)
+			}
+			_, err = exec.executeCreateConstraint(ctx, tt.query)
+			if err != nil {
+				t.Fatalf("duplicate named constraint should be idempotent for %s: %v", tt.name, err)
+			}
+		})
+	}
+}

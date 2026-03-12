@@ -273,6 +273,58 @@ func TestTransactionStatementHandlers_WithWALAsyncEngine(t *testing.T) {
 	require.NotNil(t, commitRes.Metadata["receipt"])
 }
 
+func TestTransactionHandleCommit_ErrorBranchAfterClosedTx(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := exec.handleBegin()
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+
+	tx, ok := exec.txContext.tx.(*storage.BadgerTransaction)
+	require.True(t, ok)
+	require.NoError(t, tx.Rollback())
+
+	_, err = exec.handleCommit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commit failed")
+	assert.Nil(t, exec.txContext)
+}
+
+func TestTransactionHandleCommit_ErrorBranchAfterClosedTx_WithWAL(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cypher-transaction-commit-fail-wal-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	badger, err := storage.NewBadgerEngine(tmpDir)
+	require.NoError(t, err)
+	defer badger.Close()
+
+	wal, err := storage.NewWAL(tmpDir+"/wal", nil)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	walEngine := storage.NewWALEngine(badger, wal)
+	store := storage.NewNamespacedEngine(walEngine, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err = exec.handleBegin()
+	require.NoError(t, err)
+	require.NotNil(t, exec.txContext)
+	require.NotNil(t, exec.txContext.wal)
+	require.Greater(t, exec.txContext.walSeqStart, uint64(0))
+
+	tx, ok := exec.txContext.tx.(*storage.BadgerTransaction)
+	require.True(t, ok)
+	require.NoError(t, tx.Rollback())
+
+	_, err = exec.handleCommit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commit failed")
+	assert.Nil(t, exec.txContext)
+}
+
 func TestTransactionHandleBegin_NoTransactionEngine(t *testing.T) {
 	exec := &StorageExecutor{} // no storage engine configured
 	_, err := exec.handleBegin()

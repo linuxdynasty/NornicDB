@@ -74,6 +74,42 @@ func TestApocLoadExportHelpers_CallApocLoadJsonArray_FromFile(t *testing.T) {
 	assert.Len(t, res.Rows, 3)
 }
 
+func TestApocLoadExportHelpers_CallApocLoadJsonArray_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	e := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := e.callApocLoadJsonArray(ctx, "CALL apoc.load.jsonArray()")
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	objPath := filepath.Join(dir, "obj.json")
+	require.NoError(t, os.WriteFile(objPath, []byte(`{"k":"v"}`), 0o644))
+
+	// Non-array payload falls into default single-row branch.
+	res, err := e.callApocLoadJsonArray(ctx, "CALL apoc.load.jsonArray('"+objPath+"') YIELD value")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	obj, ok := res.Rows[0][0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "v", obj["k"])
+
+	// URL source branch.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"x":1},{"x":2}]`))
+	}))
+	defer srv.Close()
+
+	res, err = e.callApocLoadJsonArray(ctx, "CALL apoc.load.jsonArray('"+srv.URL+"') YIELD value")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+
+	// Load failure branch.
+	_, err = e.callApocLoadJsonArray(ctx, "CALL apoc.load.jsonArray('"+filepath.Join(dir, "missing.json")+"') YIELD value")
+	require.Error(t, err)
+}
+
 func TestApocLoadExportHelpers_CallApocImportJson_FromFile(t *testing.T) {
 	eng := storage.NewMemoryEngine()
 	defer eng.Close()

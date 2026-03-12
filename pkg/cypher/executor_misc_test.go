@@ -588,6 +588,81 @@ func TestExecuteWithImplicitTransaction_WALBeginError(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to write WAL tx begin")
 }
 
+func TestExecuteReturn_Branches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// RETURN missing branch.
+	_, err := exec.executeReturn(ctx, "MATCH (n)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RETURN clause not found")
+
+	// Parameter substitution + aliases + null + int/float/bool/string fallback.
+	ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{"x": int64(7)})
+	res, err := exec.executeReturn(ctxWithParams, "RETURN $x AS x, null AS n, 1 AS one, 0 AS zero, 3.14 AS pi, 's' AS s, bareword AS b")
+	require.NoError(t, err)
+	require.Equal(t, []string{"x", "n", "one", "zero", "pi", "s", "b"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 7)
+	assert.Equal(t, int64(7), res.Rows[0][0])
+	assert.Nil(t, res.Rows[0][1])
+	assert.Equal(t, int64(1), res.Rows[0][2])
+	assert.Equal(t, int64(0), res.Rows[0][3])
+	assert.Equal(t, 3.14, res.Rows[0][4])
+	assert.Equal(t, "s", res.Rows[0][5])
+	assert.Equal(t, "bareword", res.Rows[0][6])
+
+	// Expression evaluation branch (evaluateExpressionWithContext result != nil).
+	exprRes, err := exec.executeReturn(ctx, "RETURN toUpper('abc') AS up")
+	require.NoError(t, err)
+	require.Len(t, exprRes.Rows, 1)
+	require.Len(t, exprRes.Rows[0], 1)
+	assert.Equal(t, "ABC", exprRes.Rows[0][0])
+}
+
+func TestExecuteQueryAgainstStorage_DispatchBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	dispatchQueries := []string{
+		"FOREACH (x IN [1] | CREATE (:Q {v:x}))",
+		"SHOW INDEXES",
+		"SHOW CONSTRAINTS",
+		"SHOW PROCEDURES",
+		"SHOW FUNCTIONS",
+		"SHOW DATABASES",
+		"SHOW DATABASE nornic",
+		"SHOW ALIASES",
+		"SHOW LIMITS",
+	}
+
+	for _, q := range dispatchQueries {
+		_, err := exec.executeQueryAgainstStorage(ctx, q, strings.ToUpper(q))
+		if err != nil {
+			assert.NotContains(t, err.Error(), "unsupported query type", "query should dispatch to a specific handler: %s", q)
+		}
+	}
+
+	unsupportedInTx := []string{
+		"LOAD CSV FROM 'file:///tmp/missing.csv' AS row RETURN row",
+		"ALTER COMPOSITE DATABASE cdb ADD CONSTITUENT db1",
+	}
+	for _, q := range unsupportedInTx {
+		_, err := exec.executeQueryAgainstStorage(ctx, q, strings.ToUpper(q))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported query type")
+	}
+
+	// Default fallback branch for unsupported type.
+	_, err := exec.executeQueryAgainstStorage(ctx, "WHATEVER 1", "WHATEVER 1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported query type")
+}
+
 // =============================================================================
 // Tests for Parameter Substitution (substituteParams and valueToLiteral)
 // =============================================================================

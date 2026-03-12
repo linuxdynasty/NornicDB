@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -44,6 +45,64 @@ func TestCompositeIndex(t *testing.T) {
 
 	if !found {
 		t.Error("Composite index not found in schema")
+	}
+}
+
+func TestLegacyIndexProcedureCompatibilityBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// db.index.vector.createRelationshipIndex success + default similarity branch.
+	res, err := exec.callDbIndexVectorCreateRelationshipIndex(ctx, "CALL db.index.vector.createRelationshipIndex('rel_vec_idx','KNOWS','embedding',128)")
+	if err != nil {
+		t.Fatalf("expected relationship vector index creation success: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][4] != "cosine" {
+		t.Fatalf("expected default cosine similarity in result row, got %+v", res.Rows)
+	}
+
+	// invalid dimension branch
+	_, err = exec.callDbIndexVectorCreateRelationshipIndex(ctx, "CALL db.index.vector.createRelationshipIndex('bad','KNOWS','embedding','x')")
+	if err == nil || !strings.Contains(err.Error(), "invalid dimension") {
+		t.Fatalf("expected invalid dimension error, got: %v", err)
+	}
+
+	// missing-args branch
+	_, err = exec.callDbIndexVectorCreateRelationshipIndex(ctx, "CALL db.index.vector.createRelationshipIndex('too_few')")
+	if err == nil {
+		t.Fatal("expected too-few-args error for relationship vector index")
+	}
+
+	// fulltext create (node + relationship) success
+	_, err = exec.callDbIndexFulltextCreateNodeIndex(ctx, "CALL db.index.fulltext.createNodeIndex('ft_node',['Doc'],['title','body'])")
+	if err != nil {
+		t.Fatalf("expected node fulltext index creation success: %v", err)
+	}
+	_, err = exec.callDbIndexFulltextCreateRelationshipIndex(ctx, "CALL db.index.fulltext.createRelationshipIndex('ft_rel',['KNOWS'],['note'])")
+	if err != nil {
+		t.Fatalf("expected relationship fulltext index creation success: %v", err)
+	}
+
+	// fulltext missing parenthesis/args branches
+	_, err = exec.callDbIndexFulltextCreateNodeIndex(ctx, "CALL db.index.fulltext.createNodeIndex 'ft'")
+	if err == nil {
+		t.Fatal("expected missing parentheses error for fulltext node index")
+	}
+	_, err = exec.callDbIndexFulltextCreateRelationshipIndex(ctx, "CALL db.index.fulltext.createRelationshipIndex('ft_rel')")
+	if err == nil {
+		t.Fatal("expected too-few-args error for fulltext relationship index")
+	}
+
+	// vector drop branches
+	_, err = exec.callDbIndexVectorDrop("CALL db.index.vector.drop('rel_vec_idx')")
+	if err != nil {
+		t.Fatalf("expected vector drop success: %v", err)
+	}
+	_, err = exec.callDbIndexVectorDrop("CALL db.index.vector.drop 'rel_vec_idx'")
+	if err == nil {
+		t.Fatal("expected missing parentheses error for vector drop")
 	}
 }
 
