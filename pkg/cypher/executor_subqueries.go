@@ -708,12 +708,11 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 	// This is less efficient but handles edge cases
 	useIterativeBatching := totalRows == 0
 
-	// Guard: write queries without a batchable row source (e.g. bare CREATE ... RETURN)
-	// cannot make forward progress with SKIP/LIMIT pagination and can loop forever.
-	// Execute once in a single implicit transaction instead.
+	// Guard: write queries without a safely batchable MATCH row source (e.g. bare CREATE
+	// or UNWIND-driven writes) cannot reliably make forward progress with our SKIP/LIMIT
+	// pagination rewrite and may loop indefinitely. Execute once instead.
 	if useIterativeBatching {
-		hasBatchableSource := strings.Contains(upperSubquery, "MATCH ") ||
-			strings.Contains(upperSubquery, "UNWIND ")
+		hasBatchableSource := strings.Contains(upperSubquery, "MATCH ")
 		if !hasBatchableSource {
 			singleResult, err := e.executeWithImplicitTransaction(ctx, subquery, strings.ToUpper(subquery))
 			if err != nil {

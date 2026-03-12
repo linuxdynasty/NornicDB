@@ -282,6 +282,38 @@ func TestParserDefaultCase(t *testing.T) {
 	assert.NotNil(t, query)
 }
 
+func TestExecuteInternal_Branches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Empty query guard.
+	_, err := exec.executeInternal(ctx, "   ", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty query")
+
+	// Non-transaction path delegates to executeWithoutTransaction.
+	res, err := exec.executeInternal(ctx, "RETURN 1 AS x", nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"x"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(1), res.Rows[0][0])
+
+	// Active transaction path delegates to executeInTransaction.
+	_, err = exec.parseTransactionStatement("BEGIN")
+	require.NoError(t, err)
+	res, err = exec.executeInternal(ctx, "CREATE (:InternalBranch {id:'ib-1'})", nil)
+	require.NoError(t, err)
+	_, err = exec.parseTransactionStatement("COMMIT")
+	require.NoError(t, err)
+
+	verify, err := exec.Execute(ctx, "MATCH (n:InternalBranch {id:'ib-1'}) RETURN count(n) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, verify.Rows, 1)
+	assert.Equal(t, int64(1), verify.Rows[0][0])
+}
+
 func TestApocDynamicRunAndRunMany_Direct(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -315,11 +347,28 @@ func TestApocDynamicRunAndRunMany_Direct(t *testing.T) {
 	require.Error(t, err)
 	_, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany")
 	require.Error(t, err)
+	_, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany('RETURN 1', {}")
+	require.Error(t, err)
 
 	res, err = exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany('RETURN 1 AS n; INVALID CYPHER; RETURN 2 AS n', {})")
 	require.NoError(t, err)
 	require.Equal(t, []string{"row", "result"}, res.Columns)
 	require.NotEmpty(t, res.Rows)
+	// Ensure row index and error payload branches are deterministic.
+	require.Len(t, res.Rows, 3)
+	require.Equal(t, int64(0), res.Rows[0][0])
+	require.Equal(t, int64(1), res.Rows[1][0])
+	require.Equal(t, int64(2), res.Rows[2][0])
+	errMap, ok := res.Rows[1][1].(map[string]interface{})
+	require.True(t, ok)
+	_, hasErr := errMap["error"]
+	require.True(t, hasErr)
+
+	// Stats accumulation branch: runMany with CREATE should increment NodesCreated.
+	createRes, err := exec.callApocCypherRunMany(ctx, "CALL apoc.cypher.runMany('CREATE (:Dyn {name:\"x\"}); CREATE (:Dyn {name:\"y\"})', {})")
+	require.NoError(t, err)
+	require.NotNil(t, createRes.Stats)
+	assert.GreaterOrEqual(t, createRes.Stats.NodesCreated, 2)
 }
 
 func TestApocPeriodicIterateAndCommit_Direct(t *testing.T) {

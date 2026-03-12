@@ -104,6 +104,19 @@ func TestCallDbRerankCandidates(t *testing.T) {
 	assert.Equal(t, "a", res.Rows[0][0])
 }
 
+func TestCallDbRerankCandidates_StrictValidationBranches(t *testing.T) {
+	ctx := context.Background()
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	_, err := exec.Execute(ctx, "CALL db.rerank({query: 'alpha', candidates: []})", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires non-empty candidates")
+
+	_, err = exec.Execute(ctx, "CALL db.rerank({query: 'alpha', candidates: [{content: 'missing-id'}]})", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "candidate id is required")
+}
+
 func TestCallDbIndexVectorEmbed(t *testing.T) {
 	ctx := context.Background()
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))

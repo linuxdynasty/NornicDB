@@ -260,6 +260,90 @@ func TestDetectQueryPattern_OutgoingCountAgg(t *testing.T) {
 	}
 }
 
+func TestExecuteEdgePropertyAggOptimized_Branches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// End nodes (group targets)
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "p1",
+		Labels:     []string{"Product"},
+		Properties: map[string]interface{}{"name": "P1"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "p2",
+		Labels:     []string{"Product"},
+		Properties: map[string]interface{}{"name": "P2"},
+	})
+	require.NoError(t, err)
+	// Start node just to make edges realistic.
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "c1",
+		Labels:     []string{"Customer"},
+		Properties: map[string]interface{}{"name": "C1"},
+	})
+	require.NoError(t, err)
+
+	// Numeric + int + missing + non-numeric + dangling end-node branches.
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         "e1",
+		StartNode:  "c1",
+		EndNode:    "p1",
+		Type:       "REVIEWED",
+		Properties: map[string]interface{}{"rating": float64(4.5)},
+	}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         "e2",
+		StartNode:  "c1",
+		EndNode:    "p1",
+		Type:       "REVIEWED",
+		Properties: map[string]interface{}{"rating": int64(5)},
+	}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         "e3",
+		StartNode:  "c1",
+		EndNode:    "p2",
+		Type:       "REVIEWED",
+		Properties: map[string]interface{}{"other": 9}, // missing rating -> skipped
+	}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         "e4",
+		StartNode:  "c1",
+		EndNode:    "p2",
+		Type:       "REVIEWED",
+		Properties: map[string]interface{}{"rating": "bad"}, // non-numeric -> skipped
+	}))
+	info := PatternInfo{
+		Pattern:      PatternEdgePropertyAgg,
+		RelType:      "REVIEWED",
+		AggProperty:  "rating",
+		AggFunctions: []string{"avg", "count", "min", "max", "sum"},
+		Limit:        10,
+	}
+	res, err := exec.executeEdgePropertyAggOptimized(ctx,
+		"MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS product, avg(r.rating) AS avg, count(r) AS cnt, min(r.rating) AS min, max(r.rating) AS max, sum(r.rating) AS total",
+		info,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"product", "avg", "cnt", "min", "max", "total"}, res.Columns)
+	// p1 is the only end node with valid numeric values.
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 6)
+	assert.Equal(t, "P1", res.Rows[0][0])
+	assert.Equal(t, 4.75, res.Rows[0][1])     // avg(4.5,5)
+	assert.Equal(t, int64(2), res.Rows[0][2]) // count
+	assert.Equal(t, 4.5, res.Rows[0][3])      // min
+	assert.Equal(t, 5.0, res.Rows[0][4])      // max
+	assert.Equal(t, 9.5, res.Rows[0][5])      // sum
+
+	// getNodeCached nil branch for missing node ID.
+	cache := map[storage.NodeID]*storage.Node{}
+	assert.Nil(t, exec.getNodeCached("missing-end", cache))
+}
+
 func TestDetectQueryPattern_EdgePropertyAgg(t *testing.T) {
 	tests := []struct {
 		name        string

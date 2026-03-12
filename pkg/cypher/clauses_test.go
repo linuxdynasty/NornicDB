@@ -2412,6 +2412,64 @@ func TestShowConstraints(t *testing.T) {
 	}
 }
 
+func TestShowConstraints_WithSchemaConstraintsAndPropertyTypes(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	if err := store.GetSchema().AddConstraint(storage.Constraint{
+		Name:       "unique_person_email",
+		Type:       storage.ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	}); err != nil {
+		t.Fatalf("failed to add unique constraint: %v", err)
+	}
+	if err := store.GetSchema().AddPropertyTypeConstraint("person_age_type", "Person", "age", storage.PropertyTypeInteger); err != nil {
+		t.Fatalf("failed to add property type constraint: %v", err)
+	}
+
+	result, err := e.executeShowConstraints(ctx, "SHOW CONSTRAINTS")
+	if err != nil {
+		t.Fatalf("executeShowConstraints failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("SHOW CONSTRAINTS returned nil result")
+	}
+	if len(result.Rows) < 2 {
+		t.Fatalf("expected at least 2 constraints rows, got %d", len(result.Rows))
+	}
+
+	var (
+		foundUniqueRow       bool
+		foundPropertyTypeRow bool
+	)
+	for _, row := range result.Rows {
+		if len(row) != 8 {
+			t.Fatalf("unexpected SHOW CONSTRAINTS row shape: %v", row)
+		}
+		name, _ := row[1].(string)
+		typ, _ := row[2].(string)
+		if name == "unique_person_email" && typ == "UNIQUE" {
+			foundUniqueRow = true
+		}
+		if name == "person_age_type" && typ == "PROPERTY_TYPE" {
+			foundPropertyTypeRow = true
+			if row[7] == nil || row[7] == "" {
+				t.Fatalf("expected propertyType column to be populated, row=%v", row)
+			}
+		}
+	}
+	if !foundUniqueRow {
+		t.Fatalf("missing unique constraint row in SHOW CONSTRAINTS output: %v", result.Rows)
+	}
+	if !foundPropertyTypeRow {
+		t.Fatalf("missing property-type constraint row in SHOW CONSTRAINTS output: %v", result.Rows)
+	}
+}
+
 func TestShowProcedures(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

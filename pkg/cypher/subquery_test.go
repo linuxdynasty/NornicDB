@@ -2498,6 +2498,49 @@ func TestSubqueryHelpers_CallInTransactions_NonBatchableWriteExecutesOnce(t *tes
 	assert.Equal(t, int64(1), verify.Rows[0][0])
 }
 
+func TestSubqueryHelpers_CallInTransactions_KnownBatchCountErrorBranch(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{ID: "p2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bob"}})
+	require.NoError(t, err)
+	require.NoError(t, eng.GetSchema().AddConstraint(storage.Constraint{
+		Name:       "uq_person_email",
+		Type:       storage.ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	}))
+
+	// Row count is known from MATCH/RETURN, but the second batch fails due unique constraint.
+	_, err = exec.executeCallInTransactions(ctx, "MATCH (n:Person) SET n.email = 'dup@example.com' RETURN n.name AS name", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "batch 2/2 failed")
+}
+
+func TestSubqueryHelpers_CallInTransactions_IterativeBatchingWithUnwind(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	// UNWIND write query is not convertible by makeSubqueryReadOnly, so this exercises
+	// iterative batching with a batchable source.
+	res, err := exec.executeCallInTransactions(ctx, "UNWIND [1,2,3] AS i CREATE (n:IterTx {v:i}) RETURN i AS i", 2)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"i"}, res.Columns)
+	require.Len(t, res.Rows, 3)
+	assert.EqualValues(t, 3, res.Stats.NodesCreated)
+
+	verify, err := exec.Execute(ctx, "MATCH (n:IterTx) RETURN count(*)", nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), verify.Rows[0][0])
+}
+
 func TestSubqueryHelpers_ParseCallSubquery_EdgeBranches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
 

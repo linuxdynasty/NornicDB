@@ -161,6 +161,15 @@ func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
 	require.Error(t, err)
 	_, err = e.callApocExportCsvQuery(context.Background(), "CALL apoc.export.csv.query('', '"+csvOut+"', {})")
 	require.Error(t, err)
+
+	// Query execution failure branch.
+	_, err = e.callApocExportJsonQuery(context.Background(), "CALL apoc.export.json.query('THIS IS NOT CYPHER', '"+jsonOut+"', {})")
+	require.Error(t, err)
+
+	// File write failure branch (json.query does not auto-create dirs).
+	badExportPath := filepath.Join(tmpDir, "missing", "nested", "q.json")
+	_, err = e.callApocExportJsonQuery(context.Background(), "CALL apoc.export.json.query('RETURN 1 AS x', '"+badExportPath+"', {})")
+	require.Error(t, err)
 }
 
 func TestApocLoadExportHelpers_CallApocLoadCsv_OptionsAndSources(t *testing.T) {

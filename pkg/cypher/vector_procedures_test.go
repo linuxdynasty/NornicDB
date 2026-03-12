@@ -1243,6 +1243,16 @@ func TestCallDbIndexFulltextDrop(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "my_special_index", result.Rows[0][0])
 	})
+
+	t.Run("invalid_drop_syntax_errors", func(t *testing.T) {
+		_, err := exec.callDbIndexFulltextDrop("CALL db.index.fulltext.nope('x')")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid db.index.fulltext.drop syntax")
+
+		_, err = exec.callDbIndexFulltextDrop("CALL db.index.fulltext.drop 'x'")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing parentheses")
+	})
 }
 
 func TestCallDbIndexVectorDrop(t *testing.T) {

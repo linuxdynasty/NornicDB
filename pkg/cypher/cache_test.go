@@ -198,6 +198,38 @@ func TestQueryCache_Stats(t *testing.T) {
 	}
 }
 
+func TestQueryCache_EvictOldest_EmptyAndNonEmptyBranches(t *testing.T) {
+	cache := NewQueryCache(2)
+
+	// Empty LRU list branch should be a no-op.
+	cache.evictOldest()
+	_, _, size := cache.Stats()
+	if size != 0 {
+		t.Fatalf("expected empty cache after evict on empty, got size=%d", size)
+	}
+
+	result := &ExecuteResult{Columns: []string{"n"}, Rows: [][]interface{}{{"v"}}}
+	cache.Put("q1", nil, result, time.Minute)
+	cache.Put("q2", nil, result, time.Minute)
+
+	cache.mu.Lock()
+	before := len(cache.lruList)
+	cache.evictOldest()
+	after := len(cache.lruList)
+	cache.mu.Unlock()
+
+	if before != 2 || after != 1 {
+		t.Fatalf("expected LRU length 2->1 after evictOldest, got %d->%d", before, after)
+	}
+
+	// Exactly one of q1/q2 should remain.
+	_, found1 := cache.Get("q1", nil)
+	_, found2 := cache.Get("q2", nil)
+	if found1 == found2 {
+		t.Fatalf("expected exactly one entry to remain, found1=%v found2=%v", found1, found2)
+	}
+}
+
 // =============================================================================
 // SMART QUERY CACHE TESTS
 // =============================================================================

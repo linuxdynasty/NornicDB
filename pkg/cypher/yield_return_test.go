@@ -316,6 +316,45 @@ func TestCallDbIndexFulltextQueryNodes_DirectBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Empty(t, res.Rows)
+
+	// Non-built-in missing index should error (Neo4j compatibility path).
+	_, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('missing_idx', 'alpha')")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "there is no such fulltext schema index")
+
+	// Create explicit fulltext index to exercise label/property filtering branches.
+	_, err = exec.Execute(context.Background(), "CREATE FULLTEXT INDEX idx_ft IF NOT EXISTS FOR (n:Doc) ON EACH [n.content]", nil)
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "n2",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"content": "alpha must keep"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "n3",
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"content": "alpha beta must"}, // excluded by NOT beta
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "n4",
+		Labels:     []string{"Other"},
+		Properties: map[string]interface{}{"content": "alpha must"}, // filtered by label
+	})
+	require.NoError(t, err)
+
+	// Must-have/exclude branches: only n2 should remain.
+	res, err = exec.callDbIndexFulltextQueryNodes("CALL db.index.fulltext.queryNodes('idx_ft', '+must alpha NOT beta')")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.Rows, 1)
+	node, ok := res.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	assert.Equal(t, storage.NodeID("n2"), node.ID)
+	_, scoreOK := res.Rows[0][1].(float64)
+	assert.True(t, scoreOK)
 }
 
 // TestYieldReturnWithOtherProcedures tests YIELD...RETURN with various procedures

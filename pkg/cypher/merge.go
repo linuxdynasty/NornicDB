@@ -1401,20 +1401,9 @@ func splitMergeChainClauseBlock(block string) []string {
 			}
 		}
 		if currentKw == "" {
-			// Skip unknown leading content until the next recognized keyword.
-			next := -1
-			for _, kw := range keywords {
-				if idx := findKeywordIndex(block[pos:], kw); idx > 0 {
-					if next == -1 || idx < next {
-						next = idx
-					}
-				}
-			}
-			if next == -1 {
-				clauses = append(clauses, strings.TrimSpace(block[pos:]))
-				break
-			}
-			pos += next
+			// Defensive fallback: once aligned to the first keyword, subsequent clause
+			// boundaries should always start on a recognized keyword.
+			clauses = append(clauses, strings.TrimSpace(block[pos:]))
 			continue
 		}
 

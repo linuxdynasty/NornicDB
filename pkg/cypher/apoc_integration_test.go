@@ -170,4 +170,21 @@ func TestAPOCPathHelpers_BranchCoverage(t *testing.T) {
 	}
 	dfsEdges := exec.dfsSpanningTree(startNode, cfg)
 	require.NotEmpty(t, dfsEdges)
+
+	// Missing explicit start node id should produce deterministic empty results.
+	res, err = exec.callApocPathSubgraphNodes("MATCH (n {id: 'missing'}) CALL apoc.path.subgraphNodes(n,{maxLevel:2})")
+	require.NoError(t, err)
+	require.Empty(t, res.Rows)
+}
+
+func TestAPOCPathHelpers_SubgraphNodes_AllNodesError(t *testing.T) {
+	failStore := &failingNodeLookupEngine{
+		Engine:      storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"),
+		allNodesErr: assert.AnError,
+	}
+	exec := NewStorageExecutor(failStore)
+
+	_, err := exec.callApocPathSubgraphNodes("CALL apoc.path.subgraphNodes(n,{maxLevel:2})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), assert.AnError.Error())
 }
