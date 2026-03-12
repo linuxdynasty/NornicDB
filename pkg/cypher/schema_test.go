@@ -8,6 +8,12 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+type nilSchemaEngine struct {
+	storage.Engine
+}
+
+func (n *nilSchemaEngine) GetSchema() *storage.SchemaManager { return nil }
+
 func TestCreateUniqueConstraint(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
@@ -898,5 +904,81 @@ func TestCreateConstraint_DuplicateNamedDefinitionErrors(t *testing.T) {
 				t.Fatalf("duplicate named constraint should be idempotent for %s: %v", tt.name, err)
 			}
 		})
+	}
+}
+
+func TestCreateRangeIndex_ErrorBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX idx_age FOR (n:Person) ON (n.age)")
+	if err != nil {
+		t.Fatalf("failed to create baseline range index: %v", err)
+	}
+	_, err = exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX idx_age FOR (n:Person) ON (n.score)")
+	if err != nil {
+		t.Fatalf("expected conflicting named range index to be idempotent, got: %v", err)
+	}
+
+	_, err = exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX FOR (n:Product) ON (n.price)")
+	if err != nil {
+		t.Fatalf("failed to create unnamed range index: %v", err)
+	}
+	_, err = exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX FOR (n:Product) ON (n.cost)")
+	if err != nil {
+		t.Fatalf("expected second unnamed range index with different generated name to succeed, got: %v", err)
+	}
+
+	_, err = exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX idx_multi FOR (n:Person) ON (n.age, n.score)")
+	if err == nil || !strings.Contains(err.Error(), "only supports single property") {
+		t.Fatalf("expected single-property validation error, got: %v", err)
+	}
+
+	_, err = exec.executeCreateRangeIndex(ctx, "CREATE RANGE INDEX")
+	if err == nil || !strings.Contains(err.Error(), "invalid CREATE RANGE INDEX syntax") {
+		t.Fatalf("expected invalid syntax error, got: %v", err)
+	}
+}
+
+func TestCreateFulltextIndex_SchemaAndDuplicateErrors(t *testing.T) {
+	ctx := context.Background()
+
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX dup_ft FOR (n:Doc) ON EACH [n.title]")
+	if err != nil {
+		t.Fatalf("failed to create baseline fulltext index: %v", err)
+	}
+	_, err = exec.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX dup_ft FOR (n:Doc) ON EACH [n.body]")
+	if err != nil {
+		t.Fatalf("expected conflicting fulltext index to be idempotent, got: %v", err)
+	}
+
+	nilSchema := &nilSchemaEngine{Engine: store}
+	execNilSchema := NewStorageExecutor(nilSchema)
+	_, err = execNilSchema.executeCreateFulltextIndex(ctx, "CREATE FULLTEXT INDEX nil_schema FOR (n:Doc) ON EACH [n.title]")
+	if err == nil || !strings.Contains(err.Error(), "schema manager not available") {
+		t.Fatalf("expected nil schema error, got: %v", err)
+	}
+}
+
+func TestCreateVectorIndex_DuplicateErrorBranch(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	query := "CREATE VECTOR INDEX vec_dup FOR (n:Doc) ON (n.embedding)"
+	_, err := exec.executeCreateVectorIndex(ctx, query)
+	if err != nil {
+		t.Fatalf("failed to create baseline vector index: %v", err)
+	}
+	_, err = exec.executeCreateVectorIndex(ctx, "CREATE VECTOR INDEX vec_dup FOR (n:Doc) ON (n.altEmbedding)")
+	if err != nil {
+		t.Fatalf("expected conflicting vector index to be idempotent, got: %v", err)
 	}
 }

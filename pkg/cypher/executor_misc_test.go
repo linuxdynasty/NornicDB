@@ -628,39 +628,41 @@ func TestExecuteQueryAgainstStorage_DispatchBranches(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	dispatchQueries := []string{
+	expectNoError := []string{
 		"FOREACH (x IN [1] | CREATE (:Q {v:x}))",
 		"SHOW INDEXES",
 		"SHOW CONSTRAINTS",
 		"SHOW PROCEDURES",
 		"SHOW FUNCTIONS",
-		"SHOW DATABASES",
 		"SHOW DATABASE nornic",
-		"SHOW ALIASES",
-		"SHOW LIMITS",
+		"SHOW DATABASE",
+		"DROP INDEX idx_missing IF EXISTS",
+		"DROP CONSTRAINT c_missing IF EXISTS",
 	}
 
-	for _, q := range dispatchQueries {
+	for _, q := range expectNoError {
 		_, err := exec.executeQueryAgainstStorage(ctx, q, strings.ToUpper(q))
-		if err != nil {
-			assert.NotContains(t, err.Error(), "unsupported query type", "query should dispatch to a specific handler: %s", q)
-		}
+		require.NoError(t, err, "query should succeed: %s", q)
 	}
 
-	unsupportedInTx := []string{
-		"LOAD CSV FROM 'file:///tmp/missing.csv' AS row RETURN row",
-		"ALTER COMPOSITE DATABASE cdb ADD CONSTITUENT db1",
-	}
-	for _, q := range unsupportedInTx {
-		_, err := exec.executeQueryAgainstStorage(ctx, q, strings.ToUpper(q))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unsupported query type")
+	expectError := []struct {
+		query       string
+		errContains string
+	}{
+		{query: "SHOW DATABASES", errContains: "SHOW DATABASES requires multi-database support"},
+		{query: "SHOW ALIASES", errContains: "SHOW ALIASES requires multi-database support"},
+		{query: "SHOW LIMITS FOR DATABASE nornic", errContains: "SHOW LIMITS requires multi-database support"},
+		{query: "SHOW WHATEVER", errContains: "unsupported SHOW command in transaction"},
+		{query: "LOAD CSV FROM 'file:///tmp/missing.csv' AS row RETURN row", errContains: "unsupported query type"},
+		{query: "ALTER COMPOSITE DATABASE cdb ADD CONSTITUENT db1", errContains: "unsupported query type"},
+		{query: "WHATEVER 1", errContains: "unsupported query type"},
 	}
 
-	// Default fallback branch for unsupported type.
-	_, err := exec.executeQueryAgainstStorage(ctx, "WHATEVER 1", "WHATEVER 1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported query type")
+	for _, tc := range expectError {
+		_, err := exec.executeQueryAgainstStorage(ctx, tc.query, strings.ToUpper(tc.query))
+		require.Error(t, err, "query should fail: %s", tc.query)
+		assert.Contains(t, err.Error(), tc.errContains, "query should fail with expected reason: %s", tc.query)
+	}
 }
 
 // =============================================================================

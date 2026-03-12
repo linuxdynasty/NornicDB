@@ -334,8 +334,14 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 			return e.executeShowProcedures(ctx, cypher)
 		case strings.HasPrefix(upper, "SHOW FUNCTION"):
 			return e.executeShowFunctions(ctx, cypher)
+		case strings.HasPrefix(upper, "SHOW DATABASES"):
+			return e.executeShowDatabases(ctx, cypher)
 		case strings.HasPrefix(upper, "SHOW DATABASE"):
 			return e.executeShowDatabase(ctx, cypher)
+		case strings.HasPrefix(upper, "SHOW ALIASES"):
+			return e.executeShowAliases(ctx, cypher)
+		case strings.HasPrefix(upper, "SHOW LIMITS"):
+			return e.executeShowLimits(ctx, cypher)
 		default:
 			return nil, fmt.Errorf("unsupported SHOW command in transaction: %s", cypher)
 		}

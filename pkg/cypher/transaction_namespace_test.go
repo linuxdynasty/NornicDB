@@ -158,6 +158,7 @@ func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
 		name      string
 		cypher    string
 		expectErr bool
+		errLike   string
 	}{
 		{name: "create", cypher: "CREATE (:Dispatch {name:'c1'})", expectErr: false},
 		{name: "match", cypher: "MATCH (n:Dispatch) RETURN count(n)", expectErr: false},
@@ -178,8 +179,10 @@ func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
 		{name: "show_constraints", cypher: "SHOW CONSTRAINTS", expectErr: false},
 		{name: "show_procedures", cypher: "SHOW PROCEDURES", expectErr: false},
 		{name: "show_functions", cypher: "SHOW FUNCTIONS", expectErr: false},
-		{name: "show_databases", cypher: "SHOW DATABASES", expectErr: false},
-		{name: "show_unsupported", cypher: "SHOW FOO", expectErr: true},
+		{name: "show_databases_requires_manager", cypher: "SHOW DATABASES", expectErr: true, errLike: "SHOW DATABASES requires multi-database support"},
+		{name: "show_aliases_requires_manager", cypher: "SHOW ALIASES", expectErr: true, errLike: "SHOW ALIASES requires multi-database support"},
+		{name: "show_limits_requires_manager", cypher: "SHOW LIMITS FOR DATABASE nornic", expectErr: true, errLike: "SHOW LIMITS requires multi-database support"},
+		{name: "show_unsupported", cypher: "SHOW FOO", expectErr: true, errLike: "unsupported SHOW command in transaction"},
 		{name: "drop_index_noop", cypher: "DROP INDEX idx_any", expectErr: false},
 		{name: "unwind", cypher: "UNWIND [1,2] AS x RETURN x", expectErr: false},
 		{name: "with", cypher: "WITH 1 AS x RETURN x", expectErr: false},
@@ -192,9 +195,41 @@ func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
 			_, err := exec.executeQueryAgainstStorage(ctx, tc.cypher, strings.ToUpper(tc.cypher))
 			if tc.expectErr {
 				require.Error(t, err)
+				if tc.errLike != "" {
+					require.Contains(t, err.Error(), tc.errLike)
+				}
 			} else {
 				require.NoError(t, err)
 			}
 		})
+	}
+}
+
+func TestExecuteQueryAgainstStorage_ShowDispatchWithDatabaseManager(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	mockDBM := newMockDatabaseManager()
+	require.NoError(t, mockDBM.CreateDatabase("nornic"))
+	require.NoError(t, mockDBM.CreateDatabase("tenant_a"))
+	exec.SetDatabaseManager(mockDBM)
+
+	queries := []struct {
+		query   string
+		minRows int
+	}{
+		{query: "SHOW DATABASES", minRows: 2},
+		{query: "SHOW ALIASES", minRows: 0},
+		{query: "SHOW LIMITS FOR DATABASE nornic", minRows: 0},
+	}
+
+	for _, tc := range queries {
+		res, err := exec.executeQueryAgainstStorage(ctx, tc.query, strings.ToUpper(tc.query))
+		require.NoError(t, err, "query should dispatch and succeed: %s", tc.query)
+		require.NotNil(t, res)
+		require.NotEmpty(t, res.Columns)
+		require.GreaterOrEqual(t, len(res.Rows), tc.minRows)
 	}
 }
