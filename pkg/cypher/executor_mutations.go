@@ -155,6 +155,9 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	if err != nil {
 		return nil, err
 	}
+	// MATCH ... RETURN can surface nodes as maps (e.g. via nodeToMap), so normalize
+	// to live nodes before delete processing.
+	e.normalizeSetMatchRowsToNodes(matchResult, store)
 
 	// Delete matched nodes and/or relationships
 	for _, row := range matchResult.Rows {
@@ -272,6 +275,34 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	return result, nil
 }
 
+func (e *StorageExecutor) normalizeSetMatchRowsToNodes(matchResult *ExecuteResult, store storage.Engine) {
+	if matchResult == nil {
+		return
+	}
+	for rowIdx := range matchResult.Rows {
+		row := matchResult.Rows[rowIdx]
+		for colIdx, val := range row {
+			m, ok := val.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			rawID, ok := m["_nodeId"]
+			if !ok {
+				continue
+			}
+			nodeID, ok := rawID.(string)
+			if !ok || nodeID == "" {
+				continue
+			}
+			node, err := store.GetNode(storage.NodeID(nodeID))
+			if err != nil || node == nil {
+				continue
+			}
+			row[colIdx] = node
+		}
+	}
+}
+
 // executeSet handles MATCH ... SET queries.
 func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	result := &ExecuteResult{
@@ -312,6 +343,9 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	if err != nil {
 		return nil, err
 	}
+	// MATCH ... RETURN can surface nodes as maps (e.g. via nodeToMap). SET/RETURN
+	// pipelines need live node pointers to preserve Cypher property semantics.
+	e.normalizeSetMatchRowsToNodes(matchResult, store)
 
 	// Parse SET clause: SET n.property = value or SET n += $properties.
 	// If additional clauses follow SET (e.g., UNWIND/WITH/RETURN), split them out
@@ -616,6 +650,12 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		if strings.HasPrefix(strings.ToUpper(trailingPart), "UNWIND ") {
 			return e.executeSetTrailingUnwind(ctx, trailingPart, matchResult, result)
 		}
+		if withResult, handled, err := e.executeSetTrailingWithReturn(ctx, trailingPart, matchResult, result); handled {
+			if err != nil {
+				return nil, err
+			}
+			return withResult, nil
+		}
 		followQuery := strings.TrimSpace(matchSegment + " " + trailingPart)
 		followResult, err := e.executeMatch(ctx, followQuery)
 		if err != nil {
@@ -852,6 +892,138 @@ func (e *StorageExecutor) resolveUnwindValueFromExpr(ctx context.Context, unwind
 		}
 	}
 	return e.evaluateExpressionWithContext(expr, nodeVars, nil)
+}
+
+// executeSetTrailingWithReturn handles MATCH ... SET ... WITH ... RETURN by
+// evaluating WITH/RETURN directly over the mutated MATCH rows.
+func (e *StorageExecutor) executeSetTrailingWithReturn(ctx context.Context, trailingPart string, matchResult *ExecuteResult, result *ExecuteResult) (*ExecuteResult, bool, error) {
+	upper := strings.ToUpper(strings.TrimSpace(trailingPart))
+	if !strings.HasPrefix(upper, "WITH ") {
+		return nil, false, nil
+	}
+
+	returnIdx := findKeywordIndex(trailingPart, "RETURN")
+	if returnIdx <= 0 {
+		return nil, false, nil
+	}
+	withClause := strings.TrimSpace(trailingPart[len("WITH "):returnIdx])
+	if withClause == "" {
+		return nil, true, fmt.Errorf("WITH clause requires at least one expression")
+	}
+	for _, kw := range []string{"ORDER BY", "LIMIT", "SKIP", "UNWIND", "OPTIONAL MATCH", "MATCH", "CALL"} {
+		if findKeywordIndex(withClause, kw) >= 0 {
+			return nil, false, nil
+		}
+	}
+
+	withItems := e.splitWithItems(withClause)
+	type withExpr struct {
+		expr  string
+		alias string
+	}
+	parsedWith := make([]withExpr, 0, len(withItems))
+	for _, item := range withItems {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		asIdx := findKeywordIndex(item, "AS")
+		if asIdx > 0 {
+			expr := strings.TrimSpace(item[:asIdx])
+			alias := strings.TrimSpace(item[asIdx+2:])
+			if expr == "" || alias == "" {
+				return nil, true, fmt.Errorf("invalid WITH item: %q", item)
+			}
+			parsedWith = append(parsedWith, withExpr{expr: expr, alias: alias})
+			continue
+		}
+		parsedWith = append(parsedWith, withExpr{expr: item, alias: item})
+	}
+	if len(parsedWith) == 0 {
+		return nil, true, fmt.Errorf("WITH clause requires at least one expression")
+	}
+
+	returnClause := strings.TrimSpace(trailingPart[returnIdx+len("RETURN"):])
+	returnItems := e.parseReturnItems(returnClause)
+	result.Columns = make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	colIndex := make(map[string]int, len(matchResult.Columns))
+	for i, col := range matchResult.Columns {
+		colIndex[col] = i
+	}
+
+	for _, row := range matchResult.Rows {
+		rowScope := make(map[string]interface{}, len(parsedWith))
+		nodeScope := make(map[string]*storage.Node, len(parsedWith)+len(matchResult.Columns))
+		for i, col := range matchResult.Columns {
+			if i >= len(row) {
+				continue
+			}
+			if node, ok := row[i].(*storage.Node); ok && node != nil {
+				nodeScope[col] = node
+			}
+		}
+
+		for _, wi := range parsedWith {
+			val, resolved := resolveSetTrailingValue(wi.expr, row, colIndex, nodeScope)
+			if !resolved {
+				val = e.evaluateExpressionWithContext(wi.expr, nodeScope, nil)
+			}
+			rowScope[wi.alias] = val
+			if node, ok := val.(*storage.Node); ok && node != nil {
+				nodeScope[wi.alias] = node
+			}
+		}
+
+		out := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			expr := strings.TrimSpace(item.expr)
+			if val, ok := rowScope[expr]; ok {
+				out[i] = val
+				continue
+			}
+			if strings.Contains(expr, ".") {
+				parts := strings.SplitN(expr, ".", 2)
+				base := strings.TrimSpace(parts[0])
+				prop := strings.TrimSpace(parts[1])
+				if node, ok := nodeScope[base]; ok && node != nil {
+					out[i] = node.Properties[prop]
+					continue
+				}
+				if m, ok := rowScope[base].(map[string]interface{}); ok {
+					out[i] = m[prop]
+					continue
+				}
+			}
+			out[i] = e.evaluateExpressionWithContext(expr, nodeScope, nil)
+		}
+		result.Rows = append(result.Rows, out)
+	}
+
+	return result, true, nil
+}
+
+func resolveSetTrailingValue(expr string, row []interface{}, colIndex map[string]int, nodeScope map[string]*storage.Node) (interface{}, bool) {
+	expr = strings.TrimSpace(expr)
+	if idx, ok := colIndex[expr]; ok && idx < len(row) {
+		return row[idx], true
+	}
+	if strings.Contains(expr, ".") {
+		parts := strings.SplitN(expr, ".", 2)
+		base := strings.TrimSpace(parts[0])
+		prop := strings.TrimSpace(parts[1])
+		if node, ok := nodeScope[base]; ok && node != nil {
+			return node.Properties[prop], true
+		}
+	}
+	return nil, false
 }
 
 // normalizeUnwindExpression removes syntactic wrapper parentheses around a valid

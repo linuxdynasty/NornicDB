@@ -2648,3 +2648,188 @@ func TestExecuteMatchWithClause_AggregationAndWindowBranches(t *testing.T) {
 	require.NotNil(t, windowRes.Rows[0][0])
 	require.NotNil(t, windowRes.Rows[0][1])
 }
+
+func TestExecuteMatchWithClause_MoreAggregationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	seed := []*storage.Node{
+		{ID: "mwa1", Labels: []string{"Emp"}, Properties: map[string]interface{}{"name": "alice", "dept": "eng", "score": int64(10)}},
+		{ID: "mwa2", Labels: []string{"Emp"}, Properties: map[string]interface{}{"name": "bob", "dept": "eng", "score": float64(15.5)}},
+		{ID: "mwa3", Labels: []string{"Emp"}, Properties: map[string]interface{}{"name": "cara", "dept": "ops", "score": int64(7)}},
+	}
+	for _, n := range seed {
+		_, err := store.CreateNode(n)
+		require.NoError(t, err)
+	}
+
+	// Distinct/non-distinct COUNT and COLLECT plus mixed SUM types.
+	res, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Emp) WITH n.dept AS d, count(DISTINCT n.name) AS uniq, count(n.name) AS cnt, sum(n.score) AS total, collect(DISTINCT n.name) AS names RETURN d, uniq, cnt, total, names ORDER BY d",
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "eng", res.Rows[0][0])
+	require.Equal(t, int64(2), res.Rows[0][1])
+	require.Equal(t, int64(2), res.Rows[0][2])
+	require.Equal(t, float64(25.5), res.Rows[0][3])
+	require.Len(t, res.Rows[0][4].([]interface{}), 2)
+
+	// Property access on projected node with missing property should resolve to nil.
+	missing, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Emp) WITH n AS node RETURN node.unknown ORDER BY node.name LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.Len(t, missing.Rows, 1)
+	assert.Nil(t, missing.Rows[0][0])
+
+	// Scalar substitution/evaluation fallback on projected value.
+	exprRes, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Emp) WITH n.name AS nm RETURN nm + '-x' ORDER BY nm LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.Len(t, exprRes.Rows, 1)
+	assert.Equal(t, "alice-x", exprRes.Rows[0][0])
+
+	// ORDER BY DESC + SKIP + LIMIT windowing path.
+	windowed, err := exec.executeMatchWithClause(
+		ctx,
+		"MATCH (n:Emp) WITH n.dept AS d RETURN d ORDER BY d DESC SKIP 1 LIMIT 1",
+	)
+	require.NoError(t, err)
+	require.Len(t, windowed.Rows, 1)
+	assert.Equal(t, "eng", windowed.Rows[0][0])
+}
+
+func TestExecuteDeleteAndSetAdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (a:P {id:'a'})-[:REL]->(b:P {id:'b'})", nil)
+	require.NoError(t, err)
+
+	// DETACH without DELETE should fail with deterministic syntax error.
+	_, err = exec.executeDelete(ctx, "MATCH (n:P) DETACH n")
+	require.Error(t, err)
+	assert.Contains(t, strings.ToUpper(err.Error()), "DETACH DELETE")
+
+	// Relationship delete path (row map with _edgeId) and count(*) branch.
+	relDelete, err := exec.Execute(ctx, "MATCH (a:P)-[r:REL]->(b:P) DELETE r RETURN count(*) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, relDelete.Rows, 1)
+	assert.Equal(t, int64(1), relDelete.Rows[0][0])
+
+	// ExecuteSet buildEvalNodes default-scalar branch.
+	setScalar, err := exec.Execute(ctx, "MATCH (n:P) WITH n, 5 AS five SET n.score = five RETURN n.score", nil)
+	require.NoError(t, err)
+	require.Len(t, setScalar.Rows, 2)
+	for _, row := range setScalar.Rows {
+		assert.Equal(t, int64(5), row[0])
+	}
+
+	// ExecuteSet buildEvalNodes map branch.
+	setMap, err := exec.Execute(ctx, "MATCH (n:P) WITH n, {bonus: 2} AS m SET n.score = m.bonus RETURN n.score", nil)
+	require.NoError(t, err)
+	require.Len(t, setMap.Rows, 2)
+	for _, row := range setMap.Rows {
+		assert.Equal(t, int64(2), row[0])
+	}
+}
+
+func TestCreateDeleteAdditionalNoReturnAndEdgeCleanupBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "alice-create-delete",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice"},
+	})
+	require.NoError(t, err)
+
+	// Direct DELETE-without-WITH/RETURN branch in executeMatchCreateBlock.
+	res, err := exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (t:Tmp {id:'tmp-no-return'}) DELETE t",
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res.Stats)
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.NodesDeleted)
+
+	// executeCompoundCreateWithDelete branch where deleting created node also removes created edge.
+	compound, err := exec.executeCompoundCreateWithDelete(
+		ctx,
+		"CREATE (a:Tmp {id:'edge-a'})-[:REL]->(b:Tmp {id:'edge-b'}) WITH a DELETE a RETURN count(a)",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, compound.Stats)
+	assert.Equal(t, 2, compound.Stats.NodesCreated)
+	assert.Equal(t, 1, compound.Stats.NodesDeleted)
+	assert.Equal(t, 1, compound.Stats.RelationshipsCreated)
+	assert.Equal(t, 1, compound.Stats.RelationshipsDeleted)
+	require.Len(t, compound.Rows, 1)
+	assert.Equal(t, int64(1), compound.Rows[0][0])
+}
+
+func TestExecuteSet_AdditionalMapAndLabelValidationBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "set-branch-node",
+		Labels:     []string{"P"},
+		Properties: map[string]interface{}{"name": "set-branch"},
+	})
+	require.NoError(t, err)
+
+	// executeMatch error path while evaluating SET.
+	_, err = exec.executeSet(ctx, "MATCH (n:P SET n.value = 1")
+	require.Error(t, err)
+
+	// Empty assignment list should fail fast.
+	_, err = exec.executeSet(ctx, "MATCH (n:P) SET    ")
+	require.Error(t, err)
+	assert.Contains(t, strings.ToUpper(err.Error()), "SET CLAUSE")
+
+	// Map-variable merge path inside executeSet (SET n += props).
+	merged, err := exec.Execute(ctx, "MATCH (n:P) WITH n, {level: 3} AS props SET n += props RETURN n.level", nil)
+	require.NoError(t, err)
+	require.Len(t, merged.Rows, 1)
+	assert.Equal(t, int64(3), merged.Rows[0][0])
+
+	// Missing map variable should return explicit scope error.
+	_, err = exec.Execute(ctx, "MATCH (n:P) SET n += props RETURN n", nil)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "map variable")
+
+	// Escaped-label normalization branch (`Quoted``Label` -> Quoted`Label) still fails identifier validation.
+	_, err = exec.Execute(ctx, "MATCH (n:P) SET n:`Quoted``Label` RETURN n", nil)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "invalid label name")
+
+	// Unescaped keyword label currently accepted by parser/runtime.
+	_, err = exec.Execute(ctx, "MATCH (n:P) SET n:RETURN RETURN n", nil)
+	require.NoError(t, err)
+	kwLabelRes, err := exec.Execute(ctx, "MATCH (n:RETURN) RETURN count(n)", nil)
+	require.NoError(t, err)
+	require.Len(t, kwLabelRes.Rows, 1)
+	assert.Equal(t, int64(1), kwLabelRes.Rows[0][0])
+
+	_, err = exec.Execute(ctx, "MATCH (n:P) SET n:1bad RETURN n", nil)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "invalid label name")
+}

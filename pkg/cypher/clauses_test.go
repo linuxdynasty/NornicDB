@@ -2559,3 +2559,143 @@ func TestCallDbIndexFulltextListAvailableAnalyzers_Basic(t *testing.T) {
 		t.Error("Should return analyzers")
 	}
 }
+
+func TestExecuteUnion_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// DISTINCT UNION should dedupe.
+	res, err := e.executeUnion(ctx, "RETURN 1 AS x UNION RETURN 1 AS x UNION RETURN 2 AS x", false)
+	if err != nil {
+		t.Fatalf("distinct UNION failed: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("distinct UNION rows = %d, want 2", len(res.Rows))
+	}
+
+	// UNION ALL should keep duplicates.
+	res, err = e.executeUnion(ctx, "RETURN 1 AS x UNION ALL RETURN 1 AS x UNION ALL RETURN 2 AS x", true)
+	if err != nil {
+		t.Fatalf("UNION ALL failed: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("UNION ALL rows = %d, want 3", len(res.Rows))
+	}
+
+	// Mismatched column counts must error.
+	_, err = e.executeUnion(ctx, "RETURN 1 AS a UNION RETURN 1 AS a, 2 AS b", false)
+	if err == nil {
+		t.Fatal("expected mismatched-column UNION error")
+	}
+	if !strings.Contains(err.Error(), "same number of columns") {
+		t.Fatalf("unexpected mismatched-column error: %v", err)
+	}
+
+	// Missing UNION separator must error.
+	_, err = e.executeUnion(ctx, "RETURN 1 AS x", false)
+	if err == nil {
+		t.Fatal("expected UNION not found error")
+	}
+
+	// Error in a child query must be wrapped with query index.
+	_, err = e.executeUnion(ctx, "RETURN 1 AS x UNION MATCH (n", false)
+	if err == nil {
+		t.Fatal("expected wrapped error from second UNION query")
+	}
+	if !strings.Contains(err.Error(), "UNION query 2") {
+		t.Fatalf("unexpected wrapped UNION error: %v", err)
+	}
+}
+
+func TestOptionalMatch_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.executeOptionalMatch(ctx, "MATCH (n) RETURN n")
+	if err == nil {
+		t.Fatal("expected OPTIONAL MATCH not found error")
+	}
+
+	// Malformed OPTIONAL MATCH should still return deterministic single-row output.
+	res, err := e.executeOptionalMatch(ctx, "OPTIONAL MATCH (n RETURN n")
+	if err != nil {
+		t.Fatalf("optional malformed should return deterministic result, got err: %v", err)
+	}
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 {
+		t.Fatalf("unexpected malformed optional result shape: %#v", res.Rows)
+	}
+
+	// Empty optional result should preserve columns with nil row.
+	res, err = e.Execute(ctx, "OPTIONAL MATCH (n:Missing) RETURN n.name", nil)
+	if err != nil {
+		t.Fatalf("OPTIONAL MATCH empty result failed: %v", err)
+	}
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 || res.Rows[0][0] != nil {
+		t.Fatalf("expected single nil row for empty OPTIONAL MATCH, got %#v", res.Rows)
+	}
+}
+
+func TestCompoundOptionalMatchAndFindRelatedNodes_Branches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE (a:Person {name:'alice'}), (b:Person {name:'bob'}), (a)-[:KNOWS {w:1}]->(b)", nil)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	// No WITH/RETURN branch should return matched count.
+	res, err := e.executeCompoundMatchOptionalMatch(ctx, "MATCH (a:Person {name:'alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person)")
+	if err != nil {
+		t.Fatalf("compound optional without WITH/RETURN failed: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] != int64(1) {
+		t.Fatalf("compound optional matched count unexpected: %#v", res.Rows)
+	}
+
+	// Missing variable in initial MATCH pattern should error.
+	_, err = e.executeCompoundMatchOptionalMatch(ctx, "MATCH (:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN b")
+	if err == nil {
+		t.Fatal("expected parse error for variable-less initial MATCH in compound optional")
+	}
+
+	aliceRes, err := e.Execute(ctx, "MATCH (a:Person {name:'alice'}) RETURN a", nil)
+	if err != nil || len(aliceRes.Rows) != 1 {
+		t.Fatalf("failed to fetch alice: err=%v rows=%d", err, len(aliceRes.Rows))
+	}
+	alice, ok := aliceRes.Rows[0][0].(*storage.Node)
+	if !ok || alice == nil {
+		t.Fatalf("expected node in row[0][0], got %#v", aliceRes.Rows[0][0])
+	}
+
+	outPattern := e.parseOptionalRelPattern("(a)-[r:KNOWS]->(b:Person {name:'bob'})")
+	outRelated := e.findRelatedNodes(alice, outPattern)
+	if len(outRelated) != 1 {
+		t.Fatalf("outgoing related len = %d, want 1", len(outRelated))
+	}
+	if outRelated[0].node.Properties["name"] != "bob" {
+		t.Fatalf("unexpected outgoing related node: %#v", outRelated[0].node.Properties)
+	}
+
+	inPattern := e.parseOptionalRelPattern("(a)<-[r:KNOWS]-(b:Person)")
+	inRelated := e.findRelatedNodes(alice, inPattern)
+	if len(inRelated) != 0 {
+		t.Fatalf("incoming related len = %d, want 0", len(inRelated))
+	}
+
+	// both-direction with wrong type should filter to zero.
+	bothWrongType := optionalRelPattern{direction: "both", relType: "LIKES", targetProps: map[string]interface{}{}}
+	bothRelated := e.findRelatedNodes(alice, bothWrongType)
+	if len(bothRelated) != 0 {
+		t.Fatalf("both-direction wrong-type related len = %d, want 0", len(bothRelated))
+	}
+}

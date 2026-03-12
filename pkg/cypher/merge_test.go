@@ -6,6 +6,7 @@ package cypher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -628,4 +629,172 @@ func TestApplyWithProjection_Branches(t *testing.T) {
 	assert.Equal(t, "", remaining)
 	assert.Empty(t, keptNodes)
 	assert.Empty(t, keptRels)
+}
+
+func TestExecuteMergeWithChain_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE (c:Category {name:'catA'}), (a:TypeA {name:'A1'})", nil)
+	require.NoError(t, err)
+
+	// Chain-break branch: MATCH miss in middle should produce 0 rows while prior MERGE still succeeds.
+	brokenRes, err := e.executeMergeWithChain(ctx, `
+		MERGE (ent:Entry {id:'entry-break'})
+		ON CREATE SET ent.created = true
+		WITH ent
+		MATCH (c:Category {name:'missing'})
+		MERGE (ent)-[:IN_CATEGORY]->(c)
+		RETURN ent.id
+	`)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ent.id"}, brokenRes.Columns)
+	assert.Empty(t, brokenRes.Rows)
+
+	verifyBroken, err := e.Execute(ctx, "MATCH (e:Entry {id:'entry-break'}) RETURN count(e)", nil)
+	require.NoError(t, err)
+	require.Len(t, verifyBroken.Rows, 1)
+	assert.Equal(t, int64(1), verifyBroken.Rows[0][0])
+
+	// OPTIONAL MATCH + FOREACH clause handling in chain segments.
+	okRes, err := e.executeMergeWithChain(ctx, `
+		MERGE (ent:Entry {id:'entry-ok'})
+		ON CREATE SET ent.created = true
+		WITH ent
+		OPTIONAL MATCH (a:TypeA {name:'A1'})
+		FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END | MERGE (ent)-[:HAS_A]->(a))
+		RETURN ent.id
+	`)
+	require.NoError(t, err)
+	require.Len(t, okRes.Rows, 1)
+	assert.Equal(t, "entry-ok", okRes.Rows[0][0])
+}
+
+func TestSplitMergeChainSegments_AdditionalBranches(t *testing.T) {
+	e := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	segments := e.splitMergeChainSegments(`
+		MERGE (n:Word {name:'x'})
+		WITH n
+		MATCH (m:Word) WHERE m.name STARTS WITH 'x'
+		RETURN n.name
+	`)
+	require.GreaterOrEqual(t, len(segments), 3)
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(segments[0]), "MERGE"))
+	assert.Contains(t, strings.ToUpper(segments[len(segments)-1]), "RETURN")
+
+	one := e.splitMergeChainSegments("MERGE (n:Solo {id:'1'}) RETURN n.id")
+	require.Len(t, one, 1)
+	assert.Contains(t, one[0], "MERGE (n:Solo")
+}
+
+func TestExecuteMerge_UnsubstitutedParamAndFallbackPatternBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Unsubstituted parameter branch should proceed without panicking.
+	res, err := exec.executeMerge(ctx, "MERGE (n:Doc {path: $path}) RETURN n")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+
+	// Fallback parse branch for degenerate MERGE pattern.
+	fallback, err := exec.executeMerge(ctx, "MERGE () RETURN n")
+	require.NoError(t, err)
+	require.Equal(t, []string{"n"}, fallback.Columns)
+	require.Len(t, fallback.Rows, 1)
+	require.NotNil(t, fallback.Rows[0][0])
+}
+
+func TestExecuteCompoundMatchMerge_SecondMergeAndErrorBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "match-merge-seed",
+		Labels:     []string{"P"},
+		Properties: map[string]interface{}{"name": "seed"},
+	})
+	require.NoError(t, err)
+
+	// First MERGE before MATCH forces "find second MERGE after MATCH" branch.
+	res, err := exec.executeCompoundMatchMerge(
+		ctx,
+		"MERGE (pre:Scratch {id:'pre'}) MATCH (a:P) MERGE (m:Merged {id:'ok'}) RETURN m",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// MATCH parse failure path should bubble up deterministic error.
+	_, err = exec.executeCompoundMatchMerge(ctx, "MATCH (a:P MERGE (m:Broken {id:'x'})")
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "match")
+
+	// OPTIONAL MATCH with empty result should still execute MERGE branch.
+	opt, err := exec.executeCompoundMatchMerge(ctx, "OPTIONAL MATCH (a:Missing) MERGE (m:Merged {id:'opt'}) RETURN m")
+	require.NoError(t, err)
+	require.NotNil(t, opt)
+}
+
+func TestExecuteMergeNodeAndMatchSegment_AdditionalBranches(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	seed := &storage.Node{
+		ID:         "merge-seed",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "alice", "age": int64(30)},
+	}
+	_, err := store.CreateNode(seed)
+	require.NoError(t, err)
+
+	// Existing node + ON MATCH SET branch.
+	node, varName, err := exec.executeMergeNodeSegment(ctx, "MERGE (p:Person {name:'alice'}) ON MATCH SET p.age = 31")
+	require.NoError(t, err)
+	require.Equal(t, "p", varName)
+	require.NotNil(t, node)
+	assert.Equal(t, int64(31), node.Properties["age"])
+
+	// Create node + ON CREATE SET branch.
+	created, createdVar, err := exec.executeMergeNodeSegment(ctx, "MERGE (q:Person {name:'bob'}) ON CREATE SET q.city = 'phx'")
+	require.NoError(t, err)
+	require.Equal(t, "q", createdVar)
+	require.NotNil(t, created)
+	assert.Equal(t, "phx", created.Properties["city"])
+
+	// Syntax guard branches.
+	_, _, err = exec.executeMergeNodeSegment(ctx, "MATCH (n)")
+	require.Error(t, err)
+	_, _, err = exec.executeMergeNodeSegment(ctx, "MERGE bad-pattern")
+	require.Error(t, err)
+
+	// executeMatchSegment: missing MATCH keyword.
+	_, _, err = exec.executeMatchSegment(ctx, "(n:Person)", map[string]*storage.Node{})
+	require.Error(t, err)
+
+	// Bound-variable fast return.
+	bound := &storage.Node{ID: "bound-1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "bound"}}
+	got, gotVar, err := exec.executeMatchSegment(ctx, "MATCH (n:Person {name:'alice'})", map[string]*storage.Node{"n": bound})
+	require.NoError(t, err)
+	assert.Equal(t, "n", gotVar)
+	assert.Equal(t, bound, got)
+
+	// AllNodes path (no label) and no-match branch.
+	got, gotVar, err = exec.executeMatchSegment(ctx, "MATCH (x {name:'alice'})", map[string]*storage.Node{})
+	require.NoError(t, err)
+	assert.Equal(t, "x", gotVar)
+	require.NotNil(t, got)
+
+	got, gotVar, err = exec.executeMatchSegment(ctx, "MATCH (z:Person {name:'missing'})", map[string]*storage.Node{})
+	require.NoError(t, err)
+	assert.Equal(t, "z", gotVar)
+	assert.Nil(t, got)
 }

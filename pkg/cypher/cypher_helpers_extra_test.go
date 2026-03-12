@@ -3025,3 +3025,159 @@ func TestCypherHelpers_ExtractCreateVariableRefsBranches(t *testing.T) {
 	vars = extractCreateVariableRefs("CREATE (a)-[:R]->(b) CREATE (a)-[:R]->(c)")
 	assert.ElementsMatch(t, []string{"a", "b", "c"}, vars)
 }
+
+func TestCypherHelpers_ExecuteSetTrailingPipelinesAndHelpers(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (n:Person {name:'alice'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (n:Person {name:'bob'})", nil)
+	require.NoError(t, err)
+
+	// SET + trailing UNWIND + RETURN path.
+	unwindRes, err := exec.Execute(ctx, "MATCH (n:Person) SET n.score = 7 UNWIND [1,2] AS x RETURN n.name AS name, x", nil)
+	require.NoError(t, err)
+	require.Len(t, unwindRes.Columns, 2)
+	require.Len(t, unwindRes.Rows, 4)
+	for _, row := range unwindRes.Rows {
+		require.Len(t, row, 2)
+		name, ok := row[0].(string)
+		require.True(t, ok)
+		require.Contains(t, []string{"alice", "bob"}, name)
+		require.Contains(t, []interface{}{int64(1), int64(2), 1, 2}, row[1])
+	}
+
+	// SET + trailing WITH/RETURN follow-query path should expose updated property directly.
+	withRes, err := exec.Execute(ctx, "MATCH (n:Person) SET n.flag = true WITH n RETURN n.flag AS flag", nil)
+	require.NoError(t, err)
+	require.Len(t, withRes.Rows, 2)
+	for _, row := range withRes.Rows {
+		require.Len(t, row, 1)
+		assert.Equal(t, true, row[0])
+	}
+	verifyRes, err := exec.Execute(ctx, "MATCH (n:Person) RETURN n", nil)
+	require.NoError(t, err)
+	require.Len(t, verifyRes.Rows, 2)
+	for _, row := range verifyRes.Rows {
+		require.Len(t, row, 1)
+		switch n := row[0].(type) {
+		case map[string]interface{}:
+			assert.Equal(t, true, n["flag"])
+		case *storage.Node:
+			assert.Equal(t, true, n.Properties["flag"])
+		default:
+			t.Fatalf("unexpected row type: %T", row[0])
+		}
+	}
+
+	// Chained SET collapse path (SET ... SET ...).
+	chainedRes, err := exec.Execute(ctx, "MATCH (n:Person {name:'alice'}) SET n += {city:'phx'} SET n.age = 30 RETURN n.city AS city, n.age AS age", nil)
+	require.NoError(t, err)
+	require.Len(t, chainedRes.Rows, 1)
+	assert.Equal(t, "phx", chainedRes.Rows[0][0])
+	assert.Equal(t, int64(30), chainedRes.Rows[0][1])
+
+	matchResult := &ExecuteResult{
+		Columns: []string{"n"},
+		Rows: [][]interface{}{{
+			&storage.Node{
+				ID:         "set-trailing",
+				Labels:     []string{"Person"},
+				Properties: map[string]interface{}{"name": "zed"},
+			},
+		}},
+	}
+
+	// executeSetTrailingUnwind syntax validation branches.
+	_, err = exec.executeSetTrailingUnwind(ctx, "UNWIND [1,2]", matchResult, &ExecuteResult{Stats: &QueryStats{}})
+	require.Error(t, err)
+	assert.Contains(t, strings.ToUpper(err.Error()), "AS")
+
+	_, err = exec.executeSetTrailingUnwind(ctx, "UNWIND [1,2] AS x", matchResult, &ExecuteResult{Stats: &QueryStats{}})
+	require.Error(t, err)
+	assert.Contains(t, strings.ToUpper(err.Error()), "RETURN")
+
+	// Helper branches.
+	assert.Equal(t, "n += $props, n.x = 1, n.y = 2", collapseChainedSetClauses("n += $props SET n.x = 1 SET n.y = 2"))
+	assert.Equal(t, -1, firstPostSetClauseIndex("n.x = 1, n.y = 2"))
+	assert.GreaterOrEqual(t, firstPostSetClauseIndex("n.x = 1 RETURN n"), 0)
+	assert.GreaterOrEqual(t, firstPostSetClauseIndex("n.x = 1 UNWIND [1] AS x RETURN x"), 0)
+}
+
+func TestCypherHelpers_ValueToCypherLiteralAndPipelineRowsBranches(t *testing.T) {
+	// valueToCypherLiteral/mapToCypherLiteral branches.
+	assert.Equal(t, "'x'", valueToCypherLiteral("x"))
+	assert.Equal(t, "true", valueToCypherLiteral(true))
+	assert.Equal(t, "null", valueToCypherLiteral(nil))
+	assert.Equal(t, "9", valueToCypherLiteral(9))
+	assert.Equal(t, "[1, 'a', [2, false]]", valueToCypherLiteral([]interface{}{1, "a", []interface{}{2, false}}))
+
+	mixed := valueToCypherLiteral(map[interface{}]interface{}{"a": 1, "b": "x"})
+	assert.True(t, strings.HasPrefix(mixed, "{") && strings.HasSuffix(mixed, "}"))
+	assert.Contains(t, mixed, "a: 1")
+	assert.Contains(t, mixed, "b: 'x'")
+
+	// executeMatchWithPipelineToRows branches for multi-label/property/where filtering.
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o1",
+		Labels: []string{"OrderStatus", "Routable"},
+		Properties: map[string]interface{}{
+			"orderId": "A-1",
+			"status":  "open",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o2",
+		Labels: []string{"OrderStatus", "Routable"},
+		Properties: map[string]interface{}{
+			"orderId": "A-2",
+			"status":  "closed",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "ph1",
+		Labels: []string{"Pharmacy"},
+		Properties: map[string]interface{}{
+			"id": "P-1",
+		},
+	})
+	require.NoError(t, err)
+
+	matchPart := "MATCH (o:OrderStatus:Routable {status:'open'}) WHERE o.orderId IS NOT NULL WITH collect(o) AS orders UNWIND range(0, size(orders)-1) AS i WITH orders[i] AS o, i MATCH (ph:Pharmacy) WITH o, i, ph ORDER BY ph.id WITH o, i, collect(ph) AS pharmacies WITH o, pharmacies[i % size(pharmacies)] AS pharmacy"
+	rows, err := exec.executeMatchWithPipelineToRows(ctx, matchPart, []string{"o", "pharmacy"}, store)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	_, ok := rows[0]["o"].(*storage.Node)
+	require.True(t, ok)
+	_, ok = rows[0]["pharmacy"].(*storage.Node)
+	require.True(t, ok)
+
+	// No pharmacies path should deterministically return empty output rows.
+	emptyStore := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	_, err = emptyStore.CreateNode(&storage.Node{
+		ID:     "o-empty",
+		Labels: []string{"OrderStatus"},
+		Properties: map[string]interface{}{
+			"orderId": "Z-1",
+		},
+	})
+	require.NoError(t, err)
+	rows, err = exec.executeMatchWithPipelineToRows(
+		ctx,
+		"MATCH (o:OrderStatus) WITH collect(o) AS orders UNWIND range(0, size(orders)-1) AS i WITH orders[i] AS o, i MATCH (ph:Pharmacy) WITH o, i, ph ORDER BY ph.id WITH o, i, collect(ph) AS pharmacies WITH o, pharmacies[i % size(pharmacies)] AS pharmacy",
+		[]string{"o", "pharmacy"},
+		emptyStore,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}

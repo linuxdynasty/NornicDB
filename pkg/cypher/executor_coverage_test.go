@@ -4,6 +4,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -2440,4 +2441,297 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 	require.Len(t, res.Rows, 1)
 	// a=1, b=4, d=3 => 1+4+3-1 = 7
 	assert.Equal(t, float64(7), res.Rows[0][0])
+}
+
+func TestCreateHelpers_ProcessRelationshipResolveAndSetMerge(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	nodeVars := map[string]*storage.Node{}
+	edgeVars := map[string]*storage.Edge{}
+	result := &ExecuteResult{Stats: &QueryStats{}}
+
+	err := exec.processCreateNode("(a:Person {name:'alice'})", nodeVars, result, store)
+	require.NoError(t, err)
+	require.Contains(t, nodeVars, "a")
+	assert.Equal(t, 1, result.Stats.NodesCreated)
+
+	err = exec.processCreateRelationship("(a)-[r:KNOWS {since: 2020}]->(b:Person {name:'bob'})", nodeVars, edgeVars, result, store)
+	require.NoError(t, err)
+	require.Contains(t, nodeVars, "b")
+	require.Contains(t, edgeVars, "r")
+	assert.Equal(t, "KNOWS", edgeVars["r"].Type)
+	assert.Equal(t, int64(2020), edgeVars["r"].Properties["since"])
+
+	// Reverse arrow branch: created edge should start at inline node c and end at a.
+	err = exec.processCreateRelationship("(a)<-[rb:BACK]-(c:Person {name:'carol'})", nodeVars, edgeVars, result, store)
+	require.NoError(t, err)
+	require.Contains(t, nodeVars, "c")
+	require.Contains(t, edgeVars, "rb")
+	assert.Equal(t, nodeVars["c"].ID, edgeVars["rb"].StartNode)
+	assert.Equal(t, nodeVars["a"].ID, edgeVars["rb"].EndNode)
+
+	// Invalid relationship shape.
+	err = exec.processCreateRelationship("(a)-[:BROKEN](b)", nodeVars, edgeVars, result, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid relationship pattern")
+
+	// Missing variable in context must error deterministically.
+	err = exec.processCreateRelationship("(missing)-[:REL]->(a)", nodeVars, edgeVars, result, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve source node")
+
+	created := &ExecuteResult{Stats: &QueryStats{}}
+	err = exec.applySetMergeToCreated(ctx, "a += {score: 5, active: true}", nodeVars, edgeVars, created, store)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), nodeVars["a"].Properties["score"])
+	assert.Equal(t, true, nodeVars["a"].Properties["active"])
+	assert.Equal(t, 2, created.Stats.PropertiesSet)
+
+	ctxWithParams := context.WithValue(ctx, paramsKey, map[string]interface{}{
+		"edgeProps": map[string]interface{}{"rank": int64(9)},
+	})
+	err = exec.applySetMergeToCreated(ctxWithParams, "r += $edgeProps", nodeVars, edgeVars, created, store)
+	require.NoError(t, err)
+	assert.Equal(t, int64(9), edgeVars["r"].Properties["rank"])
+	assert.Equal(t, 3, created.Stats.PropertiesSet)
+
+	// Strict error branches.
+	err = exec.applySetMergeToCreated(ctx, "a + {x:1}", nodeVars, edgeVars, created, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid SET += syntax")
+
+	err = exec.applySetMergeToCreated(ctx, "a += $missing", nodeVars, edgeVars, created, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires parameters")
+
+	err = exec.applySetMergeToCreated(context.WithValue(ctx, paramsKey, map[string]interface{}{"missing": int64(1)}), "a += $missing", nodeVars, edgeVars, created, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a map")
+
+	err = exec.applySetMergeToCreated(ctx, "a += {broken", nodeVars, edgeVars, created, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse properties")
+
+	err = exec.applySetMergeToCreated(ctx, "unknown += {x:1}", nodeVars, edgeVars, created, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown variable")
+}
+
+func TestCreateHelpers_ParsersAndValidators(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+
+	require.NoError(t, exec.validateCreatePatternPropertyMap("(n:Person {name:'ok'})"))
+	require.NoError(t, exec.validateCreatePatternPropertyMap("(n:Person)"))
+
+	err := exec.validateCreatePatternPropertyMap("(n:Person {name:'x'")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid property map syntax")
+
+	err = exec.validateCreatePatternPropertyMap("(n:Person {name})")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid property map syntax")
+
+	pathVar, stripped := parseCreatePathAssignment("p = (a)-[:R]->(b)")
+	assert.Equal(t, "p", pathVar)
+	assert.Equal(t, "(a)-[:R]->(b)", stripped)
+
+	pathVar, stripped = parseCreatePathAssignment("1bad = (a)-[:R]->(b)")
+	assert.Equal(t, "", pathVar)
+	assert.Equal(t, "1bad = (a)-[:R]->(b)", stripped)
+
+	parts := exec.splitCreatePatterns("p=(a:A {txt:'x -> y'})-[r:REL]->(b:B), (c:C)")
+	require.Len(t, parts, 2)
+	assert.Equal(t, "p=(a:A {txt:'x -> y'})-[r:REL]->(b:B)", strings.TrimSpace(parts[0]))
+	assert.Equal(t, "(c:C)", strings.TrimSpace(parts[1]))
+
+	nodes := exec.splitNodePatterns("(a:A {txt:'(x)' }), (b:B {v:1})")
+	require.Len(t, nodes, 2)
+	assert.Contains(t, nodes[0], "(a:A")
+	assert.Contains(t, nodes[1], "(b:B")
+
+	relType, relProps := exec.parseRelationshipTypeAndProps("r:KNOWS {since: 2021, note: 'x'}")
+	assert.Equal(t, "KNOWS", relType)
+	assert.Equal(t, int64(2021), relProps["since"])
+	assert.Equal(t, "x", relProps["note"])
+
+	relType, relProps = exec.parseRelationshipTypeAndProps("r")
+	assert.Equal(t, "RELATED_TO", relType)
+	assert.Empty(t, relProps)
+
+	relType, relProps = exec.parseRelationshipTypeAndProps(":")
+	assert.Equal(t, "RELATED_TO", relType)
+	assert.Empty(t, relProps)
+
+	source, rel, target, reverse, remainder, err := exec.parseCreateRelPatternWithVars("(a)-[r:KNOWS]->(b)-[:NEXT]->(c)")
+	require.NoError(t, err)
+	assert.Equal(t, "a", source)
+	assert.Equal(t, "r:KNOWS", rel)
+	assert.Equal(t, "b", target)
+	assert.False(t, reverse)
+	assert.Equal(t, "-[:NEXT]->(c)", remainder)
+
+	source, rel, target, reverse, remainder, err = exec.parseCreateRelPatternWithVars("(a)<-[r:BACK]-(b)")
+	require.NoError(t, err)
+	assert.Equal(t, "a", source)
+	assert.Equal(t, "r:BACK", rel)
+	assert.Equal(t, "b", target)
+	assert.True(t, reverse)
+	assert.Equal(t, "", remainder)
+
+	_, _, _, _, _, err = exec.parseCreateRelPatternWithVars("a)-[r:REL]->(b)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must start with (")
+
+	_, _, _, _, _, err = exec.parseCreateRelPatternWithVars("(a)-[r:REL->(b)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmatched bracket")
+
+	_, _, _, _, _, err = exec.parseCreateRelPatternWithVars("(a)-[r:REL]-(b)")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected ->(")
+}
+
+func TestCreateHelpers_ResolveOrCreateAndMultipleCreates(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	nodeVars := map[string]*storage.Node{}
+	result := &ExecuteResult{Stats: &QueryStats{}}
+
+	_, err := exec.resolveOrCreateNode("missingVar", nodeVars, result, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	n, err := exec.resolveOrCreateNode("x:Node {id:'x1'}", nodeVars, result, store)
+	require.NoError(t, err)
+	require.NotNil(t, n)
+	require.Contains(t, nodeVars, "x")
+	assert.Equal(t, 1, result.Stats.NodesCreated)
+
+	// Existing variable returns same node without creating a new one.
+	same, err := exec.resolveOrCreateNode("x:Node {id:'different'}", nodeVars, result, store)
+	require.NoError(t, err)
+	assert.Equal(t, n.ID, same.ID)
+	assert.Equal(t, 1, result.Stats.NodesCreated)
+
+	// Inline node without variable is created but not added to nodeVars.
+	inline, err := exec.resolveOrCreateNode(":Leaf {k:1}", nodeVars, result, store)
+	require.NoError(t, err)
+	require.NotNil(t, inline)
+	assert.Equal(t, 2, result.Stats.NodesCreated)
+	_, hasLeaf := nodeVars["Leaf"]
+	assert.False(t, hasLeaf)
+
+	assert.True(t, isSimpleVariable("abc_123"))
+	assert.False(t, isSimpleVariable("a-b"))
+	keys := getKeys(nodeVars)
+	assert.Contains(t, keys, "x")
+
+	ctx := context.Background()
+	res, err := exec.executeMultipleCreates(ctx, "CREATE (a:Person {name:'a'}) WITH a CREATE (b:Person {name:'b'}) CREATE (a)-[r:KNOWS]->(b) RETURN a.name AS aname, b.name AS bname, type(r) AS rt")
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "a", res.Rows[0][0])
+	assert.Equal(t, "b", res.Rows[0][1])
+	assert.Equal(t, "KNOWS", res.Rows[0][2])
+	assert.Equal(t, 2, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+}
+
+func TestExecuteMatchCreateBlock_AdditionalSetAndDeleteBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (a:Person {name:'alice'})", nil)
+	require.NoError(t, err)
+
+	allNodeVars := map[string]*storage.Node{}
+	allEdgeVars := map[string]*storage.Edge{}
+
+	// No CREATE in block should be a no-op.
+	res, err := exec.executeMatchCreateBlock(ctx, "MATCH (a:Person {name:'alice'})", allNodeVars, allEdgeVars)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, 0, res.Stats.NodesCreated)
+	assert.Empty(t, res.Rows)
+
+	// MATCH producing zero rows should short-circuit CREATE and still shape RETURN columns.
+	res, err = exec.executeMatchCreateBlock(ctx, "MATCH (m:Missing) CREATE (x:Tmp {id:'x'}) RETURN x", allNodeVars, allEdgeVars)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x"}, res.Columns)
+	assert.Empty(t, res.Rows)
+
+	// Direct DELETE without WITH branch + count after delete.
+	res, err = exec.executeMatchCreateBlock(ctx, "MATCH (a:Person {name:'alice'}) CREATE (t:Tmp {id:'d1'}) DELETE t RETURN count(t) AS c", allNodeVars, allEdgeVars)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(1), res.Rows[0][0])
+	assert.Equal(t, 1, res.Stats.NodesCreated)
+	assert.Equal(t, 1, res.Stats.NodesDeleted)
+
+	// SET branches: += map, label add, edge property set, and RETURN edge + function expression.
+	res, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (a)-[r:LIKES]->(b:Person {name:'bob2'}) SET b += {age: 20}, b:User, r.weight = 2 RETURN b.age AS age, type(r) AS rt, r.weight AS w",
+		allNodeVars,
+		allEdgeVars,
+	)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, int64(20), res.Rows[0][0])
+	assert.Nil(t, res.Rows[0][1])
+	assert.Equal(t, int64(2), res.Rows[0][2])
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+	assert.GreaterOrEqual(t, res.Stats.PropertiesSet, 2)
+	assert.Equal(t, 1, res.Stats.LabelsAdded)
+
+	// Unknown variable in SET must fail deterministically.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (b:Tmp {id:'u1'}) SET z.flag = true RETURN b",
+		allNodeVars,
+		allEdgeVars,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown variable in SET clause")
+
+	// Missing parameter for SET assignment must error.
+	_, err = exec.executeMatchCreateBlock(
+		ctx,
+		"MATCH (a:Person {name:'alice'}) CREATE (b:Tmp {id:'u2'}) SET b.score = $score RETURN b",
+		allNodeVars,
+		allEdgeVars,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires parameters to be provided")
+}
+
+func TestExecuteCompoundCreateWithDelete_AdditionalBranches(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Invalid shape must error.
+	_, err := exec.executeCompoundCreateWithDelete(ctx, "CREATE (n:Tmp {id:'x'}) RETURN n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid CREATE...WITH...DELETE query")
+
+	// Edge delete target branch, non-count RETURN branch should yield nil value.
+	res, err := exec.executeCompoundCreateWithDelete(
+		ctx,
+		"CREATE (a:Tmp {id:'a'})-[r:REL]->(b:Tmp {id:'b'}) WITH r DELETE r RETURN r",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Stats.RelationshipsCreated)
+	assert.Equal(t, 1, res.Stats.RelationshipsDeleted)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	assert.Nil(t, res.Rows[0][0])
 }
