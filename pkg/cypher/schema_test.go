@@ -861,6 +861,80 @@ func TestCreateIndex_BranchCoverage(t *testing.T) {
 	}
 }
 
+func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	queries := []string{
+		"CREATE INDEX FOR (n:TestNode) ON (n.entity_id)",
+		"CREATE INDEX IF NOT EXISTS FOR (n:`base`) ON (n.entity_id)",
+		"CREATE INDEX ON :TestNode(entity_id)",
+		"CREATE INDEX test_idx ON :TestNode(entity_id)",
+		"CREATE RANGE INDEX FOR (n:TestNode) ON (n.entity_id)",
+		"CREATE INDEX IF NOT EXISTS FOR (n:Test) ON n.entity_id",
+	}
+	for _, q := range queries {
+		_, err := exec.executeSchemaCommand(ctx, q)
+		if err != nil {
+			t.Fatalf("expected query to succeed: %s; err=%v", q, err)
+		}
+	}
+
+	indexes := store.GetSchema().GetIndexes()
+	if len(indexes) == 0 {
+		t.Fatal("expected created indexes to be present")
+	}
+
+	for _, raw := range indexes {
+		idx, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if label, ok := idx["label"].(string); ok && strings.Contains(label, ")") {
+			t.Fatalf("label should not include closing parenthesis: %q", label)
+		}
+		if labels, ok := idx["labels"].([]string); ok {
+			for _, label := range labels {
+				if strings.Contains(label, ")") {
+					t.Fatalf("label should not include closing parenthesis: %q", label)
+				}
+			}
+		}
+	}
+}
+
+func TestCreateFulltextIndex_CompatSyntaxWithoutParenthesizedPattern(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.executeSchemaCommand(ctx, "CREATE FULLTEXT INDEX ft1 FOR n:base ON n.entity_id")
+	if err != nil {
+		t.Fatalf("expected fulltext compat syntax to succeed: %v", err)
+	}
+
+	indexes := store.GetSchema().GetIndexes()
+	found := false
+	for _, raw := range indexes {
+		idx, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := idx["name"].(string)
+		idxType, _ := idx["type"].(string)
+		if name == "ft1" && strings.EqualFold(idxType, "FULLTEXT") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected fulltext index ft1 to be persisted in schema")
+	}
+}
+
 func TestCreateConstraint_DuplicateNamedDefinitionErrors(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 	store := storage.NewNamespacedEngine(baseStore, "test")

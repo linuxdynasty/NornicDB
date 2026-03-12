@@ -176,6 +176,7 @@ func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
 		{name: "return", cypher: "RETURN 1", expectErr: false},
 		{name: "call", cypher: "CALL db.labels()", expectErr: false},
 		{name: "show_indexes", cypher: "SHOW INDEXES", expectErr: false},
+		{name: "show_fulltext_indexes", cypher: "SHOW FULLTEXT INDEXES", expectErr: false},
 		{name: "show_constraints", cypher: "SHOW CONSTRAINTS", expectErr: false},
 		{name: "show_procedures", cypher: "SHOW PROCEDURES", expectErr: false},
 		{name: "show_functions", cypher: "SHOW FUNCTIONS", expectErr: false},

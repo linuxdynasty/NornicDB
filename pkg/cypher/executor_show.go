@@ -16,10 +16,66 @@ import (
 
 // executeShowIndexes handles SHOW INDEXES command
 func (e *StorageExecutor) executeShowIndexes(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// NornicDB manages indexes internally, return empty list
+	schema := e.storage.GetSchema()
+	rows := [][]interface{}{}
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	indexTypeFilter := ""
+	switch {
+	case strings.HasPrefix(upper, "SHOW FULLTEXT INDEX"):
+		indexTypeFilter = "FULLTEXT"
+	case strings.HasPrefix(upper, "SHOW RANGE INDEX"):
+		indexTypeFilter = "RANGE"
+	case strings.HasPrefix(upper, "SHOW VECTOR INDEX"):
+		indexTypeFilter = "VECTOR"
+	}
+	if schema != nil {
+		indexes := schema.GetIndexes()
+		rows = make([][]interface{}, 0, len(indexes))
+		for i, idx := range indexes {
+			idxMap, ok := idx.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			name := idxMap["name"]
+			idxType := idxMap["type"]
+			if indexTypeFilter != "" && !strings.EqualFold(fmt.Sprintf("%v", idxType), indexTypeFilter) {
+				continue
+			}
+
+			var labelsOrTypes interface{} = []string{}
+			var properties interface{} = []string{}
+			if l, ok := idxMap["label"].(string); ok && l != "" {
+				labelsOrTypes = []string{l}
+			} else if ls, ok := idxMap["labels"]; ok {
+				labelsOrTypes = ls
+			}
+			if p, ok := idxMap["property"].(string); ok && p != "" {
+				properties = []string{p}
+			} else if ps, ok := idxMap["properties"]; ok {
+				properties = ps
+			}
+
+			rows = append(rows, []interface{}{
+				int64(i + 1),      // id
+				name,              // name
+				"ONLINE",          // state
+				100.0,             // populationPercent
+				idxType,           // type
+				"NODE",            // entityType
+				labelsOrTypes,     // labelsOrTypes
+				properties,        // properties
+				"nornicdb+schema", // indexProvider
+				nil,               // owningConstraint
+				nil,               // lastRead
+				int64(0),          // readCount
+			})
+		}
+	}
+
 	return &ExecuteResult{
 		Columns: []string{"id", "name", "state", "populationPercent", "type", "entityType", "labelsOrTypes", "properties", "indexProvider", "owningConstraint", "lastRead", "readCount"},
-		Rows:    [][]interface{}{},
+		Rows:    rows,
 	}, nil
 }
 

@@ -244,6 +244,9 @@ func analyzeQuery(cypher string) *QueryInfo {
 	info.HasProfile = strings.HasPrefix(upper, "PROFILE")
 	info.HasShow = strings.HasPrefix(upper, "SHOW")
 	info.HasSchema = containsKeyword(upper, "CREATE INDEX") ||
+		containsKeyword(upper, "CREATE RANGE INDEX") ||
+		containsKeyword(upper, "CREATE FULLTEXT INDEX") ||
+		containsKeyword(upper, "CREATE VECTOR INDEX") ||
 		containsKeyword(upper, "DROP INDEX") ||
 		containsKeyword(upper, "CREATE CONSTRAINT") ||
 		containsKeyword(upper, "DROP CONSTRAINT")

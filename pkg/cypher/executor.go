@@ -1803,6 +1803,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		}
 		return e.executeMatch(ctx, cypher)
 	case findMultiWordKeywordIndex(cypher, "CREATE", "CONSTRAINT") == 0,
+		findMultiWordKeywordIndex(cypher, "CREATE", "RANGE INDEX") == 0,
 		findMultiWordKeywordIndex(cypher, "CREATE", "FULLTEXT INDEX") == 0,
 		findMultiWordKeywordIndex(cypher, "CREATE", "VECTOR INDEX") == 0,
 		findKeywordIndex(cypher, "CREATE INDEX") == 0:
@@ -1881,6 +1882,14 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeLoadCSV(ctx, cypher)
 	// SHOW commands for Neo4j compatibility
+	case findMultiWordKeywordIndex(cypher, "SHOW", "FULLTEXT INDEXES") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "FULLTEXT INDEX") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "RANGE INDEXES") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "RANGE INDEX") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "VECTOR INDEXES") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "VECTOR INDEX") == 0:
+		// Must be at start (position 0) to be a standalone clause
+		return e.executeShowIndexes(ctx, cypher)
 	case findMultiWordKeywordIndex(cypher, "SHOW", "INDEXES") == 0,
 		findMultiWordKeywordIndex(cypher, "SHOW", "INDEX") == 0:
 		// Must be at start (position 0) to be a standalone clause

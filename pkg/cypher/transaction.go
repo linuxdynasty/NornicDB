@@ -282,6 +282,7 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	case isCreateProcedureCommand(cypher):
 		return e.executeCreateProcedure(ctx, cypher)
 	case strings.HasPrefix(upper, "CREATE CONSTRAINT"),
+		strings.HasPrefix(upper, "CREATE RANGE INDEX"),
 		strings.HasPrefix(upper, "CREATE FULLTEXT INDEX"),
 		strings.HasPrefix(upper, "CREATE VECTOR INDEX"),
 		strings.HasPrefix(upper, "CREATE INDEX"):
@@ -326,6 +327,10 @@ func (e *StorageExecutor) executeQueryAgainstStorage(ctx context.Context, cypher
 	case strings.HasPrefix(upper, "SHOW"):
 		// Handle SHOW commands (indexes, constraints, procedures, etc.)
 		switch {
+		case strings.HasPrefix(upper, "SHOW FULLTEXT INDEX"),
+			strings.HasPrefix(upper, "SHOW RANGE INDEX"),
+			strings.HasPrefix(upper, "SHOW VECTOR INDEX"):
+			return e.executeShowIndexes(ctx, cypher)
 		case strings.HasPrefix(upper, "SHOW INDEX"):
 			return e.executeShowIndexes(ctx, cypher)
 		case strings.HasPrefix(upper, "SHOW CONSTRAINT"):

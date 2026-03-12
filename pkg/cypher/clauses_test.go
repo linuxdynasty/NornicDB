@@ -2395,6 +2395,222 @@ func TestShowIndexes(t *testing.T) {
 	}
 }
 
+func TestShowIndexes_MatchesCallDbIndexes(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE INDEX person_name_idx FOR (p:Person) ON (p.name)", nil)
+	if err != nil {
+		t.Fatalf("CREATE INDEX failed: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE RANGE INDEX person_age_idx FOR (p:Person) ON (p.age)", nil)
+	if err != nil {
+		t.Fatalf("CREATE RANGE INDEX failed: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE FULLTEXT INDEX person_search_idx FOR (p:Person) ON EACH [p.name, p.bio]", nil)
+	if err != nil {
+		t.Fatalf("CREATE FULLTEXT INDEX failed: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE VECTOR INDEX person_vec_idx FOR (p:Person) ON (p.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 8}}", nil)
+	if err != nil {
+		t.Fatalf("CREATE VECTOR INDEX failed: %v", err)
+	}
+
+	showRes, err := e.Execute(ctx, "SHOW INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW INDEXES failed: %v", err)
+	}
+	callRes, err := e.Execute(ctx, "CALL db.indexes()", nil)
+	if err != nil {
+		t.Fatalf("CALL db.indexes() failed: %v", err)
+	}
+
+	if showRes == nil || callRes == nil {
+		t.Fatal("SHOW INDEXES / CALL db.indexes() returned nil result")
+	}
+	if len(showRes.Rows) == 0 {
+		t.Fatal("SHOW INDEXES should return created indexes")
+	}
+	if len(showRes.Rows) != len(callRes.Rows) {
+		t.Fatalf("SHOW INDEXES row count (%d) should match CALL db.indexes() (%d)", len(showRes.Rows), len(callRes.Rows))
+	}
+
+	showNameIdx, callNameIdx := -1, -1
+	for i, c := range showRes.Columns {
+		if c == "name" {
+			showNameIdx = i
+			break
+		}
+	}
+	for i, c := range callRes.Columns {
+		if c == "name" {
+			callNameIdx = i
+			break
+		}
+	}
+	if showNameIdx < 0 || callNameIdx < 0 {
+		t.Fatalf("expected 'name' column in both results, got SHOW=%v CALL=%v", showRes.Columns, callRes.Columns)
+	}
+
+	showNames := make(map[string]struct{}, len(showRes.Rows))
+	for _, row := range showRes.Rows {
+		if showNameIdx >= len(row) {
+			t.Fatalf("SHOW row missing name column: %v", row)
+		}
+		name, ok := row[showNameIdx].(string)
+		if !ok || name == "" {
+			t.Fatalf("SHOW row has invalid name: %v", row[showNameIdx])
+		}
+		showNames[name] = struct{}{}
+	}
+
+	callNames := make(map[string]struct{}, len(callRes.Rows))
+	for _, row := range callRes.Rows {
+		if callNameIdx >= len(row) {
+			t.Fatalf("CALL row missing name column: %v", row)
+		}
+		name, ok := row[callNameIdx].(string)
+		if !ok || name == "" {
+			t.Fatalf("CALL row has invalid name: %v", row[callNameIdx])
+		}
+		callNames[name] = struct{}{}
+	}
+
+	if len(showNames) != len(callNames) {
+		t.Fatalf("name set size mismatch SHOW=%d CALL=%d", len(showNames), len(callNames))
+	}
+	for name := range callNames {
+		if _, ok := showNames[name]; !ok {
+			t.Fatalf("SHOW INDEXES missing index name from CALL db.indexes(): %s", name)
+		}
+	}
+}
+
+func TestShowFulltextIndexes_FiltersToFulltextType(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE INDEX person_name_idx FOR (p:Person) ON (p.name)", nil)
+	if err != nil {
+		t.Fatalf("CREATE INDEX failed: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE FULLTEXT INDEX person_search_idx FOR (p:Person) ON EACH [p.name, p.bio]", nil)
+	if err != nil {
+		t.Fatalf("CREATE FULLTEXT INDEX failed: %v", err)
+	}
+
+	res, err := e.Execute(ctx, "SHOW FULLTEXT INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW FULLTEXT INDEXES failed: %v", err)
+	}
+	if res == nil {
+		t.Fatal("SHOW FULLTEXT INDEXES returned nil result")
+	}
+
+	typeIdx, nameIdx := -1, -1
+	for i, c := range res.Columns {
+		if c == "type" {
+			typeIdx = i
+		}
+		if c == "name" {
+			nameIdx = i
+		}
+	}
+	if typeIdx < 0 || nameIdx < 0 {
+		t.Fatalf("expected type/name columns in SHOW FULLTEXT INDEXES, got %v", res.Columns)
+	}
+
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected exactly one fulltext index row, got %d", len(res.Rows))
+	}
+	if gotType, _ := res.Rows[0][typeIdx].(string); strings.ToUpper(gotType) != "FULLTEXT" {
+		t.Fatalf("expected FULLTEXT row type, got %v", res.Rows[0][typeIdx])
+	}
+	if gotName, _ := res.Rows[0][nameIdx].(string); gotName != "person_search_idx" {
+		t.Fatalf("expected fulltext index name person_search_idx, got %v", res.Rows[0][nameIdx])
+	}
+}
+
+func TestShowQualifiedIndexes_RangeAndVectorFilters(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Qualified SHOW should be accepted even with no indexes.
+	emptyRange, err := e.Execute(ctx, "SHOW RANGE INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW RANGE INDEXES failed on empty schema: %v", err)
+	}
+	if emptyRange == nil {
+		t.Fatal("SHOW RANGE INDEXES returned nil result")
+	}
+	if len(emptyRange.Rows) != 0 {
+		t.Fatalf("expected no RANGE index rows on empty schema, got %d", len(emptyRange.Rows))
+	}
+
+	emptyVector, err := e.Execute(ctx, "SHOW VECTOR INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW VECTOR INDEXES failed on empty schema: %v", err)
+	}
+	if emptyVector == nil {
+		t.Fatal("SHOW VECTOR INDEXES returned nil result")
+	}
+	if len(emptyVector.Rows) != 0 {
+		t.Fatalf("expected no VECTOR index rows on empty schema, got %d", len(emptyVector.Rows))
+	}
+
+	_, err = e.Execute(ctx, "CREATE RANGE INDEX person_age_idx FOR (p:Person) ON (p.age)", nil)
+	if err != nil {
+		t.Fatalf("CREATE RANGE INDEX failed: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE VECTOR INDEX person_vec_idx FOR (p:Person) ON (p.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 8}}", nil)
+	if err != nil {
+		t.Fatalf("CREATE VECTOR INDEX failed: %v", err)
+	}
+
+	rangeRes, err := e.Execute(ctx, "SHOW RANGE INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW RANGE INDEXES failed: %v", err)
+	}
+	vectorRes, err := e.Execute(ctx, "SHOW VECTOR INDEXES", nil)
+	if err != nil {
+		t.Fatalf("SHOW VECTOR INDEXES failed: %v", err)
+	}
+
+	typeIdx := -1
+	for i, c := range rangeRes.Columns {
+		if c == "type" {
+			typeIdx = i
+			break
+		}
+	}
+	if typeIdx < 0 {
+		t.Fatalf("missing type column in SHOW qualified indexes: %v", rangeRes.Columns)
+	}
+
+	if len(rangeRes.Rows) != 1 {
+		t.Fatalf("expected exactly one RANGE index row, got %d", len(rangeRes.Rows))
+	}
+	if gotType, _ := rangeRes.Rows[0][typeIdx].(string); strings.ToUpper(gotType) != "RANGE" {
+		t.Fatalf("expected RANGE row type, got %v", rangeRes.Rows[0][typeIdx])
+	}
+
+	if len(vectorRes.Rows) != 1 {
+		t.Fatalf("expected exactly one VECTOR index row, got %d", len(vectorRes.Rows))
+	}
+	if gotType, _ := vectorRes.Rows[0][typeIdx].(string); strings.ToUpper(gotType) != "VECTOR" {
+		t.Fatalf("expected VECTOR row type, got %v", vectorRes.Rows[0][typeIdx])
+	}
+}
+
 func TestShowConstraints(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

@@ -11,10 +11,21 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+)
+
+var (
+	identifierCompatPattern  = `(?:` + "`" + `[^` + "`" + `]+` + "`" + `|[A-Za-z_][A-Za-z0-9_]*)`
+	createIndexLegacyPattern = regexp.MustCompile(
+		`(?i)^CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+:(` + identifierCompatPattern + `)\s*\(([^)]+)\)\s*$`)
+	createIndexForCompatPattern = regexp.MustCompile(
+		`(?i)^CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(\w+)\s*:\s*(` + identifierCompatPattern + `)\s*\)\s+ON\s+(.+)$`)
+	fulltextIndexCompatPattern = regexp.MustCompile(
+		`(?i)^CREATE\s+FULLTEXT\s+INDEX\s+(` + identifierCompatPattern + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(?\s*(\w+)\s*:\s*(` + identifierCompatPattern + `)\s*\)?\s+ON(?:\s+EACH)?\s+(.+)$`)
 )
 
 // executeSchemaCommand handles CREATE CONSTRAINT and CREATE INDEX commands.
@@ -431,7 +442,7 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 		propertiesStr := matches[4] // e.g., "n.prop1, n.prop2"
 
 		// Parse properties (single or multiple)
-		properties := e.parseIndexProperties(propertiesStr)
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("no properties specified for index")
 		}
@@ -450,7 +461,7 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 		propertiesStr := matches[3] // e.g., "n.prop1, n.prop2"
 
 		// Parse properties
-		properties := e.parseIndexProperties(propertiesStr)
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("no properties specified for index")
 		}
@@ -464,6 +475,46 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 			return nil, err
 		}
 
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Neo4j legacy syntax: CREATE INDEX [name] ON :Label(prop[, prop2])
+	if matches := createIndexLegacyPattern.FindStringSubmatch(strings.TrimSpace(cypher)); matches != nil {
+		indexName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[2])
+		properties := e.parseIndexProperties(matches[3])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties specified for index")
+		}
+		if indexName == "" {
+			propsJoined := strings.Join(properties, "_")
+			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
+		}
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Neo4j 5 compat variant: CREATE INDEX [name] FOR (n:Label) ON n.prop
+	if matches := createIndexForCompatPattern.FindStringSubmatch(strings.TrimSpace(cypher)); matches != nil {
+		indexName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
+		onPart := strings.TrimSpace(matches[4])
+		if strings.HasPrefix(onPart, "(") && strings.HasSuffix(onPart, ")") {
+			onPart = strings.TrimSpace(onPart[1 : len(onPart)-1])
+		}
+		properties := e.parseQualifiedIndexProperties(onPart)
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties specified for index")
+		}
+		if indexName == "" {
+			propsJoined := strings.Join(properties, "_")
+			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
+		}
+		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
+			return nil, err
+		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
@@ -489,7 +540,7 @@ func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher st
 		propertiesStr := matches[4]
 
 		// Range index only supports single property
-		properties := e.parseIndexProperties(propertiesStr)
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
 		if len(properties) != 1 {
 			return nil, fmt.Errorf("RANGE INDEX only supports single property, got %d", len(properties))
 		}
@@ -507,7 +558,7 @@ func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher st
 		label := matches[2]
 		propertiesStr := matches[3]
 
-		properties := e.parseIndexProperties(propertiesStr)
+		properties := e.parseQualifiedIndexProperties(propertiesStr)
 		if len(properties) != 1 {
 			return nil, fmt.Errorf("RANGE INDEX only supports single property, got %d", len(properties))
 		}
@@ -531,6 +582,14 @@ func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher st
 //   - "n.prop1, n.prop2"     -> ["prop1", "prop2"]
 //   - "n.a, n.b, n.c"        -> ["a", "b", "c"]
 func (e *StorageExecutor) parseIndexProperties(propertiesStr string) []string {
+	return e.parseIndexPropertiesWithMode(propertiesStr, true)
+}
+
+func (e *StorageExecutor) parseQualifiedIndexProperties(propertiesStr string) []string {
+	return e.parseIndexPropertiesWithMode(propertiesStr, false)
+}
+
+func (e *StorageExecutor) parseIndexPropertiesWithMode(propertiesStr string, allowBare bool) []string {
 	// Split by comma
 	parts := strings.Split(propertiesStr, ",")
 	var properties []string
@@ -539,7 +598,13 @@ func (e *StorageExecutor) parseIndexProperties(propertiesStr string) []string {
 		part = strings.TrimSpace(part)
 		// Extract property name after dot (e.g., "n.prop" -> "prop")
 		if dotIdx := strings.LastIndex(part, "."); dotIdx >= 0 && dotIdx < len(part)-1 {
-			propName := strings.TrimSpace(part[dotIdx+1:])
+			propName := normalizeIdentifierToken(part[dotIdx+1:])
+			if propName != "" {
+				properties = append(properties, propName)
+			}
+		} else if allowBare {
+			// Also support bare property names used by legacy syntax ON :Label(prop)
+			propName := normalizeIdentifierToken(part)
 			if propName != "" {
 				properties = append(properties, propName)
 			}
@@ -597,7 +662,29 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 	matches := fulltextIndexPattern.FindStringSubmatch(cypher)
 
 	if matches == nil {
-		return nil, fmt.Errorf("invalid CREATE FULLTEXT INDEX syntax: %s", cypher)
+		compat := fulltextIndexCompatPattern.FindStringSubmatch(strings.TrimSpace(cypher))
+		if compat == nil {
+			return nil, fmt.Errorf("invalid CREATE FULLTEXT INDEX syntax: %s", cypher)
+		}
+
+		indexName := normalizeIdentifierToken(compat[1])
+		label := normalizeIdentifierToken(compat[3])
+		propsRaw := strings.TrimSpace(compat[4])
+		if strings.HasPrefix(propsRaw, "[") && strings.HasSuffix(propsRaw, "]") {
+			propsRaw = strings.TrimSpace(propsRaw[1 : len(propsRaw)-1])
+		}
+		properties := e.parseQualifiedIndexProperties(propsRaw)
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("no properties found in fulltext index definition")
+		}
+		schema := e.storage.GetSchema()
+		if schema == nil {
+			return nil, fmt.Errorf("schema manager not available")
+		}
+		if err := schema.AddFulltextIndex(indexName, []string{label}, properties); err != nil {
+			return nil, fmt.Errorf("failed to add fulltext index: %w", err)
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
 	indexName := matches[1]
@@ -605,14 +692,7 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 	propertiesStr := matches[4]
 
 	// Parse properties: "n.prop1, n.prop2" -> ["prop1", "prop2"]
-	properties := []string{}
-	for _, prop := range strings.Split(propertiesStr, ",") {
-		prop = strings.TrimSpace(prop)
-		// Extract property name from "n.property"
-		if parts := strings.Split(prop, "."); len(parts) == 2 {
-			properties = append(properties, parts[1])
-		}
-	}
+	properties := e.parseQualifiedIndexProperties(propertiesStr)
 
 	if len(properties) == 0 {
 		return nil, fmt.Errorf("no properties found in fulltext index definition")
@@ -629,6 +709,15 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 	}
 
 	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+}
+
+func normalizeIdentifierToken(v string) string {
+	s := strings.TrimSpace(v)
+	if len(s) >= 2 && strings.HasPrefix(s, "`") && strings.HasSuffix(s, "`") {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, "``", "`")
+	}
+	return strings.TrimSpace(s)
 }
 
 // executeCreateVectorIndex handles CREATE VECTOR INDEX commands.

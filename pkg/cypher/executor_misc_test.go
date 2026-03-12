@@ -630,7 +630,9 @@ func TestExecuteQueryAgainstStorage_DispatchBranches(t *testing.T) {
 
 	expectNoError := []string{
 		"FOREACH (x IN [1] | CREATE (:Q {v:x}))",
+		"CREATE RANGE INDEX idx_tx_dispatch FOR (n:Dispatch) ON (n.age)",
 		"SHOW INDEXES",
+		"SHOW FULLTEXT INDEXES",
 		"SHOW CONSTRAINTS",
 		"SHOW PROCEDURES",
 		"SHOW FUNCTIONS",
