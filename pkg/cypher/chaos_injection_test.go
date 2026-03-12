@@ -467,9 +467,8 @@ func TestInjection_LoadCSVPathTraversal(t *testing.T) {
 		t.Run(fmt.Sprintf("path_%s", strings.ReplaceAll(path, "/", "_")), func(t *testing.T) {
 			query := fmt.Sprintf("LOAD CSV FROM '%s' AS line RETURN line", path)
 			_, err := exec.Execute(ctx, query, nil)
-			// Should either fail or be blocked - we don't support LOAD CSV anyway
-			// The important thing is we don't actually load arbitrary files
-			_ = err // May or may not error depending on implementation
+			// Unsupported/blocked path traversal must fail deterministically.
+			require.Error(t, err)
 		})
 	}
 }

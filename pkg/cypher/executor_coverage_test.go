@@ -678,22 +678,10 @@ func TestExecuteSetInvalidPropertyAccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, err)
 
-	// SET without proper n.property format - should either error or be a no-op
-	// Note: Current implementation may not error on this malformed SET,
-	// so we just verify it doesn't panic and no properties are set
+	// SET without proper n.property format is invalid.
 	_, err = exec.Execute(ctx, "MATCH (n:SetInv) SET prop = 'value'", nil)
-	if err != nil {
-		// If an error is returned, it should mention property access
-		assert.Contains(t, err.Error(), "property")
-	} else {
-		// If no error, verify the node wasn't modified incorrectly
-		updatedNode, _ := store.GetNode("set-inv")
-		if updatedNode != nil {
-			// The malformed SET should not have created a "prop" property
-			_, hasProp := updatedNode.Properties["prop"]
-			assert.False(t, hasProp, "Malformed SET should not create 'prop' property")
-		}
-	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid SET assignment")
 }
 
 func TestExecuteSetMergeRejectsMalformedInlineMap(t *testing.T) {

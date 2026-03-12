@@ -664,21 +664,18 @@ func TestCallSubqueryInTransactions(t *testing.T) {
 		`, nil)
 		require.NoError(t, err)
 
-		// This should fail on invalid syntax (missing WHERE clause with non-existent label)
+		// Deterministically invalid SET assignment inside batch execution.
 		_, err = exec.Execute(ctx, `
 			CALL {
-				MATCH (p:NonExistentLabel)
-				SET p.value = 'test'
+				MATCH (p:Person)
+				WHERE p.name IN ['ErrorTest1', 'ErrorTest2']
+				SET prop = 'test'
 				RETURN p.name AS name
 			} IN TRANSACTIONS OF 1 ROWS
 			RETURN name
 		`, nil)
-		// May or may not error depending on implementation - just verify it doesn't crash
-		// The key is that batching handles errors gracefully
-		if err != nil {
-			// Error is acceptable - batching should stop on error
-			assert.Contains(t, err.Error(), "batch", "Error should mention batch")
-		}
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid SET assignment")
 	})
 
 	t.Run("stats accumulation across batches", func(t *testing.T) {
