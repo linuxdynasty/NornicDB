@@ -296,7 +296,11 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	// Execute MATCH/WITH pipeline first and retain row scope for SET expression
 	// evaluation, including aliases introduced by WITH ... AS.
 	matchSegment := normalized[matchIdx:setIdx]
-	matchPattern := strings.TrimSpace(normalized[matchIdx+5 : setIdx]) // Skip "MATCH"
+	matchPartEnd := len(matchSegment)
+	if withIdx := findKeywordIndex(matchSegment, "WITH"); withIdx >= 0 {
+		matchPartEnd = withIdx
+	}
+	matchPattern := strings.TrimSpace(matchSegment[len("MATCH"):matchPartEnd])
 	matchVars := e.extractVariableNamesFromPattern(matchPattern)
 	withAliases := extractWithAliases(matchSegment)
 	allVars := dedupeNonEmpty(matchVars, withAliases)

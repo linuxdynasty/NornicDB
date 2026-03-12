@@ -64,6 +64,9 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 		if nodePatternStr == "" {
 			continue
 		}
+		if err := e.validateCreatePatternPropertyMap(nodePatternStr); err != nil {
+			return nil, err
+		}
 
 		nodePattern := e.parseNodePattern(nodePatternStr)
 
@@ -341,6 +344,22 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 	}
 
 	return result, nil
+}
+
+func (e *StorageExecutor) validateCreatePatternPropertyMap(pattern string) error {
+	propsStart := strings.Index(pattern, "{")
+	if propsStart < 0 {
+		return nil
+	}
+	propsEnd := strings.LastIndex(pattern, "}")
+	if propsEnd < propsStart {
+		return fmt.Errorf("invalid property map syntax in pattern: %s", pattern)
+	}
+	propsLiteral := strings.TrimSpace(pattern[propsStart : propsEnd+1])
+	if _, err := e.parseSetMergeMapLiteralStrict(propsLiteral); err != nil {
+		return fmt.Errorf("invalid property map syntax in pattern: %w", err)
+	}
+	return nil
 }
 
 func parseCreatePathAssignment(pattern string) (string, string) {

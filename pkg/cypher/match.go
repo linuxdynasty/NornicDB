@@ -161,6 +161,11 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		if returnPart == "" {
 			return nil, fmt.Errorf("RETURN clause requires at least one expression")
 		}
+		for _, item := range splitTopLevelCommaKeepEmpty(returnPart) {
+			if strings.TrimSpace(item) == "" {
+				return nil, fmt.Errorf("RETURN clause contains empty expression")
+			}
+		}
 	}
 
 	result := &ExecuteResult{

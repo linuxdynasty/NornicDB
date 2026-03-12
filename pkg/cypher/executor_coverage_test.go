@@ -1553,17 +1553,9 @@ func TestParseReturnItemsEmptyAfterSplit(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, err)
 
-	// RETURN with trailing comma that might create empty parts
-	// Note: ANTLR parser is stricter and rejects trailing comma as syntax error
-	// Nornic parser is more lenient and ignores the trailing comma
-	result, err := exec.Execute(ctx, "MATCH (n:EmptyRet) RETURN n,", nil)
-	if err != nil {
-		// ANTLR parser rejects this - that's acceptable
-		assert.Contains(t, err.Error(), "syntax error")
-	} else {
-		// Nornic parser accepts this - also acceptable
-		assert.NotNil(t, result)
-	}
+	// RETURN with trailing comma is invalid syntax.
+	_, err = exec.Execute(ctx, "MATCH (n:EmptyRet) RETURN n,", nil)
+	require.Error(t, err)
 }
 
 func TestExecuteMergeAsCreate(t *testing.T) {
@@ -1794,17 +1786,9 @@ func TestParsePropertiesNoValue(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Properties key without proper value (invalid syntax)
-	// ANTLR parser is stricter and rejects this as syntax error
-	// Nornic parser is more lenient and may accept it
-	result, err := exec.Execute(ctx, "CREATE (n:Test {name})", nil)
-	if err != nil {
-		// ANTLR parser rejects this - that's acceptable
-		assert.Contains(t, err.Error(), "syntax error")
-	} else {
-		// Nornic parser accepts this - also acceptable
-		assert.Equal(t, 1, result.Stats.NodesCreated)
-	}
+	// Properties key without value must fail (strict Cypher map syntax).
+	_, err := exec.Execute(ctx, "CREATE (n:Test {name})", nil)
+	require.Error(t, err)
 }
 
 func TestUnsupportedQueryType(t *testing.T) {
@@ -2077,17 +2061,9 @@ func TestParseReturnItemsEmptyString(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, err)
 
-	// Return with extra spaces/commas (invalid syntax)
-	// ANTLR parser is stricter and rejects trailing comma as syntax error
-	// Nornic parser is more lenient
-	result, err := exec.Execute(ctx, "MATCH (n:EmptyItems) RETURN n , ", nil)
-	if err != nil {
-		// ANTLR parser rejects this - that's acceptable
-		assert.Contains(t, err.Error(), "syntax error")
-	} else {
-		// Nornic parser accepts this - also acceptable
-		assert.NotEmpty(t, result.Rows)
-	}
+	// RETURN with trailing comma/empty item is invalid syntax.
+	_, err = exec.Execute(ctx, "MATCH (n:EmptyItems) RETURN n , ", nil)
+	require.Error(t, err)
 }
 
 func TestExecuteMatchWhereEqualsNumber(t *testing.T) {
