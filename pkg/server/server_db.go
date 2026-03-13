@@ -129,6 +129,54 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	return executor, nil
 }
 
+// getExecutorForDatabaseWithAuth returns an executor for dbName and forwards authToken
+// to remote constituent resolution when a composite database contains remote constituents.
+func (s *Server) getExecutorForDatabaseWithAuth(dbName string, authToken string) (*cypher.StorageExecutor, error) {
+	if authToken == "" || !s.databaseHasRemoteConstituent(dbName) {
+		return s.getExecutorForDatabase(dbName)
+	}
+
+	storageEngine, err := s.dbManager.GetStorageWithAuth(dbName, authToken)
+	if err != nil {
+		return nil, err
+	}
+
+	executor := cypher.NewStorageExecutor(storageEngine)
+	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
+
+	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+		executor.SetSearchService(searchSvc)
+	}
+
+	if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
+		if emb := baseExec.GetEmbedder(); emb != nil {
+			executor.SetEmbedder(emb)
+		}
+		if inferMgr := baseExec.GetInferenceManager(); inferMgr != nil {
+			executor.SetInferenceManager(inferMgr)
+		}
+	}
+
+	if q := s.db.GetEmbedQueue(); q != nil {
+		executor.SetNodeMutatedCallback(func(nodeID string) { q.Enqueue(nodeID) })
+	}
+
+	return executor, nil
+}
+
+func (s *Server) databaseHasRemoteConstituent(dbName string) bool {
+	info, err := s.dbManager.GetDatabase(dbName)
+	if err != nil || info == nil || info.Type != "composite" {
+		return false
+	}
+	for _, ref := range info.Constituents {
+		if ref.Type == "remote" {
+			return true
+		}
+	}
+	return false
+}
+
 // newExecutorForDatabase creates a fresh executor scoped to a single database.
 // Unlike getExecutorForDatabase, this does not cache the executor and is intended
 // for per-transaction session state (explicit HTTP transactions).
@@ -270,6 +318,11 @@ func (a *databaseManagerAdapter) CreateCompositeDatabase(name string, constituen
 					DatabaseName: getString(m, "database_name"),
 					Type:         getString(m, "type"),
 					AccessMode:   getString(m, "access_mode"),
+					URI:          getString(m, "uri"),
+					SecretRef:    getString(m, "secret_ref"),
+					AuthMode:     getString(m, "auth_mode"),
+					User:         getString(m, "user"),
+					Password:     getString(m, "password"),
 				}
 			} else {
 				return fmt.Errorf("invalid constituent type at index %d", i)
@@ -304,6 +357,11 @@ func (a *databaseManagerAdapter) AddConstituent(compositeName string, constituen
 			DatabaseName: getString(m, "database_name"),
 			Type:         getString(m, "type"),
 			AccessMode:   getString(m, "access_mode"),
+			URI:          getString(m, "uri"),
+			SecretRef:    getString(m, "secret_ref"),
+			AuthMode:     getString(m, "auth_mode"),
+			User:         getString(m, "user"),
+			Password:     getString(m, "password"),
 		}
 	} else if r, ok := constituent.(multidb.ConstituentRef); ok {
 		ref = r
@@ -885,8 +943,10 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 
-		// Get executor for the specified database (or the one from :USE command)
-		executor, err := s.getExecutorForDatabase(effectiveDbName)
+		// Get executor for the specified database (or the one from :USE command).
+		// For composite databases with remote constituents, preserve caller identity by
+		// forwarding the request auth token into remote constituent engine construction.
+		executor, err := s.getExecutorForDatabaseWithAuth(effectiveDbName, r.Header.Get("Authorization"))
 		if err != nil {
 			response.Errors = append(response.Errors, QueryError{
 				Code:    "Neo.ClientError.Database.General",
@@ -1339,7 +1399,26 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 	var req TransactionRequest
 	_ = s.readJSON(r, &req) // Optional body
 
-	txSession, err := s.txSessions.Open(r.Context(), dbName)
+	var txSession *txsession.Session
+	var err error
+	authToken := r.Header.Get("Authorization")
+	if authToken != "" && s.databaseHasRemoteConstituent(dbName) {
+		executor, execErr := s.getExecutorForDatabaseWithAuth(dbName, authToken)
+		if execErr != nil {
+			response := TransactionResponse{
+				Results: make([]QueryResult, 0),
+				Errors: []QueryError{{
+					Code:    "Neo.ClientError.Transaction.TransactionStartFailed",
+					Message: execErr.Error(),
+				}},
+			}
+			s.writeJSON(w, http.StatusInternalServerError, response)
+			return
+		}
+		txSession, err = s.txSessions.OpenWithExecutor(r.Context(), dbName, executor)
+	} else {
+		txSession, err = s.txSessions.Open(r.Context(), dbName)
+	}
 	if err != nil {
 		if errors.Is(err, multidb.ErrDatabaseNotFound) {
 			response := TransactionResponse{

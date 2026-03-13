@@ -74,6 +74,11 @@ func (a *testDatabaseManagerAdapter) CreateCompositeDatabase(name string, consti
 				DatabaseName: getStringFromMap(m, "database_name"),
 				Type:         getStringFromMap(m, "type"),
 				AccessMode:   getStringFromMap(m, "access_mode"),
+				URI:          getStringFromMap(m, "uri"),
+				SecretRef:    getStringFromMap(m, "secret_ref"),
+				AuthMode:     getStringFromMap(m, "auth_mode"),
+				User:         getStringFromMap(m, "user"),
+				Password:     getStringFromMap(m, "password"),
 			}
 		} else {
 			return fmt.Errorf("invalid constituent type at index %d", i)
@@ -94,6 +99,11 @@ func (a *testDatabaseManagerAdapter) AddConstituent(compositeName string, consti
 			DatabaseName: getStringFromMap(m, "database_name"),
 			Type:         getStringFromMap(m, "type"),
 			AccessMode:   getStringFromMap(m, "access_mode"),
+			URI:          getStringFromMap(m, "uri"),
+			SecretRef:    getStringFromMap(m, "secret_ref"),
+			AuthMode:     getStringFromMap(m, "auth_mode"),
+			User:         getStringFromMap(m, "user"),
+			Password:     getStringFromMap(m, "password"),
 		}
 	} else {
 		return fmt.Errorf("invalid constituent type")
@@ -117,6 +127,10 @@ func (a *testDatabaseManagerAdapter) GetCompositeConstituents(compositeName stri
 			"database_name": c.DatabaseName,
 			"type":          c.Type,
 			"access_mode":   c.AccessMode,
+			"uri":           c.URI,
+			"secret_ref":    c.SecretRef,
+			"auth_mode":     c.AuthMode,
+			"user":          c.User,
 		}
 	}
 	return result, nil
@@ -308,7 +322,9 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 
 		baseStore := storage.NewMemoryEngine()
 		inner := storage.NewMemoryEngine()
-		manager, _ := multidb.NewDatabaseManager(inner, nil)
+		cfg := multidb.DefaultConfig()
+		cfg.RemoteCredentialEncryptionKey = "test-key-for-composite-commands"
+		manager, _ := multidb.NewDatabaseManager(inner, cfg)
 		adapter := &testDatabaseManagerAdapter{manager: manager}
 		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
 		exec.SetDatabaseManager(adapter)
@@ -332,6 +348,29 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.NotNil(t, res)
 		require.Equal(t, [][]interface{}{{"c1"}}, res.Rows)
 
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote ALIAS tr FOR DATABASE caremark_tr AT 'https://shard-a.example/nornic-db' SECRET REF 'spn-a' TYPE remote ACCESS read ALIAS txt FOR DATABASE caremark_txt AT 'https://shard-b.example/nornic-db' SECRET REF 'spn-b' TYPE remote ACCESS read_write")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_remote"}}, res.Rows)
+		createdRefs, err := adapter.GetCompositeConstituents("c_remote")
+		require.NoError(t, err)
+		require.Len(t, createdRefs, 2)
+		first := createdRefs[0].(map[string]interface{})
+		require.Equal(t, "remote", first["type"])
+		require.Equal(t, "https://shard-a.example/nornic-db", first["uri"])
+		require.Equal(t, "spn-a", first["secret_ref"])
+		require.Equal(t, "read", first["access_mode"])
+		require.Equal(t, "oidc_forwarding", first["auth_mode"])
+
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote_basic ALIAS tr FOR DATABASE caremark_tr AT 'https://shard-a.example/nornic-db' USER 'svc-user' PASSWORD 'svc-pass' TYPE remote ACCESS read")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_remote_basic"}}, res.Rows)
+		createdRefs, err = adapter.GetCompositeConstituents("c_remote_basic")
+		require.NoError(t, err)
+		require.Len(t, createdRefs, 1)
+		first = createdRefs[0].(map[string]interface{})
+		require.Equal(t, "user_password", first["auth_mode"])
+		require.Equal(t, "svc-user", first["user"])
+
 		// Flexible whitespace parsing branch.
 		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE\tCOMPOSITE\tDATABASE\tc_ws ALIAS a1 FOR DATABASE db1")
 		require.NoError(t, err)
@@ -340,11 +379,23 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		// Invalid alias/database extraction branches.
 		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad ALIAS   FOR DATABASE db1")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "alias name cannot be empty")
+		require.Contains(t, err.Error(), "FOR DATABASE expected")
 
 		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad2 ALIAS a1 FOR DATABASE   ")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "database name cannot be empty")
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad3 ALIAS a1 FOR DATABASE db1 AT 'https://remote.example' USER 'svc-only'")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "USER and PASSWORD must both be provided")
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad4 ALIAS a1 FOR DATABASE db1 AT 'https://remote.example' OIDC CREDENTIAL FORWARDING USER 'svc' PASSWORD 'pass'")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot combine OIDC CREDENTIAL FORWARDING with USER/PASSWORD")
+
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad5 ALIAS a1 FOR DATABASE db1 USER 'svc' PASSWORD 'pass'")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "require a remote constituent")
 	})
 
 	t.Run("drop composite direct branches", func(t *testing.T) {
@@ -414,7 +465,7 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE c_show")
 		require.NoError(t, err)
 		require.NotEmpty(t, res.Rows)
-		require.Equal(t, []string{"alias", "database", "type", "access_mode"}, res.Columns)
+		require.Equal(t, []string{"alias", "database", "type", "access_mode", "uri", "secret_ref", "auth_mode", "user"}, res.Columns)
 
 		// Flexible whitespace branch: hit COMPOSITE + DATABASE parsing path.
 		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE\tDATABASE\tc_show")
@@ -440,7 +491,7 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		exec.SetDatabaseManager(weird)
 		res, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE c_show")
 		require.NoError(t, err)
-		require.Equal(t, []interface{}{"", "", "", ""}, res.Rows[0])
+		require.Equal(t, []interface{}{"", "", "", "", "", "", "", ""}, res.Rows[0])
 	})
 }
 
@@ -454,7 +505,9 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 
 	baseStore := storage.NewMemoryEngine()
 	inner := storage.NewMemoryEngine()
-	manager, _ := multidb.NewDatabaseManager(inner, nil)
+	alterCfg := multidb.DefaultConfig()
+	alterCfg.RemoteCredentialEncryptionKey = "test-key-for-alter-composite"
+	manager, _ := multidb.NewDatabaseManager(inner, alterCfg)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
 	exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
 	exec.SetDatabaseManager(adapter)
@@ -483,11 +536,38 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 
 	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS   FOR DATABASE d2")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "alias name cannot be empty")
+	require.Contains(t, err.Error(), "FOR DATABASE expected")
 
 	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS x FOR DATABASE")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "database name cannot be empty")
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS r FOR DATABASE d2 AT 'https://remote.example/nornic-db' SECRET REF 'spn-caremark' TYPE remote ACCESS read")
+	require.NoError(t, err)
+
+	list, err := adapter.GetCompositeConstituents("comp_err")
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+	last := list[1].(map[string]interface{})
+	require.Equal(t, "r", last["alias"])
+	require.Equal(t, "remote", last["type"])
+	require.Equal(t, "https://remote.example/nornic-db", last["uri"])
+	require.Equal(t, "spn-caremark", last["secret_ref"])
+	require.Equal(t, "read", last["access_mode"])
+	require.Equal(t, "oidc_forwarding", last["auth_mode"])
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS r2 FOR DATABASE d2 AT 'https://remote.example/nornic-db' USER 'svc-user' PASSWORD 'svc-pass' TYPE remote ACCESS read")
+	require.NoError(t, err)
+	list, err = adapter.GetCompositeConstituents("comp_err")
+	require.NoError(t, err)
+	require.Len(t, list, 3)
+	last = list[2].(map[string]interface{})
+	require.Equal(t, "user_password", last["auth_mode"])
+	require.Equal(t, "svc-user", last["user"])
+
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS bad FOR DATABASE d2 AT 'https://remote.example/nornic-db' OIDC CREDENTIAL FORWARDING USER 'svc-user' PASSWORD 'svc-pass'")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot combine OIDC CREDENTIAL FORWARDING with USER/PASSWORD")
 
 	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err DROP ALIAS")
 	require.Error(t, err)
@@ -496,4 +576,119 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err DROP ALIAS missing_alias")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to remove constituent")
+}
+
+func TestParseCypherValueToken(t *testing.T) {
+	v, err := parseCypherValueToken("")
+	require.NoError(t, err)
+	require.Equal(t, "", v)
+
+	v, err = parseCypherValueToken("'abc'")
+	require.NoError(t, err)
+	require.Equal(t, "abc", v)
+
+	v, err = parseCypherValueToken("\"abc\"")
+	require.NoError(t, err)
+	require.Equal(t, "abc", v)
+
+	v, err = parseCypherValueToken("`abc`")
+	require.NoError(t, err)
+	require.Equal(t, "abc", v)
+
+	v, err = parseCypherValueToken("`bad")
+	require.NoError(t, err)
+	require.Equal(t, "`bad", v)
+
+	v, err = parseCypherValueToken("plain")
+	require.NoError(t, err)
+	require.Equal(t, "plain", v)
+}
+
+func TestParseConstituentFromTokens_Branches(t *testing.T) {
+	assertErrContains := func(tokens []string, contains string) {
+		t.Helper()
+		i := 0
+		_, err := parseConstituentFromTokens(tokens, &i)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), contains)
+	}
+
+	assertErrContains([]string{}, "ALIAS expected")
+	assertErrContains([]string{"ALIAS"}, "alias name cannot be empty")
+	assertErrContains([]string{"ALIAS", "''", "FOR", "DATABASE", "d"}, "alias name cannot be empty")
+	assertErrContains([]string{"ALIAS", "a"}, "FOR DATABASE expected")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE"}, "database name cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "''"}, "database name cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT"}, "remote URI expected")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "''"}, "remote URI cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "SECRET"}, "SECRET REF expected")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "SECRET", "REF"}, "secret ref cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "SECRET", "REF", "''"}, "secret ref cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "TYPE"}, "type cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "TYPE", "bad"}, "type must be local or remote")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "TYPE", "local"}, "TYPE local contradicts AT")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "ACCESS"}, "access mode cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "ACCESS", "bad"}, "access mode must be read, write, or read_write")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "USER"}, "user cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "''", "PASSWORD", "p"}, "user cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "PASSWORD"}, "password cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "u", "PASSWORD", "''"}, "password cannot be empty")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "OIDC"}, "OIDC CREDENTIAL FORWARDING expected")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "OIDC", "CREDENTIAL"}, "OIDC CREDENTIAL FORWARDING expected")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "USER", "u", "PASSWORD", "p"}, "require a remote constituent")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "u"}, "USER and PASSWORD must both be provided")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "OIDC", "CREDENTIAL", "FORWARDING", "USER", "u", "PASSWORD", "p"}, "cannot combine OIDC CREDENTIAL FORWARDING with USER/PASSWORD")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "NOPE"}, "unexpected token")
+	assertErrContains([]string{"ALIAS", "`a`b`", "FOR", "DATABASE", "d"}, "alias name")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "`d`b`"}, "database name")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "`u`b`"}, "remote URI")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "SECRET", "REF", "`s`b`"}, "secret ref")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "TYPE", "`t`b`"}, "type")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "ACCESS", "`m`b`"}, "access mode")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "`u`b`", "PASSWORD", "p"}, "user")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "u", "PASSWORD", "`p`b`"}, "password")
+	assertErrContains([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "OIDC", "CREDENTIAL", "FORWARDING"}, "require a remote constituent")
+
+	i := 0
+	ref, err := parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "remote", ref["type"])
+	require.Equal(t, "oidc_forwarding", ref["auth_mode"])
+
+	i = 0
+	ref, err = parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "USER", "u", "PASSWORD", "p"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "user_password", ref["auth_mode"])
+	require.Equal(t, "u", ref["user"])
+	require.Equal(t, "p", ref["password"])
+
+	i = 0
+	ref, err = parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "OIDC", "CREDENTIAL", "FORWARDING"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "oidc_forwarding", ref["auth_mode"])
+
+	i = 0
+	ref, err = parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "AT", "https://x", "SECRET", "REF", "spn-a"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "spn-a", ref["secret_ref"])
+
+	i = 0
+	ref, err = parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "TYPE", "local", "ACCESS", "write"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "local", ref["type"])
+	require.Equal(t, "write", ref["access_mode"])
+
+	i = 0
+	tokens := []string{"ALIAS", "a", "FOR", "DATABASE", "d", "ALIAS", "b", "FOR", "DATABASE", "d2"}
+	ref, err = parseConstituentFromTokens(tokens, &i)
+	require.NoError(t, err)
+	require.Equal(t, "a", ref["alias"])
+	require.Equal(t, 5, i)
+	require.Equal(t, "ALIAS", tokens[i])
+
+	i = 0
+	ref, err = parseConstituentFromTokens([]string{"ALIAS", "a", "FOR", "DATABASE", "d", "TYPE", "remote", "USER", "u", "PASSWORD", "p"}, &i)
+	require.NoError(t, err)
+	require.Equal(t, "remote", ref["type"])
+	require.Equal(t, "user_password", ref["auth_mode"])
 }

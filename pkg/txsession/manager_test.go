@@ -106,3 +106,65 @@ func TestManagerLifecycle_RollbackAndErrorGuards(t *testing.T) {
 		t.Fatalf("expected session deleted after rollback")
 	}
 }
+
+func TestManagerOpenWithExecutor(t *testing.T) {
+	mgr := NewManager(time.Second, newExecutorFactory(t))
+
+	store := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = store.Close() })
+	exec := cypher.NewStorageExecutor(store)
+
+	session, err := mgr.OpenWithExecutor(context.Background(), "neo4j", exec)
+	if err != nil {
+		t.Fatalf("open with executor failed: %v", err)
+	}
+	if session == nil || session.Executor == nil {
+		t.Fatalf("expected non-nil session and executor")
+	}
+	if session.Database != "neo4j" {
+		t.Fatalf("unexpected session database: %s", session.Database)
+	}
+	if _, ok := mgr.Get(session.ID); !ok {
+		t.Fatalf("expected session to be tracked")
+	}
+
+	if err := mgr.RollbackAndDelete(context.Background(), session); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	if _, ok := mgr.Get(session.ID); ok {
+		t.Fatalf("expected session deleted after rollback")
+	}
+}
+
+func TestManagerOpenWithExecutorErrors(t *testing.T) {
+	mgr := NewManager(time.Second, newExecutorFactory(t))
+
+	if _, err := mgr.OpenWithExecutor(context.Background(), "neo4j", nil); err == nil {
+		t.Fatalf("expected nil executor error")
+	}
+}
+
+func TestManagerNewManagerDefaultTTLAndTouchNil(t *testing.T) {
+	mgr := NewManager(0, newExecutorFactory(t))
+	if mgr.ttl != 30*time.Second {
+		t.Fatalf("expected default ttl 30s, got %v", mgr.ttl)
+	}
+	// No panic path.
+	mgr.Touch(nil)
+}
+
+func TestManagerOpenWithExecutorBeginFailure(t *testing.T) {
+	mgr := NewManager(time.Second, newExecutorFactory(t))
+
+	// CompositeEngine does not support explicit transactions (BEGIN).
+	c := storage.NewCompositeEngine(
+		map[string]storage.Engine{"a": storage.NewMemoryEngine()},
+		map[string]string{"a": "a"},
+		map[string]string{"a": "read_write"},
+	)
+	exec := cypher.NewStorageExecutor(c)
+
+	if _, err := mgr.OpenWithExecutor(context.Background(), "neo4j", exec); err == nil {
+		t.Fatalf("expected begin failure for non-transactional engine")
+	}
+}

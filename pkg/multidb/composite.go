@@ -6,8 +6,16 @@ package multidb
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
+
+// RemoteEngineFactory creates storage engines for remote composite constituents.
+// authToken is the original caller's auth token/header value, forwarded to preserve
+// authentication context across distributed constituent queries.
+type RemoteEngineFactory func(ref ConstituentRef, authToken string) (storage.Engine, error)
 
 // ConstituentRef represents a reference to a constituent database within a composite database.
 type ConstituentRef struct {
@@ -17,11 +25,32 @@ type ConstituentRef struct {
 	// DatabaseName is the actual database name (or alias) that this constituent points to.
 	DatabaseName string `json:"database_name"`
 
-	// Type is the type of constituent: "local" (same instance) or "remote" (future: different instance).
+	// Type is the type of constituent: "local" (same instance) or "remote" (another instance).
 	Type string `json:"type"` // "local", "remote"
 
 	// AccessMode controls what operations are allowed: "read", "write", "read_write".
 	AccessMode string `json:"access_mode"` // "read", "write", "read_write"
+
+	// URI points to the remote NornicDB endpoint when Type == "remote".
+	URI string `json:"uri,omitempty"`
+
+	// SecretRef identifies credentials/token material for remote access.
+	// The actual secret is resolved outside of metadata persistence.
+	SecretRef string `json:"secret_ref,omitempty"`
+
+	// User and Password implement Neo4j-style explicit remote auth:
+	// ... AT '<url>' USER <user> PASSWORD '<password>'
+	//
+	// Password is encrypted before persisting metadata to the system namespace.
+	// At runtime, DatabaseManager decrypts it before invoking RemoteEngineFactory.
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+
+	// AuthMode defines remote auth behavior:
+	// - "oidc_forwarding": forward caller Authorization header
+	// - "user_password": use explicit User/Password for outbound Basic auth
+	// Empty is treated as "oidc_forwarding" for remote constituents.
+	AuthMode string `json:"auth_mode,omitempty"`
 }
 
 // Validate validates a constituent reference.
@@ -37,6 +66,31 @@ func (c *ConstituentRef) Validate() error {
 	}
 	if c.AccessMode != "read" && c.AccessMode != "write" && c.AccessMode != "read_write" {
 		return fmt.Errorf("access mode must be 'read', 'write', or 'read_write'")
+	}
+	if c.Type == "remote" && c.URI == "" {
+		return fmt.Errorf("remote constituent URI cannot be empty")
+	}
+	if c.Type == "remote" {
+		mode := strings.ToLower(strings.TrimSpace(c.AuthMode))
+		if mode == "" {
+			mode = "oidc_forwarding"
+		}
+		if mode != "oidc_forwarding" && mode != "user_password" {
+			return fmt.Errorf("remote auth mode must be 'oidc_forwarding' or 'user_password'")
+		}
+		if mode == "user_password" {
+			if strings.TrimSpace(c.User) == "" {
+				return fmt.Errorf("remote constituent user cannot be empty when auth mode is user_password")
+			}
+			if strings.TrimSpace(c.Password) == "" {
+				return fmt.Errorf("remote constituent password cannot be empty when auth mode is user_password")
+			}
+		}
+		if mode == "oidc_forwarding" {
+			if strings.TrimSpace(c.User) != "" || strings.TrimSpace(c.Password) != "" {
+				return fmt.Errorf("remote constituent user/password cannot be set when auth mode is oidc_forwarding")
+			}
+		}
 	}
 	return nil
 }
@@ -73,21 +127,18 @@ func (m *DatabaseManager) CreateCompositeDatabase(name string, constituents []Co
 			return fmt.Errorf("invalid constituent at index %d: %w", i, err)
 		}
 
-		// Check if constituent database exists
-		// Resolve alias if needed
-		actualName, err := m.resolveDatabaseInternal(ref.DatabaseName)
-		if err != nil {
-			return fmt.Errorf("constituent database '%s' not found: %w", ref.DatabaseName, err)
-		}
+		if ref.Type == "local" {
+			// Check if constituent database exists
+			// Resolve alias if needed
+			actualName, err := m.resolveDatabaseInternal(ref.DatabaseName)
+			if err != nil {
+				return fmt.Errorf("constituent database '%s' not found: %w", ref.DatabaseName, err)
+			}
 
-		// Cannot use composite database as constituent (prevent cycles)
-		if info, exists := m.databases[actualName]; exists && info.Type == "composite" {
-			return fmt.Errorf("cannot use composite database '%s' as constituent", actualName)
-		}
-
-		// For now, only support local databases
-		if ref.Type != "local" {
-			return fmt.Errorf("remote constituents not yet supported")
+			// Cannot use composite database as constituent (prevent cycles)
+			if info, exists := m.databases[actualName]; exists && info.Type == "composite" {
+				return fmt.Errorf("cannot use composite database '%s' as constituent", actualName)
+			}
 		}
 	}
 
@@ -100,6 +151,20 @@ func (m *DatabaseManager) CreateCompositeDatabase(name string, constituents []Co
 		aliasMap[ref.Alias] = true
 	}
 
+	// Encrypt remote user_password credentials before persistence.
+	encrypted := make([]ConstituentRef, len(constituents))
+	copy(encrypted, constituents)
+	for i := range encrypted {
+		ref := &encrypted[i]
+		if ref.Type == "remote" && strings.EqualFold(strings.TrimSpace(ref.AuthMode), "user_password") {
+			ciphertext, err := m.encryptRemotePassword(ref.Password)
+			if err != nil {
+				return fmt.Errorf("failed to secure remote credentials for alias '%s': %w", ref.Alias, err)
+			}
+			ref.Password = ciphertext
+		}
+	}
+
 	// Create composite database info
 	m.databases[name] = &DatabaseInfo{
 		Name:         name,
@@ -108,7 +173,7 @@ func (m *DatabaseManager) CreateCompositeDatabase(name string, constituents []Co
 		Type:         "composite",
 		IsDefault:    false,
 		UpdatedAt:    time.Now(),
-		Constituents: constituents,
+		Constituents: encrypted,
 	}
 
 	return m.persistMetadata()
@@ -164,10 +229,12 @@ func (m *DatabaseManager) AddConstituent(compositeName string, constituent Const
 		return err
 	}
 
-	// Check if constituent database exists
-	_, err := m.resolveDatabaseInternal(constituent.DatabaseName)
-	if err != nil {
-		return fmt.Errorf("constituent database '%s' not found: %w", constituent.DatabaseName, err)
+	// Check if constituent database exists for local constituents
+	if constituent.Type == "local" {
+		_, err := m.resolveDatabaseInternal(constituent.DatabaseName)
+		if err != nil {
+			return fmt.Errorf("constituent database '%s' not found: %w", constituent.DatabaseName, err)
+		}
 	}
 
 	// Check for duplicate alias
@@ -177,8 +244,17 @@ func (m *DatabaseManager) AddConstituent(compositeName string, constituent Const
 		}
 	}
 
+	encrypted := constituent
+	if encrypted.Type == "remote" && strings.EqualFold(strings.TrimSpace(encrypted.AuthMode), "user_password") {
+		ciphertext, err := m.encryptRemotePassword(encrypted.Password)
+		if err != nil {
+			return fmt.Errorf("failed to secure remote credentials for alias '%s': %w", encrypted.Alias, err)
+		}
+		encrypted.Password = ciphertext
+	}
+
 	// Add constituent
-	info.Constituents = append(info.Constituents, constituent)
+	info.Constituents = append(info.Constituents, encrypted)
 	info.UpdatedAt = time.Now()
 
 	return m.persistMetadata()

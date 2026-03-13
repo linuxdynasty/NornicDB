@@ -28,6 +28,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
@@ -79,6 +80,9 @@ func setupTestServer(t *testing.T) (*Server, *auth.Authenticator) {
 	if err != nil {
 		t.Fatalf("failed to create reader user: %v", err)
 	}
+
+	// Set encryption key for remote credential tests.
+	t.Setenv("NORNICDB_REMOTE_CREDENTIALS_KEY", "test-remote-credential-key-32b!")
 
 	// Create server config
 	serverConfig := DefaultConfig()
@@ -823,6 +827,138 @@ func TestHandleOpenTransaction(t *testing.T) {
 	if txResp["commit"] == nil {
 		t.Error("missing 'commit' URL in response")
 	}
+}
+
+func TestHandleOpenTransaction_ForwardsAuthToRemoteConstituentFactory(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	var capturedAuth string
+	dbManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(_ multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			capturedAuth = authToken
+			return storage.NewMemoryEngine(), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbManager.CreateCompositeDatabase("comp_remote", []multidb.ConstituentRef{
+		{
+			Alias:        "r1",
+			DatabaseName: "remote_db",
+			Type:         "remote",
+			AccessMode:   "read_write",
+			URI:          "http://remote.example",
+		},
+	}))
+
+	server.dbManager = dbManager
+	server.txSessions = txsession.NewManager(30*time.Second, server.newExecutorForDatabase)
+
+	resp := makeRequest(t, server, "POST", "/db/comp_remote/tx", map[string]interface{}{
+		"statements": []map[string]interface{}{},
+	}, "Bearer "+token)
+	// CompositeEngine does not support explicit transactions yet; we still verify
+	// auth forwarding reached remote constituent resolution on transaction open.
+	require.Equal(t, http.StatusInternalServerError, resp.Code, resp.Body.String())
+	require.Equal(t, "Bearer "+token, capturedAuth)
+}
+
+func TestServerNew_ConfiguresDefaultRemoteEngineFactory(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("comp_remote_default", []multidb.ConstituentRef{
+		{
+			Alias:        "r1",
+			DatabaseName: "remote_db",
+			Type:         "remote",
+			AccessMode:   "read",
+			URI:          "http://127.0.0.1:1",
+		},
+	}))
+
+	_, err := server.dbManager.GetStorageWithAuth("comp_remote_default", "Bearer token")
+	require.NoError(t, err)
+
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("comp_remote_default_basic", []multidb.ConstituentRef{
+		{
+			Alias:        "r1",
+			DatabaseName: "remote_db",
+			Type:         "remote",
+			AccessMode:   "read",
+			URI:          "http://127.0.0.1:1",
+			AuthMode:     "user_password",
+			User:         "svc-user",
+			Password:     "svc-pass",
+		},
+	}))
+	_, err = server.dbManager.GetStorageWithAuth("comp_remote_default_basic", "Bearer token")
+	require.NoError(t, err)
+}
+
+func TestGetExecutorForDatabaseWithAuthBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	// No-auth and non-remote path delegates to cached executor behavior.
+	execA, err := server.getExecutorForDatabaseWithAuth("nornic", "")
+	require.NoError(t, err)
+	execB, err := server.getExecutorForDatabaseWithAuth("nornic", "Bearer token")
+	require.NoError(t, err)
+	require.Equal(t, execA, execB)
+	require.False(t, server.databaseHasRemoteConstituent("nornic"))
+	require.False(t, server.databaseHasRemoteConstituent("missing_db"))
+
+	var tokenSeen string
+	dbManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(_ multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			tokenSeen = authToken
+			return storage.NewMemoryEngine(), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbManager.CreateCompositeDatabase("comp_remote_exec", []multidb.ConstituentRef{
+		{
+			Alias:        "r1",
+			DatabaseName: "remote_db",
+			Type:         "remote",
+			AccessMode:   "read",
+			URI:          "http://remote.example",
+		},
+	}))
+	server.dbManager = dbManager
+	server.executors = make(map[string]*cypher.StorageExecutor)
+
+	require.True(t, server.databaseHasRemoteConstituent("comp_remote_exec"))
+	execRemote, err := server.getExecutorForDatabaseWithAuth("comp_remote_exec", "Bearer remote")
+	require.NoError(t, err)
+	require.NotNil(t, execRemote)
+	require.Equal(t, "Bearer remote", tokenSeen)
+
+	// Factory error propagation path.
+	badManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(_ multidb.ConstituentRef, _ string) (storage.Engine, error) {
+			return nil, fmt.Errorf("remote dial failed")
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, badManager.CreateCompositeDatabase("comp_remote_bad", []multidb.ConstituentRef{
+		{
+			Alias:        "r1",
+			DatabaseName: "remote_db",
+			Type:         "remote",
+			AccessMode:   "read",
+			URI:          "http://remote.example",
+		},
+	}))
+	server.dbManager = badManager
+	_, err = server.getExecutorForDatabaseWithAuth("comp_remote_bad", "Bearer token")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "remote dial failed")
 }
 
 func TestExplicitTransactionWorkflow(t *testing.T) {

@@ -1,8 +1,10 @@
 package multidb
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,14 +43,69 @@ func TestCreateCompositeDatabase_EdgeCases(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidDatabaseName)
 	})
 
-	t.Run("remote constituents not yet supported", func(t *testing.T) {
+	t.Run("remote constituents require uri", func(t *testing.T) {
 		manager, _ := setupTestManager(t)
-		require.NoError(t, manager.CreateDatabase("db1"))
-
 		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
-			{DatabaseName: "db1", Alias: "db1", Type: "remote", AccessMode: "read_write"},
+			{DatabaseName: "remote_db", Alias: "db1", Type: "remote", AccessMode: "read_write"},
 		})
-		require.ErrorContains(t, err, "not yet supported")
+		require.ErrorContains(t, err, "URI cannot be empty")
+	})
+
+	t.Run("remote constituents are accepted with uri", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{DatabaseName: "remote_db", Alias: "db1", Type: "remote", AccessMode: "read", URI: "http://remote:7474"},
+		})
+		require.NoError(t, err)
+		assert.True(t, manager.IsCompositeDatabase("composite1"))
+	})
+
+	t.Run("remote user_password requires both user and password", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{
+				DatabaseName: "remote_db",
+				Alias:        "db1",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "http://remote:7474",
+				AuthMode:     "user_password",
+				User:         "svc",
+			},
+		})
+		require.ErrorContains(t, err, "password cannot be empty")
+	})
+
+	t.Run("remote oidc_forwarding rejects explicit user_password fields", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{
+				DatabaseName: "remote_db",
+				Alias:        "db1",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "http://remote:7474",
+				AuthMode:     "oidc_forwarding",
+				User:         "svc",
+				Password:     "pass",
+			},
+		})
+		require.ErrorContains(t, err, "cannot be set when auth mode is oidc_forwarding")
+	})
+
+	t.Run("remote invalid auth mode rejected", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		err := manager.CreateCompositeDatabase("composite1", []ConstituentRef{
+			{
+				DatabaseName: "remote_db",
+				Alias:        "db1",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "http://remote:7474",
+				AuthMode:     "token_exchange",
+			},
+		})
+		require.ErrorContains(t, err, "auth mode")
 	})
 
 	t.Run("constituent aliases resolve to actual databases", func(t *testing.T) {
@@ -61,6 +118,221 @@ func TestCreateCompositeDatabase_EdgeCases(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.True(t, manager.IsCompositeDatabase("composite1"))
+	})
+}
+
+func TestConstituentRefValidate_RemoteAuthModes(t *testing.T) {
+	tests := []struct {
+		name        string
+		ref         ConstituentRef
+		errContains string
+	}{
+		{
+			name: "empty alias rejected",
+			ref: ConstituentRef{
+				DatabaseName: "db",
+				Type:         "local",
+				AccessMode:   "read",
+			},
+			errContains: "alias cannot be empty",
+		},
+		{
+			name: "empty database name rejected",
+			ref: ConstituentRef{
+				Alias:      "a",
+				Type:       "local",
+				AccessMode: "read",
+			},
+			errContains: "database name cannot be empty",
+		},
+		{
+			name: "invalid constituent type rejected",
+			ref: ConstituentRef{
+				Alias:        "a",
+				DatabaseName: "db",
+				Type:         "external",
+				AccessMode:   "read",
+			},
+			errContains: "type must be 'local' or 'remote'",
+		},
+		{
+			name: "invalid access mode rejected",
+			ref: ConstituentRef{
+				Alias:        "a",
+				DatabaseName: "db",
+				Type:         "local",
+				AccessMode:   "admin",
+			},
+			errContains: "access mode must be",
+		},
+		{
+			name: "remote requires uri",
+			ref: ConstituentRef{
+				Alias:        "a",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+			},
+			errContains: "URI cannot be empty",
+		},
+		{
+			name: "remote defaults to oidc forwarding when mode omitted",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+			},
+		},
+		{
+			name: "remote rejects invalid auth mode",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+				AuthMode:     "bad_mode",
+			},
+			errContains: "auth mode",
+		},
+		{
+			name: "user_password requires user",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+				AuthMode:     "user_password",
+				Password:     "pass",
+			},
+			errContains: "user cannot be empty",
+		},
+		{
+			name: "user_password requires password",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+				AuthMode:     "user_password",
+				User:         "svc",
+			},
+			errContains: "password cannot be empty",
+		},
+		{
+			name: "oidc forwarding rejects user/password",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+				AuthMode:     "oidc_forwarding",
+				User:         "svc",
+				Password:     "pass",
+			},
+			errContains: "cannot be set when auth mode is oidc_forwarding",
+		},
+		{
+			name: "user_password valid",
+			ref: ConstituentRef{
+				Alias:        "r1",
+				DatabaseName: "db",
+				Type:         "remote",
+				AccessMode:   "read",
+				URI:          "https://remote.example/nornic-db",
+				AuthMode:     "user_password",
+				User:         "svc",
+				Password:     "pass",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.ref.Validate()
+			if tc.errContains == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.errContains)
+		})
+	}
+}
+
+func TestGetStorageWithAuth_ForwardsTokenToRemoteFactory(t *testing.T) {
+	manager, _ := setupTestManager(t)
+
+	var capturedToken string
+	manager.remoteEngineFactory = func(ref ConstituentRef, authToken string) (storage.Engine, error) {
+		capturedToken = authToken
+		return storage.NewMemoryEngine(), nil
+	}
+
+	err := manager.CreateCompositeDatabase("composite_remote", []ConstituentRef{
+		{
+			DatabaseName: "remote_db",
+			Alias:        "r1",
+			Type:         "remote",
+			AccessMode:   "read",
+			URI:          "http://remote.example:7474",
+		},
+	})
+	require.NoError(t, err)
+
+	engine, err := manager.GetStorageWithAuth("composite_remote", "Bearer svc-principal-token")
+	require.NoError(t, err)
+	require.NotNil(t, engine)
+
+	// Trigger at least one routed read through the composite wrapper.
+	_, err = engine.AllNodes()
+	require.NoError(t, err)
+	require.Equal(t, "Bearer svc-principal-token", capturedToken)
+}
+
+func TestGetStorageWithAuth_RemoteFactoryErrorPaths(t *testing.T) {
+	t.Run("missing remote factory", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		require.NoError(t, manager.CreateCompositeDatabase("composite_remote", []ConstituentRef{
+			{DatabaseName: "remote_db", Alias: "r1", Type: "remote", AccessMode: "read", URI: "http://remote.example"},
+		}))
+
+		_, err := manager.GetStorageWithAuth("composite_remote", "Bearer token")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "remote engine factory is not configured")
+	})
+
+	t.Run("remote factory returns error", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		require.NoError(t, manager.CreateCompositeDatabase("composite_remote", []ConstituentRef{
+			{DatabaseName: "remote_db", Alias: "r1", Type: "remote", AccessMode: "read", URI: "http://remote.example"},
+		}))
+		manager.remoteEngineFactory = func(_ ConstituentRef, _ string) (storage.Engine, error) {
+			return nil, fmt.Errorf("dial failed")
+		}
+
+		_, err := manager.GetStorageWithAuth("composite_remote", "Bearer token")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "dial failed")
+	})
+
+	t.Run("remote factory returns nil engine", func(t *testing.T) {
+		manager, _ := setupTestManager(t)
+		require.NoError(t, manager.CreateCompositeDatabase("composite_remote", []ConstituentRef{
+			{DatabaseName: "remote_db", Alias: "r1", Type: "remote", AccessMode: "read", URI: "http://remote.example"},
+		}))
+		manager.remoteEngineFactory = func(_ ConstituentRef, _ string) (storage.Engine, error) {
+			return nil, nil
+		}
+
+		_, err := manager.GetStorageWithAuth("composite_remote", "Bearer token")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "returned nil")
 	})
 }
 

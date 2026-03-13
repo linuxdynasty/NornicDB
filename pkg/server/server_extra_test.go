@@ -26,6 +26,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testUIAssetsFS() fs.FS {
@@ -1649,8 +1650,11 @@ func TestDatabaseAdapterAndConversionHelpers(t *testing.T) {
 		map[string]interface{}{
 			"alias":         "main",
 			"database_name": "nornic",
-			"type":          "local",
+			"type":          "remote",
 			"access_mode":   "read",
+			"uri":           "https://remote-1.example/nornic-db",
+			"secret_ref":    "spn-prod-a",
+			"auth_mode":     "oidc_forwarding",
 		},
 	}
 	err = adapter.CreateCompositeDatabase("cmp_adapter", constituents)
@@ -1661,12 +1665,29 @@ func TestDatabaseAdapterAndConversionHelpers(t *testing.T) {
 	err = adapter.AddConstituent("cmp_adapter", map[string]interface{}{
 		"alias":         "extra",
 		"database_name": "db_adapter_b",
-		"type":          "local",
+		"type":          "remote",
 		"access_mode":   "read",
+		"uri":           "https://remote-2.example/nornic-db",
+		"secret_ref":    "spn-prod-b",
+		"auth_mode":     "user_password",
+		"user":          "svc-user",
+		"password":      "svc-pass",
 	})
 	assert.NoError(t, err)
-	_, err = adapter.GetCompositeConstituents("cmp_adapter")
+	constituentList, err := adapter.GetCompositeConstituents("cmp_adapter")
 	assert.NoError(t, err)
+	require.Len(t, constituentList, 2)
+	first, ok := constituentList[0].(multidb.ConstituentRef)
+	require.True(t, ok)
+	assert.Equal(t, "https://remote-1.example/nornic-db", first.URI)
+	assert.Equal(t, "spn-prod-a", first.SecretRef)
+	assert.Equal(t, "oidc_forwarding", first.AuthMode)
+	second, ok := constituentList[1].(multidb.ConstituentRef)
+	require.True(t, ok)
+	assert.Equal(t, "https://remote-2.example/nornic-db", second.URI)
+	assert.Equal(t, "spn-prod-b", second.SecretRef)
+	assert.Equal(t, "user_password", second.AuthMode)
+	assert.Equal(t, "svc-user", second.User)
 	err = adapter.RemoveConstituent("cmp_adapter", "extra")
 	assert.NoError(t, err)
 	err = adapter.AddConstituent("cmp_adapter", 123)

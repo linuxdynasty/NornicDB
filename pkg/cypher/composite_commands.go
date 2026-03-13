@@ -9,6 +9,213 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 )
 
+func parseCypherValueToken(tok string) (string, error) {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return "", nil
+	}
+	if len(tok) >= 2 {
+		if (tok[0] == '\'' && tok[len(tok)-1] == '\'') || (tok[0] == '"' && tok[len(tok)-1] == '"') {
+			return tok[1 : len(tok)-1], nil
+		}
+	}
+	if strings.HasPrefix(tok, "`") {
+		return unquoteBacktickIdentifier(tok)
+	}
+	return tok, nil
+}
+
+func parseConstituentFromTokens(tokens []string, idx *int) (map[string]interface{}, error) {
+	if *idx >= len(tokens) || !strings.EqualFold(tokens[*idx], "ALIAS") {
+		return nil, fmt.Errorf("invalid constituent syntax: ALIAS expected")
+	}
+	*idx = *idx + 1
+
+	if *idx >= len(tokens) {
+		return nil, fmt.Errorf("invalid constituent syntax: alias name cannot be empty")
+	}
+	aliasName, err := parseCypherValueToken(tokens[*idx])
+	if err != nil {
+		return nil, fmt.Errorf("invalid constituent syntax: alias name: %w", err)
+	}
+	*idx = *idx + 1
+	if strings.TrimSpace(aliasName) == "" {
+		return nil, fmt.Errorf("invalid constituent syntax: alias name cannot be empty")
+	}
+
+	if *idx+1 >= len(tokens) || !strings.EqualFold(tokens[*idx], "FOR") || !strings.EqualFold(tokens[*idx+1], "DATABASE") {
+		return nil, fmt.Errorf("invalid constituent syntax: FOR DATABASE expected")
+	}
+	*idx += 2
+
+	if *idx >= len(tokens) {
+		return nil, fmt.Errorf("invalid constituent syntax: database name cannot be empty")
+	}
+	constituentDbName, err := parseCypherValueToken(tokens[*idx])
+	if err != nil {
+		return nil, fmt.Errorf("invalid constituent syntax: database name: %w", err)
+	}
+	*idx = *idx + 1
+	if strings.TrimSpace(constituentDbName) == "" {
+		return nil, fmt.Errorf("invalid constituent syntax: database name cannot be empty")
+	}
+
+	ref := map[string]interface{}{
+		"alias":         aliasName,
+		"database_name": constituentDbName,
+		"type":          "local",
+		"access_mode":   "read_write",
+	}
+	hasUserPassword := false
+	hasOIDCForwarding := false
+
+	for *idx < len(tokens) {
+		if strings.EqualFold(tokens[*idx], "ALIAS") {
+			break
+		}
+
+		switch {
+		case strings.EqualFold(tokens[*idx], "AT"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: remote URI expected after AT")
+			}
+			uri, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: remote URI: %w", err)
+			}
+			*idx = *idx + 1
+			if strings.TrimSpace(uri) == "" {
+				return nil, fmt.Errorf("invalid constituent syntax: remote URI cannot be empty")
+			}
+			ref["uri"] = uri
+			ref["type"] = "remote"
+
+		case strings.EqualFold(tokens[*idx], "USER"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: user cannot be empty")
+			}
+			user, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: user: %w", err)
+			}
+			*idx = *idx + 1
+			if strings.TrimSpace(user) == "" {
+				return nil, fmt.Errorf("invalid constituent syntax: user cannot be empty")
+			}
+			ref["user"] = user
+			hasUserPassword = true
+
+		case strings.EqualFold(tokens[*idx], "PASSWORD"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: password cannot be empty")
+			}
+			password, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: password: %w", err)
+			}
+			*idx = *idx + 1
+			if strings.TrimSpace(password) == "" {
+				return nil, fmt.Errorf("invalid constituent syntax: password cannot be empty")
+			}
+			ref["password"] = password
+			hasUserPassword = true
+
+		case strings.EqualFold(tokens[*idx], "OIDC"):
+			*idx = *idx + 1
+			if *idx+1 >= len(tokens) || !strings.EqualFold(tokens[*idx], "CREDENTIAL") || !strings.EqualFold(tokens[*idx+1], "FORWARDING") {
+				return nil, fmt.Errorf("invalid constituent syntax: OIDC CREDENTIAL FORWARDING expected")
+			}
+			*idx += 2
+			hasOIDCForwarding = true
+
+		case strings.EqualFold(tokens[*idx], "SECRET"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) || !strings.EqualFold(tokens[*idx], "REF") {
+				return nil, fmt.Errorf("invalid constituent syntax: SECRET REF expected")
+			}
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: secret ref cannot be empty")
+			}
+			secretRef, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: secret ref: %w", err)
+			}
+			*idx = *idx + 1
+			if strings.TrimSpace(secretRef) == "" {
+				return nil, fmt.Errorf("invalid constituent syntax: secret ref cannot be empty")
+			}
+			ref["secret_ref"] = secretRef
+
+		case strings.EqualFold(tokens[*idx], "TYPE"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: type cannot be empty")
+			}
+			typeVal, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: type: %w", err)
+			}
+			*idx = *idx + 1
+			typeVal = strings.ToLower(strings.TrimSpace(typeVal))
+			if typeVal != "local" && typeVal != "remote" {
+				return nil, fmt.Errorf("invalid constituent syntax: type must be local or remote")
+			}
+			// Reject contradictory AT + TYPE local: AT implies remote.
+			if existingType, ok := ref["type"]; ok && existingType == "remote" && typeVal == "local" {
+				return nil, fmt.Errorf("invalid constituent syntax: TYPE local contradicts AT (remote URI already specified)")
+			}
+			ref["type"] = typeVal
+
+		case strings.EqualFold(tokens[*idx], "ACCESS"):
+			*idx = *idx + 1
+			if *idx >= len(tokens) {
+				return nil, fmt.Errorf("invalid constituent syntax: access mode cannot be empty")
+			}
+			accessVal, err := parseCypherValueToken(tokens[*idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid constituent syntax: access mode: %w", err)
+			}
+			*idx = *idx + 1
+			accessVal = strings.ToLower(strings.TrimSpace(accessVal))
+			switch accessVal {
+			case "read", "write", "read_write":
+				ref["access_mode"] = accessVal
+			default:
+				return nil, fmt.Errorf("invalid constituent syntax: access mode must be read, write, or read_write")
+			}
+
+		default:
+			return nil, fmt.Errorf("invalid constituent syntax: unexpected token '%s'", tokens[*idx])
+		}
+	}
+
+	if t, _ := ref["type"].(string); t == "remote" {
+		switch {
+		case hasOIDCForwarding && hasUserPassword:
+			return nil, fmt.Errorf("invalid constituent syntax: cannot combine OIDC CREDENTIAL FORWARDING with USER/PASSWORD")
+		case hasUserPassword:
+			user, _ := ref["user"].(string)
+			password, _ := ref["password"].(string)
+			user = strings.TrimSpace(user)
+			password = strings.TrimSpace(password)
+			if user == "" || password == "" {
+				return nil, fmt.Errorf("invalid constituent syntax: USER and PASSWORD must both be provided")
+			}
+			ref["auth_mode"] = "user_password"
+		default:
+			ref["auth_mode"] = "oidc_forwarding"
+		}
+	} else if hasUserPassword || hasOIDCForwarding {
+		return nil, fmt.Errorf("invalid constituent syntax: USER/PASSWORD and OIDC CREDENTIAL FORWARDING require a remote constituent (AT '<url>' or TYPE remote)")
+	}
+
+	return ref, nil
+}
+
 // executeCreateCompositeDatabase handles CREATE COMPOSITE DATABASE command.
 //
 // Syntax:
@@ -76,78 +283,22 @@ func (e *StorageExecutor) executeCreateCompositeDatabase(ctx context.Context, cy
 		return nil, fmt.Errorf("invalid CREATE COMPOSITE DATABASE syntax: database name cannot be empty")
 	}
 
-	// Parse constituents (ALIAS ... FOR DATABASE ...)
+	// Parse constituents (ALIAS ... FOR DATABASE ... [AT ...] [SECRET REF ...])
 	constituents := []interface{}{}
 	remaining := strings.TrimSpace(cypher[dbNameEnd:])
-
-	for remaining != "" {
-		// Look for "ALIAS" keyword
-		aliasIdx := findKeywordIndex(remaining, "ALIAS")
-		if aliasIdx == -1 {
-			break
+	if remaining != "" {
+		tokens, err := tokenize(remaining)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CREATE COMPOSITE DATABASE syntax: %w", err)
 		}
-
-		// Skip "ALIAS" and whitespace
-		aliasStart := aliasIdx + len("ALIAS")
-		for aliasStart < len(remaining) && isWhitespace(remaining[aliasStart]) {
-			aliasStart++
-		}
-
-		// Find "FOR DATABASE"
-		forIdx := findMultiWordKeywordIndex(remaining[aliasStart:], "FOR", "DATABASE")
-		if forIdx == -1 {
-			return nil, fmt.Errorf("invalid constituent syntax: FOR DATABASE expected")
-		}
-
-		// Extract alias name
-		aliasName := strings.TrimSpace(remaining[aliasStart : aliasStart+forIdx])
-		aliasName = strings.ReplaceAll(aliasName, " ", "")
-		aliasName = strings.ReplaceAll(aliasName, "\t", "")
-		aliasName = strings.ReplaceAll(aliasName, "\n", "")
-		aliasName = strings.ReplaceAll(aliasName, "\r", "")
-
-		if aliasName == "" {
-			return nil, fmt.Errorf("invalid constituent syntax: alias name cannot be empty")
-		}
-
-		// Skip "FOR DATABASE" and whitespace
-		dbStart := aliasStart + forIdx + len("FOR")
-		for dbStart < len(remaining) && isWhitespace(remaining[dbStart]) {
-			dbStart++
-		}
-		if dbStart+len("DATABASE") <= len(remaining) && strings.EqualFold(remaining[dbStart:dbStart+len("DATABASE")], "DATABASE") {
-			dbStart += len("DATABASE")
-			for dbStart < len(remaining) && isWhitespace(remaining[dbStart]) {
-				dbStart++
+		idx := 0
+		for idx < len(tokens) {
+			ref, err := parseConstituentFromTokens(tokens, &idx)
+			if err != nil {
+				return nil, err
 			}
+			constituents = append(constituents, ref)
 		}
-
-		// Extract database name (until newline or end)
-		dbNameEnd2 := dbStart
-		for dbNameEnd2 < len(remaining) && !isWhitespace(remaining[dbNameEnd2]) && remaining[dbNameEnd2] != '\n' {
-			dbNameEnd2++
-		}
-
-		constituentDbName := strings.TrimSpace(remaining[dbStart:dbNameEnd2])
-		constituentDbName = strings.ReplaceAll(constituentDbName, " ", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\t", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\n", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\r", "")
-
-		if constituentDbName == "" {
-			return nil, fmt.Errorf("invalid constituent syntax: database name cannot be empty")
-		}
-
-		// Add constituent (default to local, read_write)
-		constituents = append(constituents, map[string]interface{}{
-			"alias":         aliasName,
-			"database_name": constituentDbName,
-			"type":          "local",
-			"access_mode":   "read_write",
-		})
-
-		// Move to next constituent
-		remaining = strings.TrimSpace(remaining[dbNameEnd2:])
 	}
 
 	if len(constituents) == 0 {
@@ -321,6 +472,10 @@ func (e *StorageExecutor) executeShowConstituents(ctx context.Context, cypher st
 				ref.DatabaseName,
 				ref.Type,
 				ref.AccessMode,
+				ref.URI,
+				ref.SecretRef,
+				ref.AuthMode,
+				ref.User,
 			}
 		} else if m, ok := c.(map[string]interface{}); ok {
 			// Fallback for map format (if returned as map)
@@ -329,15 +484,19 @@ func (e *StorageExecutor) executeShowConstituents(ctx context.Context, cypher st
 				m["database_name"],
 				m["type"],
 				m["access_mode"],
+				m["uri"],
+				m["secret_ref"],
+				m["auth_mode"],
+				m["user"],
 			}
 		} else {
 			// Unknown type - return empty row
-			rows[i] = []interface{}{"", "", "", ""}
+			rows[i] = []interface{}{"", "", "", "", "", "", "", ""}
 		}
 	}
 
 	return &ExecuteResult{
-		Columns: []string{"alias", "database", "type", "access_mode"},
+		Columns: []string{"alias", "database", "type", "access_mode", "uri", "secret_ref", "auth_mode", "user"},
 		Rows:    rows,
 	}, nil
 }
@@ -434,81 +593,43 @@ func (e *StorageExecutor) executeAlterCompositeDatabase(ctx context.Context, cyp
 	upperRemaining := strings.ToUpper(remaining)
 
 	if strings.HasPrefix(upperRemaining, "ADD ALIAS") {
-		// ADD ALIAS alias FOR DATABASE db
-		addIdx := findMultiWordKeywordIndex(remaining, "ADD", "ALIAS")
-		if addIdx == -1 {
+		tokens, err := tokenize(remaining)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ALTER COMPOSITE DATABASE syntax: %w", err)
+		}
+		if len(tokens) < 2 || !strings.EqualFold(tokens[0], "ADD") || !strings.EqualFold(tokens[1], "ALIAS") {
 			return nil, fmt.Errorf("invalid ALTER COMPOSITE DATABASE syntax: ADD ALIAS expected")
 		}
-
-		// Skip "ADD ALIAS" and whitespace
-		aliasStart := addIdx + len("ADD")
-		for aliasStart < len(remaining) && isWhitespace(remaining[aliasStart]) {
-			aliasStart++
+		idx := 1
+		constituent, err := parseConstituentFromTokens(tokens, &idx)
+		if err != nil {
+			return nil, err
 		}
-		if aliasStart+len("ALIAS") <= len(remaining) && strings.EqualFold(remaining[aliasStart:aliasStart+len("ALIAS")], "ALIAS") {
-			aliasStart += len("ALIAS")
-			for aliasStart < len(remaining) && isWhitespace(remaining[aliasStart]) {
-				aliasStart++
-			}
+		if idx != len(tokens) {
+			return nil, fmt.Errorf("invalid ADD ALIAS syntax: unexpected token '%s'", tokens[idx])
 		}
-
-		// Find "FOR DATABASE"
-		forIdx := findMultiWordKeywordIndex(remaining[aliasStart:], "FOR", "DATABASE")
-		if forIdx == -1 {
-			return nil, fmt.Errorf("invalid ADD ALIAS syntax: FOR DATABASE expected")
-		}
-
-		// Extract alias name
-		aliasName := strings.TrimSpace(remaining[aliasStart : aliasStart+forIdx])
-		aliasName = strings.ReplaceAll(aliasName, " ", "")
-		aliasName = strings.ReplaceAll(aliasName, "\t", "")
-		aliasName = strings.ReplaceAll(aliasName, "\n", "")
-		aliasName = strings.ReplaceAll(aliasName, "\r", "")
-
-		if aliasName == "" {
-			return nil, fmt.Errorf("invalid ADD ALIAS syntax: alias name cannot be empty")
-		}
-
-		// Skip "FOR DATABASE" and whitespace
-		dbStart := aliasStart + forIdx + len("FOR")
-		for dbStart < len(remaining) && isWhitespace(remaining[dbStart]) {
-			dbStart++
-		}
-		if dbStart+len("DATABASE") <= len(remaining) && strings.EqualFold(remaining[dbStart:dbStart+len("DATABASE")], "DATABASE") {
-			dbStart += len("DATABASE")
-			for dbStart < len(remaining) && isWhitespace(remaining[dbStart]) {
-				dbStart++
-			}
-		}
-
-		// Extract database name
-		constituentDbName := strings.TrimSpace(remaining[dbStart:])
-		constituentDbName = strings.ReplaceAll(constituentDbName, " ", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\t", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\n", "")
-		constituentDbName = strings.ReplaceAll(constituentDbName, "\r", "")
-
-		if constituentDbName == "" {
-			return nil, fmt.Errorf("invalid ADD ALIAS syntax: database name cannot be empty")
-		}
-
-		// Convert to ConstituentRef format (interface{} for DatabaseManagerInterface)
-		constituent := map[string]interface{}{
-			"alias":         aliasName,
-			"database_name": constituentDbName,
-			"type":          "local",
-			"access_mode":   "read_write",
-		}
+		aliasName, _ := constituent["alias"].(string)
+		constituentDbName, _ := constituent["database_name"].(string)
 
 		// Add constituent using the interface
-		err := e.dbManager.AddConstituent(dbName, constituent)
+		err = e.dbManager.AddConstituent(dbName, constituent)
 		if err != nil {
 			return nil, fmt.Errorf("failed to add constituent to composite database '%s': %w", dbName, err)
 		}
 
 		return &ExecuteResult{
-			Columns: []string{"composite_database", "action", "alias", "database"},
-			Rows:    [][]interface{}{{dbName, "ADD", aliasName, constituentDbName}},
+			Columns: []string{"composite_database", "action", "alias", "database", "type", "uri", "secret_ref", "auth_mode", "user"},
+			Rows: [][]interface{}{{
+				dbName,
+				"ADD",
+				aliasName,
+				constituentDbName,
+				constituent["type"],
+				constituent["uri"],
+				constituent["secret_ref"],
+				constituent["auth_mode"],
+				constituent["user"],
+			}},
 		}, nil
 
 	} else if strings.HasPrefix(upperRemaining, "DROP ALIAS") {

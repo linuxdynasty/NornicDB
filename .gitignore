@@ -68,3 +68,4 @@ neural/models/
 llama.cpp/
 macos/MenuBarApp/.build
 pkg/cypher/file:
+.todos.md

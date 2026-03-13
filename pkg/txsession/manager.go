@@ -60,6 +60,17 @@ func (m *Manager) Open(ctx context.Context, dbName string) (*Session, error) {
 		return nil, err
 	}
 
+	return m.OpenWithExecutor(ctx, dbName, executor)
+}
+
+// OpenWithExecutor opens a transaction session using a pre-built executor.
+// This is used when executor construction depends on request context (for example
+// forwarding auth to remote composite constituents).
+func (m *Manager) OpenWithExecutor(ctx context.Context, dbName string, executor *cypher.StorageExecutor) (*Session, error) {
+	if executor == nil {
+		return nil, fmt.Errorf("transaction executor is not available")
+	}
+
 	if _, err := executor.Execute(ctx, "BEGIN", nil); err != nil {
 		return nil, err
 	}

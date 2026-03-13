@@ -5,6 +5,7 @@ NornicDB supports multiple isolated databases within a single storage backend, s
 ## Overview
 
 Multi-database support enables:
+
 - **Complete data isolation** between databases
 - **Application-level multi-tenancy** - each database can be used as an isolation boundary
 - **Neo4j 4.x compatibility** - works with existing Neo4j drivers and tools
@@ -24,12 +25,14 @@ By default, NornicDB uses **`"nornic"`** as the default database name (Neo4j use
 This is configurable:
 
 **Config File:**
+
 ```yaml
 database:
   default_database: "custom"
 ```
 
 **Environment Variable:**
+
 ```bash
 export NORNICDB_DEFAULT_DATABASE=custom
 # Or Neo4j-compatible:
@@ -37,6 +40,7 @@ export NEO4J_dbms_default__database=custom
 ```
 
 **Configuration Precedence:**
+
 1. CLI arguments (highest priority)
 2. Environment variables
 3. Config file
@@ -66,11 +70,13 @@ DROP DATABASE tenant_a
 ### Switching Databases
 
 **In Cypher Shell:**
+
 ```cypher
 :USE tenant_a
 ```
 
 **In Drivers:**
+
 ```python
 # Python
 driver = GraphDatabase.driver(
@@ -87,6 +93,7 @@ const driver = neo4j.driver(
 ```
 
 **HTTP API:**
+
 ```
 POST /db/tenant_a/tx/commit
 ```
@@ -100,6 +107,7 @@ curl http://localhost:7474/
 ```
 
 **Response:**
+
 ```json
 {
   "bolt_direct": "bolt://localhost:7687",
@@ -137,6 +145,7 @@ The system database (`"system"`) is a special database used for NornicDB's inter
 - **System configuration** - Internal system settings
 
 **User Storage:**
+
 - All user accounts are stored as nodes with labels `["_User", "_System"]` in the system database
 - Users are automatically loaded from the system database on server startup
 - User accounts are included in database backups automatically
@@ -145,6 +154,7 @@ The system database (`"system"`) is a special database used for NornicDB's inter
 See **[User Storage in System Database](#system-database)** for details.
 
 The system database is:
+
 - Automatically created
 - Not accessible to users for regular queries (internal use only)
 - Cannot be dropped
@@ -154,6 +164,7 @@ The system database is:
 When you upgrade to NornicDB with multi-database support, **existing data is automatically migrated** to the default database namespace on first startup.
 
 **What happens:**
+
 - On first startup, NornicDB detects any data without namespace prefixes
 - All unprefixed nodes and edges are automatically migrated to the default database (`"nornic"` by default)
 - All indexes are automatically updated
@@ -163,6 +174,7 @@ When you upgrade to NornicDB with multi-database support, **existing data is aut
 **No action required** - migration happens automatically and transparently.
 
 **Example:**
+
 ```cypher
 // Before upgrade: data stored as "node-123"
 // After upgrade: automatically becomes "nornic:node-123"
@@ -173,6 +185,7 @@ MATCH (n) RETURN n
 ## Backwards Compatibility
 
 ✅ **Fully backwards compatible:**
+
 - Existing code without database parameter works with default database
 - All existing data automatically migrated and accessible in default database
 - No breaking changes to existing APIs
@@ -181,18 +194,21 @@ MATCH (n) RETURN n
 ## Configuration Examples
 
 ### Default Configuration
+
 ```yaml
 database:
-  default_database: "nornic"  # Default
+  default_database: "nornic" # Default
 ```
 
 ### Custom Default Database
+
 ```yaml
 database:
   default_database: "main"
 ```
 
 ### Environment Variable Override
+
 ```bash
 export NORNICDB_DEFAULT_DATABASE=production
 ./nornicdb serve
@@ -215,12 +231,14 @@ CREATE ALIAS current FOR DATABASE v1.2.3
 Aliases work exactly like database names - you can use them anywhere a database name is expected:
 
 **In Cypher Shell:**
+
 ```cypher
 :USE main
 MATCH (n) RETURN n
 ```
 
 **In Drivers:**
+
 ```python
 # Python
 driver = GraphDatabase.driver(
@@ -230,6 +248,7 @@ driver = GraphDatabase.driver(
 ```
 
 **HTTP API:**
+
 ```
 POST /db/main/tx/commit
 ```
@@ -331,6 +350,7 @@ By default, all limits are **unlimited** (0). You must explicitly set limits for
 ### Limit Persistence
 
 Limits are **fully persisted** to disk as part of database metadata:
+
 - Limits are saved immediately when set
 - Limits survive server restarts
 - Limits are automatically loaded on startup
@@ -341,17 +361,20 @@ Limits are **fully persisted** to disk as part of database metadata:
 All limits are enforced at runtime with clear, actionable error messages:
 
 **MaxNodes/MaxEdges**: When the count limit is reached, create operations fail with:
+
 ```
 storage limit exceeded: database 'tenant_a' has reached max_nodes limit (1000/1000)
 ```
 
 **MaxBytes**: When the size limit would be exceeded, create operations fail with:
+
 ```
-storage limit exceeded: database 'tenant_a' would exceed max_bytes limit 
+storage limit exceeded: database 'tenant_a' would exceed max_bytes limit
 (current: 500 bytes, limit: 1024 bytes, new entity: 600 bytes)
 ```
 
 **MaxBytes Implementation Details**:
+
 - Uses **exact size calculation**, not estimation
 - Calculates the actual serialized size of each node/edge using gob encoding
 - Tracks storage size incrementally (initialized lazily on first access)
@@ -470,6 +493,7 @@ SHOW CONSTRAINTS  -- Shows constraints from all constituents
 ```
 
 **Schema Merging Details:**
+
 - **Constraints**: All constraint types (UNIQUE, NODE_KEY, EXISTS) are merged from all constituents
 - **Indexes**: All index types are merged:
   - Property indexes (single property)
@@ -487,14 +511,152 @@ SHOW CONSTRAINTS  -- Shows constraints from all constituents
 3. **Write Routing**: Write operations are routed to the appropriate constituent based on routing rules
 4. **Schema Merging**: Constraints and indexes from all constituents are merged into a unified schema view
 
+### Remote Constituents
+
+Composite databases support remote constituents directly in Cypher. A remote constituent points at another NornicDB server and is queried as part of the same composite route.
+
+#### Remote Constituent Fields
+
+- `alias`: local name used in the composite catalog.
+- `database_name`: target database name on the remote server.
+- `type`: must be `remote`.
+- `access_mode`: `read`, `write`, or `read_write`.
+- `uri`: remote service base URL (for example: `https://remote-host/nornic-db`).
+- `secret_ref` (optional): logical secret reference for your deployment automation (metadata only; not runtime-resolved by query execution).
+- `auth_mode`: `oidc_forwarding` (default) or `user_password`.
+- `user`/`password`: explicit remote credentials when `auth_mode` is `user_password`.
+
+#### Authentication and Identity Propagation
+
+When a query is executed against a composite database with remote constituents:
+
+1. NornicDB reads the caller `Authorization` header from the incoming request.
+2. NornicDB forwards that header to remote constituent requests.
+3. The remote server evaluates auth/RBAC for the same caller identity.
+
+This preserves service-principal or user identity across Fabric-style fan-out.
+
+#### Define Remote Constituents in Cypher
+
+```cypher
+CREATE COMPOSITE DATABASE caremark
+  ALIAS tr FOR DATABASE caremark_tr
+    AT "https://shard-a.example/nornic-db"
+    OIDC CREDENTIAL FORWARDING
+    TYPE remote
+    ACCESS read_write
+  ALIAS txt FOR DATABASE caremark_txt
+    AT "https://shard-b.example/nornic-db"
+    USER "svc-caremark"
+    PASSWORD "svc-password"
+    TYPE remote
+    ACCESS read_write
+```
+
+```cypher
+ALTER COMPOSITE DATABASE caremark
+  ADD ALIAS rx FOR DATABASE caremark_rx
+    AT "https://shard-c.example/nornic-db"
+    SECRET REF "spn-caremark-c"
+    OIDC CREDENTIAL FORWARDING
+    TYPE remote
+    ACCESS read
+```
+
+```cypher
+SHOW CONSTITUENTS FOR COMPOSITE DATABASE caremark
+```
+
+Result columns include `alias`, `database`, `type`, `access_mode`, `uri`, `secret_ref`, `auth_mode`, `user`.
+
+#### Remote Auth Behavior (Neo4j-Compatible)
+
+- `AT '<url>' USER <user> PASSWORD '<password>'`:
+  uses explicit Basic auth to the remote constituent.
+- `AT '<url>' OIDC CREDENTIAL FORWARDING`:
+  forwards the caller `Authorization` header to the remote constituent.
+- `AT '<url>'` with no explicit auth clause:
+  defaults to OIDC credential forwarding.
+- `USER/PASSWORD` and `OIDC CREDENTIAL FORWARDING` cannot be combined in one constituent clause.
+
+#### Remote Credential Encryption Key Selection
+
+For remote constituents using `USER/PASSWORD`, the password is encrypted before metadata persistence.
+
+Key selection order on the coordinator:
+
+1. `NORNICDB_REMOTE_CREDENTIALS_KEY` (recommended, dedicated key)
+2. `NORNICDB_ENCRYPTION_PASSWORD` / `database.encryption_password`
+3. `NORNICDB_AUTH_JWT_SECRET` / `auth.jwt_secret`
+
+Notes:
+
+- `NORNICDB_REMOTE_CREDENTIALS_KEY` is a separate key and **overrides** fallback values.
+- If fallback key sources are used, the server logs a warning at startup.
+- JWT-secret fallback is supported for compatibility, but dedicated key separation is more secure.
+
+#### End-to-End Example
+
+Coordinator: `https://coordinator.example/nornic-db`  
+Remote shard A: `https://shard-a.example/nornic-db`  
+Remote shard B: `https://shard-b.example/nornic-db`
+
+Create/query data directly on remote shards first:
+
+```bash
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"CREATE (n:Translation {id:\"tr-1\", textKey:\"WELCOME\"})"}]}' \
+  "https://shard-a.example/nornic-db/db/caremark_tr/tx/commit"
+
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"CREATE (n:TranslationText {translationId:\"tr-1\", locale:\"en-US\", value:\"Welcome\"})"}]}' \
+  "https://shard-b.example/nornic-db/db/caremark_txt/tx/commit"
+```
+
+#### Verification Query (Composite Read)
+
+```cypher
+:USE caremark
+MATCH (n)
+RETURN labels(n) AS labels, count(*) AS c
+ORDER BY labels
+```
+
+Expected: rows from both remote constituents appear in one result stream.
+
+#### Troubleshooting
+
+`Neo.ClientError.Database.General: failed to get remote storage for constituent ... remote engine factory is not configured`
+
+- The coordinator was started without remote-engine factory wiring.
+
+`Neo.ClientError.Database.General: ... dial failed ...`
+
+- `uri` is unreachable, TLS/DNS/network issue, or remote server unavailable.
+
+`Neo.ClientError.Security.Forbidden` from a remote operation
+
+- Caller token was forwarded, but that principal lacks permissions on the remote shard database.
+
+No `Authorization` header on incoming request
+
+- Query can still execute if remote shard allows anonymous/basic access; otherwise auth fails remotely.
+
+`remote user/password auth requires remote credential encryption key configuration`
+
+- Set one of:
+  - `NORNICDB_REMOTE_CREDENTIALS_KEY` (recommended)
+  - `NORNICDB_ENCRYPTION_PASSWORD`
+  - `NORNICDB_AUTH_JWT_SECRET`
+
 ### Limitations
 
-- **Local Constituents Only**: Currently only supports local databases (remote constituents planned for future)
 - **No Distributed Transactions**: Writes to multiple constituents are not atomic
 - **Routing Configuration**: Advanced routing rules are not yet user-configurable (uses default hash-based routing)
 
 ## Limitations (v1)
-
 
 ## See Also
 

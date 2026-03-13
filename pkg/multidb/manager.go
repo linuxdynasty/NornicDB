@@ -54,6 +54,12 @@ type DatabaseManager struct {
 
 	// Cached namespaced engines (avoid recreating)
 	engines map[string]*storage.NamespacedEngine
+
+	// Factory used to create storage engines for remote constituents.
+	remoteEngineFactory RemoteEngineFactory
+
+	// Optional encryptor for remote constituent credentials persisted in metadata.
+	remoteCredentialCipher *remoteCredentialCipher
 }
 
 // DatabaseInfo holds metadata about a database.
@@ -92,6 +98,14 @@ type Config struct {
 
 	// AllowDropDefault allows dropping the default database
 	AllowDropDefault bool
+
+	// RemoteEngineFactory creates a storage engine for a remote constituent.
+	// If nil, remote constituents are not executable (metadata may still be stored).
+	RemoteEngineFactory RemoteEngineFactory
+
+	// RemoteCredentialEncryptionKey encrypts remote constituent user/password values
+	// before metadata persistence. If empty, user_password auth mode is rejected.
+	RemoteCredentialEncryptionKey string
 }
 
 // DefaultConfig returns default configuration.
@@ -138,10 +152,18 @@ func NewDatabaseManager(inner storage.Engine, config *Config) (*DatabaseManager,
 	}
 
 	m := &DatabaseManager{
-		inner:     inner,
-		databases: make(map[string]*DatabaseInfo),
-		config:    config,
-		engines:   make(map[string]*storage.NamespacedEngine),
+		inner:               inner,
+		databases:           make(map[string]*DatabaseInfo),
+		config:              config,
+		engines:             make(map[string]*storage.NamespacedEngine),
+		remoteEngineFactory: config.RemoteEngineFactory,
+	}
+	if key := strings.TrimSpace(config.RemoteCredentialEncryptionKey); key != "" {
+		cipher, err := newRemoteCredentialCipher(key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize remote credential cipher: %w", err)
+		}
+		m.remoteCredentialCipher = cipher
 	}
 
 	// Load existing databases from system namespace
@@ -386,6 +408,12 @@ func (m *DatabaseManager) DropDatabase(name string) error {
 // The returned engine is scoped to the database - all operations only
 // affect data within that namespace.
 func (m *DatabaseManager) GetStorage(name string) (storage.Engine, error) {
+	return m.GetStorageWithAuth(name, "")
+}
+
+// GetStorageWithAuth returns a storage engine for the specified database and forwards
+// authToken to remote constituent factories when composite databases include remotes.
+func (m *DatabaseManager) GetStorageWithAuth(name string, authToken string) (storage.Engine, error) {
 	m.mu.RLock()
 
 	// Check cache first
@@ -421,16 +449,36 @@ func (m *DatabaseManager) GetStorage(name string) (storage.Engine, error) {
 		accessModes := make(map[string]string)
 
 		for _, ref := range info.Constituents {
-			// Resolve actual database name (might be an alias)
-			actualName, err := m.resolveDatabaseInternal(ref.DatabaseName)
-			if err != nil {
-				return nil, fmt.Errorf("constituent database '%s' not found: %w", ref.DatabaseName, err)
-			}
+			var constituentStorage storage.Engine
+			runtimeRef := ref
+			actualName := ref.DatabaseName
+			var err error
 
-			// Get storage for constituent
-			constituentStorage, err := m.getStorageInternal(actualName)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get storage for constituent '%s': %w", ref.DatabaseName, err)
+			switch ref.Type {
+			case "remote":
+				if strings.EqualFold(strings.TrimSpace(runtimeRef.AuthMode), "user_password") {
+					decrypted, decErr := m.decryptStoredRemotePassword(runtimeRef.Password)
+					if decErr != nil {
+						return nil, fmt.Errorf("failed to resolve remote credentials for constituent '%s': %w", runtimeRef.Alias, decErr)
+					}
+					runtimeRef.Password = decrypted
+				}
+				constituentStorage, err = m.getRemoteStorageInternal(runtimeRef, authToken)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get remote storage for constituent '%s': %w", ref.Alias, err)
+				}
+			default:
+				// Resolve actual database name (might be an alias)
+				actualName, err = m.resolveDatabaseInternal(ref.DatabaseName)
+				if err != nil {
+					return nil, fmt.Errorf("constituent database '%s' not found: %w", ref.DatabaseName, err)
+				}
+
+				// Get storage for constituent
+				constituentStorage, err = m.getStorageInternal(actualName)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get storage for constituent '%s': %w", ref.DatabaseName, err)
+				}
 			}
 
 			constituents[ref.Alias] = constituentStorage
@@ -476,6 +524,22 @@ func (m *DatabaseManager) getStorageInternal(name string) (storage.Engine, error
 	engine := storage.NewNamespacedEngine(m.inner, name)
 	m.engines[name] = engine
 
+	return engine, nil
+}
+
+// getRemoteStorageInternal creates an engine for a remote constituent.
+// Must be called with lock held.
+func (m *DatabaseManager) getRemoteStorageInternal(ref ConstituentRef, authToken string) (storage.Engine, error) {
+	if m.remoteEngineFactory == nil {
+		return nil, fmt.Errorf("remote constituent '%s' cannot be opened: remote engine factory is not configured", ref.Alias)
+	}
+	engine, err := m.remoteEngineFactory(ref, authToken)
+	if err != nil {
+		return nil, err
+	}
+	if engine == nil {
+		return nil, fmt.Errorf("remote engine factory returned nil for constituent '%s'", ref.Alias)
+	}
 	return engine, nil
 }
 

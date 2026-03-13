@@ -950,11 +950,36 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	// Get the base storage engine from the DB (unwraps the namespaced storage).
 	// DatabaseManager will create NamespacedEngines for each logical database.
 	storageEngine := db.GetBaseStorageForManager()
+	remoteCredentialEncryptionKey := ""
+	switch {
+	case strings.TrimSpace(os.Getenv("NORNICDB_REMOTE_CREDENTIALS_KEY")) != "":
+		remoteCredentialEncryptionKey = strings.TrimSpace(os.Getenv("NORNICDB_REMOTE_CREDENTIALS_KEY"))
+	case strings.TrimSpace(globalConfig.Database.EncryptionPassword) != "":
+		remoteCredentialEncryptionKey = strings.TrimSpace(globalConfig.Database.EncryptionPassword)
+		log.Printf("⚠️  Remote credential encryption key fallback in use: using database encryption password. Set NORNICDB_REMOTE_CREDENTIALS_KEY for key separation.")
+	case strings.TrimSpace(globalConfig.Auth.JWTSecret) != "":
+		remoteCredentialEncryptionKey = strings.TrimSpace(globalConfig.Auth.JWTSecret)
+		log.Printf("⚠️  Remote credential encryption key fallback in use: using JWT signing secret. Set NORNICDB_REMOTE_CREDENTIALS_KEY for stronger key separation.")
+	}
 	multiDBConfig := &multidb.Config{
-		DefaultDatabase:  globalConfig.Database.DefaultDatabase,
-		SystemDatabase:   "system",
-		MaxDatabases:     0, // Unlimited
-		AllowDropDefault: false,
+		DefaultDatabase:               globalConfig.Database.DefaultDatabase,
+		SystemDatabase:                "system",
+		MaxDatabases:                  0, // Unlimited
+		AllowDropDefault:              false,
+		RemoteCredentialEncryptionKey: remoteCredentialEncryptionKey,
+		RemoteEngineFactory: func(ref multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			useUserPassword := strings.EqualFold(strings.TrimSpace(ref.AuthMode), "user_password")
+			cfg := storage.RemoteEngineConfig{
+				URI:       ref.URI,
+				Database:  ref.DatabaseName,
+				AuthToken: authToken,
+			}
+			if useUserPassword {
+				cfg.User = ref.User
+				cfg.Password = ref.Password
+			}
+			return storage.NewRemoteEngine(cfg)
+		},
 	}
 	dbManager, err := multidb.NewDatabaseManager(storageEngine, multiDBConfig)
 	if err != nil {
