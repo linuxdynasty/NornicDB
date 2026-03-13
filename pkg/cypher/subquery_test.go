@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -133,6 +134,115 @@ func TestCountSubqueryZero(t *testing.T) {
 	if len(result.Rows) != 2 {
 		t.Errorf("Expected 2 results, got %d", len(result.Rows))
 	}
+}
+
+func TestCallSubquery_UseClauseInBodySwitchesNamespace(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+
+	rootStore := storage.NewNamespacedEngine(baseStore, "caremark")
+	trStore := storage.NewNamespacedEngine(baseStore, "caremark.tr")
+
+	exec := NewStorageExecutor(rootStore)
+	ctx := context.Background()
+
+	_, err := trStore.CreateNode(&storage.Node{
+		ID:         "t-1",
+		Labels:     []string{"Translation"},
+		Properties: map[string]interface{}{"id": "t-1", "textKey": "hello", "textKey128": "h128"},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		CALL {
+			USE caremark.tr
+			MATCH (t:Translation)
+			RETURN t.id AS translationId
+		}
+		RETURN translationId
+	`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{"translationId"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "t-1", result.Rows[0][0])
+}
+
+func TestCallSubquery_ChainedUseWithImport(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+
+	rootStore := storage.NewNamespacedEngine(baseStore, "caremark")
+	trStore := storage.NewNamespacedEngine(baseStore, "caremark.tr")
+	txtStore := storage.NewNamespacedEngine(baseStore, "caremark.txt")
+	exec := NewStorageExecutor(rootStore)
+	ctx := context.Background()
+
+	_, err := trStore.CreateNode(&storage.Node{
+		ID:         "tr-1",
+		Labels:     []string{"Translation"},
+		Properties: map[string]interface{}{"id": "t-1", "textKey": "k1", "textKey128": "k1-128"},
+	})
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{
+		ID:         "tr-2",
+		Labels:     []string{"Translation"},
+		Properties: map[string]interface{}{"id": "t-2", "textKey": "k2", "textKey128": "k2-128"},
+	})
+	require.NoError(t, err)
+
+	_, err = txtStore.CreateNode(&storage.Node{
+		ID:     "txt-1",
+		Labels: []string{"TranslationText"},
+		Properties: map[string]interface{}{
+			"translationId": "t-1",
+			"text":          "value-1",
+		},
+	})
+	require.NoError(t, err)
+	_, err = txtStore.CreateNode(&storage.Node{
+		ID:     "txt-2",
+		Labels: []string{"TranslationText"},
+		Properties: map[string]interface{}{
+			"translationId": "t-2",
+			"text":          "value-2",
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		USE caremark
+		CALL {
+			USE caremark.tr
+			MATCH (t:Translation)
+			RETURN t.id AS translationId, t.textKey AS textKey, t.textKey128 AS textKey128
+		}
+		CALL {
+			USE caremark.txt
+			WITH translationId
+			MATCH (tt:TranslationText)
+			WHERE tt.translationId = translationId
+			RETURN collect(tt) AS texts
+		}
+		RETURN translationId, textKey, textKey128, texts
+	`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{"translationId", "textKey", "textKey128", "texts"}, result.Columns)
+	require.Len(t, result.Rows, 2)
+
+	got := make(map[string][]interface{}, len(result.Rows))
+	keys := make([]string, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		require.Len(t, row, 4)
+		id, ok := row[0].(string)
+		require.True(t, ok)
+		texts, ok := row[3].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, texts)
+		got[id] = texts
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	require.Equal(t, []string{"t-1", "t-2"}, keys)
 }
 
 // TestCountSubqueryGTE tests COUNT { } >= n syntax

@@ -36,7 +36,27 @@ options {
 }
 
 script
-    : query (SEMI query)* SEMI? EOF
+    : shellCommand EOF
+    | transactionStatement EOF
+    | query (SEMI query)* SEMI? EOF
+    ;
+
+shellCommand
+    : COLON name shellCommandElement*
+    ;
+
+shellCommandElement
+    : mapLit
+    | expression
+    | ASSIGN
+    | GT
+    | COLON
+    ;
+
+transactionStatement
+    : BEGIN TRANSACTION?
+    | COMMIT TRANSACTION?
+    | ROLLBACK TRANSACTION?
     ;
 
 // statements
@@ -516,6 +536,10 @@ symbol
     | INDEXES
     | CONSTRAINT
     | CONSTRAINTS
+    | BEGIN
+    | COMMIT
+    | ROLLBACK
+    | TRANSACTION
     | DROP
     | CREATE
     | VECTOR

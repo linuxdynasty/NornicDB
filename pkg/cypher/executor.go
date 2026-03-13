@@ -227,6 +227,11 @@ type StorageExecutor struct {
 	// This is an interface to avoid import cycles with multidb package
 	dbManager DatabaseManagerInterface
 
+	// shellParams stores Neo4j shell-style parameters set via :param / :params.
+	// These are session-scoped to the executor instance and merged with per-call params.
+	shellParams   map[string]interface{}
+	shellParamsMu sync.RWMutex
+
 	// vectorRegistry maps Cypher vector index definitions to concrete vector spaces.
 	vectorRegistry    *vectorspace.IndexRegistry
 	vectorIndexSpaces map[string]vectorspace.VectorSpaceKey
@@ -305,6 +310,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		planCache:         NewQueryPlanCache(500),   // Cache 500 parsed query plans
 		analyzer:          NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache:   make(map[string]*storage.Node, 1000),
+		shellParams:       make(map[string]interface{}),
 		searchService:     nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
 		vectorRegistry:    vectorspace.NewIndexRegistry(),
 		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
@@ -545,50 +551,47 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 		return nil, fmt.Errorf("empty query")
 	}
 
-	// Handle :USE command (Neo4j browser/shell compatibility)
-	// :USE database_name switches database context and should be stripped from query
-	// The actual database switching is handled at the API layer by checking context
-	if strings.HasPrefix(cypher, ":USE") || strings.HasPrefix(cypher, ":use") {
-		// Extract :USE command and remaining query
-		lines := strings.Split(cypher, "\n")
-		var remainingLines []string
-		useCommandFound := false
-		var useDatabaseName string
+	// Handle Neo4j shell/browser commands like :USE and :param before validation.
+	processedQuery, processedCtx, shellResult, err := e.preprocessShellCommands(ctx, cypher, params)
+	if err != nil {
+		return nil, err
+	}
+	ctx = processedCtx
+	cypher = processedQuery
+	if cypher == "" {
+		return shellResult, nil
+	}
 
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if !useCommandFound && (strings.HasPrefix(trimmed, ":USE") || strings.HasPrefix(trimmed, ":use")) {
-				useCommandFound = true
-				// Extract database name from :USE command
-				// Format: :USE database_name or :USE  database_name (with whitespace)
-				parts := strings.Fields(trimmed)
-				if len(parts) >= 2 {
-					useDatabaseName = parts[1]
-					// Store database name in context for server to switch
-					ctx = context.WithValue(ctx, ctxKeyUseDatabase, useDatabaseName)
-				}
-				// Skip this line
-				continue
-			}
-			// Collect all other lines (including empty lines for formatting)
-			remainingLines = append(remainingLines, line)
+	// Handle leading Cypher USE clause (openCypher multi-graph syntax).
+	if useDB, remaining, hasUse, err := parseLeadingUseClause(cypher); hasUse || err != nil {
+		if err != nil {
+			return nil, err
 		}
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, ctxKeyUseDatabase, resolvedDB)
+		if strings.TrimSpace(remaining) == "" {
+			return &ExecuteResult{
+				Columns: []string{"database"},
+				Rows:    [][]interface{}{{resolvedDB}},
+			}, nil
+		}
+		return scopedExec.Execute(ctx, remaining, params)
+	}
 
-		if useCommandFound {
-			// Reconstruct query without :USE command
-			cypher = strings.Join(remainingLines, "\n")
-			cypher = strings.TrimSpace(cypher)
-			if cypher == "" {
-				// Only :USE command, no actual query - return success
-				return &ExecuteResult{
-					Columns: []string{"database"},
-					Rows:    [][]interface{}{{"switched"}},
-				}, nil
-			}
-		}
-	} else if strings.HasPrefix(cypher, ":") {
-		// Starts with : but not :USE - return helpful error
-		return nil, fmt.Errorf("unknown command: %s (only :USE is supported)", strings.Split(cypher, "\n")[0])
+	// Merge session-scoped shell parameters with per-call parameters.
+	// Explicit params win over shell params to preserve HTTP/Bolt semantics.
+	params = e.mergeShellParams(params)
+
+	// Check for transaction control statements and transaction scripts FIRST.
+	// These are Nornic extensions and must bypass strict ANTLR validation.
+	if result, err := e.executeTransactionScript(ctx, cypher); result != nil || err != nil {
+		return result, err
+	}
+	if result, err := e.parseTransactionStatement(cypher); result != nil || err != nil {
+		return result, err
 	}
 
 	// Validate basic syntax
@@ -656,14 +659,6 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 		if cached, found := e.cache.Get(cypher, params); found {
 			return cached, nil
 		}
-	}
-
-	// Check for transaction control statements FIRST
-	if result, err := e.executeTransactionScript(ctx, cypher); result != nil || err != nil {
-		return result, err
-	}
-	if result, err := e.parseTransactionStatement(cypher); result != nil || err != nil {
-		return result, err
 	}
 
 	// Check for EXPLAIN/PROFILE execution modes (using cached analysis)

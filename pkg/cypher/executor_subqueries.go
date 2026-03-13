@@ -980,6 +980,11 @@ func (e *StorageExecutor) addLimitSkipToSubquery(subquery string, limit, skip in
 func (e *StorageExecutor) processAfterCallSubquery(ctx context.Context, innerResult *ExecuteResult, afterCall string) (*ExecuteResult, error) {
 	upperAfter := strings.ToUpper(afterCall)
 
+	// Handle chained CALL { } subqueries.
+	if strings.HasPrefix(upperAfter, "CALL") && isCallSubquery(afterCall) {
+		return e.executeChainedCallSubquery(ctx, innerResult, afterCall)
+	}
+
 	// Handle RETURN clause
 	if strings.HasPrefix(upperAfter, "RETURN ") {
 		return e.processCallSubqueryReturn(innerResult, afterCall)
@@ -995,6 +1000,259 @@ func (e *StorageExecutor) processAfterCallSubquery(ctx context.Context, innerRes
 	// Unsupported clause after CALL {}
 	firstWord := strings.Split(upperAfter, " ")[0]
 	return nil, fmt.Errorf("unsupported clause after CALL {}: %s (supported: RETURN, ORDER BY, SKIP, LIMIT)", firstWord)
+}
+
+func (e *StorageExecutor) executeChainedCallSubquery(ctx context.Context, seedResult *ExecuteResult, callClause string) (*ExecuteResult, error) {
+	subqueryBody, afterCall, inTransactions, batchSize := e.parseCallSubquery(callClause)
+	if subqueryBody == "" {
+		return nil, fmt.Errorf("invalid CALL {} subquery: empty body (expected CALL { <query> })")
+	}
+
+	if inTransactions {
+		return nil, fmt.Errorf("CALL {} IN TRANSACTIONS is not supported in chained CALL subqueries (batchSize=%d)", batchSize)
+	}
+
+	useDB, bodyWithoutUse, hasUse, err := parseLeadingUseClause(subqueryBody)
+	if err != nil {
+		return nil, err
+	}
+
+	targetExec := e
+	if hasUse {
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		if err != nil {
+			return nil, err
+		}
+		targetExec = scopedExec
+		ctx = context.WithValue(ctx, ctxKeyUseDatabase, resolvedDB)
+		subqueryBody = bodyWithoutUse
+	}
+
+	withVars, innerBody, hasWith, err := parseLeadingWithImports(subqueryBody)
+	if err != nil {
+		return nil, err
+	}
+
+	combined := &ExecuteResult{Columns: []string{}, Rows: make([][]interface{}, 0)}
+	if hasWith {
+		combined, err = targetExec.executeCorrelatedCallWithSeedRows(ctx, seedResult, innerBody, withVars)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		innerResult, err := targetExec.executeInternal(ctx, subqueryBody, nil)
+		if err != nil {
+			return nil, fmt.Errorf("CALL subquery error: %w", err)
+		}
+		combined = crossJoinCallResults(seedResult, innerResult)
+	}
+
+	if afterCall != "" {
+		return e.processAfterCallSubquery(ctx, combined, afterCall)
+	}
+
+	return combined, nil
+}
+
+func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody string, hasWith bool, err error) {
+	trimmed := strings.TrimSpace(subqueryBody)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
+		return nil, trimmed, false, nil
+	}
+
+	afterWith := strings.TrimSpace(trimmed[len("WITH "):])
+	nextIdx := len(afterWith)
+	clauseStarts := []int{
+		findMultiWordKeywordIndex(afterWith, "OPTIONAL", "MATCH"),
+		findKeywordIndex(afterWith, "MATCH"),
+		findKeywordIndex(afterWith, "UNWIND"),
+		findKeywordIndex(afterWith, "MERGE"),
+		findKeywordIndex(afterWith, "CREATE"),
+		findKeywordIndex(afterWith, "CALL"),
+		findKeywordIndex(afterWith, "RETURN"),
+		findKeywordIndex(afterWith, "WITH"),
+	}
+	for _, idx := range clauseStarts {
+		if idx > 0 && idx < nextIdx {
+			nextIdx = idx
+		}
+	}
+
+	if nextIdx == len(afterWith) {
+		return nil, "", true, fmt.Errorf("invalid CALL {} subquery: WITH must be followed by a query clause")
+	}
+
+	withExpr := strings.TrimSpace(afterWith[:nextIdx])
+	innerBody = strings.TrimSpace(afterWith[nextIdx:])
+	if innerBody == "" {
+		return nil, "", true, fmt.Errorf("invalid CALL {} subquery: empty query body after WITH")
+	}
+
+	parts := splitReturnExpressions(withExpr)
+	withVars = make([]string, 0, len(parts))
+	for _, part := range parts {
+		expr := strings.TrimSpace(part)
+		if expr == "" {
+			continue
+		}
+
+		upperExpr := strings.ToUpper(expr)
+		if asIdx := strings.Index(upperExpr, " AS "); asIdx >= 0 {
+			alias := strings.TrimSpace(expr[asIdx+4:])
+			if alias == "" {
+				return nil, "", true, fmt.Errorf("invalid WITH import expression: %q", expr)
+			}
+			withVars = append(withVars, alias)
+			continue
+		}
+
+		withVars = append(withVars, expr)
+	}
+
+	if len(withVars) == 0 {
+		return nil, "", true, fmt.Errorf("invalid CALL {} subquery: WITH clause does not import variables")
+	}
+
+	return withVars, innerBody, true, nil
+}
+
+func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context, seedResult *ExecuteResult, innerBody string, importVars []string) (*ExecuteResult, error) {
+	colMap := make(map[string]int, len(seedResult.Columns))
+	for i, col := range seedResult.Columns {
+		colMap[col] = i
+	}
+
+	combinedCols := append([]string{}, seedResult.Columns...)
+	combinedRows := make([][]interface{}, 0)
+
+	for _, seedRow := range seedResult.Rows {
+		params := make(map[string]interface{}, len(importVars))
+		correlatedBody := innerBody
+		for _, varName := range importVars {
+			idx, ok := colMap[varName]
+			if !ok {
+				return nil, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", varName)
+			}
+			if idx < 0 || idx >= len(seedRow) {
+				return nil, fmt.Errorf("CALL subquery seed row missing variable: %s", varName)
+			}
+			params[varName] = seedRow[idx]
+			correlatedBody = replaceStandaloneCypherIdentifier(correlatedBody, varName, "$"+varName)
+		}
+
+		innerRes, err := e.executeInternal(ctx, correlatedBody, params)
+		if err != nil {
+			return nil, fmt.Errorf("CALL subquery error: %w", err)
+		}
+
+		if len(innerRes.Rows) == 0 {
+			continue
+		}
+
+		innerUniqueIdx := make([]int, 0, len(innerRes.Columns))
+		innerUniqueCols := make([]string, 0, len(innerRes.Columns))
+		for i, col := range innerRes.Columns {
+			if _, exists := colMap[col]; !exists {
+				innerUniqueIdx = append(innerUniqueIdx, i)
+				innerUniqueCols = append(innerUniqueCols, col)
+			}
+		}
+		if len(combinedCols) == len(seedResult.Columns) && len(innerUniqueCols) > 0 {
+			combinedCols = append(combinedCols, innerUniqueCols...)
+		}
+
+		for _, innerRow := range innerRes.Rows {
+			joined := append([]interface{}{}, seedRow...)
+			for _, idx := range innerUniqueIdx {
+				if idx >= 0 && idx < len(innerRow) {
+					joined = append(joined, innerRow[idx])
+				} else {
+					joined = append(joined, nil)
+				}
+			}
+			combinedRows = append(combinedRows, joined)
+		}
+	}
+
+	return &ExecuteResult{Columns: combinedCols, Rows: combinedRows}, nil
+}
+
+// replaceStandaloneCypherIdentifier replaces identifier tokens that are not part of
+// a dotted access chain (e.g. preserves tt.translationId when replacing translationId).
+func replaceStandaloneCypherIdentifier(query, ident, replacement string) string {
+	if ident == "" || query == "" || ident == replacement {
+		return query
+	}
+
+	isWord := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	}
+
+	var out strings.Builder
+	out.Grow(len(query))
+	i := 0
+	for i < len(query) {
+		j := strings.Index(query[i:], ident)
+		if j < 0 {
+			out.WriteString(query[i:])
+			break
+		}
+		j += i
+		k := j + len(ident)
+
+		prevWord := j > 0 && isWord(query[j-1])
+		nextWord := k < len(query) && isWord(query[k])
+		dotted := j > 0 && query[j-1] == '.'
+
+		out.WriteString(query[i:j])
+		if !prevWord && !nextWord && !dotted {
+			out.WriteString(replacement)
+		} else {
+			out.WriteString(query[j:k])
+		}
+		i = k
+	}
+
+	return out.String()
+}
+
+func crossJoinCallResults(left, right *ExecuteResult) *ExecuteResult {
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+
+	colMap := make(map[string]struct{}, len(left.Columns))
+	for _, col := range left.Columns {
+		colMap[col] = struct{}{}
+	}
+	combinedCols := append([]string{}, left.Columns...)
+	innerUniqueIdx := make([]int, 0, len(right.Columns))
+	for i, col := range right.Columns {
+		if _, exists := colMap[col]; !exists {
+			combinedCols = append(combinedCols, col)
+			innerUniqueIdx = append(innerUniqueIdx, i)
+		}
+	}
+
+	rows := make([][]interface{}, 0, len(left.Rows)*len(right.Rows))
+	for _, lrow := range left.Rows {
+		for _, rrow := range right.Rows {
+			joined := append([]interface{}{}, lrow...)
+			for _, idx := range innerUniqueIdx {
+				if idx >= 0 && idx < len(rrow) {
+					joined = append(joined, rrow[idx])
+				} else {
+					joined = append(joined, nil)
+				}
+			}
+			rows = append(rows, joined)
+		}
+	}
+
+	return &ExecuteResult{Columns: combinedCols, Rows: rows}
 }
 
 // processCallSubqueryReturn processes the RETURN clause after CALL {}

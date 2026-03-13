@@ -68,6 +68,10 @@ STICK      : '|';
 DOLLAR     : '$';
 
 CALL       : 'CALL';
+BEGIN      : 'BEGIN';
+COMMIT     : 'COMMIT';
+ROLLBACK   : 'ROLLBACK';
+TRANSACTION: 'TRANSACTION';
 YIELD      : 'YIELD';
 FILTER     : 'FILTER';
 EXTRACT    : 'EXTRACT';

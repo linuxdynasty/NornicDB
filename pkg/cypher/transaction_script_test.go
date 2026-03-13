@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,6 +118,31 @@ COMMIT
 	require.NoError(t, err)
 	require.Len(t, check.Rows, 1)
 	require.Nil(t, check.Rows[0][0])
+}
+
+func TestTransactionScriptBeginTransactionCommit_ANTLRMode(t *testing.T) {
+	cleanup := config.WithANTLRParser()
+	defer cleanup()
+
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	result, err := exec.Execute(ctx, `
+BEGIN TRANSACTION
+CREATE (u:User {id: 'u-antlr', age: 21, last_seen: datetime()})
+RETURN u.id, u.last_seen
+COMMIT
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "u-antlr", result.Rows[0][0])
+	require.NotNil(t, result.Rows[0][1])
+
+	check, err := exec.Execute(ctx, "MATCH (u:User {id: 'u-antlr'}) RETURN count(u)", nil)
+	require.NoError(t, err)
+	require.EqualValues(t, int64(1), check.Rows[0][0])
 }
 
 func TestTransactionScriptHelpers_ParseAndMapBuilders(t *testing.T) {

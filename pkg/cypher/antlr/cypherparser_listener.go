@@ -10,6 +10,15 @@ type CypherParserListener interface {
 	// EnterScript is called when entering the script production.
 	EnterScript(c *ScriptContext)
 
+	// EnterShellCommand is called when entering the shellCommand production.
+	EnterShellCommand(c *ShellCommandContext)
+
+	// EnterShellCommandElement is called when entering the shellCommandElement production.
+	EnterShellCommandElement(c *ShellCommandElementContext)
+
+	// EnterTransactionStatement is called when entering the transactionStatement production.
+	EnterTransactionStatement(c *TransactionStatementContext)
+
 	// EnterQuery is called when entering the query production.
 	EnterQuery(c *QueryContext)
 
@@ -312,6 +321,15 @@ type CypherParserListener interface {
 
 	// ExitScript is called when exiting the script production.
 	ExitScript(c *ScriptContext)
+
+	// ExitShellCommand is called when exiting the shellCommand production.
+	ExitShellCommand(c *ShellCommandContext)
+
+	// ExitShellCommandElement is called when exiting the shellCommandElement production.
+	ExitShellCommandElement(c *ShellCommandElementContext)
+
+	// ExitTransactionStatement is called when exiting the transactionStatement production.
+	ExitTransactionStatement(c *TransactionStatementContext)
 
 	// ExitQuery is called when exiting the query production.
 	ExitQuery(c *QueryContext)

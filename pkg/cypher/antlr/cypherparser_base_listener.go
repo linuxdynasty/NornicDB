@@ -26,6 +26,24 @@ func (s *BaseCypherParserListener) EnterScript(ctx *ScriptContext) {}
 // ExitScript is called when production script is exited.
 func (s *BaseCypherParserListener) ExitScript(ctx *ScriptContext) {}
 
+// EnterShellCommand is called when production shellCommand is entered.
+func (s *BaseCypherParserListener) EnterShellCommand(ctx *ShellCommandContext) {}
+
+// ExitShellCommand is called when production shellCommand is exited.
+func (s *BaseCypherParserListener) ExitShellCommand(ctx *ShellCommandContext) {}
+
+// EnterShellCommandElement is called when production shellCommandElement is entered.
+func (s *BaseCypherParserListener) EnterShellCommandElement(ctx *ShellCommandElementContext) {}
+
+// ExitShellCommandElement is called when production shellCommandElement is exited.
+func (s *BaseCypherParserListener) ExitShellCommandElement(ctx *ShellCommandElementContext) {}
+
+// EnterTransactionStatement is called when production transactionStatement is entered.
+func (s *BaseCypherParserListener) EnterTransactionStatement(ctx *TransactionStatementContext) {}
+
+// ExitTransactionStatement is called when production transactionStatement is exited.
+func (s *BaseCypherParserListener) ExitTransactionStatement(ctx *TransactionStatementContext) {}
+
 // EnterQuery is called when production query is entered.
 func (s *BaseCypherParserListener) EnterQuery(ctx *QueryContext) {}
 

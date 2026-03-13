@@ -22,6 +22,21 @@ func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, pa
 		return nil, fmt.Errorf("empty query")
 	}
 
+	if useDB, remaining, hasUse, err := parseLeadingUseClause(cypher); hasUse || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, ctxKeyUseDatabase, resolvedDB)
+		if strings.TrimSpace(remaining) == "" {
+			return &ExecuteResult{Columns: []string{"database"}, Rows: [][]interface{}{{resolvedDB}}}, nil
+		}
+		return scopedExec.executeInternal(ctx, remaining, params)
+	}
+
 	// Basic syntax validation to preserve existing error behavior.
 	if err := e.validateSyntax(cypher); err != nil {
 		return nil, err
