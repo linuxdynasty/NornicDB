@@ -60,6 +60,42 @@ if [ ! -d "$PROJECT_ROOT/macos/build/NornicDB.app" ]; then
     exit 1
 fi
 
+cleanup_build_dir() {
+    local target="$1"
+
+    if [ ! -e "$target" ]; then
+        return 0
+    fi
+
+    # Newer macOS versions can leave ACLs / flags on copied app bundle contents
+    # that cause plain rm -rf to fail with "Permission denied".
+    chmod -RN "$target" 2>/dev/null || true
+    chflags -R nouchg "$target" 2>/dev/null || true
+    xattr -rc "$target" 2>/dev/null || true
+    chmod -R u+rwX "$target" 2>/dev/null || true
+
+    if rm -rf "$target" 2>/dev/null; then
+        return 0
+    fi
+
+    # Fallback for stale root-owned artifacts from prior packaging runs.
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -n chmod -RN "$target" 2>/dev/null || true
+        sudo -n chflags -R nouchg "$target" 2>/dev/null || true
+        sudo -n xattr -rc "$target" 2>/dev/null || true
+        sudo -n chmod -R u+rwX "$target" 2>/dev/null || true
+        sudo -n rm -rf "$target" 2>/dev/null || true
+    fi
+
+    if [ -e "$target" ]; then
+        echo "❌ Failed to remove $target"
+        echo "   Try: chmod -RN \"$target\" && chflags -R nouchg \"$target\" && rm -rf \"$target\""
+        return 1
+    fi
+
+    return 0
+}
+
 # Function to build a package variant
 build_package() {
     local VARIANT=$1  # "lite" or "full"
@@ -72,8 +108,7 @@ build_package() {
     
     # Clean and create build directory
     echo "📁 Preparing build directory..."
-    chmod -R u+w "$BUILD_DIR" 2>/dev/null || true
-    rm -rf "$BUILD_DIR"
+    cleanup_build_dir "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"/{payload,scripts,resources,root/usr/local/bin,root/Applications}
     
     # Copy files to package root

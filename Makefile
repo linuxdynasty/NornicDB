@@ -1240,7 +1240,10 @@ macos-clean:
 	@rm -rf macos/build 2>/dev/null || sudo rm -rf macos/build 2>/dev/null || true
 	@if [ -d "dist/installer" ]; then \
 		echo "Removing installer artifacts (may require sudo)..."; \
-		chmod -R u+w dist/installer 2>/dev/null || true; \
+		chmod -RN dist/installer 2>/dev/null || true; \
+		chflags -R nouchg dist/installer 2>/dev/null || true; \
+		xattr -rc dist/installer 2>/dev/null || true; \
+		chmod -R u+rwX dist/installer 2>/dev/null || true; \
 		rm -rf dist/installer 2>/dev/null || sudo rm -rf dist/installer; \
 	fi
 	@echo "✅ Cleaned"
