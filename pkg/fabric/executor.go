@@ -118,7 +118,7 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		return nil, fmt.Errorf("apply input failed: %w", err)
 	}
 
-	result := &ResultStream{}
+	result := &ResultStream{Columns: append([]string(nil), f.Columns...)}
 	innerFragment := rewriteFragmentWithImports(f.Inner)
 
 	// For each input row, execute the inner fragment with imported variables.
@@ -133,13 +133,16 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 			return nil, fmt.Errorf("apply inner failed: %w", err)
 		}
 
-		if innerResult == nil || len(innerResult.Rows) == 0 {
+		if innerResult == nil {
 			continue
 		}
 
 		// Combine input and inner columns/rows.
 		if len(result.Columns) == 0 {
 			result.Columns = combineColumns(inputResult.Columns, innerResult.Columns)
+		}
+		if len(innerResult.Rows) == 0 {
+			continue
 		}
 
 		for _, innerRow := range innerResult.Rows {

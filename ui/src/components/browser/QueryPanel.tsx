@@ -18,7 +18,7 @@ interface QueryPanelProps {
   queryError: string | null;
   cypherResult: {
     results: Array<{
-      columns: string[];
+      columns: string[] | null;
       data: Array<{
         row: unknown[];
         meta: unknown[];

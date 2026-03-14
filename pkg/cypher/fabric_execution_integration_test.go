@@ -71,7 +71,6 @@ RETURN translationId, textKey, textCount
 		if id, ok := row[0].(string); ok && id == "t-1" {
 			found = true
 			require.Equal(t, "orders.where", row[1])
-			// count(tt) can come back as int64/int depending execution path.
 			switch v := row[2].(type) {
 			case int64:
 				require.Equal(t, int64(1), v)
@@ -172,4 +171,54 @@ RETURN x
 	_, err = exec.Execute(context.Background(), query, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid USE target")
+}
+
+func TestExecute_FabricCorrelatedCallUseChain_EmptyOuterRowsStillHasColumns(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
+	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	txtStore, err := mgr.GetStorage("caremark_txt")
+	require.NoError(t, err)
+	_, err = txtStore.CreateNode(&storage.Node{ID: "tt-1", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
+		"translationId": "missing",
+		"text":          "orphan",
+	}})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:Translation)
+  RETURN t.id AS translationId, t.textKey AS textKey, t.textKey128 AS textKey128
+}
+CALL {
+  WITH translationId
+  USE translations.txr
+  MATCH (tt:TranslationText)
+  WHERE tt.translationId = translationId
+  RETURN collect(tt) AS texts
+}
+RETURN translationId, textKey, textKey128, texts;
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"translationId", "textKey", "textKey128", "texts"}, res.Columns)
+	require.Empty(t, res.Rows)
 }

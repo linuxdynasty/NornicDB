@@ -3596,6 +3596,16 @@ func TestNeo4jConversionAndTxHelpers_AdditionalBranches(t *testing.T) {
 	})
 	require.Len(t, resp.Results, 1)
 	require.NotNil(t, resp.Receipt)
+
+	// Nil result columns must serialize as [] for UI safety.
+	resp = &TransactionResponse{Results: make([]QueryResult, 0)}
+	server.appendStatementResult(resp, &cypher.ExecuteResult{
+		Columns: nil,
+		Rows:    [][]interface{}{},
+	})
+	require.Len(t, resp.Results, 1)
+	require.NotNil(t, resp.Results[0].Columns)
+	require.Len(t, resp.Results[0].Columns, 0)
 }
 
 func TestTransactionHandlers_AdditionalErrorBranches(t *testing.T) {

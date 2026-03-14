@@ -1584,8 +1584,12 @@ func (s *Server) transactionCommitURL(dbName, txID string) string {
 }
 
 func (s *Server) appendStatementResult(response *TransactionResponse, result *cypher.ExecuteResult) {
+	columns := result.Columns
+	if columns == nil {
+		columns = []string{}
+	}
 	qr := QueryResult{
-		Columns: result.Columns,
+		Columns: columns,
 		Data:    make([]ResultRow, len(result.Rows)),
 	}
 	for i, row := range result.Rows {

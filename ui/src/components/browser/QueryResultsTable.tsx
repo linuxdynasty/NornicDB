@@ -9,7 +9,7 @@ import { extractNodeFromResult, getAllNodeIdsFromQueryResults } from "../../util
 interface QueryResultsTableProps {
   cypherResult: {
     results: Array<{
-      columns: string[];
+      columns: string[] | null;
       data: Array<{
         row: unknown[];
         meta: unknown[];
@@ -37,6 +37,7 @@ export function QueryResultsTable({
 
   const allNodeIds = getAllNodeIdsFromQueryResults(cypherResult);
   const allSelected = allNodeIds.length > 0 && allNodeIds.every(id => selectedNodeIds.has(id));
+  const columns = cypherResult.results[0].columns ?? [];
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -59,7 +60,7 @@ export function QueryResultsTable({
                   className="cursor-pointer"
                 />
               </th>
-              {cypherResult.results[0].columns.map((col) => (
+              {columns.map((col) => (
                 <th key={col}>{col}</th>
               ))}
             </tr>
@@ -162,4 +163,3 @@ export function QueryResultsTable({
     </div>
   );
 }
-

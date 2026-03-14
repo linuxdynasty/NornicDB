@@ -94,6 +94,11 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 	if stream == nil {
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
+	if len(stream.Columns) == 0 {
+		if inferred := e.inferTopLevelReturnColumns(cypher); len(inferred) > 0 {
+			stream.Columns = inferred
+		}
+	}
 	return &ExecuteResult{Columns: stream.Columns, Rows: stream.Rows}, nil
 }
 
@@ -104,6 +109,52 @@ func (e *StorageExecutor) currentDatabaseName() string {
 		}
 	}
 	return "nornic"
+}
+
+// inferTopLevelReturnColumns best-effort derives outer RETURN columns for Fabric queries.
+// This is used when a distributed execution path returns zero rows and no columns.
+func (e *StorageExecutor) inferTopLevelReturnColumns(query string) []string {
+	opts := defaultKeywordScanOpts()
+	opts.SkipBraces = true
+
+	lastReturn := -1
+	searchFrom := 0
+	for {
+		idx := keywordIndexFrom(query, "RETURN", searchFrom, opts)
+		if idx < 0 {
+			break
+		}
+		lastReturn = idx
+		searchFrom = idx + len("RETURN")
+	}
+	if lastReturn < 0 {
+		return nil
+	}
+
+	clause := strings.TrimSpace(query[lastReturn+len("RETURN"):])
+	if clause == "" {
+		return nil
+	}
+
+	// Strip trailing ORDER BY / SKIP / LIMIT at top-level.
+	end := len(clause)
+	for _, kw := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := topLevelKeywordIndex(clause, kw); idx >= 0 && idx < end {
+			end = idx
+		}
+	}
+	clause = strings.TrimSpace(clause[:end])
+	clause = strings.TrimSuffix(clause, ";")
+	clause = strings.TrimSpace(clause)
+	if clause == "" {
+		return nil
+	}
+
+	items := e.parseReturnItems(clause)
+	if len(items) == 0 {
+		return nil
+	}
+	return e.buildColumnsFromReturnItems(items)
 }
 
 func (e *StorageExecutor) buildFabricCatalog() (*fabric.Catalog, error) {
