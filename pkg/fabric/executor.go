@@ -105,6 +105,7 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 	}
 
 	result := &ResultStream{}
+	innerFragment := rewriteFragmentWithImports(f.Inner)
 
 	// For each input row, execute the inner fragment with imported variables.
 	for _, inputRow := range inputResult.Rows {
@@ -112,16 +113,6 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		// as parameters. This enables correlated subqueries where the inner
 		// query references variables from the outer scope.
 		innerParams := mergeRowParams(params, inputResult.Columns, inputRow)
-
-		innerFragment := f.Inner
-		if execFrag, ok := f.Inner.(*FragmentExec); ok {
-			importCols := importColumnsFromFragment(execFrag.Input)
-			if rewritten := rewriteLeadingWithImports(execFrag.Query, importCols); rewritten != execFrag.Query {
-				copied := *execFrag
-				copied.Query = rewritten
-				innerFragment = &copied
-			}
-		}
 
 		innerResult, err := e.Execute(ctx, tx, innerFragment, innerParams, authToken)
 		if err != nil {
@@ -159,6 +150,35 @@ func importColumnsFromFragment(f Fragment) []string {
 		return init.Columns
 	}
 	return nil
+}
+
+func rewriteFragmentWithImports(fragment Fragment) Fragment {
+	if fragment == nil {
+		return nil
+	}
+
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		importCols := importColumnsFromFragment(f.Input)
+		if rewritten := rewriteLeadingWithImports(f.Query, importCols); rewritten != f.Query {
+			copied := *f
+			copied.Query = rewritten
+			return &copied
+		}
+		return fragment
+	case *FragmentApply:
+		copied := *f
+		copied.Input = rewriteFragmentWithImports(copied.Input)
+		copied.Inner = rewriteFragmentWithImports(copied.Inner)
+		return &copied
+	case *FragmentUnion:
+		copied := *f
+		copied.LHS = rewriteFragmentWithImports(copied.LHS)
+		copied.RHS = rewriteFragmentWithImports(copied.RHS)
+		return &copied
+	default:
+		return fragment
+	}
 }
 
 func rewriteLeadingWithImports(query string, importCols []string) string {

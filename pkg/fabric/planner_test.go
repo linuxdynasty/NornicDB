@@ -360,6 +360,84 @@ RETURN n`
 	}
 }
 
+func TestPlan_NestedCallUseSubquery(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
+	catalog.Register("nornic.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
+	p := NewFabricPlanner(catalog)
+
+	query := `USE nornic
+WITH "t-1" AS outerId
+CALL {
+  WITH outerId
+  CALL {
+    USE nornic.tr
+    WITH outerId
+    MATCH (t:Translation {id: outerId})
+    RETURN t.id AS translationId
+  }
+  RETURN translationId
+}
+RETURN translationId`
+
+	frag, err := p.Plan(query, "nornic")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	nestedExec := findExecByGraphName(frag, "nornic.tr")
+	if nestedExec == nil {
+		t.Fatalf("expected nested nornic.tr fragment in plan tree")
+	}
+
+	init, ok := nestedExec.Input.(*FragmentInit)
+	if !ok {
+		t.Fatalf("expected nested exec input to be FragmentInit, got %T", nestedExec.Input)
+	}
+	if len(init.ImportColumns) != 1 || init.ImportColumns[0] != "outerId" {
+		t.Fatalf("expected nested import columns [outerId], got %v", init.ImportColumns)
+	}
+}
+
+func TestPlan_SubqueryUseTargetOutOfScope(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("comp1", &LocationLocal{DBName: "comp1"})
+	catalog.Register("comp1.a", &LocationLocal{DBName: "comp1_a"})
+	catalog.Register("comp2", &LocationLocal{DBName: "comp2"})
+	catalog.Register("comp2.b", &LocationLocal{DBName: "comp2_b"})
+	p := NewFabricPlanner(catalog)
+
+	query := `USE comp1
+CALL {
+  USE comp2.b
+  RETURN 1 AS x
+}
+RETURN x`
+
+	_, err := p.Plan(query, "comp1")
+	if err == nil {
+		t.Fatal("expected out-of-scope USE error")
+	}
+}
+
+func TestPlan_SubqueryUseTargetNotFound(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
+	p := NewFabricPlanner(catalog)
+
+	query := `USE nornic
+CALL {
+  USE nornic.missing
+  RETURN 1 AS x
+}
+RETURN x`
+
+	_, err := p.Plan(query, "nornic")
+	if err == nil {
+		t.Fatal("expected missing USE target error")
+	}
+}
+
 func TestParseLeadingUse_NoUse(t *testing.T) {
 	db, remaining, hasUse, err := parseLeadingUse("MATCH (n) RETURN n")
 	if err != nil {
@@ -536,5 +614,27 @@ func TestQueryIsWrite(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("queryIsWrite(%q) = %v, want %v", tt.query, got, tt.want)
 		}
+	}
+}
+
+func findExecByGraphName(fragment Fragment, graphName string) *FragmentExec {
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		if f.GraphName == graphName {
+			return f
+		}
+		return nil
+	case *FragmentApply:
+		if found := findExecByGraphName(f.Input, graphName); found != nil {
+			return found
+		}
+		return findExecByGraphName(f.Inner, graphName)
+	case *FragmentUnion:
+		if found := findExecByGraphName(f.LHS, graphName); found != nil {
+			return found
+		}
+		return findExecByGraphName(f.RHS, graphName)
+	default:
+		return nil
 	}
 }

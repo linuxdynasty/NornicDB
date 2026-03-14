@@ -292,7 +292,7 @@ Primary semantic targets reviewed so far:
 | `USE composite.alias` | Complete | direct composite constituent path implemented with scope enforcement |
 | `USE graph.byName()` | Complete | implemented and covered in planner/use parsing tests |
 | `USE graph.byElementId()` | Complete | implemented and covered in planner/use parsing tests |
-| `USE` in subqueries | Partial | supported for current planned subset (`CALL { USE ... }`) |
+| `USE` in subqueries | Complete | recursive CALL-subquery decomposition (including nested `CALL` blocks), strict in-scope target validation, and planner/e2e regression coverage |
 | `USE` in union parts | Complete | implemented and covered in Fabric planner tests |
 | Remote auth forwarding isolation | Complete | auth-aware cache keying + isolation tests in `pkg/fabric/remote_executor_test.go` |
 | Many-read / one-write enforcement | Complete | enforced in Fabric transaction coordinator and covered by tx tests |
@@ -323,6 +323,7 @@ The items below were re-verified against current code and tests after the strict
 
 - [x] `USE graph.byName(...)` support implemented and covered (`pkg/fabric/planner_test.go`, `pkg/cypher/executor_use.go`).
 - [x] `USE graph.byElementId(...)` support implemented and covered (`pkg/fabric/planner_test.go`, `pkg/cypher/executor_use.go`).
+- [x] `USE` in subqueries completed beyond first-level `CALL { USE ... }`: recursive nested decomposition, subquery target validation, and execution regressions (`pkg/fabric/planner.go`, `pkg/fabric/planner_test.go`, `pkg/cypher/fabric_execution_integration_test.go`).
 - [x] UNION-part `USE` planning implemented and covered (`pkg/fabric/planner_test.go`).
 - [x] Remote executor auth-cache isolation implemented and covered (`pkg/fabric/remote_executor.go`, `pkg/fabric/remote_executor_test.go`).
 - [x] Remote executor cache concurrency safety implemented and covered (`pkg/fabric/remote_executor.go`, `pkg/fabric/remote_executor_test.go`).

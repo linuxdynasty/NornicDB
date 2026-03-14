@@ -84,3 +84,92 @@ RETURN translationId, textKey, textCount
 	}
 	require.True(t, found, "expected row for translation t-1")
 }
+
+func TestExecute_FabricNestedCallUseChain_OnCompositeConstituents(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("caremark_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "t-2", Labels: []string{"Translation"}, Properties: map[string]interface{}{
+		"id":      "t-2",
+		"textKey": "nested.use",
+	}})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE caremark
+CALL {
+  CALL {
+    USE caremark.tr
+    MATCH (t:Translation {id: "t-2"})
+    RETURN t.id AS translationId, t.textKey AS textKey
+  }
+  RETURN translationId, textKey
+}
+RETURN translationId, textKey
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.Rows)
+
+	found := false
+	for _, row := range res.Rows {
+		if len(row) < 2 {
+			continue
+		}
+		if id, ok := row[0].(string); ok && id == "t-2" {
+			found = true
+			require.Equal(t, "nested.use", row[1])
+		}
+	}
+	require.True(t, found, "expected row for nested translation t-2")
+}
+
+func TestExecute_FabricCallUseSubquery_OutOfScopeUseFails(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+	}))
+	require.NoError(t, mgr.CreateDatabase("other_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("other", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "other_tr", Type: "local", AccessMode: "read_write"},
+	}))
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE caremark
+CALL {
+  USE other.tr
+  RETURN 1 AS x
+}
+RETURN x
+`
+
+	_, err = exec.Execute(context.Background(), query, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid USE target")
+}

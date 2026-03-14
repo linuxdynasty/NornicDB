@@ -2,7 +2,6 @@ package fabric
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -298,16 +297,30 @@ func (p *FabricPlanner) planSingleQuery(trimmed string, sessionDB string) (Fragm
 	if !hasTopUse {
 		topDB = sessionDB
 		remaining = trimmed
+	} else {
+		if err := p.validateUseTarget(sessionDB, topDB); err != nil {
+			return nil, err
+		}
 	}
 
-	// Check whether the remaining query contains CALL {} subqueries with USE clauses.
-	callBlocks, err := extractCallUseBlocks(remaining)
+	// Check whether the remaining query contains top-level CALL {} subqueries.
+	callBlocks, err := extractTopLevelCallBlocks(remaining)
 	if err != nil {
 		return nil, err
 	}
+	fabricBlocks := make([]callSubqueryBlock, 0, len(callBlocks))
+	for _, block := range callBlocks {
+		isFabricBlock, err := callBlockContainsFabricUse(block.body)
+		if err != nil {
+			return nil, err
+		}
+		if isFabricBlock {
+			fabricBlocks = append(fabricBlocks, block)
+		}
+	}
 
-	if len(callBlocks) == 0 {
-		// Simple case: single-graph query, no CALL { USE ... } blocks.
+	if len(fabricBlocks) == 0 {
+		// Simple case: single-graph query, no CALL {} blocks at this scope.
 		isWrite := queryIsWrite(remaining)
 		return &FragmentExec{
 			Input:     &FragmentInit{Columns: nil},
@@ -321,28 +334,18 @@ func (p *FabricPlanner) planSingleQuery(trimmed string, sessionDB string) (Fragm
 	// Multi-graph case: decompose into Apply chain.
 	// The top-level USE sets the default graph; each CALL { USE ... } block
 	// targets a different constituent.
-	return p.planMultiGraph(topDB, remaining, callBlocks)
+	return p.planMultiGraph(topDB, remaining, fabricBlocks)
 }
 
-// planMultiGraph builds a Fragment tree for queries with CALL { USE ... } subqueries.
-//
-// The pattern is:
-//
-//	USE composite
-//	CALL { USE composite.alias1 MATCH ... RETURN ... }
-//	CALL { USE composite.alias2 WITH imported MATCH ... RETURN ... }
-//	RETURN ...
-//
-// This produces a chain of FragmentApply nodes:
-//
-//	Apply(outer=Exec(alias1), inner=Apply(outer=Exec(alias2), inner=...))
-func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []callUseBlock) (Fragment, error) {
+// planMultiGraph builds a Fragment tree for queries with top-level CALL {} subqueries.
+// Each CALL block is planned recursively so nested USE variants are decomposed correctly.
+func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []callSubqueryBlock) (Fragment, error) {
 	init := &FragmentInit{Columns: nil}
 	var currentInput Fragment = init
 	lastPos := 0
 
 	for _, block := range blocks {
-		// Preserve outer query segments before each CALL { USE ... } block.
+		// Preserve outer query segments before each CALL block.
 		prefix := strings.TrimSpace(fullQuery[lastPos:block.startPos])
 		if prefix != "" {
 			prefixExec := &FragmentExec{
@@ -355,21 +358,36 @@ func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []
 			currentInput = &FragmentApply{Input: currentInput, Inner: prefixExec, Columns: nil}
 		}
 
-		// Each CALL { USE graph ... } block becomes a FragmentExec
-		// wrapped in a FragmentApply so it receives input rows.
-		isWrite := queryIsWrite(block.body)
-
-		execFragment := &FragmentExec{
-			Input:     &FragmentInit{Columns: block.importColumns, ImportColumns: block.importColumns},
-			Query:     block.body,
-			GraphName: block.graphName,
-			Columns:   nil, // determined at execution time
-			IsWrite:   isWrite,
+		subDB, subBody, hasUse, err := parseLeadingUse(block.body)
+		if err != nil {
+			return nil, fmt.Errorf("invalid USE in CALL subquery: %w", err)
 		}
+
+		var (
+			subqueryFragment Fragment
+			importCols       []string
+		)
+		if hasUse {
+			if err := p.validateUseTarget(topDB, subDB); err != nil {
+				return nil, err
+			}
+			subqueryFragment, err = p.planSingleQuery(subBody, subDB)
+			if err != nil {
+				return nil, err
+			}
+			importCols = extractWithImports(subBody)
+		} else {
+			subqueryFragment, err = p.planSingleQuery(block.body, topDB)
+			if err != nil {
+				return nil, err
+			}
+			importCols = extractWithImports(block.body)
+		}
+		subqueryFragment = bindLeadingImportColumns(subqueryFragment, importCols)
 
 		currentInput = &FragmentApply{
 			Input:   currentInput,
-			Inner:   execFragment,
+			Inner:   subqueryFragment,
 			Columns: nil, // determined at execution time
 		}
 		lastPos = block.endPos
@@ -395,22 +413,90 @@ func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []
 	return currentInput, nil
 }
 
-// callUseBlock represents a parsed CALL { USE graph.name ... } block.
-type callUseBlock struct {
-	// graphName is the USE target inside the CALL block.
-	graphName string
-
-	// body is the Cypher body inside the CALL block (after USE, without the CALL { } wrapper).
+// callSubqueryBlock represents a top-level CALL { ... } block for a single scope.
+type callSubqueryBlock struct {
+	// body is the Cypher body inside the CALL block (without the CALL { } wrapper).
 	body string
-
-	// importColumns are the WITH-imported variables at the start of the body.
-	importColumns []string
 
 	// startPos is the byte offset in the original query where CALL { starts.
 	startPos int
 
 	// endPos is the byte offset after the closing }.
 	endPos int
+}
+
+func (p *FabricPlanner) validateUseTarget(sessionDB string, targetDB string) error {
+	target := strings.TrimSpace(targetDB)
+	if target == "" {
+		return fmt.Errorf("USE clause requires a database name")
+	}
+	if p.catalog != nil {
+		if _, err := p.catalog.Resolve(target); err != nil {
+			return fmt.Errorf("invalid USE target '%s': %w", target, err)
+		}
+	}
+
+	scopeRoot := compositeScopeRoot(sessionDB)
+	targetRoot := compositeScopeRoot(target)
+	if strings.Contains(target, ".") && p.inCompositeScope(sessionDB) && scopeRoot != "" && !strings.EqualFold(scopeRoot, targetRoot) {
+		return fmt.Errorf("invalid USE target '%s': target is out of scope for composite '%s'", target, scopeRoot)
+	}
+	return nil
+}
+
+func (p *FabricPlanner) inCompositeScope(sessionDB string) bool {
+	db := strings.TrimSpace(sessionDB)
+	if db == "" {
+		return false
+	}
+	if strings.Contains(db, ".") {
+		return true
+	}
+	if p.catalog == nil {
+		return false
+	}
+	prefix := strings.ToLower(db) + "."
+	for _, graph := range p.catalog.ListGraphs() {
+		if strings.HasPrefix(strings.ToLower(graph), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func compositeScopeRoot(graph string) string {
+	graph = strings.TrimSpace(graph)
+	if graph == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(graph, '.'); idx >= 0 {
+		return graph[:idx]
+	}
+	return graph
+}
+
+func bindLeadingImportColumns(fragment Fragment, importCols []string) Fragment {
+	if len(importCols) == 0 || fragment == nil {
+		return fragment
+	}
+
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		copied := *f
+		copied.Input = &FragmentInit{Columns: importCols, ImportColumns: importCols}
+		return &copied
+	case *FragmentApply:
+		copied := *f
+		copied.Input = bindLeadingImportColumns(copied.Input, importCols)
+		return &copied
+	case *FragmentUnion:
+		copied := *f
+		copied.LHS = bindLeadingImportColumns(copied.LHS, importCols)
+		copied.RHS = bindLeadingImportColumns(copied.RHS, importCols)
+		return &copied
+	default:
+		return fragment
+	}
 }
 
 // parseLeadingUse extracts a leading USE clause from a query.
@@ -483,53 +569,130 @@ func extractIdentifier(s string) (string, string, error) {
 	return s[:end], s[end:], nil
 }
 
-// callUseRe matches CALL followed by optional whitespace and {
-var callUseRe = regexp.MustCompile(`(?i)\bCALL\s*\{`)
+// extractTopLevelCallBlocks finds CALL { ... } blocks in the current query scope.
+func extractTopLevelCallBlocks(query string) ([]callSubqueryBlock, error) {
+	var blocks []callSubqueryBlock
+	inSingleQuote := false
+	inDoubleQuote := false
+	braceDepth := 0
+	parenDepth := 0
 
-// extractCallUseBlocks finds all CALL { USE ... } subquery blocks in a query.
-func extractCallUseBlocks(query string) ([]callUseBlock, error) {
-	matches := callUseRe.FindAllStringIndex(query, -1)
-	if len(matches) == 0 {
-		return nil, nil
-	}
-
-	var blocks []callUseBlock
-	for _, match := range matches {
-		startPos := match[0]
-		braceStart := match[1] - 1 // position of the {
-
-		// Find the matching closing brace.
-		closePos, err := findMatchingBrace(query, braceStart)
-		if err != nil {
-			return nil, fmt.Errorf("unmatched brace in CALL subquery at position %d: %w", startPos, err)
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' && !inDoubleQuote {
+			if inSingleQuote {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			} else {
+				inSingleQuote = true
+			}
+			continue
 		}
-
-		// Extract body between { and }
-		body := strings.TrimSpace(query[braceStart+1 : closePos])
-
-		// Check if the body starts with USE.
-		subDB, subBody, hasUse, err := parseLeadingUse(body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid USE in CALL subquery: %w", err)
+		if ch == '"' && !inSingleQuote {
+			if inDoubleQuote {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			} else {
+				inDoubleQuote = true
+			}
+			continue
 		}
-		if !hasUse {
-			// CALL {} without USE — not a fabric subquery, skip it.
+		if inSingleQuote || inDoubleQuote {
 			continue
 		}
 
-		// Extract WITH-imported columns from the subquery body.
-		importCols := extractWithImports(subBody)
+		if ch == '/' && i+1 < len(query) && query[i+1] == '/' {
+			for i < len(query) && query[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if ch == '/' && i+1 < len(query) && query[i+1] == '*' {
+			i += 2
+			for i+1 < len(query) {
+				if query[i] == '*' && query[i+1] == '/' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
 
-		blocks = append(blocks, callUseBlock{
-			graphName:     subDB,
-			body:          subBody,
-			importColumns: importCols,
-			startPos:      startPos,
-			endPos:        closePos + 1,
+		switch ch {
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		}
+		if braceDepth != 0 || parenDepth != 0 {
+			continue
+		}
+		if !keywordAt(query, i, "CALL") {
+			continue
+		}
+
+		j := i + len("CALL")
+		for j < len(query) && isWhitespace(query[j]) {
+			j++
+		}
+		if j >= len(query) || query[j] != '{' {
+			continue
+		}
+
+		closePos, err := findMatchingBrace(query, j)
+		if err != nil {
+			return nil, fmt.Errorf("unmatched brace in CALL subquery at position %d: %w", i, err)
+		}
+		body := strings.TrimSpace(query[j+1 : closePos])
+		blocks = append(blocks, callSubqueryBlock{
+			body:     body,
+			startPos: i,
+			endPos:   closePos + 1,
 		})
+		i = closePos
 	}
 
 	return blocks, nil
+}
+
+func callBlockContainsFabricUse(body string) (bool, error) {
+	_, _, hasUse, err := parseLeadingUse(body)
+	if err != nil {
+		return false, fmt.Errorf("invalid USE in CALL subquery: %w", err)
+	}
+	if hasUse {
+		return true, nil
+	}
+
+	nested, err := extractTopLevelCallBlocks(body)
+	if err != nil {
+		return false, err
+	}
+	for _, block := range nested {
+		found, err := callBlockContainsFabricUse(block.body)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // findMatchingBrace finds the position of the closing } matching the { at pos.
@@ -657,20 +820,6 @@ func extractWithImports(body string) []string {
 	}
 
 	return imports
-}
-
-// extractTrailingClauses extracts any query text that follows the last CALL { USE ... } block.
-func extractTrailingClauses(fullQuery string, blocks []callUseBlock) string {
-	if len(blocks) == 0 {
-		return ""
-	}
-
-	lastBlock := blocks[len(blocks)-1]
-	if lastBlock.endPos >= len(fullQuery) {
-		return ""
-	}
-
-	return strings.TrimSpace(fullQuery[lastBlock.endPos:])
 }
 
 // queryIsWrite performs a simple heuristic check for write operations.
