@@ -2,8 +2,10 @@ package cypher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/fabric"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -221,4 +223,131 @@ RETURN translationId, textKey, textKey128, texts;
 	require.NotNil(t, res)
 	require.Equal(t, []string{"translationId", "textKey", "textKey128", "texts"}, res.Columns)
 	require.Empty(t, res.Rows)
+}
+
+func TestExecute_FabricCorrelatedCallUseChain_AppliesWherePerOuterRow(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
+	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("caremark_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-1", Labels: []string{"Translation"}, Properties: map[string]interface{}{
+		"textKey":    "k1",
+		"textKey128": "h1",
+	}})
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-2", Labels: []string{"Translation"}, Properties: map[string]interface{}{
+		"textKey":    "k2",
+		"textKey128": "h2",
+	}})
+	require.NoError(t, err)
+
+	txrStore, err := mgr.GetStorage("caremark_txt")
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-1", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
+		"textKey128": "h1",
+		"text":       "one",
+	}})
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-2", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
+		"textKey128": "h2",
+		"text":       "two",
+	}})
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-x", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
+		"textKey128": "hx",
+		"text":       "other",
+	}})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t)
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+  LIMIT 2
+}
+CALL {
+  WITH textKey128
+  USE translations.txr
+  MATCH (tt)
+  WHERE tt.textKey128 = textKey128
+  RETURN collect(tt) AS texts
+}
+RETURN textKey, textKey128, texts
+`
+
+	catalog, err := exec.buildFabricCatalog()
+	require.NoError(t, err)
+	frag, err := fabric.NewFabricPlanner(catalog).Plan(query, "nornic")
+	require.NoError(t, err)
+	var fragmentExecs []*fabric.FragmentExec
+	var walk func(fabric.Fragment)
+	walk = func(f fabric.Fragment) {
+		switch n := f.(type) {
+		case *fabric.FragmentExec:
+			fragmentExecs = append(fragmentExecs, n)
+		case *fabric.FragmentApply:
+			walk(n.Input)
+			walk(n.Inner)
+		case *fabric.FragmentUnion:
+			walk(n.LHS)
+			walk(n.RHS)
+		}
+	}
+	walk(frag)
+	hasTXR := false
+	hasTrailing := false
+	for _, ex := range fragmentExecs {
+		if ex.GraphName == "translations.txr" {
+			hasTXR = true
+			require.NotContains(t, ex.Query, "USE translations.txr")
+		}
+		if ex.GraphName == "translations" && strings.HasPrefix(strings.TrimSpace(strings.ToUpper(ex.Query)), "RETURN ") {
+			hasTrailing = true
+		}
+	}
+	require.True(t, hasTXR, "planner must route second CALL block to translations.txr")
+	require.True(t, hasTrailing, "planner must keep trailing RETURN as separate fragment")
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"textKey", "textKey128", "texts"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+
+	for _, row := range res.Rows {
+		require.Len(t, row, 3)
+		hash, ok := row[1].(string)
+		require.True(t, ok, "row=%#v", row)
+
+		texts, ok := row[2].([]interface{})
+		require.True(t, ok, "unexpected texts type=%T value=%#v", row[2], row[2])
+		require.Len(t, texts, 1, "correlated WHERE must not fan out to unrelated rows")
+
+		switch v := texts[0].(type) {
+		case map[string]interface{}:
+			require.Equal(t, hash, v["textKey128"])
+		case *storage.Node:
+			require.Equal(t, hash, v.Properties["textKey128"])
+		case string:
+			require.Contains(t, v, hash)
+		default:
+			t.Fatalf("unexpected collected item type: %T (%#v)", texts[0], texts[0])
+		}
+	}
 }

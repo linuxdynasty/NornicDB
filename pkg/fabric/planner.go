@@ -359,6 +359,11 @@ func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []
 		}
 
 		subDB, subBody, hasUse, err := parseLeadingUse(block.body)
+		if err == nil && !hasUse {
+			var ok bool
+			subDB, subBody, ok, err = parseLeadingWithUse(block.body)
+			hasUse = ok
+		}
 		if err != nil {
 			return nil, fmt.Errorf("invalid USE in CALL subquery: %w", err)
 		}
@@ -411,6 +416,42 @@ func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []
 	}
 
 	return currentInput, nil
+}
+
+// parseLeadingWithUse extracts a leading WITH ... USE <graph> pattern from a CALL body.
+// It returns the USE target graph and a rewritten body where USE is removed but the WITH
+// import clause is preserved (e.g. "WITH x USE db MATCH ..." -> "WITH x MATCH ...").
+func parseLeadingWithUse(body string) (graph string, rewritten string, ok bool, err error) {
+	trimmed := strings.TrimSpace(body)
+	if !startsWithFold(trimmed, "WITH") {
+		return "", body, false, nil
+	}
+
+	withEnd, found := findLeadingWithClauseEnd(trimmed)
+	if !found || withEnd <= 0 || withEnd >= len(trimmed) {
+		return "", body, false, nil
+	}
+
+	withClause := strings.TrimSpace(trimmed[:withEnd])
+	rest := strings.TrimSpace(trimmed[withEnd:])
+	if !startsWithFold(rest, "USE") {
+		return "", body, false, nil
+	}
+
+	db, remaining, hasUse, parseErr := parseLeadingUse(rest)
+	if parseErr != nil {
+		return "", "", false, parseErr
+	}
+	if !hasUse {
+		return "", body, false, nil
+	}
+
+	remaining = strings.TrimSpace(remaining)
+	if remaining == "" {
+		return "", "", false, fmt.Errorf("USE clause requires a following query")
+	}
+
+	return db, strings.TrimSpace(withClause + " " + remaining), true, nil
 }
 
 // callSubqueryBlock represents a top-level CALL { ... } block for a single scope.
@@ -676,6 +717,13 @@ func callBlockContainsFabricUse(body string) (bool, error) {
 		return false, fmt.Errorf("invalid USE in CALL subquery: %w", err)
 	}
 	if hasUse {
+		return true, nil
+	}
+	_, _, hasWithUse, err := parseLeadingWithUse(body)
+	if err != nil {
+		return false, fmt.Errorf("invalid USE in CALL subquery: %w", err)
+	}
+	if hasWithUse {
 		return true, nil
 	}
 

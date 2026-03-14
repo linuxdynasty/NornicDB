@@ -1,6 +1,7 @@
 package fabric
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -253,6 +254,102 @@ RETURN translationId, textKey, texts`
 	// Two CALL blocks + one trailing RETURN = 3 apply nodes.
 	if applyCount != 3 {
 		t.Errorf("expected 3 nested Apply fragments, got %d", applyCount)
+	}
+}
+
+func TestPlan_CallWithThenUseSubquery(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("translations", &LocationLocal{DBName: "translations"})
+	catalog.Register("translations.tr", &LocationLocal{DBName: "caremark_tr"})
+	catalog.Register("translations.txr", &LocationLocal{DBName: "caremark_txt"})
+	p := NewFabricPlanner(catalog)
+
+	query := `USE translations
+CALL {
+  USE translations.tr
+  MATCH (t)
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+  LIMIT 2
+}
+CALL {
+  WITH textKey128
+  USE translations.txr
+  MATCH (tt)
+  WHERE tt.textKey128 = textKey128
+  RETURN collect(tt) AS texts
+}
+RETURN textKey, textKey128, texts`
+
+	frag, err := p.Plan(query, "translations")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	root, ok := frag.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected FragmentApply root, got %T", frag)
+	}
+	var execs []*FragmentExec
+	var walk func(Fragment)
+	walk = func(f Fragment) {
+		switch n := f.(type) {
+		case *FragmentExec:
+			execs = append(execs, n)
+		case *FragmentApply:
+			walk(n.Input)
+			walk(n.Inner)
+		case *FragmentUnion:
+			walk(n.LHS)
+			walk(n.RHS)
+		}
+	}
+	walk(root)
+
+	var foundTR, foundTXR bool
+	for _, ex := range execs {
+		switch ex.GraphName {
+		case "translations.tr":
+			foundTR = true
+		case "translations.txr":
+			foundTXR = true
+			if startsWithFold(strings.TrimSpace(ex.Query), "USE") {
+				t.Fatalf("expected planner to strip USE from second call body, got query: %s", ex.Query)
+			}
+			if !startsWithFold(strings.TrimSpace(ex.Query), "WITH") {
+				t.Fatalf("expected second call query to preserve WITH imports, got: %s", ex.Query)
+			}
+		}
+	}
+	if !foundTR {
+		names := make([]string, 0, len(execs))
+		for _, ex := range execs {
+			names = append(names, ex.GraphName+"::"+strings.TrimSpace(ex.Query))
+		}
+		t.Fatalf("expected a call fragment routed to translations.tr; got %v", names)
+	}
+	if !foundTXR {
+		names := make([]string, 0, len(execs))
+		for _, ex := range execs {
+			names = append(names, ex.GraphName+"::"+strings.TrimSpace(ex.Query))
+		}
+		t.Fatalf("expected a call fragment routed to translations.txr; got %v", names)
+	}
+}
+
+func TestCallBlockContainsFabricUse_WithThenUse(t *testing.T) {
+	body := `
+WITH textKey128
+USE translations.txr
+MATCH (tt)
+WHERE tt.textKey128 = textKey128
+RETURN collect(tt) AS texts
+`
+	ok, err := callBlockContainsFabricUse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected WITH ... USE ... block to be detected as fabric block")
 	}
 }
 

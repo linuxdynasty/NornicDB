@@ -85,17 +85,181 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 		if e.local == nil {
 			return nil, fmt.Errorf("local executor not configured")
 		}
-		return e.local.Execute(ctx, l, f.Query, params)
+		res, err := e.local.Execute(ctx, l, f.Query, params)
+		if err != nil {
+			return nil, err
+		}
+		if res != nil && len(res.Columns) == 0 {
+			res.Columns = inferReturnColumnsFromQuery(f.Query)
+		}
+		return res, nil
 
 	case *LocationRemote:
 		if e.remote == nil {
 			return nil, fmt.Errorf("remote executor not configured")
 		}
-		return e.remote.Execute(ctx, l, f.Query, params, authToken)
+		res, err := e.remote.Execute(ctx, l, f.Query, params, authToken)
+		if err != nil {
+			return nil, err
+		}
+		if res != nil && len(res.Columns) == 0 {
+			res.Columns = inferReturnColumnsFromQuery(f.Query)
+		}
+		return res, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported location type: %T", loc)
 	}
+}
+
+func inferReturnColumnsFromQuery(query string) []string {
+	upper := strings.ToUpper(query)
+	returnIdx := strings.LastIndex(upper, "RETURN")
+	if returnIdx < 0 {
+		return nil
+	}
+	clause := strings.TrimSpace(query[returnIdx+len("RETURN"):])
+	if clause == "" {
+		return nil
+	}
+	// Trim trailing semicolon.
+	clause = strings.TrimSuffix(clause, ";")
+	// Strip top-level ORDER BY / SKIP / LIMIT tails.
+	end := len(clause)
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(clause); i++ {
+		ch := clause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if hasKeywordAt(clause, i, "ORDER BY") || hasKeywordAt(clause, i, "SKIP") || hasKeywordAt(clause, i, "LIMIT") {
+			end = i
+			break
+		}
+	}
+	clause = strings.TrimSpace(clause[:end])
+	parts := splitTopLevelCSV(clause)
+	cols := make([]string, 0, len(parts))
+	for _, p := range parts {
+		item := strings.TrimSpace(p)
+		if item == "" {
+			continue
+		}
+		up := strings.ToUpper(item)
+		if as := strings.LastIndex(up, " AS "); as >= 0 {
+			alias := strings.TrimSpace(item[as+4:])
+			if alias != "" {
+				cols = append(cols, strings.Trim(alias, "`"))
+				continue
+			}
+		}
+		cols = append(cols, item)
+	}
+	return cols
+}
+
+func splitTopLevelCSV(s string) []string {
+	var parts []string
+	start := 0
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		case ',':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 func participantKeyFromLocation(loc Location) string {
@@ -123,12 +287,16 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 
 	// For each input row, execute the inner fragment with imported variables.
 	for _, inputRow := range inputResult.Rows {
+		innerForRow := innerFragment
+		if !fragmentHasStaticImports(innerFragment) {
+			innerForRow = rewriteFragmentWithRuntimeImports(innerFragment, inputResult.Columns)
+		}
 		// Build parameter map for the inner execution by merging input columns
 		// as parameters. This enables correlated subqueries where the inner
 		// query references variables from the outer scope.
 		innerParams := mergeRowParams(params, inputResult.Columns, inputRow)
 
-		innerResult, err := e.Execute(ctx, tx, innerFragment, innerParams, authToken)
+		innerResult, err := e.Execute(ctx, tx, innerForRow, innerParams, authToken)
 		if err != nil {
 			return nil, fmt.Errorf("apply inner failed: %w", err)
 		}
@@ -146,9 +314,7 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		}
 
 		for _, innerRow := range innerResult.Rows {
-			combined := make([]interface{}, 0, len(inputRow)+len(innerRow))
-			combined = append(combined, inputRow...)
-			combined = append(combined, innerRow...)
+			combined := combineRowsByColumns(result.Columns, inputResult.Columns, inputRow, innerResult.Columns, innerRow)
 			result.Rows = append(result.Rows, combined)
 		}
 	}
@@ -198,15 +364,80 @@ func rewriteFragmentWithImports(fragment Fragment) Fragment {
 	}
 }
 
+func rewriteFragmentWithRuntimeImports(fragment Fragment, runtimeCols []string) Fragment {
+	if fragment == nil {
+		return nil
+	}
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		importCols := importColumnsFromFragment(f.Input)
+		merged := mergeImportColumns(runtimeCols, importCols)
+		if rewritten := rewriteLeadingWithImports(f.Query, merged); rewritten != f.Query {
+			copied := *f
+			copied.Query = rewritten
+			return &copied
+		}
+		return fragment
+	case *FragmentApply:
+		copied := *f
+		copied.Input = rewriteFragmentWithRuntimeImports(copied.Input, runtimeCols)
+		copied.Inner = rewriteFragmentWithRuntimeImports(copied.Inner, runtimeCols)
+		return &copied
+	case *FragmentUnion:
+		copied := *f
+		copied.LHS = rewriteFragmentWithRuntimeImports(copied.LHS, runtimeCols)
+		copied.RHS = rewriteFragmentWithRuntimeImports(copied.RHS, runtimeCols)
+		return &copied
+	default:
+		return fragment
+	}
+}
+
+func mergeImportColumns(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, col := range a {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		if _, ok := seen[col]; ok {
+			continue
+		}
+		seen[col] = struct{}{}
+		out = append(out, col)
+	}
+	for _, col := range b {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		if _, ok := seen[col]; ok {
+			continue
+		}
+		seen[col] = struct{}{}
+		out = append(out, col)
+	}
+	return out
+}
+
+func fragmentHasStaticImports(fragment Fragment) bool {
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		return len(importColumnsFromFragment(f.Input)) > 0
+	case *FragmentApply:
+		return fragmentHasStaticImports(f.Input) || fragmentHasStaticImports(f.Inner)
+	case *FragmentUnion:
+		return fragmentHasStaticImports(f.LHS) || fragmentHasStaticImports(f.RHS)
+	default:
+		return false
+	}
+}
+
 func rewriteLeadingWithImports(query string, importCols []string) string {
 	if len(importCols) == 0 {
 		return query
 	}
-	trimmed := strings.TrimSpace(query)
-	if !strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
-		return query
-	}
-
 	assignments := make([]string, 0, len(importCols))
 	for _, col := range importCols {
 		col = strings.TrimSpace(col)
@@ -218,6 +449,12 @@ func rewriteLeadingWithImports(query string, importCols []string) string {
 	if len(assignments) == 0 {
 		return query
 	}
+
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
+		return "WITH " + strings.Join(assignments, ", ") + " " + trimmed
+	}
+
 	withEnd, ok := findLeadingWithClauseEnd(trimmed)
 	if !ok || withEnd <= 0 {
 		return query
@@ -226,7 +463,93 @@ func rewriteLeadingWithImports(query string, importCols []string) string {
 	if rest == "" {
 		return "WITH " + strings.Join(assignments, ", ")
 	}
+	upperRest := strings.ToUpper(rest)
+	if strings.HasPrefix(upperRest, "MATCH ") || strings.HasPrefix(upperRest, "OPTIONAL MATCH ") {
+		return substituteVarsWithParams(rest, importCols)
+	}
 	return "WITH " + strings.Join(assignments, ", ") + " " + rest
+}
+
+func substituteVarsWithParams(query string, vars []string) string {
+	out := query
+	for _, v := range vars {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		out = replaceStandaloneVar(out, v, "$"+v)
+	}
+	return out
+}
+
+func replaceStandaloneVar(s, ident, replacement string) string {
+	if ident == "" || len(s) < len(ident) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	for i := 0; i < len(s); {
+		ch := s[i]
+		switch {
+		case inSingle:
+			b.WriteByte(ch)
+			if ch == '\'' {
+				inSingle = false
+			}
+			i++
+			continue
+		case inDouble:
+			b.WriteByte(ch)
+			if ch == '"' {
+				inDouble = false
+			}
+			i++
+			continue
+		case inBacktick:
+			b.WriteByte(ch)
+			if ch == '`' {
+				inBacktick = false
+			}
+			i++
+			continue
+		}
+
+		if ch == '\'' {
+			inSingle = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+
+		if i+len(ident) <= len(s) && s[i:i+len(ident)] == ident {
+			prevOK := i == 0 || (!isIdentChar(s[i-1]) && s[i-1] != '.')
+			next := i + len(ident)
+			nextOK := next >= len(s) || !isIdentChar(s[next])
+			if prevOK && nextOK {
+				b.WriteString(replacement)
+				i = next
+				continue
+			}
+		}
+		b.WriteByte(ch)
+		i++
+	}
+	return b.String()
 }
 
 func findLeadingWithClauseEnd(query string) (int, bool) {
@@ -304,6 +627,7 @@ func isCypherClauseStart(query string, idx int) bool {
 		"DETACH DELETE",
 		"ORDER BY",
 		"LOAD CSV",
+		"USE",
 		"MATCH",
 		"RETURN",
 		"CALL",
@@ -417,6 +741,27 @@ func combineColumns(outer, inner []string) []string {
 		}
 	}
 	return result
+}
+
+func combineRowsByColumns(resultCols, outerCols []string, outerRow []interface{}, innerCols []string, innerRow []interface{}) []interface{} {
+	valueByCol := make(map[string]interface{}, len(outerCols)+len(innerCols))
+	for i, col := range outerCols {
+		if i < len(outerRow) {
+			valueByCol[col] = outerRow[i]
+		}
+	}
+	for i, col := range innerCols {
+		if i < len(innerRow) {
+			// Inner values override on duplicate names, matching APPLY scoping behavior.
+			valueByCol[col] = innerRow[i]
+		}
+	}
+
+	combined := make([]interface{}, len(resultCols))
+	for i, col := range resultCols {
+		combined[i] = valueByCol[col]
+	}
+	return combined
 }
 
 // deduplicateRows removes duplicate rows based on string representation.
