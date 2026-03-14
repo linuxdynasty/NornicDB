@@ -16,7 +16,7 @@ import (
 // - ORDER BY, LIMIT, SKIP clauses
 // - Multi-line query formatting (whitespace handling)
 func TestYieldReturnIntegration(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -288,7 +288,7 @@ func TestYieldReturnIntegration(t *testing.T) {
 }
 
 func TestCallDbIndexFulltextQueryNodes_DirectBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -359,7 +359,7 @@ func TestCallDbIndexFulltextQueryNodes_DirectBranches(t *testing.T) {
 
 // TestYieldReturnWithOtherProcedures tests YIELD...RETURN with various procedures
 func TestYieldReturnWithOtherProcedures(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -428,7 +428,7 @@ func TestYieldReturnWithOtherProcedures(t *testing.T) {
 
 // TestYieldReturnEdgeCases tests edge cases in YIELD...RETURN parsing
 func TestYieldReturnEdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

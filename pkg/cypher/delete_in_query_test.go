@@ -13,7 +13,7 @@ import (
 // This test suite verifies that IN queries work correctly and don't accidentally
 // delete unintended nodes, which was the original bug.
 func TestDeleteWithINQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -320,7 +320,7 @@ func TestDeleteWithINQuery(t *testing.T) {
 // TestMatchWithINQuery tests the IN operator in WHERE clauses for MATCH operations.
 // This verifies that IN queries work correctly for selection, not just deletion.
 func TestMatchWithINQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

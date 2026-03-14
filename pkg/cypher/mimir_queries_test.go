@@ -18,7 +18,7 @@ import (
 // ====================================================================================
 
 func TestMimirConnectionTest(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -35,7 +35,7 @@ func TestMimirConnectionTest(t *testing.T) {
 // ====================================================================================
 
 func TestMimirSchemaInitialization(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -127,7 +127,7 @@ func TestMimirSchemaInitialization(t *testing.T) {
 // ====================================================================================
 
 func TestMimirNodeOperations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -221,7 +221,7 @@ func TestMimirNodeOperations(t *testing.T) {
 // ====================================================================================
 
 func TestMimirEdgeOperations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -265,7 +265,7 @@ func TestMimirEdgeOperations(t *testing.T) {
 // ====================================================================================
 
 func TestMimirEmbeddingUpdates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -314,7 +314,7 @@ func TestMimirEmbeddingUpdates(t *testing.T) {
 // ====================================================================================
 
 func TestMimirChunkOperations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -363,7 +363,7 @@ func TestMimirChunkOperations(t *testing.T) {
 // ====================================================================================
 
 func TestMimirQuickTestSuite(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -446,7 +446,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 // ====================================================================================
 
 func TestSetPlusEqualsEdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

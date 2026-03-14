@@ -26,7 +26,7 @@ func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, pa
 		if err != nil {
 			return nil, err
 		}
-		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB, GetAuthTokenFromContext(ctx))
 		if err != nil {
 			return nil, err
 		}

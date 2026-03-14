@@ -12,7 +12,7 @@ import (
 
 // TestNodeMutatedCallbackOnCreate verifies the callback is invoked when nodes are created via CREATE
 func TestNodeMutatedCallbackOnCreate(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -39,7 +39,7 @@ func TestNodeMutatedCallbackOnCreate(t *testing.T) {
 
 // TestNodeMutatedCallbackOnCreateMultiple verifies callback is invoked for each node in multi-node CREATE
 func TestNodeMutatedCallbackOnCreateMultiple(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -65,7 +65,7 @@ func TestNodeMutatedCallbackOnCreateMultiple(t *testing.T) {
 
 // TestNodeMutatedCallbackOnCreateWithRelationship verifies callback for nodes created with relationships
 func TestNodeMutatedCallbackOnCreateWithRelationship(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -91,7 +91,7 @@ func TestNodeMutatedCallbackOnCreateWithRelationship(t *testing.T) {
 
 // TestNodeMutatedCallbackOnMergeCreate verifies callback is invoked when MERGE creates a new node
 func TestNodeMutatedCallbackOnMergeCreate(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -117,7 +117,7 @@ func TestNodeMutatedCallbackOnMergeCreate(t *testing.T) {
 
 // TestNodeMutatedCallbackOnMergeMatch verifies callback is invoked when MERGE matches and persists (so embed queue can re-process on any mutation).
 func TestNodeMutatedCallbackOnMergeMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -152,7 +152,7 @@ func TestNodeMutatedCallbackOnMergeMatch(t *testing.T) {
 
 // TestNodeMutatedCallbackNotSet verifies no panic when callback is nil
 func TestNodeMutatedCallbackNotSet(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -168,7 +168,7 @@ func TestNodeMutatedCallbackNotSet(t *testing.T) {
 
 // TestNodeMutatedCallbackNodeIDsAreValid verifies the callback receives valid node IDs
 func TestNodeMutatedCallbackNodeIDsAreValid(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -200,7 +200,7 @@ func TestNodeMutatedCallbackNodeIDsAreValid(t *testing.T) {
 
 // TestNodeMutatedCallbackConcurrentCreates verifies callback is thread-safe
 func TestNodeMutatedCallbackConcurrentCreates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -236,7 +236,7 @@ func TestNodeMutatedCallbackConcurrentCreates(t *testing.T) {
 
 // TestNodeMutatedCallbackOnMatchCreate verifies callback for MATCH...CREATE pattern
 func TestNodeMutatedCallbackOnMatchCreate(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -271,7 +271,7 @@ func TestNodeMutatedCallbackOnMatchCreate(t *testing.T) {
 
 // TestSetNodeMutatedCallbackReplacesExisting verifies callback can be replaced
 func TestSetNodeMutatedCallbackReplacesExisting(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

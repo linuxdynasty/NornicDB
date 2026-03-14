@@ -10,7 +10,7 @@ import (
 )
 
 func TestShellParamCommand_PersistsAndOverrides(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	_, err := exec.Execute(ctx, ":param name => 'Alice'", nil)
@@ -28,7 +28,7 @@ func TestShellParamCommand_PersistsAndOverrides(t *testing.T) {
 }
 
 func TestShellParamCommand_MapListAndClear(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	_, err := exec.Execute(ctx, ":param {name: 'Alice', age: 1 + 1}", nil)
@@ -60,7 +60,7 @@ func TestShellParamCommand_ANTLRMode(t *testing.T) {
 	cleanup := config.WithANTLRParser()
 	defer cleanup()
 
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	_, err := exec.Execute(ctx, ":param answer => 40 + 2", nil)

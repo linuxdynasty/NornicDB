@@ -82,13 +82,30 @@ func (e *StorageExecutor) cloneForStorage(store storage.Engine) *StorageExecutor
 	return cloned
 }
 
-func (e *StorageExecutor) scopedExecutorForUse(db string) (*StorageExecutor, string, error) {
+func (e *StorageExecutor) scopedExecutorForUse(db string, authToken string) (*StorageExecutor, string, error) {
 	targetDB := strings.TrimSpace(db)
 	if targetDB == "" {
 		return nil, "", fmt.Errorf("USE clause requires a database name")
 	}
 
 	if e.dbManager != nil {
+		// Handle dotted composite.constituent references (e.g. "caremark.tr").
+		// Split at first dot: composite name + constituent alias.
+		if dotIdx := strings.IndexByte(targetDB, '.'); dotIdx > 0 {
+			compositeName := targetDB[:dotIdx]
+			if e.dbManager.IsCompositeDatabase(compositeName) {
+				// Resolve the full composite.constituent via GetStorageForUse.
+				// The composite engine's getConstituent will resolve the alias.
+				return e.resolveCompositeConstituent(targetDB, compositeName, targetDB[dotIdx+1:], authToken)
+			}
+		}
+
+		// Check if the target is itself a composite database.
+		if e.dbManager.IsCompositeDatabase(targetDB) {
+			return e.resolveCompositeStorage(targetDB, authToken)
+		}
+
+		// Standard database: resolve alias and switch namespace.
 		resolved, err := e.dbManager.ResolveDatabase(targetDB)
 		if err != nil {
 			return nil, "", fmt.Errorf("USE %s failed: %w", targetDB, err)
@@ -107,4 +124,50 @@ func (e *StorageExecutor) scopedExecutorForUse(db string) (*StorageExecutor, str
 
 	scopedStore := storage.NewNamespacedEngine(ns.GetInnerEngine(), targetDB)
 	return e.cloneForStorage(scopedStore), targetDB, nil
+}
+
+// resolveCompositeStorage resolves USE <composite> to a CompositeEngine-backed executor.
+func (e *StorageExecutor) resolveCompositeStorage(compositeName string, authToken string) (*StorageExecutor, string, error) {
+	if e.dbManager == nil {
+		return nil, "", fmt.Errorf("USE %s failed: database manager not available", compositeName)
+	}
+
+	engineIface, err := e.dbManager.GetStorageForUse(compositeName, authToken)
+	if err != nil {
+		return nil, "", fmt.Errorf("USE %s failed: %w", compositeName, err)
+	}
+
+	engine, ok := engineIface.(storage.Engine)
+	if !ok {
+		return nil, "", fmt.Errorf("USE %s failed: storage engine has unexpected type", compositeName)
+	}
+
+	return e.cloneForStorage(engine), compositeName, nil
+}
+
+// resolveCompositeConstituent resolves USE <composite.alias> to a specific
+// constituent engine within a composite database.
+func (e *StorageExecutor) resolveCompositeConstituent(fullName, compositeName, alias string, authToken string) (*StorageExecutor, string, error) {
+	if e.dbManager == nil {
+		return nil, "", fmt.Errorf("USE %s failed: database manager not available", fullName)
+	}
+
+	// Get the composite engine first.
+	engineIface, err := e.dbManager.GetStorageForUse(compositeName, authToken)
+	if err != nil {
+		return nil, "", fmt.Errorf("USE %s failed: %w", fullName, err)
+	}
+
+	compositeEngine, ok := engineIface.(*storage.CompositeEngine)
+	if !ok {
+		return nil, "", fmt.Errorf("USE %s failed: '%s' is not a composite database", fullName, compositeName)
+	}
+
+	// Resolve the specific constituent by alias.
+	constituentEngine, err := compositeEngine.GetConstituentByAlias(alias)
+	if err != nil {
+		return nil, "", fmt.Errorf("USE %s failed: %w", fullName, err)
+	}
+
+	return e.cloneForStorage(constituentEngine), fullName, nil
 }

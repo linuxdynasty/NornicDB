@@ -14,7 +14,7 @@ func TestCreateCallDropProcedureDDL(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -50,7 +50,7 @@ func TestPersistedProcedurePrecompiledOnStartup(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec1 := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -82,7 +82,7 @@ func TestProcedureCreateRejectedInsideActiveTransaction(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -101,7 +101,7 @@ func TestLoadPersistedProcedures_BranchCoverage(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -207,7 +207,7 @@ func TestDropProcedure_ErrorBranches(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

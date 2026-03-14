@@ -47,7 +47,7 @@ func TestCompareWithOperatorCoverage(t *testing.T) {
 }
 
 func TestCaseExpressionSearched(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -193,7 +193,7 @@ func TestCaseExpressionSearched(t *testing.T) {
 }
 
 func TestCaseExpressionSimple(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -291,7 +291,7 @@ func TestCaseExpressionSimple(t *testing.T) {
 }
 
 func TestCaseExpressionNullHandling(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -351,7 +351,7 @@ func TestCaseExpressionNullHandling(t *testing.T) {
 }
 
 func TestCaseExpressionComplexConditions(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -414,7 +414,7 @@ func TestCaseExpressionComplexConditions(t *testing.T) {
 }
 
 func TestCaseExpressionEdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

@@ -220,7 +220,7 @@ func parseConstituentFromTokens(tokens []string, idx *int) (map[string]interface
 //
 // Syntax:
 //
-//	CREATE COMPOSITE DATABASE name
+//	CREATE COMPOSITE DATABASE name [IF NOT EXISTS]
 //	  ALIAS alias1 FOR DATABASE db1
 //	  ALIAS alias2 FOR DATABASE db2
 //	  ...
@@ -230,6 +230,9 @@ func parseConstituentFromTokens(tokens []string, idx *int) (map[string]interface
 //	CREATE COMPOSITE DATABASE analytics
 //	  ALIAS tenant_a FOR DATABASE tenant_a
 //	  ALIAS tenant_b FOR DATABASE tenant_b
+//
+//	CREATE COMPOSITE DATABASE analytics IF NOT EXISTS
+//	  ALIAS tenant_a FOR DATABASE tenant_a
 func (e *StorageExecutor) executeCreateCompositeDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	if e.dbManager == nil {
 		return nil, fmt.Errorf("database manager not available - CREATE COMPOSITE DATABASE requires multi-database support")
@@ -283,9 +286,32 @@ func (e *StorageExecutor) executeCreateCompositeDatabase(ctx context.Context, cy
 		return nil, fmt.Errorf("invalid CREATE COMPOSITE DATABASE syntax: database name cannot be empty")
 	}
 
+	// Check for IF NOT EXISTS after database name.
+	ifNotExists := false
+	remaining := strings.TrimSpace(cypher[dbNameEnd:])
+	upperRemaining := strings.ToUpper(remaining)
+	if strings.HasPrefix(upperRemaining, "IF NOT EXISTS") {
+		ifNotExists = true
+		remaining = strings.TrimSpace(remaining[len("IF NOT EXISTS"):])
+	}
+
+	// If IF NOT EXISTS and database already exists, return success silently.
+	if ifNotExists && e.dbManager != nil && e.dbManager.IsCompositeDatabase(dbName) {
+		return &ExecuteResult{
+			Columns: []string{"name"},
+			Rows:    [][]interface{}{{dbName}},
+		}, nil
+	}
+	// Also handle IF NOT EXISTS when a standard database with that name exists.
+	if ifNotExists && e.dbManager != nil && e.dbManager.Exists(dbName) {
+		return &ExecuteResult{
+			Columns: []string{"name"},
+			Rows:    [][]interface{}{{dbName}},
+		}, nil
+	}
+
 	// Parse constituents (ALIAS ... FOR DATABASE ... [AT ...] [SECRET REF ...])
 	constituents := []interface{}{}
-	remaining := strings.TrimSpace(cypher[dbNameEnd:])
 	if remaining != "" {
 		tokens, err := tokenize(remaining)
 		if err != nil {

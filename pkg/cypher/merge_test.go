@@ -19,7 +19,7 @@ import (
 // ========================================
 
 func TestMergeNode_CreateWhenEmpty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -44,7 +44,7 @@ func TestMergeNode_CreateWhenEmpty(t *testing.T) {
 }
 
 func TestMergeNode_MatchWhenExists(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -80,7 +80,7 @@ func TestMergeNode_MatchWhenExists(t *testing.T) {
 // ========================================
 
 func TestMergeNode_OnCreateSet(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -107,7 +107,7 @@ func TestMergeNode_OnCreateSet(t *testing.T) {
 }
 
 func TestMergeNode_OnMatchSet(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -142,7 +142,7 @@ func TestMergeNode_OnMatchSet(t *testing.T) {
 // ========================================
 
 func TestMergeNode_Idempotent(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -193,7 +193,7 @@ func TestMergeNode_Idempotent(t *testing.T) {
 // ========================================
 
 func TestMergeRelationship_Basic(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -223,7 +223,7 @@ func TestMergeRelationship_Basic(t *testing.T) {
 }
 
 func TestMergeRelationship_Idempotent(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -260,7 +260,7 @@ func TestMergeRelationship_Idempotent(t *testing.T) {
 }
 
 func TestMergeHelpers_ParseReturnAndClauseSplitBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
 
@@ -290,7 +290,7 @@ func TestMergeHelpers_ParseReturnAndClauseSplitBranches(t *testing.T) {
 }
 
 func TestExecuteCompoundMatchMerge_OptionalAndContextRelationshipBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -319,7 +319,7 @@ func TestExecuteCompoundMatchMerge_OptionalAndContextRelationshipBranches(t *tes
 }
 
 func TestExecuteMatchForContextWithRelationships_MapResolutionBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -351,7 +351,7 @@ func TestExecuteMatchForContextWithRelationships_MapResolutionBranches(t *testin
 // ========================================
 
 func TestMerge_FileIndexerPattern(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -455,7 +455,7 @@ func TestMerge_FileIndexerPattern(t *testing.T) {
 
 // Test exact Mimir FileIndexer query format with SET on separate line
 func TestMerge_FileIndexerExactFormat(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -517,7 +517,7 @@ func TestMerge_FileIndexerExactFormat(t *testing.T) {
 // ========================================
 
 func TestMerge_WithParameters(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -546,7 +546,7 @@ func TestMerge_WithParameters(t *testing.T) {
 }
 
 func TestExecuteMergeRelSegment_ErrorBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -608,7 +608,7 @@ func TestSplitMergeChainClauseBlock_Branches(t *testing.T) {
 }
 
 func TestApplyWithProjection_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	n := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{}}
 	r := &storage.Edge{ID: "e1", Type: "KNOWS", StartNode: "n1", EndNode: "n1", Properties: map[string]interface{}{}}
 	nodeCtx := map[string]*storage.Node{"n": n}
@@ -632,7 +632,7 @@ func TestApplyWithProjection_Branches(t *testing.T) {
 }
 
 func TestExecuteMergeWithChain_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -673,7 +673,7 @@ func TestExecuteMergeWithChain_AdditionalBranches(t *testing.T) {
 }
 
 func TestSplitMergeChainSegments_AdditionalBranches(t *testing.T) {
-	e := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	e := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	segments := e.splitMergeChainSegments(`
 		MERGE (n:Word {name:'x'})
@@ -691,7 +691,7 @@ func TestSplitMergeChainSegments_AdditionalBranches(t *testing.T) {
 }
 
 func TestExecuteMerge_UnsubstitutedParamAndFallbackPatternBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -711,7 +711,7 @@ func TestExecuteMerge_UnsubstitutedParamAndFallbackPatternBranches(t *testing.T)
 }
 
 func TestExecuteCompoundMatchMerge_SecondMergeAndErrorBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -743,7 +743,7 @@ func TestExecuteCompoundMatchMerge_SecondMergeAndErrorBranches(t *testing.T) {
 }
 
 func TestExecuteMergeNodeAndMatchSegment_AdditionalBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

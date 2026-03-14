@@ -10,7 +10,7 @@ import (
 )
 
 func TestApocCreateUUID(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -34,7 +34,7 @@ func TestApocCreateUUID(t *testing.T) {
 }
 
 func TestApocTextJoin(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -56,7 +56,7 @@ func TestApocTextJoin(t *testing.T) {
 }
 
 func TestApocCollFlatten(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -81,7 +81,7 @@ func TestApocCollFlatten(t *testing.T) {
 }
 
 func TestApocCollToSet(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -104,7 +104,7 @@ func TestApocCollToSet(t *testing.T) {
 }
 
 func TestApocConvertToJson(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -129,7 +129,7 @@ func TestApocConvertToJson(t *testing.T) {
 }
 
 func TestApocConvertFromJsonMap(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -152,7 +152,7 @@ func TestApocConvertFromJsonMap(t *testing.T) {
 }
 
 func TestApocConvertFromJsonList(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -173,7 +173,7 @@ func TestApocConvertFromJsonList(t *testing.T) {
 }
 
 func TestApocMetaType(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -232,7 +232,7 @@ func TestApocMetaType(t *testing.T) {
 }
 
 func TestApocMetaIsType(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -284,7 +284,7 @@ func TestApocMetaIsType(t *testing.T) {
 }
 
 func TestApocMapMergeViaCypher(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -305,7 +305,7 @@ func TestApocMapMergeViaCypher(t *testing.T) {
 }
 
 func TestApocMapFromPairs(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -328,7 +328,7 @@ func TestApocMapFromPairs(t *testing.T) {
 }
 
 func TestApocMapFromLists(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -433,7 +433,7 @@ func TestMergeMaps(t *testing.T) {
 
 // Ensure APOC function names are case-insensitive
 func TestApocCaseInsensitive(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()

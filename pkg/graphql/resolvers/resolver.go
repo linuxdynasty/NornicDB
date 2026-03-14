@@ -170,6 +170,7 @@ func (r *Resolver) getCypherExecutor(ctx context.Context, database string) (*cyp
 	}
 
 	executor := cypher.NewStorageExecutor(storage)
+	executor.SetDatabaseManager(&graphqlDatabaseManagerAdapter{manager: r.dbManager})
 
 	// Copy configuration from base DB's executor if available
 	if r.DB != nil {

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -153,7 +152,7 @@ func TestExecutorExecuteAdditionalBranches(t *testing.T) {
 }
 
 func TestPatternParserHelpers(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
 
 	t.Run("containsReservedKeyword only flags dangerous forms", func(t *testing.T) {
 		assert.False(t, containsReservedKeyword("Order"))

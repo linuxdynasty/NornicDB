@@ -9,7 +9,7 @@ import (
 )
 
 func TestMergeChain_OptionalMatchForeach_CreatesOnlyWhenMatched(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -56,7 +56,7 @@ func TestMergeChain_OptionalMatchForeach_CreatesOnlyWhenMatched(t *testing.T) {
 }
 
 func TestForeach_ReplacesLoopVariable_NotMapKeys(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

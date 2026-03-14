@@ -10,7 +10,7 @@ import (
 )
 
 func TestDetachDeleteAll(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -45,7 +45,7 @@ func TestDetachDeleteAll(t *testing.T) {
 }
 
 func TestDetachDeleteWithRelationships(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -80,7 +80,7 @@ func TestDetachDeleteWithRelationships(t *testing.T) {
 }
 
 func TestDeleteWithFilter(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -109,7 +109,7 @@ func TestDeleteWithFilter(t *testing.T) {
 // TestDetachDeleteParsing tests that DETACH DELETE is parsed correctly
 // This fixes the issue where "MATCH (n) DETACH DELETE n" wasn't working
 func TestDetachDeleteParsing(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -143,7 +143,7 @@ func TestDetachDeleteParsing(t *testing.T) {
 }
 
 func TestDeleteWithWhereClause(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -170,7 +170,7 @@ func TestDeleteWithWhereClause(t *testing.T) {
 }
 
 func TestDeleteWithParameters(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
@@ -199,7 +199,7 @@ func TestDeleteWithParameters(t *testing.T) {
 }
 
 func TestDeleteContentWithCypherKeywords(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)

@@ -165,6 +165,10 @@ func (m *aliasTestDatabaseManager) IsCompositeDatabase(name string) bool {
 	return false
 }
 
+func (m *aliasTestDatabaseManager) GetStorageForUse(name string, authToken string) (interface{}, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+
 type aliasTestDatabaseInfo struct {
 	info *multidb.DatabaseInfo
 }
@@ -198,7 +202,7 @@ func whitespaceVariations(baseQuery string) []string {
 }
 
 func TestAliasCommands_CreateAlias_WhitespaceVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -256,7 +260,7 @@ func TestAliasCommands_CreateAlias_WhitespaceVariations(t *testing.T) {
 }
 
 func TestAliasCommands_DropAlias_WhitespaceVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -313,7 +317,7 @@ func TestAliasCommands_DropAlias_WhitespaceVariations(t *testing.T) {
 }
 
 func TestAliasCommands_ShowAliases_WhitespaceVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -356,7 +360,7 @@ func TestAliasCommands_ShowAliases_WhitespaceVariations(t *testing.T) {
 }
 
 func TestAliasCommands_CreateAlias_ErrorCases_WhitespaceVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -413,7 +417,7 @@ func TestAliasCommands_CreateAlias_ErrorCases_WhitespaceVariations(t *testing.T)
 }
 
 func TestAliasCommands_DropAlias_ErrorCases_WhitespaceVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -459,7 +463,7 @@ func TestAliasCommands_DropAlias_ErrorCases_WhitespaceVariations(t *testing.T) {
 }
 
 func TestAliasCommands_ComplexWhitespacePatterns(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -506,7 +510,7 @@ func TestAliasCommands_ComplexWhitespacePatterns(t *testing.T) {
 }
 
 func TestAliasCommands_EdgeCases_Whitespace(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

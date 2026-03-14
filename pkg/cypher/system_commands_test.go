@@ -144,6 +144,10 @@ func (m *mockDatabaseManager) IsCompositeDatabase(name string) bool {
 	return false
 }
 
+func (m *mockDatabaseManager) GetStorageForUse(name string, authToken string) (interface{}, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+
 type badLimitsTypeDBManager struct{ *mockDatabaseManager }
 
 func (m *badLimitsTypeDBManager) GetDatabaseLimits(databaseName string) (interface{}, error) {
@@ -160,7 +164,7 @@ func (m *failingSetLimitsDBManager) SetDatabaseLimits(databaseName string, limit
 }
 
 func TestSystemCommands_CreateDatabase(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -238,7 +242,7 @@ func TestSystemCommands_CreateDatabase(t *testing.T) {
 }
 
 func TestSystemCommands_DropDatabase(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -311,7 +315,7 @@ func TestSystemCommands_DropDatabase(t *testing.T) {
 func TestSystemCommands_BacktickQuotedDatabaseNames(t *testing.T) {
 	ctx := context.Background()
 
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -327,7 +331,7 @@ func TestSystemCommands_BacktickQuotedDatabaseNames(t *testing.T) {
 }
 
 func TestSystemCommands_ShowDatabases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -386,7 +390,7 @@ func TestSystemCommands_ShowDatabases(t *testing.T) {
 }
 
 func TestSystemCommands_ShowDatabase(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -404,7 +408,7 @@ func TestSystemCommands_ShowDatabase(t *testing.T) {
 }
 
 func TestSystemCommands_Integration(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -440,7 +444,7 @@ func TestSystemCommands_Integration(t *testing.T) {
 }
 
 func TestSystemCommands_AlterDatabaseSetLimit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -592,7 +596,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 
 	t.Run("show limits for database with no limits", func(t *testing.T) {
 		// Fresh setup for each subtest to avoid state leakage
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		defer store.Close()
@@ -613,7 +617,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 
 	t.Run("show limits for database with limits set", func(t *testing.T) {
 		// Fresh setup for each subtest to avoid state leakage
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		defer store.Close()
@@ -665,7 +669,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 
 	t.Run("error on non-existent database", func(t *testing.T) {
 		// Fresh setup for each subtest to avoid state leakage
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		defer store.Close()
@@ -681,7 +685,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 
 	t.Run("error on invalid syntax", func(t *testing.T) {
 		// Fresh setup for each subtest to avoid state leakage
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		defer store.Close()
@@ -697,7 +701,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 
 	t.Run("error without database manager", func(t *testing.T) {
 		// Fresh setup for each subtest to avoid state leakage
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		defer store.Close()
@@ -711,7 +715,7 @@ func TestSystemCommands_ShowLimits(t *testing.T) {
 }
 
 func TestSystemCommands_ShowDatabase_BranchCoverage(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "tenant_ns")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

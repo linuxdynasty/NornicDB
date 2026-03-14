@@ -10,7 +10,7 @@ import (
 )
 
 func TestShortestPathCypher(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -129,7 +129,7 @@ func TestShortestPathCypher(t *testing.T) {
 }
 
 func TestShortestPathBidirectional(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -165,7 +165,7 @@ func TestShortestPathBidirectional(t *testing.T) {
 }
 
 func TestShortestPathNoPath(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -193,7 +193,7 @@ func TestShortestPathNoPath(t *testing.T) {
 }
 
 func TestShortestPathWithMaxHops(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -250,7 +250,7 @@ func TestShortestPathWithMaxHops(t *testing.T) {
 }
 
 func TestShortestPathDirectional(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -304,7 +304,7 @@ func TestShortestPathDirectional(t *testing.T) {
 }
 
 func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -376,7 +376,7 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 }
 
 func TestFindNodeByPattern_HelperBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 

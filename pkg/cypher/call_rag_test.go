@@ -44,7 +44,7 @@ func (s *stubInferenceManager) Chat(ctx context.Context, req heimdall.ChatReques
 
 func TestCallDbRetrieveAndRerank(t *testing.T) {
 	ctx := context.Background()
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -74,7 +74,7 @@ func TestCallDbRetrieveAndRerank(t *testing.T) {
 
 func TestCallDbInfer(t *testing.T) {
 	ctx := context.Background()
-	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
 	exec.SetInferenceManager(&stubInferenceManager{})
 
 	genRes, err := exec.Execute(ctx, "CALL db.infer({prompt: 'hello world', max_tokens: 32, temperature: 0.2})", nil)
@@ -95,7 +95,7 @@ func TestCallDbInfer(t *testing.T) {
 
 func TestCallDbRerankCandidates(t *testing.T) {
 	ctx := context.Background()
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	res, err := exec.Execute(ctx, "CALL db.rerank({query: 'alpha', candidates: [{id: 'a', content: 'alpha text', score: 0.9}, {id: 'b', content: 'beta text', score: 0.4}]})", nil)
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestCallDbRerankCandidates(t *testing.T) {
 
 func TestCallDbRerankCandidates_StrictValidationBranches(t *testing.T) {
 	ctx := context.Background()
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	_, err := exec.Execute(ctx, "CALL db.rerank({query: 'alpha', candidates: []})", nil)
 	require.Error(t, err)
@@ -119,7 +119,7 @@ func TestCallDbRerankCandidates_StrictValidationBranches(t *testing.T) {
 
 func TestCallDbIndexVectorEmbed(t *testing.T) {
 	ctx := context.Background()
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	exec.SetEmbedder(&stubVectorEmbedder{vec: []float32{0.1, 0.2, 0.3, 0.4}})
 
 	res, err := exec.Execute(ctx, "CALL db.index.vector.embed('hello world') YIELD embedding", nil)
@@ -133,7 +133,7 @@ func TestCallDbIndexVectorEmbed(t *testing.T) {
 
 func TestCallDbRetrieveWrappers_ParseErrors(t *testing.T) {
 	ctx := context.Background()
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	_, err := exec.callDbRetrieve(ctx, "CALL db.retrieve(")
 	require.Error(t, err)

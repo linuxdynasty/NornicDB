@@ -13,7 +13,7 @@ import (
 
 // TestCompositeDatabase_EndToEnd tests full end-to-end composite database functionality
 func TestCompositeDatabase_EndToEnd(t *testing.T) {
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	defer inner.Close()
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
@@ -75,7 +75,7 @@ func TestCompositeDatabase_EndToEnd(t *testing.T) {
 
 // TestCompositeDatabase_ComplexQuery tests complex queries across constituents
 func TestCompositeDatabase_ComplexQuery(t *testing.T) {
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	defer inner.Close()
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
@@ -165,7 +165,7 @@ func TestCompositeDatabase_ComplexQuery(t *testing.T) {
 
 // TestCompositeDatabase_QueryWithRelationships tests queries with relationships across constituents
 func TestCompositeDatabase_QueryWithRelationships(t *testing.T) {
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	defer inner.Close()
 	manager, err := multidb.NewDatabaseManager(inner, nil)
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestCompositeDatabase_QueryWithRelationships(t *testing.T) {
 
 // TestCompositeDatabase_AlterCompositeDatabase tests ALTER COMPOSITE DATABASE commands
 func TestCompositeDatabase_AlterCompositeDatabase(t *testing.T) {
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	defer inner.Close()
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}

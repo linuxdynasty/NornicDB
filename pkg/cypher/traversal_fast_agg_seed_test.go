@@ -9,7 +9,7 @@ import (
 )
 
 func TestFastAgg_WithCypherSeed_CategoryNamePresent(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
@@ -49,7 +49,7 @@ func TestFastAgg_WithCypherSeed_CategoryNamePresent(t *testing.T) {
 }
 
 func TestFastAgg_WithCypherSeed_ProductsPerCategoryQueryShape(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 

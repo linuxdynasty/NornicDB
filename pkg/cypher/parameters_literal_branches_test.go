@@ -10,7 +10,7 @@ import (
 )
 
 func TestValueToLiteral_AllTypeBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	// Nil
 	assert.Equal(t, "null", exec.valueToLiteral(nil))
@@ -77,7 +77,7 @@ type customLiteral struct{ s string }
 func (c customLiteral) String() string { return c.s }
 
 func TestValueToLiteral_DefaultFallbackBranch(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	got := exec.valueToLiteral(customLiteral{s: "fallback-value"})
 	require.Equal(t, "'fallback-value'", got)
 }

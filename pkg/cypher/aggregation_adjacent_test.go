@@ -17,7 +17,7 @@ import (
 // ====================================================================================
 
 func TestAggregation_OrderByVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -130,7 +130,7 @@ func TestAggregation_OrderByVariations(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_WhereVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -225,7 +225,7 @@ func TestAggregation_WhereVariations(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_MultipleAggregates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -285,7 +285,7 @@ func TestAggregation_MultipleAggregates(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_MultipleGroupByColumns(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -363,7 +363,7 @@ func TestAggregation_MultipleGroupByColumns(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_NullHandlingAdvanced(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -429,7 +429,7 @@ func TestAggregation_NullHandlingAdvanced(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_EdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -480,7 +480,7 @@ func TestAggregation_EdgeCases(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_CollectVariations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -543,7 +543,7 @@ func TestAggregation_CollectVariations(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_CombinedClauses(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

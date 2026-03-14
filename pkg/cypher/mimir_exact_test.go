@@ -16,7 +16,7 @@ import (
 // TestMimirExactQueries tests the EXACT queries from Mimir's index-api.ts
 // with data that matches production: mostly .md files with File:Node labels
 func TestMimirExactQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -157,7 +157,7 @@ func TestMimirExactQueries(t *testing.T) {
 
 // TestMimirExactQueriesWithEmbeddings tests with files that have embeddings
 func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

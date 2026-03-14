@@ -10,7 +10,7 @@ import (
 )
 
 func TestExecuteCreate_BranchCoverage(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

@@ -10,7 +10,7 @@ import (
 )
 
 func TestCreateParsesBacktickedPropertyKeys(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -38,7 +38,7 @@ RETURN n._mongo_collection
 }
 
 func TestSetWholeMapLiteralParsesBacktickedKeys(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -75,7 +75,7 @@ RETURN n._mongo_collection, n._mongo_database
 }
 
 func TestUnwindCreateSetWholeMapFromParameter(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -115,7 +115,7 @@ RETURN n._mongo_collection, n._mongo_database, n._mongo_id
 }
 
 func TestUnwindCreateSetWholeMapFromParameter_LargeBatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -157,7 +157,7 @@ SET n = row
 }
 
 func TestUnwindCreateSetWholeMapFromParameter_LargeBatch_RowPropertiesWorks(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -201,7 +201,7 @@ SET n = row.properties
 }
 
 func TestParseValue_MapLiterals(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -217,7 +217,7 @@ func TestParseValue_MapLiterals(t *testing.T) {
 }
 
 func TestCreateSetWholeMapLiteral(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -243,7 +243,7 @@ RETURN n._mongo_collection
 }
 
 func TestReplaceVariableInQuery_ForNestedMapPropertyAccess(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 

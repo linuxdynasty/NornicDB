@@ -65,7 +65,7 @@ func TestParseExecutionMode(t *testing.T) {
 }
 
 func TestExplainBasicQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -154,7 +154,7 @@ func TestExplainBasicQuery(t *testing.T) {
 }
 
 func TestProfileBasicQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -221,7 +221,7 @@ func TestProfileBasicQuery(t *testing.T) {
 }
 
 func TestExplainComplexQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -279,7 +279,7 @@ func TestExplainComplexQueries(t *testing.T) {
 }
 
 func TestExplainPlanStructure(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -315,7 +315,7 @@ func TestExplainPlanStructure(t *testing.T) {
 }
 
 func TestProfileDBHits(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -336,7 +336,7 @@ func TestProfileDBHits(t *testing.T) {
 }
 
 func TestExplainNoExecution(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -390,7 +390,7 @@ func collectOperatorTypes(op *PlanOperator) []string {
 }
 
 func TestExplainVsProfileOutput(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -429,7 +429,7 @@ func planStringFromResult(t *testing.T, result *ExecuteResult) string {
 }
 
 func TestAnalyzeNodeScan(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -493,7 +493,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestExplainHelpers_InferColumnsAndDBHitsBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -525,7 +525,7 @@ func TestExplainHelpers_InferColumnsAndDBHitsBranches(t *testing.T) {
 }
 
 func TestExplainHelpers_InferColumnsAndDBHits_MoreBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	// YIELD items without RETURN should infer yielded column names.
 	cols := exec.inferExplainColumns("CALL db.info() YIELD name, version")

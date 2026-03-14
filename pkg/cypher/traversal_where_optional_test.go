@@ -11,7 +11,7 @@ import (
 // TestTraversalWhere_NotRelationshipPattern tests MATCH (n)-[r:TYPE]->(ph) WHERE n.prop = $ AND NOT (n)-[:OTHER]->()
 // so that relationship-pattern WHERE works in the traversal path (e.g. head-only OrderStatus).
 func TestTraversalWhere_NotRelationshipPattern(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "db")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -51,7 +51,7 @@ func TestTraversalWhere_NotRelationshipPattern(t *testing.T) {
 // TestTraversalWhere_NotRelationshipPattern_FiltersOut tests that when the node HAS the relationship,
 // NOT (n)-[:X]->() filters the row out.
 func TestTraversalWhere_NotRelationshipPattern_FiltersOut(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "db")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

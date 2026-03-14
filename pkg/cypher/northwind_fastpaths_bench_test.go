@@ -13,6 +13,7 @@ func setupNorthwindBenchExecutor(b *testing.B, products int, orders int) *cypher
 	b.Helper()
 
 	base := storage.NewMemoryEngine()
+	b.Cleanup(func() { _ = base.Close() })
 	store := storage.NewNamespacedEngine(base, "bench")
 
 	// Categories

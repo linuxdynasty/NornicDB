@@ -8,7 +8,7 @@ import (
 )
 
 func TestParseTraversalPattern_Chained_NorthwindSupplierCategory(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	pattern := "(s:Supplier)-[:SUPPLIES]->(p:Product)-[:PART_OF]->(c:Category)"

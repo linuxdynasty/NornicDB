@@ -1220,7 +1220,7 @@ func TestGenerateFastRPEmbeddings_LargeGraphStreamingBranch(t *testing.T) {
 }
 
 func TestCallGdsGraphProject_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

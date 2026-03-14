@@ -28,7 +28,7 @@ func TestUserProcedureRegistrationAndExecution(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -52,7 +52,7 @@ func TestUserProcedureRegistrationAndExecution(t *testing.T) {
 }
 
 func TestDbmsProceduresIncludesSignatureColumn(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -64,7 +64,7 @@ func TestDbmsProceduresIncludesSignatureColumn(t *testing.T) {
 }
 
 func TestCallYieldUnknownColumnReturnsError(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

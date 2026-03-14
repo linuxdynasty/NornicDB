@@ -155,6 +155,13 @@ func (c *CompositeEngine) getConstituent(alias string) (Engine, error) {
 	return engine, nil
 }
 
+// GetConstituentByAlias returns the storage engine for a specific constituent
+// within this composite database. This is used by the Cypher executor to resolve
+// USE composite.alias references.
+func (c *CompositeEngine) GetConstituentByAlias(alias string) (Engine, error) {
+	return c.getConstituent(alias)
+}
+
 // routeWrite determines which constituent should receive a write operation.
 // Implements full routing using configured routing rules with intelligent fallbacks.
 func (c *CompositeEngine) routeWrite(operation string, labels []string, properties map[string]interface{}, writableConstituents []string) string {

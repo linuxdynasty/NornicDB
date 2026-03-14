@@ -2847,28 +2847,28 @@ func TestExecuteTxStatementsAdditionalBranches(t *testing.T) {
 
 	// 1) Mutation without claims => forbidden.
 	resp := &TransactionResponse{Results: make([]QueryResult, 0), Errors: make([]QueryError, 0)}
-	server.executeTxStatements(context.Background(), nil, dbName, tx, []StatementRequest{
+	server.executeTxStatements(context.Background(), "", nil, dbName, tx, []StatementRequest{
 		{Statement: "CREATE (n:Doc {name:'x'})"},
 	}, resp)
 	assert.NotEmpty(t, resp.Errors)
 
 	// 2) Claims without write privilege => forbidden.
 	resp = &TransactionResponse{Results: make([]QueryResult, 0), Errors: make([]QueryError, 0)}
-	server.executeTxStatements(context.Background(), &auth.JWTClaims{Roles: []string{"viewer"}}, dbName, tx, []StatementRequest{
+	server.executeTxStatements(context.Background(), "", &auth.JWTClaims{Roles: []string{"viewer"}}, dbName, tx, []StatementRequest{
 		{Statement: "CREATE (n:Doc {name:'y'})"},
 	}, resp)
 	assert.NotEmpty(t, resp.Errors)
 
 	// 3) Claims with write privilege + syntax error => statement syntax error.
 	resp = &TransactionResponse{Results: make([]QueryResult, 0), Errors: make([]QueryError, 0)}
-	server.executeTxStatements(context.Background(), &auth.JWTClaims{Roles: []string{"admin"}}, dbName, tx, []StatementRequest{
+	server.executeTxStatements(context.Background(), "", &auth.JWTClaims{Roles: []string{"admin"}}, dbName, tx, []StatementRequest{
 		{Statement: "INVALID CYPHER"},
 	}, resp)
 	assert.NotEmpty(t, resp.Errors)
 
 	// 4) Read statement success path appends result.
 	resp = &TransactionResponse{Results: make([]QueryResult, 0), Errors: make([]QueryError, 0)}
-	server.executeTxStatements(context.Background(), &auth.JWTClaims{Roles: []string{"viewer"}}, dbName, tx, []StatementRequest{
+	server.executeTxStatements(context.Background(), "", &auth.JWTClaims{Roles: []string{"viewer"}}, dbName, tx, []StatementRequest{
 		{Statement: "RETURN 1 AS n"},
 	}, resp)
 	assert.NotEmpty(t, resp.Results)

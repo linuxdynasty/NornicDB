@@ -61,7 +61,7 @@ func TestMatchWhereSetUnwind_PermutationsAndStyles(t *testing.T) {
 	for i, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
 			ctx := context.Background()
@@ -262,7 +262,7 @@ func randomValidWhitespace(r *rand.Rand) string {
 }
 
 func TestMatchWhereSetUnwind_SpecificFailedQueryRegression(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -318,7 +318,7 @@ func TestMatchWhereSetUnwind_MultilineWhereAllPermutations(t *testing.T) {
 	for i, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
 			ctx := context.Background()
@@ -451,7 +451,7 @@ func factorial(n int) int {
 }
 
 func TestEvaluateWithWhereCondition_DirectBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	vals := map[string]interface{}{
 		"n":      int64(10),
 		"exists": "x",

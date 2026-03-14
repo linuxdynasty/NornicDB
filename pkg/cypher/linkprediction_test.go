@@ -11,7 +11,7 @@ import (
 // TestParseLinkPredictionConfig tests configuration parsing
 func TestParseLinkPredictionConfig(t *testing.T) {
 	executor := &StorageExecutor{
-		storage: storage.NewMemoryEngine(),
+		storage: newTestMemoryEngine(t),
 	}
 
 	tests := []struct {
@@ -94,7 +94,7 @@ func TestParseLinkPredictionConfig(t *testing.T) {
 }
 
 func TestParseLinkPredictionConfig_AdditionalBranches(t *testing.T) {
-	executor := &StorageExecutor{storage: storage.NewMemoryEngine()}
+	executor := &StorageExecutor{storage: newTestMemoryEngine(t)}
 
 	// id(var) with missing variable in provided context should error clearly.
 	_, err := executor.parseLinkPredictionConfig(
@@ -130,7 +130,7 @@ func TestParseLinkPredictionConfig_AdditionalBranches(t *testing.T) {
 
 // TestGdsLinkPredictionAdamicAdar tests Adamic-Adar procedure
 func TestGdsLinkPredictionAdamicAdar(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)
@@ -182,7 +182,7 @@ func TestGdsLinkPredictionAdamicAdar(t *testing.T) {
 
 // TestGdsLinkPredictionCommonNeighbors tests Common Neighbors procedure
 func TestGdsLinkPredictionCommonNeighbors(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)
@@ -205,7 +205,7 @@ func TestGdsLinkPredictionCommonNeighbors(t *testing.T) {
 
 // TestGdsLinkPredictionResourceAllocation tests Resource Allocation procedure
 func TestGdsLinkPredictionResourceAllocation(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)
@@ -228,7 +228,7 @@ func TestGdsLinkPredictionResourceAllocation(t *testing.T) {
 
 // TestGdsLinkPredictionPreferentialAttachment tests Preferential Attachment procedure
 func TestGdsLinkPredictionPreferentialAttachment(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)
@@ -251,7 +251,7 @@ func TestGdsLinkPredictionPreferentialAttachment(t *testing.T) {
 
 // TestGdsLinkPredictionJaccard tests Jaccard procedure
 func TestGdsLinkPredictionJaccard(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)
@@ -274,7 +274,7 @@ func TestGdsLinkPredictionJaccard(t *testing.T) {
 
 // TestGdsLinkPredictionPredict tests hybrid prediction procedure
 func TestGdsLinkPredictionPredict(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	setupTestGraph(t, engine)

@@ -11,7 +11,7 @@ import (
 
 // TestAPOCFunctionsIntegration tests APOC functions work end-to-end
 func TestAPOCFunctionsIntegration(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -116,7 +116,7 @@ func TestAPOCFunctionsIntegration(t *testing.T) {
 }
 
 func TestAPOCPathHelpers_BranchCoverage(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -179,7 +179,7 @@ func TestAPOCPathHelpers_BranchCoverage(t *testing.T) {
 
 func TestAPOCPathHelpers_SubgraphNodes_AllNodesError(t *testing.T) {
 	failStore := &failingNodeLookupEngine{
-		Engine:      storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"),
+		Engine:      storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"),
 		allNodesErr: assert.AnError,
 	}
 	exec := NewStorageExecutor(failStore)

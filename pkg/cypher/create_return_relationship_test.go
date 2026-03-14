@@ -9,7 +9,7 @@ import (
 )
 
 func TestCreate_ReturnsCreatedRelationship(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	res, err := exec.Execute(context.Background(), "CREATE (:Test)-[r:RELATES_TO]->(:Test) RETURN r", nil)

@@ -24,7 +24,7 @@ func TestProcedureDifferentialNeo4j(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = driver.Close(ctx) }()
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	nornic := NewStorageExecutor(store)
 

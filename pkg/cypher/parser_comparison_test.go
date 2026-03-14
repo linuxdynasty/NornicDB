@@ -21,7 +21,7 @@ import (
 func setupParserComparisonExecutor(tb testing.TB) (*StorageExecutor, context.Context) {
 	tb.Helper()
 
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(tb)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -261,7 +261,7 @@ func TestParserPerformanceComparison(t *testing.T) {
 		t.Skip("Skipping performance comparison in short mode")
 	}
 
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

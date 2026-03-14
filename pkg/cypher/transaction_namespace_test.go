@@ -29,7 +29,7 @@ func countFromResult(t *testing.T, result *ExecuteResult) int64 {
 }
 
 func TestExplicitTransaction_NamespacedCreateCommit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -54,7 +54,7 @@ func TestExplicitTransaction_NamespacedCreateCommit(t *testing.T) {
 }
 
 func TestExplicitTransaction_NamespacedCreateRollback(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -79,7 +79,7 @@ func TestExplicitTransaction_NamespacedCreateRollback(t *testing.T) {
 }
 
 func TestTransactionStatementRoutingAndErrors(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -112,7 +112,7 @@ func TestTransactionStatementRoutingAndErrors(t *testing.T) {
 }
 
 func TestTransactionUnknownTypeBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -142,7 +142,7 @@ func TestTransactionUnknownTypeBranches(t *testing.T) {
 }
 
 func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -207,7 +207,7 @@ func TestExecuteQueryAgainstStorage_DispatchCoverage(t *testing.T) {
 }
 
 func TestExecuteQueryAgainstStorage_ShowDispatchWithDatabaseManager(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

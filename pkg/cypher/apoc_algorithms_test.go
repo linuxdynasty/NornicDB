@@ -13,7 +13,7 @@ import (
 //
 //	\-> E -> F
 func createTestGraph(t *testing.T) *StorageExecutor {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -220,7 +220,7 @@ func TestApocNeighborsByhop(t *testing.T) {
 }
 
 func TestDijkstraWithWeights(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)

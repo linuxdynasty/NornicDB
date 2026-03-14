@@ -13,7 +13,7 @@ import (
 // TestMatchWhereSize tests MATCH (n) WHERE size(n.prop) op value.
 // size() returns string/list length; these queries must filter nodes correctly.
 func TestMatchWhereSize(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -84,7 +84,7 @@ func TestMatchWhereSize(t *testing.T) {
 
 // TestMatchWhereExists tests MATCH (n) WHERE exists(n.prop).
 func TestMatchWhereExists(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -135,7 +135,7 @@ func TestMatchWhereExists(t *testing.T) {
 
 // TestMatchWhereSizeAndExists tests combined WHERE size(n.content) > X AND exists(n.openai_embedding).
 func TestMatchWhereSizeAndExists(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

@@ -710,7 +710,7 @@ func TestCypherKalmanWithNodeProperty(t *testing.T) {
 // Helper for Kalman test setup
 func setupKalmanTestStorage(t *testing.T) storage.Engine {
 	t.Helper()
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	return storage.NewNamespacedEngine(baseStore, "test")
 }
 
@@ -749,7 +749,7 @@ func BenchmarkKalmanAdaptiveProcess(b *testing.B) {
 }
 
 func BenchmarkCypherKalmanProcess(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

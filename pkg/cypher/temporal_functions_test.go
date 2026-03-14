@@ -11,7 +11,7 @@ import (
 )
 
 func TestTimestampFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -39,7 +39,7 @@ func TestTimestampFunction(t *testing.T) {
 }
 
 func TestDatetimeFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -71,7 +71,7 @@ func TestDatetimeFunction(t *testing.T) {
 }
 
 func TestDateFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -103,7 +103,7 @@ func TestDateFunction(t *testing.T) {
 }
 
 func TestTimeFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -135,7 +135,7 @@ func TestTimeFunction(t *testing.T) {
 }
 
 func TestLocaldatetimeFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -154,7 +154,7 @@ func TestLocaldatetimeFunction(t *testing.T) {
 }
 
 func TestLocaltimeFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -173,7 +173,7 @@ func TestLocaltimeFunction(t *testing.T) {
 }
 
 func TestDateComponentFunctions(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()

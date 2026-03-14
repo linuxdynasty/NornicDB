@@ -11,7 +11,7 @@ import (
 )
 
 func TestTemporalAssertNoOverlap(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
@@ -39,7 +39,7 @@ func TestTemporalAssertNoOverlap(t *testing.T) {
 }
 
 func TestTemporalProcedures_HelperBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
@@ -71,7 +71,7 @@ func TestTemporalProcedures_HelperBranches(t *testing.T) {
 }
 
 func TestTemporalAsOf(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
@@ -117,7 +117,7 @@ func TestTemporalAsOf(t *testing.T) {
 }
 
 func TestTemporalProcedures_ErrorAndSelectionBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
@@ -192,7 +192,7 @@ func TestTemporalProcedures_ErrorAndSelectionBranches(t *testing.T) {
 }
 
 func TestTemporalProcedures_RequiredStringArgsBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
@@ -212,7 +212,7 @@ func TestTemporalProcedures_RequiredStringArgsBranches(t *testing.T) {
 
 func TestTemporalProcedures_LabelLookupErrorBranches(t *testing.T) {
 	failStore := &failingNodeLookupEngine{
-		Engine:     storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"),
+		Engine:     storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"),
 		byLabelErr: errors.New("label lookup failed"),
 	}
 	exec := NewStorageExecutor(failStore)
@@ -228,7 +228,7 @@ func TestTemporalProcedures_LabelLookupErrorBranches(t *testing.T) {
 }
 
 func TestTemporalProcedures_StrictArgValidationAdditionalBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()

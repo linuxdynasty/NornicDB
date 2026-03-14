@@ -58,7 +58,7 @@ func TestApocLoadExportHelpers_CallApocLoadCsvParams_Delegates(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocLoadJsonArray_FromFile(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	e := NewStorageExecutor(eng)
 
@@ -75,7 +75,7 @@ func TestApocLoadExportHelpers_CallApocLoadJsonArray_FromFile(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocLoadJsonArray_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	e := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -111,7 +111,7 @@ func TestApocLoadExportHelpers_CallApocLoadJsonArray_Branches(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocImportJson_FromFile(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 	e := NewStorageExecutor(eng)
 
@@ -140,7 +140,7 @@ func TestApocLoadExportHelpers_CallApocImportJson_FromFile(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 	e := NewStorageExecutor(eng)
 
@@ -209,7 +209,7 @@ func TestApocLoadExportHelpers_LoadJsonFromURL_AndQueryExports(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocLoadCsv_OptionsAndSources(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -251,7 +251,7 @@ func TestApocLoadExportHelpers_CallApocLoadCsv_OptionsAndSources(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocLoadJson_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -285,7 +285,7 @@ func TestApocLoadExportHelpers_CallApocLoadJson_Branches(t *testing.T) {
 }
 
 func TestApocLoadExportHelpers_CallApocExportJsonAll_NoFile(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -305,7 +305,7 @@ func TestApocLoadExportHelpers_CallApocExportJsonAll_NoFile(t *testing.T) {
 	assert.Contains(t, res.Rows[0][4].(string), "\"nodes\"")
 }
 func TestApocLoadExportHelpers_CallApocExportJsonAll_WriteError(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()

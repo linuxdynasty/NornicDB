@@ -41,7 +41,7 @@ func setupAggregationTestData(t *testing.T, store storage.Engine) {
 // ====================================================================================
 
 func TestBug_WhereIsNotNullWithAggregation(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -109,7 +109,7 @@ func TestBug_WhereIsNotNullWithAggregation(t *testing.T) {
 // ====================================================================================
 
 func TestBug_CountInWithClauseReturnsNull(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -157,7 +157,7 @@ func TestBug_CountInWithClauseReturnsNull(t *testing.T) {
 // ====================================================================================
 
 func TestAggregation_GroupByProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -189,7 +189,7 @@ func TestAggregation_GroupByProperty(t *testing.T) {
 }
 
 func TestAggregation_WithThenReturn(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -224,7 +224,7 @@ func TestAggregation_WithThenReturn(t *testing.T) {
 }
 
 func TestAggregation_ChainedWith(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -245,7 +245,7 @@ func TestAggregation_ChainedWith(t *testing.T) {
 }
 
 func TestAggregation_NullHandling(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -280,7 +280,7 @@ func TestAggregation_NullHandling(t *testing.T) {
 }
 
 func TestAggregation_CollectDistinct(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -306,7 +306,7 @@ func TestAggregation_CollectDistinct(t *testing.T) {
 }
 
 func TestAggregation_SumAndAvg(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -342,7 +342,7 @@ func TestAggregation_SumAndAvg(t *testing.T) {
 }
 
 func TestAggregation_WhereOnAggregatedResult(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -372,7 +372,7 @@ func TestAggregation_WhereOnAggregatedResult(t *testing.T) {
 }
 
 func TestAggregation_OrderByAggregatedValue(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -400,7 +400,7 @@ func TestAggregation_OrderByAggregatedValue(t *testing.T) {
 }
 
 func TestAggregation_WithMultipleAggregates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -443,7 +443,7 @@ func TestAggregation_WithMultipleAggregates(t *testing.T) {
 // ====================================================================================
 
 func TestMimirIndexStatsExtensionQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -479,7 +479,7 @@ func TestMimirIndexStatsExtensionQuery(t *testing.T) {
 
 // TestMimirIndexStatsTypeQuery tests the exact byType query from Mimir's index-api.ts
 func TestMimirIndexStatsTypeQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -512,7 +512,7 @@ func TestMimirIndexStatsTypeQuery(t *testing.T) {
 
 // TestMimirComplexStatsQuery tests the complex stats query from Mimir's index-api.ts
 func TestMimirComplexStatsQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

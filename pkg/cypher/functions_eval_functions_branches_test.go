@@ -9,7 +9,7 @@ import (
 )
 
 func TestEvaluateExpression_FunctionUtilityBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	nodes := map[string]*storage.Node{
 		"n": {
 			ID:     "n1",
@@ -84,7 +84,7 @@ func TestEvaluateExpression_FunctionUtilityBranches(t *testing.T) {
 }
 
 func TestEvaluateExpression_FullFunctionAdvancedBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	nodes := map[string]*storage.Node{
 		"n": {
 			ID:     "n1",

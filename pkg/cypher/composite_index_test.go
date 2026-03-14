@@ -31,7 +31,7 @@ func (e *updateErrorEngine) UpdateEdge(edge *storage.Edge) error {
 
 // TestCompositeIndex tests composite (multi-property) index creation
 func TestCompositeIndex(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -70,7 +70,7 @@ func TestCompositeIndex(t *testing.T) {
 }
 
 func TestLegacyIndexProcedureCompatibilityBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -128,7 +128,7 @@ func TestLegacyIndexProcedureCompatibilityBranches(t *testing.T) {
 }
 
 func TestVectorPropertyProcedureBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -216,7 +216,7 @@ func TestVectorPropertyProcedureBranches(t *testing.T) {
 }
 
 func TestLegacyIndexProcedureErrorBranches_Additional(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -258,7 +258,7 @@ func TestLegacyIndexProcedureErrorBranches_Additional(t *testing.T) {
 
 // TestCompositeIndexUnnamed tests composite index without explicit name
 func TestCompositeIndexUnnamed(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -302,7 +302,7 @@ func TestCompositeIndexUnnamed(t *testing.T) {
 
 // TestCompositeIndexThreeProperties tests composite index with three properties
 func TestCompositeIndexThreeProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -343,7 +343,7 @@ func TestCompositeIndexThreeProperties(t *testing.T) {
 
 // TestCompositeIndexWithSpaces tests parsing with various spacing
 func TestCompositeIndexWithSpaces(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -370,7 +370,7 @@ func TestCompositeIndexWithSpaces(t *testing.T) {
 
 // TestCompositeIndexIfNotExists tests IF NOT EXISTS clause with composite indexes
 func TestCompositeIndexIfNotExists(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -391,7 +391,7 @@ func TestCompositeIndexIfNotExists(t *testing.T) {
 
 // TestSinglePropertyIndexStillWorks tests that single-property indexes still work
 func TestSinglePropertyIndexStillWorks(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -430,7 +430,7 @@ func TestSinglePropertyIndexStillWorks(t *testing.T) {
 
 // TestCompositeIndexQueryOptimization tests that composite indexes can be used in queries
 func TestCompositeIndexQueryOptimization(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -474,7 +474,7 @@ func TestCompositeIndexQueryOptimization(t *testing.T) {
 
 // TestParseIndexProperties tests the parseIndexProperties helper function
 func TestParseIndexProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

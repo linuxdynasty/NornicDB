@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -12,7 +11,7 @@ import (
 // and start nested implicit transactions. Otherwise, a failure after the inner
 // write can commit partial data even though the outer statement returns an error.
 func TestCallSubquery_NoNestedImplicitTransactionOnError(t *testing.T) {
-	store := storage.NewMemoryEngine()
+	store := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 

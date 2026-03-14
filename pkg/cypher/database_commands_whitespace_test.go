@@ -56,7 +56,7 @@ func whitespacePermutations(baseQuery string) []string {
 }
 
 func TestDatabaseCommands_CreateDatabase_WhitespacePermutations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -106,7 +106,7 @@ func TestDatabaseCommands_CreateDatabase_WhitespacePermutations(t *testing.T) {
 }
 
 func TestDatabaseCommands_DropDatabase_WhitespacePermutations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -160,7 +160,7 @@ func TestDatabaseCommands_DropDatabase_WhitespacePermutations(t *testing.T) {
 }
 
 func TestDatabaseCommands_ShowDatabases_WhitespacePermutations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -189,7 +189,7 @@ func TestDatabaseCommands_ShowDatabases_WhitespacePermutations(t *testing.T) {
 }
 
 func TestDatabaseCommands_ShowDatabase_WhitespacePermutations(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -212,7 +212,7 @@ func TestDatabaseCommands_ShowDatabase_WhitespacePermutations(t *testing.T) {
 }
 
 func TestDatabaseCommands_ComplexWhitespacePatterns(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -279,7 +279,7 @@ func TestDatabaseCommands_ComplexWhitespacePatterns(t *testing.T) {
 }
 
 func TestDatabaseCommands_EdgeCases_Whitespace(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

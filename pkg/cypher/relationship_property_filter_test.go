@@ -12,7 +12,7 @@ import (
 // TestRelationshipPropertyFilter tests inline property filters on relationship traversal
 // Bug discovered: MATCH (a)-[:REL]->(b:Label {name: 'value'}) returns 0 when value contains special chars
 func TestRelationshipPropertyFilter(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -157,7 +157,7 @@ func TestRelationshipPropertyFilter(t *testing.T) {
 
 // TestCategoryRelationshipTraversal tests IN_CATEGORY style relationship patterns
 func TestCategoryRelationshipTraversal(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -239,7 +239,7 @@ func TestCategoryRelationshipTraversal(t *testing.T) {
 
 // TestSpecialCharacterPropertyValues tests various special characters in property values
 func TestSpecialCharacterPropertyValues(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -316,7 +316,7 @@ func TestSpecialCharacterPropertyValues(t *testing.T) {
 
 // TestMultipleRelationshipPatterns tests complex patterns with multiple relationship types
 func TestMultipleRelationshipPatterns(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

@@ -10,7 +10,7 @@ import (
 
 func setupApocPathExecutor(t *testing.T) (*StorageExecutor, *storage.NamespacedEngine) {
 	t.Helper()
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	t.Cleanup(func() { base.Close() })
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)

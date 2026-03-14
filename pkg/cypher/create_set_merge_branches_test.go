@@ -10,7 +10,7 @@ import (
 )
 
 func TestApplySetMergeToCreated_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -85,7 +85,7 @@ func TestApplySetMergeToCreated_Branches(t *testing.T) {
 }
 
 func TestParseSetMergeMapLiteralStrict_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
 
 	t.Run("missing braces", func(t *testing.T) {
 		_, err := exec.parseSetMergeMapLiteralStrict("a:1")

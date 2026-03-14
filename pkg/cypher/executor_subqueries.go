@@ -381,11 +381,26 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		return nil, fmt.Errorf("invalid CALL {} subquery: empty body")
 	}
 
+	// Handle USE clause inside CALL subquery body — resolve the target database
+	// and switch the executor before processing WITH/MATCH.
+	subqueryExecutor := e
+	if useDB, useRemaining, hasUse, useErr := parseLeadingUseClause(subqueryBody); hasUse || useErr != nil {
+		if useErr != nil {
+			return nil, fmt.Errorf("CALL subquery USE clause error: %w", useErr)
+		}
+		scopedExec, resolvedDB, scopeErr := e.scopedExecutorForUse(useDB, GetAuthTokenFromContext(ctx))
+		if scopeErr != nil {
+			return nil, fmt.Errorf("CALL subquery USE %s failed: %w", useDB, scopeErr)
+		}
+		subqueryExecutor = scopedExec
+		subqueryBody = useRemaining
+		ctx = context.WithValue(ctx, ctxKeyUseDatabase, resolvedDB)
+	}
 	// Check if subquery starts with "WITH <variable>" - this imports outer context
 	upperBody := strings.ToUpper(strings.TrimSpace(subqueryBody))
 	if !strings.HasPrefix(upperBody, "WITH ") {
 		// No WITH clause - execute as standalone subquery for each seed
-		return e.executeCallSubquery(ctx, callPart)
+		return subqueryExecutor.executeCallSubquery(ctx, "CALL { "+subqueryBody+" }")
 	}
 
 	// Find where the WITH clause ends (at MATCH or RETURN)
@@ -446,7 +461,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				}
 
 				// Execute the substituted subquery with parameters
-				innerResult, err := e.executeInternal(ctx, substitutedBody, subqueryParams)
+				innerResult, err := subqueryExecutor.executeInternal(ctx, substitutedBody, subqueryParams)
 				if err != nil {
 					// Log but continue with other seeds
 					continue
@@ -469,7 +484,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		substitutedBody := "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " WITH " + nodePattern.variable + " " + restOfSubquery
 
 		// Execute the substituted subquery with parameters
-		innerResult, err := e.executeInternal(ctx, substitutedBody, subqueryParams)
+		innerResult, err := subqueryExecutor.executeInternal(ctx, substitutedBody, subqueryParams)
 		if err != nil {
 			// Log but continue with other seeds
 			continue
@@ -543,23 +558,40 @@ func (e *StorageExecutor) executeCallSubquery(ctx context.Context, cypher string
 		return nil, fmt.Errorf("invalid CALL {} subquery: empty body (expected CALL { <query> })")
 	}
 
+	// Check if the subquery body starts with USE — this indicates a fabric
+	// cross-database subquery (e.g. CALL { USE caremark.tr MATCH ... }).
+	// Resolve the target database and execute against that engine.
+	subqueryExecutor := e
+	if useDB, useRemaining, hasUse, useErr := parseLeadingUseClause(subqueryBody); hasUse || useErr != nil {
+		if useErr != nil {
+			return nil, fmt.Errorf("CALL subquery USE clause error: %w", useErr)
+		}
+		scopedExec, resolvedDB, scopeErr := e.scopedExecutorForUse(useDB, GetAuthTokenFromContext(ctx))
+		if scopeErr != nil {
+			return nil, fmt.Errorf("CALL subquery USE %s failed: %w", useDB, scopeErr)
+		}
+		subqueryExecutor = scopedExec
+		subqueryBody = useRemaining
+		ctx = context.WithValue(ctx, ctxKeyUseDatabase, resolvedDB)
+	}
+
 	// Execute the inner subquery
 	var innerResult *ExecuteResult
 	var err error
 
 	if inTransactions {
 		// Execute in batches (for large data operations)
-		innerResult, err = e.executeCallInTransactions(ctx, subqueryBody, batchSize)
+		innerResult, err = subqueryExecutor.executeCallInTransactions(ctx, subqueryBody, batchSize)
 	} else {
 		// Check if subquery contains UNION - route to executeUnion if so
 		// This must be checked before calling Execute, as Execute routes based on first keyword
 		if findKeywordIndex(subqueryBody, "UNION ALL") >= 0 {
-			innerResult, err = e.executeUnion(ctx, subqueryBody, true)
+			innerResult, err = subqueryExecutor.executeUnion(ctx, subqueryBody, true)
 		} else if findKeywordIndex(subqueryBody, "UNION") >= 0 {
-			innerResult, err = e.executeUnion(ctx, subqueryBody, false)
+			innerResult, err = subqueryExecutor.executeUnion(ctx, subqueryBody, false)
 		} else {
 			// Execute as single query
-			innerResult, err = e.executeInternal(ctx, subqueryBody, nil)
+			innerResult, err = subqueryExecutor.executeInternal(ctx, subqueryBody, nil)
 		}
 	}
 
@@ -1019,7 +1051,7 @@ func (e *StorageExecutor) executeChainedCallSubquery(ctx context.Context, seedRe
 
 	targetExec := e
 	if hasUse {
-		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB, GetAuthTokenFromContext(ctx))
 		if err != nil {
 			return nil, err
 		}

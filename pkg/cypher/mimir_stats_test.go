@@ -12,7 +12,7 @@ import (
 // TestMimirStatsQueries tests the exact queries used by Mimir's index-stats API.
 // These queries must work for the VSCode plugin to show correct stats.
 func TestMimirStatsQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -130,7 +130,7 @@ func TestMimirStatsQueries(t *testing.T) {
 
 // TestMimirStatsWithEmbeddings tests stats queries when nodes have embeddings
 func TestMimirStatsWithEmbeddings(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

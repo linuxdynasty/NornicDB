@@ -66,7 +66,7 @@ func setupFileIndexTestData(t *testing.T, store storage.Engine) {
 
 // TestMatchOptionalMatchBasic tests basic MATCH ... OPTIONAL MATCH pattern
 func TestMatchOptionalMatchBasic(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -98,7 +98,7 @@ func TestMatchOptionalMatchBasic(t *testing.T) {
 
 // TestMatchOptionalMatchWithCase tests OPTIONAL MATCH with CASE WHEN
 func TestMatchOptionalMatchWithCase(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -128,7 +128,7 @@ func TestMatchOptionalMatchWithCase(t *testing.T) {
 
 // TestMatchOptionalMatchWithMultipleWith tests multiple WITH clauses
 func TestMatchOptionalMatchWithMultipleWith(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -171,7 +171,7 @@ func TestMatchOptionalMatchWithMultipleWith(t *testing.T) {
 
 // TestVSCodeStatsQuery tests the exact query used by VSCode extension
 func TestVSCodeStatsQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -222,7 +222,7 @@ func TestVSCodeStatsQuery(t *testing.T) {
 
 // TestCountDistinct tests COUNT(DISTINCT) aggregation
 func TestCountDistinct(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -268,7 +268,7 @@ func TestCountDistinct(t *testing.T) {
 
 // TestCollectDistinct tests COLLECT(DISTINCT) aggregation
 func TestCollectDistinct(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -297,7 +297,7 @@ func TestCollectDistinct(t *testing.T) {
 
 // TestCaseWhenInStatsQuery tests CASE WHEN expression evaluation for stats queries
 func TestCaseWhenInStatsQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -342,7 +342,7 @@ func TestCaseWhenInStatsQuery(t *testing.T) {
 
 // TestSumWithArithmetic tests SUM() + SUM() arithmetic
 func TestSumWithArithmetic(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -369,7 +369,7 @@ func TestSumWithArithmetic(t *testing.T) {
 
 // TestOptionalMatchWithNoMatches tests OPTIONAL MATCH when no relationships exist
 func TestOptionalMatchWithNoMatches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

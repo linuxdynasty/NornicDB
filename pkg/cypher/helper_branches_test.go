@@ -88,7 +88,7 @@ func TestFunctionMatch_HelperBranches(t *testing.T) {
 }
 
 func TestVectorRegistry_HelperBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "tenant_helper_cov")
 	exec := NewStorageExecutor(store)
 

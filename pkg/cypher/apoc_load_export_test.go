@@ -13,7 +13,7 @@ import (
 )
 
 func TestApocLoadJson(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -63,7 +63,7 @@ func TestApocLoadJson(t *testing.T) {
 }
 
 func TestApocLoadCsv(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -96,7 +96,7 @@ Bob,25,LA`
 }
 
 func TestApocExportJsonAll(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -154,7 +154,7 @@ func TestApocExportJsonAll(t *testing.T) {
 }
 
 func TestApocExportCsvAll(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -186,7 +186,7 @@ func TestApocExportCsvAll(t *testing.T) {
 }
 
 func TestApocImportJson(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -249,7 +249,7 @@ func TestApocImportJson(t *testing.T) {
 }
 
 func TestApocLoadJsonArray(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)

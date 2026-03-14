@@ -9,7 +9,7 @@ import (
 )
 
 func TestExecutor_CacheIntegration(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -70,7 +70,7 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 }
 
 func TestExecutor_CacheSchemaQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -122,7 +122,7 @@ func TestExecutor_CacheSchemaQueries(t *testing.T) {
 }
 
 func TestExecutor_CacheParameterizedQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -190,7 +190,7 @@ func TestExecutor_CacheParameterizedQueries(t *testing.T) {
 }
 
 func TestExecutor_CacheOnlyReadQueries(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -213,7 +213,7 @@ func TestExecutor_CacheOnlyReadQueries(t *testing.T) {
 }
 
 func BenchmarkExecutor_WithCache(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -232,7 +232,7 @@ func BenchmarkExecutor_WithCache(b *testing.B) {
 }
 
 func BenchmarkExecutor_WithoutCache(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

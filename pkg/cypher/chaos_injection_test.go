@@ -13,7 +13,7 @@ import (
 )
 
 func setupChaosExecutor(t *testing.T) (*StorageExecutor, context.Context) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1714,7 +1714,7 @@ func TestRollback_MergeWithConstraintViolation(t *testing.T) {
 
 // TestRollback_ConcurrentWritesDuringRollback verifies concurrent safety
 func TestRollback_ConcurrentWritesDuringRollback(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

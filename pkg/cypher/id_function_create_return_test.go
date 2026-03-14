@@ -9,7 +9,7 @@ import (
 )
 
 func TestIDFunction_CreateReturn(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornicdb")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "nornicdb")
 	exec := NewStorageExecutor(store)
 
 	res, err := exec.Execute(context.Background(), "CREATE (a:Test) RETURN a, id(a), elementId(a)", nil)

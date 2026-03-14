@@ -12,7 +12,7 @@ import (
 func TestExecute_LongNonCypherInput_DoesNotPanic(t *testing.T) {
 	// Regression guard: users sometimes paste long free-form text into the UI "Cypher Query" tab.
 	// This must return a syntax error, not crash the server.
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 

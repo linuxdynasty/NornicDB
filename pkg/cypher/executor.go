@@ -259,6 +259,9 @@ type DatabaseManagerInterface interface {
 	GetCompositeConstituents(compositeName string) ([]interface{}, error)
 	ListCompositeDatabases() []DatabaseInfoInterface
 	IsCompositeDatabase(name string) bool
+	// GetStorageForUse returns the storage engine for a database, supporting
+	// composite databases. authToken is forwarded for remote constituents.
+	GetStorageForUse(name string, authToken string) (interface{}, error)
 }
 
 // DatabaseInfoInterface provides database metadata without importing multidb.
@@ -562,12 +565,20 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 		return shellResult, nil
 	}
 
+	// Route multi-graph CALL { USE ... } queries through the Fabric planner/executor
+	// so subquery decomposition and cross-graph routing use a single deterministic path.
+	if e.shouldUseFabricPlanner(cypher) {
+		mergedParams := e.mergeShellParams(params)
+		ctx = context.WithValue(ctx, paramsKey, mergedParams)
+		return e.executeViaFabric(ctx, cypher, mergedParams)
+	}
+
 	// Handle leading Cypher USE clause (openCypher multi-graph syntax).
 	if useDB, remaining, hasUse, err := parseLeadingUseClause(cypher); hasUse || err != nil {
 		if err != nil {
 			return nil, err
 		}
-		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB)
+		scopedExec, resolvedDB, err := e.scopedExecutorForUse(useDB, GetAuthTokenFromContext(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -1131,11 +1142,33 @@ type ctxKeyUseDatabaseType struct{}
 
 var ctxKeyUseDatabase = ctxKeyUseDatabaseType{}
 
+// ctxKeyAuthToken carries an Authorization header value for remote/OIDC forwarding.
+type ctxKeyAuthTokenType struct{}
+
+var ctxKeyAuthToken = ctxKeyAuthTokenType{}
+
 // GetUseDatabaseFromContext extracts the database name from :USE command if present in context.
 // Returns empty string if no :USE command was found.
 func GetUseDatabaseFromContext(ctx context.Context) string {
 	if dbName, ok := ctx.Value(ctxKeyUseDatabase).(string); ok {
 		return dbName
+	}
+	return ""
+}
+
+// WithAuthToken stores an Authorization header token on context for execution paths
+// that need to forward caller identity across remote constituents.
+func WithAuthToken(ctx context.Context, authToken string) context.Context {
+	if strings.TrimSpace(authToken) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyAuthToken, authToken)
+}
+
+// GetAuthTokenFromContext extracts forwarded Authorization token from context.
+func GetAuthTokenFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyAuthToken).(string); ok {
+		return v
 	}
 	return ""
 }

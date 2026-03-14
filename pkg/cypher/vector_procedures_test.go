@@ -17,7 +17,7 @@ import (
 )
 
 func TestCallDbIndexVectorCreateNodeIndex(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -53,7 +53,7 @@ func TestCallDbIndexVectorCreateNodeIndex(t *testing.T) {
 }
 
 func TestVectorIndexRegistryAndNamedEmbeddings(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "nornic")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func TestVectorIndexRegistryAndNamedEmbeddings(t *testing.T) {
 }
 
 func TestVectorIndexQueryNodes_PrefersNamedEmbeddingsOverPropertyAndFallsBack(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "nornic")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -171,7 +171,7 @@ func TestVectorIndexQueryNodes_PrefersNamedEmbeddingsOverPropertyAndFallsBack(t 
 }
 
 func TestVectorIndexQueryNodes_WithUnifiedSearchService_PreservesCypherSemantics(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "nornic")
 	exec := NewStorageExecutor(store)
 	exec.SetSearchService(search.NewService(store))
@@ -241,7 +241,7 @@ func TestVectorIndexQueryNodes_WithUnifiedSearchService_PreservesCypherSemantics
 }
 
 func TestCallDbCreateSetNodeVectorProperty(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -291,7 +291,7 @@ func TestCallDbCreateSetNodeVectorProperty(t *testing.T) {
 }
 
 func TestCallDbCreateSetRelationshipVectorProperty(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -355,7 +355,7 @@ func TestCallDbCreateSetRelationshipVectorProperty(t *testing.T) {
 }
 
 func TestVectorIndexQueryNodesWithProcedure(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -464,7 +464,7 @@ func loadLargeDocQuery(t *testing.T) string {
 // 2. String query (NornicDB server-side embedding)
 // 3. Parameter reference ($queryVector)
 func TestVectorSearchQueryModes(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -607,7 +607,7 @@ func TestVectorSearchQueryModes(t *testing.T) {
 	t.Run("parameter_reference_with_string_param", func(t *testing.T) {
 		// Test with string parameter (should be embedded)
 		// Create a new executor with embedder for this test
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 		testStore := storage.NewNamespacedEngine(baseStore, "test")
 		testExec := NewStorageExecutor(testStore)
 		mockEmbedder := &mockQueryEmbedder{
@@ -689,7 +689,7 @@ func TestVectorSearchQueryModes(t *testing.T) {
 // 2. Mimir stores embedding via Cypher SET
 // 3. Mimir queries via db.index.vector.queryNodes with vector
 func TestVectorSearchEndToEnd(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -731,7 +731,7 @@ func TestVectorSearchEndToEnd(t *testing.T) {
 
 // TestMultiLineSetWithArray tests that SET clauses with arrays and multiple properties work
 func TestMultiLineSetWithArray(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -770,7 +770,7 @@ func TestMultiLineSetWithArray(t *testing.T) {
 }
 
 func TestMatchWithCallProcedure(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -865,7 +865,7 @@ func TestMatchWithCallProcedure(t *testing.T) {
 }
 
 func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1038,7 +1038,7 @@ func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
 }
 
 func TestCallDbIndexFulltextQueryRelationships(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1070,7 +1070,7 @@ func TestCallDbIndexFulltextQueryRelationships(t *testing.T) {
 // =============================================================================
 
 func TestCallDbIndexVectorCreateRelationshipIndex(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1116,7 +1116,7 @@ func TestCallDbIndexVectorCreateRelationshipIndex(t *testing.T) {
 }
 
 func TestCallDbIndexFulltextCreateNodeIndex(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1167,7 +1167,7 @@ func TestCallDbIndexFulltextCreateNodeIndex(t *testing.T) {
 }
 
 func TestCallDbIndexFulltextCreateRelationshipIndex(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1204,7 +1204,7 @@ func TestCallDbIndexFulltextCreateRelationshipIndex(t *testing.T) {
 }
 
 func TestCallDbIndexFulltextDrop(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1256,7 +1256,7 @@ func TestCallDbIndexFulltextDrop(t *testing.T) {
 }
 
 func TestCallDbIndexVectorDrop(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1294,7 +1294,7 @@ func TestCallDbIndexVectorDrop(t *testing.T) {
 // =============================================================================
 
 func TestFulltextIndexWorkflow(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1333,7 +1333,7 @@ func TestFulltextIndexWorkflow(t *testing.T) {
 }
 
 func TestVectorIndexWorkflow(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1385,7 +1385,7 @@ func TestVectorIndexWorkflow(t *testing.T) {
 }
 
 func TestMimirCompatibleWorkflow(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
@@ -1447,7 +1447,7 @@ func TestMimirCompatibleWorkflow(t *testing.T) {
 }
 
 func TestCallDbIndexVectorQueryNodes_AdditionalParameterBranches(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()

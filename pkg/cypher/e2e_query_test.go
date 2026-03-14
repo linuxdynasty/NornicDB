@@ -17,7 +17,7 @@ import (
 // =============================================================================
 
 func setupE2EExecutor(t *testing.T) (*StorageExecutor, context.Context) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

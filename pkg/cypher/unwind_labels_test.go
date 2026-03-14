@@ -37,7 +37,7 @@ func setupMultiLabelNodes(t *testing.T, store storage.Engine, exec *StorageExecu
 // ====================================================================================
 
 func TestLabelsFunction(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -86,7 +86,7 @@ func TestLabelsFunction(t *testing.T) {
 // ====================================================================================
 
 func TestUnwindWithFunctionResults(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -142,7 +142,7 @@ func TestUnwindWithFunctionResults(t *testing.T) {
 // ====================================================================================
 
 func TestListComprehensionWithLabels(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -225,7 +225,7 @@ func TestListComprehensionWithLabels(t *testing.T) {
 // ====================================================================================
 
 func TestMatchUnwindCombined(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -265,7 +265,7 @@ func TestMatchUnwindCombined(t *testing.T) {
 // ====================================================================================
 
 func TestMimirByTypeQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -313,7 +313,7 @@ func TestMimirByTypeQuery(t *testing.T) {
 // ====================================================================================
 
 func TestUnwindEdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -384,7 +384,7 @@ func TestUnwindEdgeCases(t *testing.T) {
 // ====================================================================================
 
 func TestSimplifiedByTypeQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -412,7 +412,7 @@ func TestSimplifiedByTypeQuery(t *testing.T) {
 // ====================================================================================
 
 func TestUnwindWithCreate(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -437,7 +437,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND creates nodes with multiple properties", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -472,7 +472,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND with range creates sequential nodes", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -495,7 +495,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND CREATE with RETURN", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -526,7 +526,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND empty list creates no nodes", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -549,7 +549,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND with parameters", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -576,7 +576,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND CREATE preserves transaction atomicity", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)
@@ -599,7 +599,7 @@ func TestUnwindWithCreate(t *testing.T) {
 	})
 
 	t.Run("UNWIND CREATE with additional properties", func(t *testing.T) {
-		baseStore := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
 
 		store := storage.NewNamespacedEngine(baseStore, "test")
 		exec := NewStorageExecutor(store)

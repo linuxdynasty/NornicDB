@@ -9,7 +9,7 @@ import (
 )
 
 func TestFormatStringFunction(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -76,7 +76,7 @@ func TestFormatStringFunction(t *testing.T) {
 }
 
 func TestExistingStringFunctionsStillWork(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

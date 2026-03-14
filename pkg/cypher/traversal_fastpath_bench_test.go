@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkMatchRelationships_CountAll(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

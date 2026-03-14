@@ -153,7 +153,7 @@ func setupWorksInTestData(t *testing.T, exec *StorageExecutor, ctx context.Conte
 // MATCH (p:Person)<-[:HAS_CONTACT|MANAGED_BY|HAS_LEADER]-(poc:POC)-[:BELONGS_TO]->(a:Area)
 // MERGE (p)-[:WORKS_IN]->(a)
 func TestWorksInFromPOC(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -224,7 +224,7 @@ func TestWorksInFromPOC(t *testing.T) {
 // MATCH (p:Person)<-[:HAS_VP|HAS_PRIMARY_LEAD|HAS_SECONDARY_LEAD]-(w:WarRoom)-[:BELONGS_TO]->(a:Area)
 // MERGE (p)-[:WORKS_IN]->(a)
 func TestWorksInFromWarRoom(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -287,7 +287,7 @@ func TestWorksInFromWarRoom(t *testing.T) {
 // MATCH (p:Person)<-[:HAS_PRODUCT_LEAD|HAS_PRODUCT_CONTACT|HAS_ENGINEERING_LEAD|HAS_ENGINEERING_CONTACT]-(app:ApplicationContact)-[:BELONGS_TO]->(a:Area)
 // MERGE (p)-[:WORKS_IN]->(a)
 func TestWorksInFromApplicationContact(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -359,7 +359,7 @@ func TestWorksInFromApplicationContact(t *testing.T) {
 // TestWorksInAllQueriesCombined tests running all three WORKS_IN queries in sequence
 // to verify they work correctly together and MERGE doesn't create duplicates
 func TestWorksInAllQueriesCombined(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -475,7 +475,7 @@ func TestWorksInAllQueriesCombined(t *testing.T) {
 // TestWorksInMergeIdempotency tests that running the same MERGE query twice
 // does not create duplicate relationships
 func TestWorksInMergeIdempotency(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -507,7 +507,7 @@ func TestWorksInMergeIdempotency(t *testing.T) {
 
 // TestWorksInEmptyMatch tests the queries when no matching patterns exist
 func TestWorksInEmptyMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -545,7 +545,7 @@ func TestWorksInEmptyMatch(t *testing.T) {
 // TestWorksInMultiplePathsToSameArea tests that a Person connected to the same Area
 // through multiple intermediate nodes only gets one WORKS_IN relationship
 func TestWorksInMultiplePathsToSameArea(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -610,7 +610,7 @@ func TestWorksInMultiplePathsToSameArea(t *testing.T) {
 // TestWorksInRelationshipTypeAlternation tests that the pipe (|) operator
 // correctly matches multiple relationship types
 func TestWorksInRelationshipTypeAlternation(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

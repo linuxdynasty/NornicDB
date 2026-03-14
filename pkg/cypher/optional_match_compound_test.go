@@ -13,7 +13,7 @@ import (
 // FormatOrderStatusContext: MATCH (n:OrderStatus) WHERE n.userId = $ AND NOT (n)-[:SUPERSEDED_BY]->()
 // OPTIONAL MATCH (n)-[:FILLED_AT]->(ph:Pharmacy) RETURN n.orderId, ..., ph.id, ph.name ORDER BY n.orderId
 func TestCompoundMatchOptionalMatch_OrderStatusPharmacy(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "db")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -81,7 +81,7 @@ ORDER BY n.orderId`
 // TestCompoundMatchOptionalMatch_OrderStatusNoPharmacy tests that when there is no FILLED_AT
 // edge, OPTIONAL MATCH yields null for ph columns but the row is still returned.
 func TestCompoundMatchOptionalMatch_OrderStatusNoPharmacy(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "db")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

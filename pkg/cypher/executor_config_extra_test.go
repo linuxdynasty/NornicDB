@@ -28,7 +28,7 @@ func (testInferenceManager) Chat(ctx context.Context, req heimdall.ChatRequest) 
 }
 
 func TestStorageExecutor_ConfigSettersAndFlush(t *testing.T) {
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	defer inner.Close()
 	async := storage.NewAsyncEngine(inner, nil)
 	defer async.Close()
@@ -67,7 +67,7 @@ func TestStorageExecutor_ConfigSettersAndFlush(t *testing.T) {
 }
 
 func TestStorageExecutor_NodeMutatedAndUseDatabaseContext(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
 
 	var got string
 	exec.SetNodeMutatedCallback(func(nodeID string) {

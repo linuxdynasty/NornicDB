@@ -265,7 +265,7 @@ func TestNilIndexHintContext(t *testing.T) {
 }
 
 func TestApplyAndValidateIndexHints(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	defer base.Close()
 	eng := storage.NewNamespacedEngine(base, "test")
 	schema := eng.GetSchema()

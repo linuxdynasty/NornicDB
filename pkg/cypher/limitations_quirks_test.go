@@ -7,14 +7,14 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-func newTestExecutor() (*StorageExecutor, storage.Engine) {
-	base := storage.NewMemoryEngine()
+func newTestExecutor(t testing.TB) (*StorageExecutor, storage.Engine) {
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	return NewStorageExecutor(store), store
 }
 
 func TestToLowerWithParameterInContains(t *testing.T) {
-	exec, store := newTestExecutor()
+	exec, store := newTestExecutor(t)
 	ctx := context.Background()
 
 	_, _ = store.CreateNode(&storage.Node{
@@ -45,7 +45,7 @@ RETURN rx.drugName
 }
 
 func TestOptionalMatchWithParameters(t *testing.T) {
-	exec, store := newTestExecutor()
+	exec, store := newTestExecutor(t)
 	ctx := context.Background()
 
 	_, _ = store.CreateNode(&storage.Node{
@@ -105,7 +105,7 @@ RETURN m.memberId, o.orderId
 }
 
 func TestDuplicateRowsAndDistinct(t *testing.T) {
-	exec, store := newTestExecutor()
+	exec, store := newTestExecutor(t)
 	ctx := context.Background()
 
 	_, _ = store.CreateNode(&storage.Node{
@@ -166,7 +166,7 @@ RETURN DISTINCT p.name, rx.drugName
 }
 
 func TestDoubleMatchClauses(t *testing.T) {
-	exec, store := newTestExecutor()
+	exec, store := newTestExecutor(t)
 	ctx := context.Background()
 
 	_, _ = store.CreateNode(&storage.Node{

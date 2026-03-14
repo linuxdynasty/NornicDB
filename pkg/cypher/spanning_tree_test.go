@@ -9,7 +9,7 @@ import (
 
 // TestApocPathSpanningTreeBasic tests basic spanning tree functionality
 func TestApocPathSpanningTreeBasic(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -42,7 +42,7 @@ func TestApocPathSpanningTreeBasic(t *testing.T) {
 
 // TestApocPathSpanningTreeWithCycle tests spanning tree with cycles
 func TestApocPathSpanningTreeWithCycle(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -75,7 +75,7 @@ func TestApocPathSpanningTreeWithCycle(t *testing.T) {
 
 // TestApocPathSpanningTreeMaxLevel tests maxLevel configuration
 func TestApocPathSpanningTreeMaxLevel(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -106,7 +106,7 @@ func TestApocPathSpanningTreeMaxLevel(t *testing.T) {
 
 // TestApocPathSpanningTreeRelationshipFilter tests relationship type filtering
 func TestApocPathSpanningTreeRelationshipFilter(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -138,7 +138,7 @@ func TestApocPathSpanningTreeRelationshipFilter(t *testing.T) {
 
 // TestApocPathSpanningTreeDFS tests depth-first search spanning tree
 func TestApocPathSpanningTreeDFS(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -172,7 +172,7 @@ func TestApocPathSpanningTreeDFS(t *testing.T) {
 
 // TestApocPathSpanningTreeLabelFilter tests label filtering
 func TestApocPathSpanningTreeLabelFilter(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -204,7 +204,7 @@ func TestApocPathSpanningTreeLabelFilter(t *testing.T) {
 
 // TestApocPathSpanningTreeLimit tests limit configuration
 func TestApocPathSpanningTreeLimit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -237,7 +237,7 @@ func TestApocPathSpanningTreeLimit(t *testing.T) {
 
 // TestApocPathSpanningTreeDisconnectedGraph tests with disconnected components
 func TestApocPathSpanningTreeDisconnectedGraph(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)
@@ -268,7 +268,7 @@ func TestApocPathSpanningTreeDisconnectedGraph(t *testing.T) {
 
 // TestApocPathSpanningTreeDirection tests directional traversal
 func TestApocPathSpanningTreeDirection(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	e := NewStorageExecutor(store)

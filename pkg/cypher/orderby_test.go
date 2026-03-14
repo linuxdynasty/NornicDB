@@ -8,7 +8,7 @@ import (
 )
 
 func TestOrderByLimitSkip(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -161,7 +161,7 @@ func TestOrderByLimitSkip(t *testing.T) {
 }
 
 func TestOrderByStringValues(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -212,7 +212,7 @@ func TestOrderByStringValues(t *testing.T) {
 }
 
 func TestLimitSkipEdgeCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

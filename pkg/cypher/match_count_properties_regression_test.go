@@ -9,7 +9,7 @@ import (
 )
 
 func TestMatchCountRespectsAllPatternProperties(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

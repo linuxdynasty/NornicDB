@@ -24,7 +24,7 @@ func TestTransactionStorageWrapper_PrefixHelpers(t *testing.T) {
 }
 
 func TestTransactionStorageWrapper_CreateGetDelete_WithNamespace(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 	tx, err := eng.BeginTransaction()
 	require.NoError(t, err)
@@ -49,7 +49,7 @@ func TestTransactionStorageWrapper_CreateGetDelete_WithNamespace(t *testing.T) {
 }
 
 func TestTransactionStorageWrapper_BulkOps_AndCounts(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 
 	// Seed underlying storage first so the transaction snapshot can read/delete them.
@@ -123,7 +123,7 @@ func TestTransactionStorageWrapper_BulkOps_AndCounts(t *testing.T) {
 }
 
 func TestTransactionStorageWrapper_BulkOps_WithNamespace(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 
 	tx, err := eng.BeginTransaction()
@@ -171,7 +171,7 @@ func TestTransactionStorageWrapper_ToUserNode_NilSafe(t *testing.T) {
 }
 
 func TestTransactionStorageWrapper_BulkDelete_ErrorPaths(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 
 	tx, err := eng.BeginTransaction()
@@ -188,7 +188,7 @@ func TestTransactionStorageWrapper_BulkDelete_ErrorPaths(t *testing.T) {
 }
 
 func TestTransactionStorageWrapper_BulkCreate_ErrorPaths(t *testing.T) {
-	eng := storage.NewMemoryEngine()
+	eng := newTestMemoryEngine(t)
 	defer eng.Close()
 
 	tx, err := eng.BeginTransaction()
@@ -221,7 +221,7 @@ func TestTransactionStorageWrapper_BulkCreate_ErrorPaths(t *testing.T) {
 }
 
 func TestExecuteSetTrailingUnwind_ErrorAndProjectionBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 
@@ -277,7 +277,7 @@ func TestExecuteSetTrailingUnwind_ErrorAndProjectionBranches(t *testing.T) {
 }
 
 func TestTryAsyncCreateNodeBatch_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -317,7 +317,7 @@ func TestTryAsyncCreateNodeBatch_Branches(t *testing.T) {
 }
 
 func TestExecuteCreateRelSegment_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -385,7 +385,7 @@ func TestExecuteCreateRelSegment_Branches(t *testing.T) {
 }
 
 func TestExecuteCallInTransactions_AdditionalBatchingBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

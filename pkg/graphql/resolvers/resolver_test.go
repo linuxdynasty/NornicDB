@@ -147,6 +147,22 @@ func TestQueryNode(t *testing.T) {
 	})
 }
 
+func TestGetCypherExecutor_WiresDatabaseManager(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	dbManager := testDBManager(t, db)
+	resolver := NewResolver(db, dbManager)
+
+	exec, err := resolver.getCypherExecutor(ctx, "")
+	require.NoError(t, err)
+
+	// SHOW DATABASES requires dbManager wiring in cypher executor.
+	result, err := exec.Execute(ctx, "SHOW DATABASES", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.Rows)
+}
+
 func TestQueryNodes(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)

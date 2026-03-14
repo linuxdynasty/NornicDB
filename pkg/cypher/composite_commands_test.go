@@ -149,6 +149,10 @@ func (a *testDatabaseManagerAdapter) IsCompositeDatabase(name string) bool {
 	return a.manager.IsCompositeDatabase(name)
 }
 
+func (a *testDatabaseManagerAdapter) GetStorageForUse(name string, authToken string) (interface{}, error) {
+	return a.manager.GetStorageWithAuth(name, authToken)
+}
+
 type testDatabaseInfoAdapter struct {
 	info *multidb.DatabaseInfo
 }
@@ -183,10 +187,10 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 }
 
 func TestExecuteAlterCompositeDatabase_AddAlias(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
 	exec := NewStorageExecutor(store)
@@ -235,10 +239,10 @@ func TestExecuteAlterCompositeDatabase_AddAlias(t *testing.T) {
 }
 
 func TestExecuteAlterCompositeDatabase_DropAlias(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
 	exec := NewStorageExecutor(store)
@@ -286,10 +290,10 @@ func TestExecuteAlterCompositeDatabase_DropAlias(t *testing.T) {
 }
 
 func TestExecuteAlterCompositeDatabase_InvalidSyntax(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
-	inner := storage.NewMemoryEngine()
+	inner := newTestMemoryEngine(t)
 	manager, _ := multidb.NewDatabaseManager(inner, nil)
 	adapter := &testDatabaseManagerAdapter{manager: manager}
 	exec := NewStorageExecutor(store)
@@ -320,8 +324,8 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "database manager not available")
 
-		baseStore := storage.NewMemoryEngine()
-		inner := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
+		inner := newTestMemoryEngine(t)
 		cfg := multidb.DefaultConfig()
 		cfg.RemoteCredentialEncryptionKey = "test-key-for-composite-commands"
 		manager, _ := multidb.NewDatabaseManager(inner, cfg)
@@ -396,6 +400,26 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_bad5 ALIAS a1 FOR DATABASE db1 USER 'svc' PASSWORD 'pass'")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "require a remote constituent")
+
+		// IF NOT EXISTS: existing composite — should succeed silently.
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c1 IF NOT EXISTS ALIAS a1 FOR DATABASE db1")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c1"}}, res.Rows)
+
+		// IF NOT EXISTS: existing standard database — should succeed silently.
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE db1 IF NOT EXISTS ALIAS a1 FOR DATABASE db2")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"db1"}}, res.Rows)
+
+		// IF NOT EXISTS: new database — should create normally.
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_ifne IF NOT EXISTS ALIAS a1 FOR DATABASE db1")
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"c_ifne"}}, res.Rows)
+		require.True(t, adapter.IsCompositeDatabase("c_ifne"))
+
+		// Without IF NOT EXISTS: duplicate — should fail.
+		_, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_ifne ALIAS a1 FOR DATABASE db1")
+		require.Error(t, err)
 	})
 
 	t.Run("drop composite direct branches", func(t *testing.T) {
@@ -404,8 +428,8 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "database manager not available")
 
-		baseStore := storage.NewMemoryEngine()
-		inner := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
+		inner := newTestMemoryEngine(t)
 		manager, _ := multidb.NewDatabaseManager(inner, nil)
 		adapter := &testDatabaseManagerAdapter{manager: manager}
 		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
@@ -442,8 +466,8 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		_, err = exec.executeShowConstituents(ctx, "SHOW CONSTITUENTS FOR COMPOSITE DATABASE x")
 		require.Error(t, err)
 
-		baseStore := storage.NewMemoryEngine()
-		inner := storage.NewMemoryEngine()
+		baseStore := newTestMemoryEngine(t)
+		inner := newTestMemoryEngine(t)
 		manager, _ := multidb.NewDatabaseManager(inner, nil)
 		adapter := &testDatabaseManagerAdapter{manager: manager}
 		exec = NewStorageExecutor(storage.NewNamespacedEngine(baseStore, "test"))
@@ -503,8 +527,8 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "database manager not available")
 
-	baseStore := storage.NewMemoryEngine()
-	inner := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
+	inner := newTestMemoryEngine(t)
 	alterCfg := multidb.DefaultConfig()
 	alterCfg.RemoteCredentialEncryptionKey = "test-key-for-alter-composite"
 	manager, _ := multidb.NewDatabaseManager(inner, alterCfg)

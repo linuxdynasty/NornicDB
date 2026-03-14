@@ -15,7 +15,7 @@ func TestTransactionScriptBeginTransactionCommit(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -49,7 +49,7 @@ func TestTransactionScriptBeginShorthandEquivalent(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -83,7 +83,7 @@ func TestTransactionScriptCaseRollback(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -124,7 +124,7 @@ func TestTransactionScriptBeginTransactionCommit_ANTLRMode(t *testing.T) {
 	cleanup := config.WithANTLRParser()
 	defer cleanup()
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -186,7 +186,7 @@ func TestTransactionScriptHelpers_ParseAndMapBuilders(t *testing.T) {
 }
 
 func TestTransactionScript_AdditionalBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -220,7 +220,7 @@ func TestTransactionScript_AdditionalBranches(t *testing.T) {
 }
 
 func TestTransactionStatementHandlers_AdditionalBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 
@@ -300,7 +300,7 @@ func TestTransactionStatementHandlers_WithWALAsyncEngine(t *testing.T) {
 }
 
 func TestTransactionHandleCommit_ErrorBranchAfterClosedTx(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 
@@ -352,7 +352,7 @@ func TestTransactionHandleCommit_ErrorBranchAfterClosedTx_WithWAL(t *testing.T) 
 }
 
 func TestTransactionHandleRollback_ErrorBranchAfterClosedTx(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 
@@ -371,7 +371,7 @@ func TestTransactionHandleRollback_ErrorBranchAfterClosedTx(t *testing.T) {
 }
 
 func TestExecuteInTransaction_SuccessPath(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -394,7 +394,7 @@ func TestExecuteInTransaction_SuccessPath(t *testing.T) {
 }
 
 func TestExecuteInTransaction_SuccessPath_NoNamespace(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(base)
 	ctx := context.Background()
 
@@ -423,7 +423,7 @@ func TestTransactionHandleBegin_NoTransactionEngine(t *testing.T) {
 }
 
 func TestTransactionScript_CaseRollbackAdditionalErrorBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -445,7 +445,7 @@ func TestTransactionScript_CaseRollbackAdditionalErrorBranches(t *testing.T) {
 }
 
 func TestTransactionScript_ProjectAndConditionAdditionalBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 
@@ -468,7 +468,7 @@ func TestTransactionScript_SimpleAndCaseCommitBranches(t *testing.T) {
 	ClearUserProcedures()
 	t.Cleanup(ClearUserProcedures)
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

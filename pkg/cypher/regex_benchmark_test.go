@@ -9,7 +9,7 @@ import (
 
 // BenchmarkCreateConstraint benchmarks CREATE CONSTRAINT parsing
 func BenchmarkCreateConstraint(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -24,7 +24,7 @@ func BenchmarkCreateConstraint(b *testing.B) {
 
 // BenchmarkCreateIndex benchmarks CREATE INDEX parsing
 func BenchmarkCreateIndex(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -39,7 +39,7 @@ func BenchmarkCreateIndex(b *testing.B) {
 
 // BenchmarkCreateVectorIndex benchmarks CREATE VECTOR INDEX parsing
 func BenchmarkCreateVectorIndex(b *testing.B) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(b)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

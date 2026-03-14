@@ -400,6 +400,10 @@ func (a *databaseManagerAdapter) IsCompositeDatabase(name string) bool {
 	return a.manager.IsCompositeDatabase(name)
 }
 
+func (a *databaseManagerAdapter) GetStorageForUse(name string, authToken string) (interface{}, error) {
+	return a.manager.GetStorageWithAuth(name, authToken)
+}
+
 // Helper function to get string from map
 func getString(m map[string]interface{}, key string) string {
 	if v, ok := m[key]; ok {
@@ -958,7 +962,8 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 
 		// Track query execution time for slow query logging
 		queryStart := time.Now()
-		result, err := executor.Execute(r.Context(), queryStatement, stmt.Parameters)
+		execCtx := cypher.WithAuthToken(r.Context(), r.Header.Get("Authorization"))
+		result, err := executor.Execute(execCtx, queryStatement, stmt.Parameters)
 		queryDuration := time.Since(queryStart)
 
 		// Log slow queries
@@ -1350,12 +1355,14 @@ func (s *Server) appendStatementResult(response *TransactionResponse, result *cy
 
 func (s *Server) executeTxStatements(
 	ctx context.Context,
+	authToken string,
 	claims *auth.JWTClaims,
 	dbName string,
 	session *txsession.Session,
 	statements []StatementRequest,
 	response *TransactionResponse,
 ) {
+	ctx = cypher.WithAuthToken(ctx, authToken)
 	for _, stmt := range statements {
 		if isMutationQuery(stmt.Statement) {
 			if claims == nil {
@@ -1452,7 +1459,7 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 	}
 
 	if len(req.Statements) > 0 {
-		s.executeTxStatements(r.Context(), claims, dbName, txSession, req.Statements, &response)
+		s.executeTxStatements(r.Context(), r.Header.Get("Authorization"), claims, dbName, txSession, req.Statements, &response)
 		response.Transaction.Expires = txSession.Expires.Format(time.RFC1123)
 	}
 
@@ -1485,7 +1492,7 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 		},
 	}
 
-	s.executeTxStatements(r.Context(), claims, dbName, tx, req.Statements, &response)
+	s.executeTxStatements(r.Context(), r.Header.Get("Authorization"), claims, dbName, tx, req.Statements, &response)
 	response.Transaction.Expires = tx.Expires.Format(time.RFC1123)
 
 	s.writeJSON(w, http.StatusOK, response)
@@ -1517,7 +1524,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Execute optional final statements in transaction context first.
-	s.executeTxStatements(r.Context(), claims, dbName, tx, req.Statements, &response)
+	s.executeTxStatements(r.Context(), r.Header.Get("Authorization"), claims, dbName, tx, req.Statements, &response)
 	if len(response.Errors) > 0 {
 		_ = s.txSessions.RollbackAndDelete(r.Context(), tx)
 		s.writeJSON(w, http.StatusOK, response)

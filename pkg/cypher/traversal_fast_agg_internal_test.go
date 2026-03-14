@@ -9,7 +9,7 @@ import (
 )
 
 func TestTryFastSingleHopAgg_GroupValue(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	c1, err := store.CreateNode(&storage.Node{ID: "c1", Labels: []string{"Category"}, Properties: map[string]interface{}{"categoryName": "Beverages"}})
@@ -48,7 +48,7 @@ func TestTryFastSingleHopAgg_GroupValue(t *testing.T) {
 }
 
 func TestTryFastRelationshipAggregations_EarlyGuards(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	items := []returnItem{{expr: "c.categoryName"}, {expr: "count(p)"}}
@@ -73,7 +73,7 @@ func TestTryFastRelationshipAggregations_EarlyGuards(t *testing.T) {
 }
 
 func TestTryFastSingleHopAgg_AggregateVariants(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	catID, err := store.CreateNode(&storage.Node{
@@ -157,7 +157,7 @@ func TestTryFastSingleHopAgg_AggregateVariants(t *testing.T) {
 }
 
 func TestTryFastChainedAgg_SupplierCategoryAndDistinctOrders(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	customerID, err := store.CreateNode(&storage.Node{ID: "cust-1", Labels: []string{"Customer"}, Properties: map[string]interface{}{"companyName": "CustCo"}})

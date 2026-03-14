@@ -17,7 +17,7 @@ import (
 func TestSwiftFileIndexerQueriesParseWithExplain(t *testing.T) {
 	t.Parallel()
 
-	store := storage.NewMemoryEngine()
+	store := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
@@ -214,7 +214,7 @@ func TestSwiftFileIndexerTagQueriesExecuteReduceExpressions(t *testing.T) {
 	run := func(t *testing.T) {
 		t.Helper()
 
-		store := storage.NewMemoryEngine()
+		store := newTestMemoryEngine(t)
 		exec := NewStorageExecutor(store)
 		ctx := context.Background()
 
@@ -295,7 +295,7 @@ RETURN f.file_tags as file_tags, f.tags as tags
 func TestReduceExpressionWithAliasListContext(t *testing.T) {
 	t.Parallel()
 
-	store := storage.NewMemoryEngine()
+	store := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(store)
 	expr := "reduce(acc = [], t IN (file_tags + ['hello']) | CASE WHEN t IN acc THEN acc ELSE acc + t END)"
 	nodes := map[string]*storage.Node{

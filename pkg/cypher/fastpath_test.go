@@ -13,7 +13,7 @@ import (
 
 // TestFastPath_MatchCreateDeleteRel tests the fast-path for MATCH...CREATE...DELETE patterns.
 func TestFastPath_MatchCreateDeleteRel(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 
@@ -62,7 +62,7 @@ func TestFastPath_MatchCreateDeleteRel(t *testing.T) {
 
 // TestFastPath_LDBCPattern tests the LDBC-style pattern with property matching.
 func TestFastPath_LDBCPattern(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 
@@ -176,7 +176,7 @@ func TestFastPath_RegexMatching(t *testing.T) {
 }
 
 func TestFastPath_CreateDeleteRelCount_HelperBranches(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
 
@@ -244,7 +244,7 @@ func TestFastPath_CreateDeleteRelCount_HelperBranches(t *testing.T) {
 }
 
 func TestFastPath_CreateDeleteRel_HelperBranches(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	executor := NewStorageExecutor(engine)
 
@@ -284,7 +284,7 @@ func TestFastPath_CreateDeleteRel_HelperBranches(t *testing.T) {
 
 // BenchmarkFastPath_WithLimit benchmarks the WITH LIMIT pattern.
 func BenchmarkFastPath_WithLimit(b *testing.B) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(b)
 	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
 	defer asyncBase.Close()
 	engine := storage.NewNamespacedEngine(asyncBase, "test")
@@ -313,7 +313,7 @@ func BenchmarkFastPath_WithLimit(b *testing.B) {
 
 // BenchmarkFastPath_LDBC benchmarks the LDBC property pattern.
 func BenchmarkFastPath_LDBC(b *testing.B) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(b)
 	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
 	defer asyncBase.Close()
 	engine := storage.NewNamespacedEngine(asyncBase, "test")

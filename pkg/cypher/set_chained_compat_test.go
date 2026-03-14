@@ -12,7 +12,7 @@ import (
 // TestSetChainedClausesWithMapMerge ensures Neo4j-compatible chained SET works when
 // one SET clause uses += map merge and another uses a scalar assignment.
 func TestSetChainedClausesWithMapMerge(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -52,7 +52,7 @@ func TestSetChainedClausesWithMapMerge(t *testing.T) {
 }
 
 func TestCreateSetChainedClausesWithMapMerge(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

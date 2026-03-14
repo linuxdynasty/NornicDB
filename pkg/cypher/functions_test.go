@@ -19,7 +19,7 @@ import (
 // ========================================
 
 func setupTestExecutor(t *testing.T) *StorageExecutor {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	return NewStorageExecutor(store)

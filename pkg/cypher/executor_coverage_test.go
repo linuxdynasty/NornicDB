@@ -15,7 +15,7 @@ import (
 // ======== Additional tests for 100% coverage ========
 
 func TestValidateSyntaxUnbalancedClosingBrackets(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -38,7 +38,7 @@ func TestValidateSyntaxUnbalancedClosingBrackets(t *testing.T) {
 }
 
 func TestValidateSyntaxEscapedQuotesInStrings(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -51,7 +51,7 @@ func TestValidateSyntaxEscapedQuotesInStrings(t *testing.T) {
 }
 
 func TestSubstituteParamsAllTypes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -115,7 +115,7 @@ func TestSubstituteParamsAllTypes(t *testing.T) {
 }
 
 func TestParseValueVariants(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -156,7 +156,7 @@ func TestParseValueVariants(t *testing.T) {
 }
 
 func TestCompareEqualNilCases(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -179,7 +179,7 @@ func TestCompareEqualNilCases(t *testing.T) {
 }
 
 func TestCompareGreaterLessStrings(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -217,7 +217,7 @@ func TestCompareGreaterLessStrings(t *testing.T) {
 }
 
 func TestCompareRegexInvalidPattern(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -239,7 +239,7 @@ func TestCompareRegexInvalidPattern(t *testing.T) {
 }
 
 func TestCompareRegexNonStringExpected(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -261,7 +261,7 @@ func TestCompareRegexNonStringExpected(t *testing.T) {
 }
 
 func TestEvaluateStringOpMissingProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -293,7 +293,7 @@ func TestEvaluateStringOpMissingProperty(t *testing.T) {
 }
 
 func TestEvaluateInOpMissingProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -315,7 +315,7 @@ func TestEvaluateInOpMissingProperty(t *testing.T) {
 }
 
 func TestEvaluateInOpNotAList(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -337,7 +337,7 @@ func TestEvaluateInOpNotAList(t *testing.T) {
 }
 
 func TestEvaluateWhereNoValidOperator(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -359,7 +359,7 @@ func TestEvaluateWhereNoValidOperator(t *testing.T) {
 }
 
 func TestEvaluateWhereNonPropertyComparison(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -381,7 +381,7 @@ func TestEvaluateWhereNonPropertyComparison(t *testing.T) {
 }
 
 func TestEvaluateWherePropertyNotExists(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -403,7 +403,7 @@ func TestEvaluateWherePropertyNotExists(t *testing.T) {
 }
 
 func TestOrderNodesStringSorting(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -435,7 +435,7 @@ func TestOrderNodesStringSorting(t *testing.T) {
 }
 
 func TestOrderNodesWithoutVariablePrefix(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -460,7 +460,7 @@ func TestOrderNodesWithoutVariablePrefix(t *testing.T) {
 }
 
 func TestSplitNodePatternsWithRemainder(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -473,7 +473,7 @@ func TestSplitNodePatternsWithRemainder(t *testing.T) {
 }
 
 func TestParseNodePatternNoLabels(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -486,7 +486,7 @@ func TestParseNodePatternNoLabels(t *testing.T) {
 }
 
 func TestParseNodePatternMultipleLabels(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -505,7 +505,7 @@ func TestParseNodePatternMultipleLabels(t *testing.T) {
 }
 
 func TestParsePropertiesFalseBoolean(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -521,7 +521,7 @@ func TestParsePropertiesFalseBoolean(t *testing.T) {
 }
 
 func TestParseReturnItemsWithAlias(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -542,7 +542,7 @@ func TestParseReturnItemsWithAlias(t *testing.T) {
 }
 
 func TestParseReturnItemsMapProjectionWithAlias(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -570,7 +570,7 @@ func TestParseReturnItemsMapProjectionWithAlias(t *testing.T) {
 }
 
 func TestParseReturnItemsMapProjectionWithoutAlias(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -598,7 +598,7 @@ func TestParseReturnItemsMapProjectionWithoutAlias(t *testing.T) {
 }
 
 func TestParseReturnItemsOrderByLimit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -622,7 +622,7 @@ func TestParseReturnItemsOrderByLimit(t *testing.T) {
 }
 
 func TestExecuteCreateInvalidRelPattern(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -636,7 +636,7 @@ func TestExecuteCreateInvalidRelPattern(t *testing.T) {
 }
 
 func TestExecuteDeleteRequiresMATCH(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -649,7 +649,7 @@ func TestExecuteDeleteRequiresMATCH(t *testing.T) {
 }
 
 func TestExecuteSetRequiresMATCH(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -664,7 +664,7 @@ func TestExecuteSetRequiresMATCH(t *testing.T) {
 }
 
 func TestExecuteSetInvalidPropertyAccess(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -686,7 +686,7 @@ func TestExecuteSetInvalidPropertyAccess(t *testing.T) {
 }
 
 func TestExecuteSetMergeRejectsMalformedInlineMap(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -700,7 +700,7 @@ func TestExecuteSetMergeRejectsMalformedInlineMap(t *testing.T) {
 }
 
 func TestExecuteAggregationCountStar(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -723,7 +723,7 @@ func TestExecuteAggregationCountStar(t *testing.T) {
 }
 
 func TestExecuteAggregationCollectNodes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -752,7 +752,7 @@ func TestExecuteAggregationCollectNodes(t *testing.T) {
 }
 
 func TestExecuteAggregationNonAggregateInQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -789,7 +789,7 @@ func TestExecuteAggregationNonAggregateInQuery(t *testing.T) {
 }
 
 func TestExecuteAggregationEmptyResultSet(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -802,7 +802,7 @@ func TestExecuteAggregationEmptyResultSet(t *testing.T) {
 }
 
 func TestExecuteAggregationSumNoMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -824,7 +824,7 @@ func TestExecuteAggregationSumNoMatch(t *testing.T) {
 }
 
 func TestExecuteAggregationAvgNoMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -845,7 +845,7 @@ func TestExecuteAggregationAvgNoMatch(t *testing.T) {
 }
 
 func TestExecuteAggregationMinNoMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -866,7 +866,7 @@ func TestExecuteAggregationMinNoMatch(t *testing.T) {
 }
 
 func TestExecuteAggregationMaxNoMatch(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -887,7 +887,7 @@ func TestExecuteAggregationMaxNoMatch(t *testing.T) {
 }
 
 func TestResolveReturnItemCountFunction(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -910,7 +910,7 @@ func TestResolveReturnItemCountFunction(t *testing.T) {
 }
 
 func TestResolveReturnItemNonExistentProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -931,7 +931,7 @@ func TestResolveReturnItemNonExistentProperty(t *testing.T) {
 }
 
 func TestResolveReturnItemDifferentVariable(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -953,7 +953,7 @@ func TestResolveReturnItemDifferentVariable(t *testing.T) {
 }
 
 func TestDbSchemaVisualizationWithRelationships(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -982,7 +982,7 @@ func TestDbSchemaVisualizationWithRelationships(t *testing.T) {
 }
 
 func TestDbSchemaNodePropertiesMultipleLabels(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1011,7 +1011,7 @@ func TestDbSchemaNodePropertiesMultipleLabels(t *testing.T) {
 }
 
 func TestDbSchemaRelPropertiesWithProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1040,7 +1040,7 @@ func TestDbSchemaRelPropertiesWithProperties(t *testing.T) {
 }
 
 func TestDbPropertyKeysWithEdgeProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1075,7 +1075,7 @@ func TestDbPropertyKeysWithEdgeProperties(t *testing.T) {
 }
 
 func TestCountLabelsAndRelTypes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1107,7 +1107,7 @@ func TestCountLabelsAndRelTypes(t *testing.T) {
 }
 
 func TestDetachDeleteWithIncomingEdges(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1140,7 +1140,7 @@ func TestDetachDeleteWithIncomingEdges(t *testing.T) {
 }
 
 func TestExecuteCreateRelationshipWithProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1154,7 +1154,7 @@ func TestExecuteCreateRelationshipWithProperties(t *testing.T) {
 }
 
 func TestExecuteCreateMultipleEmptyPatterns(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1167,7 +1167,7 @@ func TestExecuteCreateMultipleEmptyPatterns(t *testing.T) {
 }
 
 func TestExecuteReturnStarWithMultipleNodes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1189,7 +1189,7 @@ func TestExecuteReturnStarWithMultipleNodes(t *testing.T) {
 }
 
 func TestToFloat64WithInt(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1211,7 +1211,7 @@ func TestToFloat64WithInt(t *testing.T) {
 }
 
 func TestToFloat64WithInvalidString(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1234,7 +1234,7 @@ func TestToFloat64WithInvalidString(t *testing.T) {
 }
 
 func TestExecuteDistinctWithDuplicates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1265,7 +1265,7 @@ func TestExecuteDistinctWithDuplicates(t *testing.T) {
 // Additional tests for remaining coverage gaps
 
 func TestCallDbRelationshipTypesEmpty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1278,7 +1278,7 @@ func TestCallDbRelationshipTypesEmpty(t *testing.T) {
 }
 
 func TestCallDbLabelsEmpty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1291,7 +1291,7 @@ func TestCallDbLabelsEmpty(t *testing.T) {
 }
 
 func TestExecuteCreateWithReturnTargetVariable(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1306,7 +1306,7 @@ func TestExecuteCreateWithReturnTargetVariable(t *testing.T) {
 }
 
 func TestExecuteCreateRelationshipWithRelReturn(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1319,7 +1319,7 @@ func TestExecuteCreateRelationshipWithRelReturn(t *testing.T) {
 }
 
 func TestParseValueFloatParsing(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1341,7 +1341,7 @@ func TestParseValueFloatParsing(t *testing.T) {
 }
 
 func TestParseValuePlainString(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1363,7 +1363,7 @@ func TestParseValuePlainString(t *testing.T) {
 }
 
 func TestEvaluateStringOpNonVariablePrefix(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1385,7 +1385,7 @@ func TestEvaluateStringOpNonVariablePrefix(t *testing.T) {
 }
 
 func TestEvaluateInOpNonVariablePrefix(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1407,7 +1407,7 @@ func TestEvaluateInOpNonVariablePrefix(t *testing.T) {
 }
 
 func TestEvaluateIsNullNonVariablePrefix(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1429,7 +1429,7 @@ func TestEvaluateIsNullNonVariablePrefix(t *testing.T) {
 }
 
 func TestSplitNodePatternsComplexNesting(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1442,7 +1442,7 @@ func TestSplitNodePatternsComplexNesting(t *testing.T) {
 }
 
 func TestExecuteMatchCountVariable(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1466,7 +1466,7 @@ func TestExecuteMatchCountVariable(t *testing.T) {
 }
 
 func TestExecuteDeleteWithWhere(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1492,7 +1492,7 @@ func TestExecuteDeleteWithWhere(t *testing.T) {
 }
 
 func TestExecuteSetUpdateNodeError(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1514,7 +1514,7 @@ func TestExecuteSetUpdateNodeError(t *testing.T) {
 }
 
 func TestExecuteCreateNodeWithEmptyPattern(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1527,7 +1527,7 @@ func TestExecuteCreateNodeWithEmptyPattern(t *testing.T) {
 }
 
 func TestParseReturnItemsEmptyAfterSplit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1548,7 +1548,7 @@ func TestParseReturnItemsEmptyAfterSplit(t *testing.T) {
 }
 
 func TestExecuteMergeAsCreate(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1562,7 +1562,7 @@ func TestExecuteMergeAsCreate(t *testing.T) {
 }
 
 func TestCallDbLabelsWithEmptyLabels(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1585,7 +1585,7 @@ func TestCallDbLabelsWithEmptyLabels(t *testing.T) {
 }
 
 func TestExecuteCreateRelationshipNoType(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1607,7 +1607,7 @@ func TestExecuteCreateRelationshipNoType(t *testing.T) {
 
 // TestExecuteCreateWithDeleteBasic tests the basic CREATE...WITH...DELETE pattern
 func TestExecuteCreateWithDeleteBasic(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1626,7 +1626,7 @@ func TestExecuteCreateWithDeleteBasic(t *testing.T) {
 
 // TestExecuteCreateWithDeleteAndReturn tests CREATE...WITH...DELETE...RETURN
 func TestExecuteCreateWithDeleteAndReturn(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1649,7 +1649,7 @@ func TestExecuteCreateWithDeleteAndReturn(t *testing.T) {
 
 // TestExecuteCreateWithDeleteTimestamp tests CREATE with timestamp() function
 func TestExecuteCreateWithDeleteTimestamp(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1669,7 +1669,7 @@ func TestExecuteCreateWithDeleteTimestamp(t *testing.T) {
 // TestExecuteCreateWithDeleteRelationship tests CREATE...WITH...DELETE for relationships
 // Note: This creates nodes AND a relationship in one CREATE, then deletes the relationship
 func TestExecuteCreateWithDeleteRelationship(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1691,7 +1691,7 @@ func TestExecuteCreateWithDeleteRelationship(t *testing.T) {
 
 // TestExecuteCreateWithDeleteMultipleNodes tests creating and deleting multiple nodes
 func TestExecuteCreateWithDeleteMultipleNodes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1708,7 +1708,7 @@ func TestExecuteCreateWithDeleteMultipleNodes(t *testing.T) {
 }
 
 func TestExecuteDeleteDetachKeywordPosition(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1732,7 +1732,7 @@ func TestExecuteDeleteDetachKeywordPosition(t *testing.T) {
 }
 
 func TestCollectRegexWithProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1756,7 +1756,7 @@ func TestCollectRegexWithProperty(t *testing.T) {
 }
 
 func TestParsePropertiesWithSpace(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1769,7 +1769,7 @@ func TestParsePropertiesWithSpace(t *testing.T) {
 }
 
 func TestParsePropertiesNoValue(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1781,7 +1781,7 @@ func TestParsePropertiesNoValue(t *testing.T) {
 }
 
 func TestUnsupportedQueryType(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1794,7 +1794,7 @@ func TestUnsupportedQueryType(t *testing.T) {
 }
 
 func TestExecuteMatchOrderByWithSkipLimit(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1818,7 +1818,7 @@ func TestExecuteMatchOrderByWithSkipLimit(t *testing.T) {
 }
 
 func TestParseValueIntegerParsing(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1842,7 +1842,7 @@ func TestParseValueIntegerParsing(t *testing.T) {
 // Additional tests for remaining coverage gaps
 
 func TestCompareEqualBothNil(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1866,7 +1866,7 @@ func TestCompareEqualBothNil(t *testing.T) {
 }
 
 func TestToFloat64AllTypes(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1897,7 +1897,7 @@ func TestToFloat64AllTypes(t *testing.T) {
 }
 
 func TestEvaluateStringOpDefaultCase(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1927,7 +1927,7 @@ func TestEvaluateStringOpDefaultCase(t *testing.T) {
 }
 
 func TestExecuteMatchWithRelationshipQuery(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1953,7 +1953,7 @@ func TestExecuteMatchWithRelationshipQuery(t *testing.T) {
 }
 
 func TestExecuteCreateWithInlineProps(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1966,7 +1966,7 @@ func TestExecuteCreateWithInlineProps(t *testing.T) {
 }
 
 func TestExecuteReturnAliasedCount(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -1990,7 +1990,7 @@ func TestExecuteReturnAliasedCount(t *testing.T) {
 }
 
 func TestExecuteSetNewProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2013,7 +2013,7 @@ func TestExecuteSetNewProperty(t *testing.T) {
 }
 
 func TestExecuteMatchWithNilParams(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2035,7 +2035,7 @@ func TestExecuteMatchWithNilParams(t *testing.T) {
 }
 
 func TestParseReturnItemsEmptyString(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2056,7 +2056,7 @@ func TestParseReturnItemsEmptyString(t *testing.T) {
 }
 
 func TestExecuteMatchWhereEqualsNumber(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2077,7 +2077,7 @@ func TestExecuteMatchWhereEqualsNumber(t *testing.T) {
 }
 
 func TestExecuteReturnCountN(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2101,7 +2101,7 @@ func TestExecuteReturnCountN(t *testing.T) {
 }
 
 func TestExecuteAggregationWithNonNumeric(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -2124,7 +2124,7 @@ func TestExecuteAggregationWithNonNumeric(t *testing.T) {
 }
 
 func TestExecuteMatchCreateBlock_SetAndDeleteErrorBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2165,7 +2165,7 @@ func TestExecuteMatchCreateBlock_SetAndDeleteErrorBranches(t *testing.T) {
 }
 
 func TestResolveReturnItem_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -2213,7 +2213,7 @@ func TestResolveReturnItem_AdditionalBranches(t *testing.T) {
 }
 
 func TestExecuteCreateWithRefs_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2264,7 +2264,7 @@ func TestExecuteCreateWithRefs_AdditionalBranches(t *testing.T) {
 }
 
 func TestLowLevelHelpers_AdditionalCoverage(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2302,7 +2302,7 @@ func TestLowLevelHelpers_AdditionalCoverage(t *testing.T) {
 }
 
 func TestExecuteMatchCreateBlock_SetMergeAndDeleteBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2356,7 +2356,7 @@ func TestExecuteMatchCreateBlock_SetMergeAndDeleteBranches(t *testing.T) {
 	require.NoError(t, err)
 }
 func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -2444,7 +2444,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 }
 
 func TestCreateHelpers_ProcessRelationshipResolveAndSetMerge(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2521,7 +2521,7 @@ func TestCreateHelpers_ProcessRelationshipResolveAndSetMerge(t *testing.T) {
 }
 
 func TestCreateHelpers_ParsersAndValidators(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	require.NoError(t, exec.validateCreatePatternPropertyMap("(n:Person {name:'ok'})"))
 	require.NoError(t, exec.validateCreatePatternPropertyMap("(n:Person)"))
@@ -2595,7 +2595,7 @@ func TestCreateHelpers_ParsersAndValidators(t *testing.T) {
 }
 
 func TestCreateHelpers_ResolveOrCreateAndMultipleCreates(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
@@ -2643,7 +2643,7 @@ func TestCreateHelpers_ResolveOrCreateAndMultipleCreates(t *testing.T) {
 }
 
 func TestExecuteMatchCreateBlock_AdditionalSetAndDeleteBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -2713,7 +2713,7 @@ func TestExecuteMatchCreateBlock_AdditionalSetAndDeleteBranches(t *testing.T) {
 }
 
 func TestExecuteCompoundCreateWithDelete_AdditionalBranches(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

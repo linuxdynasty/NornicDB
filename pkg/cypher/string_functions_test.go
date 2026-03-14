@@ -9,7 +9,7 @@ import (
 )
 
 func TestReverseFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -61,7 +61,7 @@ func TestReverseFunction(t *testing.T) {
 }
 
 func TestLpadFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()
@@ -118,7 +118,7 @@ func TestLpadFunction(t *testing.T) {
 }
 
 func TestRpadFunction(t *testing.T) {
-	baseEngine := storage.NewMemoryEngine()
+	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	defer engine.Close()

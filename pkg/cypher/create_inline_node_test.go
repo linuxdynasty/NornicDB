@@ -16,7 +16,7 @@ import (
 
 // TestCreateInlineNodeInRelationship tests creating a new node inline within a relationship pattern
 func TestCreateInlineNodeInRelationship(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -36,7 +36,7 @@ func TestCreateInlineNodeInRelationship(t *testing.T) {
 
 // TestMatchCreateWithInlineNode tests MATCH followed by CREATE with inline node definition
 func TestMatchCreateWithInlineNode(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -64,7 +64,7 @@ func TestMatchCreateWithInlineNode(t *testing.T) {
 
 // TestMatchCreateWithInlineNodeReverse tests CREATE with inline node in reverse direction
 func TestMatchCreateWithInlineNodeReverse(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -96,7 +96,7 @@ func TestMatchCreateWithInlineNodeReverse(t *testing.T) {
 
 // TestMatchCreateBothInline tests CREATE with inline nodes on both sides
 func TestMatchCreateBothInline(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -114,7 +114,7 @@ func TestMatchCreateBothInline(t *testing.T) {
 
 // TestMatchCreateWithInlineAndVariable tests mixing inline definition with variable reference
 func TestMatchCreateWithInlineAndVariable(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -141,7 +141,7 @@ func TestMatchCreateWithInlineAndVariable(t *testing.T) {
 
 // TestMatchCreateMultipleInlineRelationships tests creating multiple relationships with inline nodes
 func TestMatchCreateMultipleInlineRelationships(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -165,7 +165,7 @@ func TestMatchCreateMultipleInlineRelationships(t *testing.T) {
 
 // TestCreateInlineWithProperties tests inline node with complex properties
 func TestCreateInlineWithProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -206,7 +206,7 @@ func TestCreateInlineWithProperties(t *testing.T) {
 // TestMatchMatchWhereCreate_TwoMatchWithWhere ensures multiple MATCH clauses each
 // with its own WHERE are parsed and executed correctly (variable 'a' and 'b' both bound).
 func TestMatchMatchWhereCreate_TwoMatchWithWhere(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -278,7 +278,7 @@ func TestCreateSingleNodeComprehensive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
@@ -324,7 +324,7 @@ func TestCreateMultipleNodesComprehensive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
@@ -373,7 +373,7 @@ func TestCreateRelationshipsComprehensive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
@@ -432,7 +432,7 @@ func TestMatchCreatePatterns(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
@@ -493,7 +493,7 @@ func TestMergePatterns(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			baseStore := storage.NewMemoryEngine()
+			baseStore := newTestMemoryEngine(t)
 
 			store := storage.NewNamespacedEngine(baseStore, "test")
 			exec := NewStorageExecutor(store)
@@ -524,7 +524,7 @@ func TestMergePatterns(t *testing.T) {
 
 // TestCreateWithParameterizedProperties tests CREATE with parameter substitution
 func TestCreateWithParameterizedProperties(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -558,7 +558,7 @@ func TestCreateWithParameterizedProperties(t *testing.T) {
 
 // TestCreateVariableReuse tests that variables can be reused correctly
 func TestCreateVariableReuse(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
@@ -577,7 +577,7 @@ func TestCreateVariableReuse(t *testing.T) {
 
 // TestMatchCreateDoesNotDuplicateExistingVariable tests that referencing existing variable doesn't create new node
 func TestMatchCreateDoesNotDuplicateExistingVariable(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
+	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)

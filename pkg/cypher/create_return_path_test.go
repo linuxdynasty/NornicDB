@@ -9,7 +9,7 @@ import (
 )
 
 func TestCreate_ReturnsCreatedPath(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 
 	res, err := exec.Execute(context.Background(), "CREATE p=(:A)-[:RELATES_TO]->(:B) RETURN p", nil)

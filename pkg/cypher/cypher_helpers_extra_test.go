@@ -368,7 +368,7 @@ func TestCypherHelpers_RagToFloat64Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_EvaluateExpressionWithContextFullOperators_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	nodes := map[string]*storage.Node{
 		"n": {
 			ID:     "n1",
@@ -412,7 +412,7 @@ func TestCypherHelpers_EvaluateExpressionWithContextFullOperators_Branches(t *te
 }
 
 func TestCypherHelpers_CallTxSetMetadata_SyntaxBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	// No active transaction.
 	_, err := exec.callTxSetMetadata("CALL tx.setMetaData({app:'x'})")
@@ -445,7 +445,7 @@ func TestCypherHelpers_CallTxSetMetadata_SyntaxBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_FindNodeByProperties_AndRangeIndex(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -471,7 +471,7 @@ func TestCypherHelpers_FindNodeByProperties_AndRangeIndex(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteMatchWithPipelineToRows(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -549,7 +549,7 @@ func TestCypherHelpers_ParserMarkersAndUnwindHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_CartesianMatchAndAggregation(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -619,7 +619,7 @@ func TestCypherHelpers_CartesianMatchAndAggregation(t *testing.T) {
 }
 
 func TestCypherHelpers_TraversalAndShortestPathHelpers(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	_, err := eng.CreateNode(&storage.Node{ID: "a1", Labels: []string{"A"}, Properties: map[string]interface{}{"name": "alpha"}})
@@ -685,7 +685,7 @@ func TestCypherHelpers_TraversalAndShortestPathHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -841,7 +841,7 @@ func TestCypherHelpers_ExecuteCallFallbackDispatch(t *testing.T) {
 }
 
 func TestCypherHelpers_CallCompatRelationshipQueries(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -985,7 +985,7 @@ func TestCypherHelpers_ComparisonConversionAndTemporalHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_DatabaseNameAndRemoveNodeFromSearch(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "tenant_cov")
 	exec := NewStorageExecutor(ns)
 
@@ -1009,7 +1009,7 @@ func TestCypherHelpers_DatabaseNameAndRemoveNodeFromSearch(t *testing.T) {
 }
 
 func TestCypherHelpers_VectorRegistryRegisterUnregister(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "tenant_cov")
 	exec := NewStorageExecutor(ns)
 
@@ -1118,7 +1118,7 @@ func TestCypherHelpers_CreateAndDropConstraintVariants(t *testing.T) {
 
 	for i, q := range validCreate {
 		t.Run(fmt.Sprintf("create_variant_%d", i), func(t *testing.T) {
-			base := storage.NewMemoryEngine()
+			base := newTestMemoryEngine(t)
 			eng := storage.NewNamespacedEngine(base, "test")
 			exec := NewStorageExecutor(eng)
 			_, err := exec.executeCreateConstraint(context.Background(), q)
@@ -1126,7 +1126,7 @@ func TestCypherHelpers_CreateAndDropConstraintVariants(t *testing.T) {
 		})
 	}
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	_, err := exec.executeCreateConstraint(context.Background(), "CREATE CONSTRAINT bad syntax")
@@ -1150,7 +1150,7 @@ func TestCypherHelpers_CreateAndDropConstraintVariants(t *testing.T) {
 	require.Error(t, err)
 
 	t.Run("constraint validation errors on existing data", func(t *testing.T) {
-		base := storage.NewMemoryEngine()
+		base := newTestMemoryEngine(t)
 		eng := storage.NewNamespacedEngine(base, "test")
 		exec := NewStorageExecutor(eng)
 		ctx := context.Background()
@@ -1171,7 +1171,7 @@ func TestCypherHelpers_CreateAndDropConstraintVariants(t *testing.T) {
 	})
 
 	t.Run("temporal constraint malformed property count", func(t *testing.T) {
-		base := storage.NewMemoryEngine()
+		base := newTestMemoryEngine(t)
 		eng := storage.NewNamespacedEngine(base, "test")
 		exec := NewStorageExecutor(eng)
 
@@ -1256,7 +1256,7 @@ func TestCypherHelpers_ExtractPolygonPoints_AllBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_ParseRagProcedureRequest(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(base, "test"))
 	ctx := context.Background()
 
@@ -1290,7 +1290,7 @@ func TestCypherHelpers_ParseRagProcedureRequest(t *testing.T) {
 }
 
 func TestCypherHelpers_CallDbIndexVectorEmbed_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(base, "test"))
 	ctx := context.Background()
 
@@ -1328,7 +1328,7 @@ func TestCypherHelpers_CallDbIndexVectorEmbed_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	node := &storage.Node{
 		ID:              "n1",
 		Labels:          []string{"Doc"},
@@ -1394,14 +1394,14 @@ func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
 }
 
 func TestCypherHelpers_PrefixNodeIDIfNeeded(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	assert.Equal(t, storage.NodeID("n1"), exec.prefixNodeIDIfNeeded("n1", ""))
 	assert.Equal(t, storage.NodeID("tenant:n1"), exec.prefixNodeIDIfNeeded("n1", "tenant:"))
 	assert.Equal(t, storage.NodeID("tenant:n1"), exec.prefixNodeIDIfNeeded("tenant:n1", "tenant:"))
 }
 
 func TestCypherHelpers_EvaluateWhereOnComputedRow(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	values := map[string]interface{}{
 		"score": float64(9.5),
 		"name":  "alice",
@@ -1420,7 +1420,7 @@ func TestCypherHelpers_EvaluateWhereOnComputedRow(t *testing.T) {
 }
 
 func TestCypherHelpers_EvaluateInnerWhereBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	node := &storage.Node{
 		ID:     "n-123",
 		Labels: []string{"Person"},
@@ -1492,7 +1492,7 @@ func TestCypherHelpers_NormalizePropValueAndMap(t *testing.T) {
 }
 
 func TestCypherHelpers_FindNodeByVariableInMatch(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -1516,7 +1516,7 @@ func TestCypherHelpers_FindNodeByVariableInMatch(t *testing.T) {
 }
 
 func TestCypherHelpers_ApocLouvainBasic(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -1553,7 +1553,7 @@ func TestCypherHelpers_ParseFulltextQueryAndShowDatabase(t *testing.T) {
 	assert.Contains(t, must, "exact phrase")
 	assert.Contains(t, must, "must")
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "tenant_show")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -1580,7 +1580,7 @@ func TestCypherHelpers_ParseFulltextQueryAndShowDatabase(t *testing.T) {
 }
 
 func TestCypherHelpers_EvaluateSetExpressionAndArraySuffix(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	assert.Nil(t, exec.evaluateSetExpression("null"))
 	assert.Equal(t, "x", exec.evaluateSetExpression("'x'"))
@@ -1641,7 +1641,7 @@ func TestCypherHelpers_AssignValueAdditionalCases(t *testing.T) {
 }
 
 func TestCypherHelpers_ModuloAndMapLiteralFullBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	// modulo: integer coercion, divide-by-zero, and invalid operand branches.
 	assert.Equal(t, int64(1), exec.modulo(int64(10), int64(3)))
@@ -1687,7 +1687,7 @@ func TestCypherHelpers_QueryPatternAndFastPathHelpers(t *testing.T) {
 	))
 	assert.False(t, isReturnEdgePropertyAggNameShape("RETURN p.name", "r", "rating"))
 
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "tenant_fast_cov")
 	exec := NewStorageExecutor(ns)
 
@@ -1729,7 +1729,7 @@ func TestCypherHelpers_QueryPatternAndFastPathHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteCreateConstraint_TypeAndErrorBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	// Named Neo4j 5 style property type constraint.
@@ -1747,7 +1747,7 @@ func TestCypherHelpers_ExecuteCreateConstraint_TypeAndErrorBranches(t *testing.T
 }
 
 func TestCypherHelpers_UnregisterVectorSpace_StandaloneBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "vreg_cov"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "vreg_cov"))
 	exec.SetVectorRegistry(vectorspace.NewIndexRegistry())
 
 	// Non-existing key with non-nil map.
@@ -1779,7 +1779,7 @@ func TestCypherHelpers_UnregisterVectorSpace_StandaloneBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteCreateConstraint_MultiSyntaxCoverage(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	valid := []string{
@@ -1810,7 +1810,7 @@ func TestCypherHelpers_ExecuteCreateConstraint_MultiSyntaxCoverage(t *testing.T)
 }
 
 func TestCypherHelpers_ExecuteCreateConstraint_ValidationFailureBranches(t *testing.T) {
-	store := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
@@ -1842,7 +1842,7 @@ func TestCypherHelpers_ExecuteCreateConstraint_ValidationFailureBranches(t *test
 }
 
 func TestCypherHelpers_MatchRowsHelpers_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	nodes := []*storage.Node{
 		{ID: "n1", Labels: []string{"X"}, Properties: map[string]interface{}{"a": int64(3), "b": int64(4)}},
@@ -1864,7 +1864,7 @@ func TestCypherHelpers_MatchRowsHelpers_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_EvaluateMapLiteralFromValues_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	values := map[string]interface{}{
 		"name": "alice",
@@ -1922,7 +1922,7 @@ func TestCypherHelpers_CompareValuesForSort(t *testing.T) {
 }
 
 func TestCypherHelpers_SubstituteNodeAndExecuteSetMerge(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -2050,7 +2050,7 @@ func TestCypherHelpers_TypedResultDecodeAndAssignBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_CallEvaluationHelpers(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	node := &storage.Node{
 		ID:         "n1",
@@ -2093,7 +2093,7 @@ func TestCypherHelpers_CallEvaluationHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_VectorParsingAndQueryBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	_, _, _, err := exec.parseVectorQueryParams("CALL db.labels()")
@@ -2154,7 +2154,7 @@ func TestCypherHelpers_VectorParsingAndQueryBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_VectorAndFulltextRelationshipQueryBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	// Fulltext relationships: empty query and match query branches.
@@ -2207,7 +2207,7 @@ func TestCypherHelpers_VectorAndFulltextRelationshipQueryBranches(t *testing.T) 
 }
 
 func TestCypherHelpers_VectorRelationshipQuery_AdditionalBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	// Setup small graph with relationship embeddings.
@@ -2331,7 +2331,7 @@ func TestCypherHelpers_VectorRelationshipQuery_AdditionalBranches(t *testing.T) 
 }
 
 func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	expectSuccess := []string{
@@ -2444,7 +2444,7 @@ func TestCypherHelpers_ExecuteCallDispatchAssertions(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteCartesianProductMatch_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -2499,7 +2499,7 @@ func TestCypherHelpers_ExecuteCartesianProductMatch_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteCartesianProductMatch_LabelAndAnonymousBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -2547,7 +2547,7 @@ func TestCypherHelpers_ExecuteCartesianProductMatch_LabelAndAnonymousBranches(t 
 }
 
 func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -2619,7 +2619,7 @@ func TestCypherHelpers_MutationRelationshipPatternHelpers(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteMatchRelationshipsWithClause_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -2675,7 +2675,7 @@ func TestCypherHelpers_ExecuteMatchRelationshipsWithClause_Branches(t *testing.T
 }
 
 func TestCypherHelpers_CountSubqueryAndComparison_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -2707,7 +2707,7 @@ func TestCypherHelpers_CountSubqueryAndComparison_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExtractionHelpers_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	exec := NewStorageExecutor(newTestMemoryEngine(t))
 
 	assert.Equal(t, "", extractVariableNameFromReturnItem(""))
 	assert.Equal(t, "n", extractVariableNameFromReturnItem("n"))
@@ -2724,7 +2724,7 @@ func TestCypherHelpers_ExtractionHelpers_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	node := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"age": int64(21), "name": "alice"}}
 
 	assert.True(t, exec.evaluateWhereAsBoolean("n.age >= 21", "n", node))
@@ -2737,7 +2737,7 @@ func TestCypherHelpers_EvaluateWhereAsBooleanBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_ComparisonHelpers_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	node := &storage.Node{
 		ID:              "n1",
 		Labels:          []string{"Doc"},
@@ -2786,7 +2786,7 @@ func TestCypherHelpers_ComparisonHelpers_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteUnwind_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()
 
 	_, err := exec.executeUnwind(ctx, "MATCH (n) RETURN n")
@@ -2831,7 +2831,7 @@ func TestCypherHelpers_ExecuteUnwind_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteMatchWithPipelineToRows_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -2917,7 +2917,7 @@ func TestCypherHelpers_ExecuteMatchWithPipelineToRows_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_YieldParsingAndFiltering_Branches(t *testing.T) {
-	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test"))
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 
 	// Keyword detection should ignore quoted occurrences.
 	assert.Equal(t, -1, findKeywordIndexInContext("x = 'ORDER BY' and y = 'LIMIT'", "ORDER"))
@@ -2999,7 +2999,7 @@ func TestCypherHelpers_YieldParsingAndFiltering_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_TryFastRevenueByProduct_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -3067,7 +3067,7 @@ func TestCypherHelpers_TryFastRevenueByProduct_Branches(t *testing.T) {
 }
 
 func TestCypherHelpers_TryFastRevenueByProduct_TypeAndPaginationBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -3147,7 +3147,7 @@ func TestCypherHelpers_TryFastRevenueByProduct_TypeAndPaginationBranches(t *test
 }
 
 func TestCypherHelpers_TryFastCompoundOptionalMatchCount_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 
@@ -3216,7 +3216,7 @@ func TestCypherHelpers_TryFastCompoundOptionalMatchCount_Branches(t *testing.T) 
 }
 
 func TestCypherHelpers_MergeRelationshipContextHelpers_Branches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(eng)
 	ctx := context.Background()
@@ -3322,7 +3322,7 @@ func TestCypherHelpers_ExtractCreateVariableRefsBranches(t *testing.T) {
 }
 
 func TestCypherHelpers_ExecuteSetTrailingPipelinesAndHelpers(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -3416,7 +3416,7 @@ func TestCypherHelpers_ValueToCypherLiteralAndPipelineRowsBranches(t *testing.T)
 	assert.Contains(t, mixed, "b: 'x'")
 
 	// executeMatchWithPipelineToRows branches for multi-label/property/where filtering.
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -3458,7 +3458,7 @@ func TestCypherHelpers_ValueToCypherLiteralAndPipelineRowsBranches(t *testing.T)
 	require.True(t, ok)
 
 	// No pharmacies path should deterministically return empty output rows.
-	emptyStore := storage.NewNamespacedEngine(storage.NewMemoryEngine(), "test")
+	emptyStore := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 	_, err = emptyStore.CreateNode(&storage.Node{
 		ID:     "o-empty",
 		Labels: []string{"OrderStatus"},
@@ -3478,7 +3478,7 @@ func TestCypherHelpers_ValueToCypherLiteralAndPipelineRowsBranches(t *testing.T)
 }
 
 func TestCypherHelpers_SetTrailingWithReturnAndRowNormalizationBranches(t *testing.T) {
-	base := storage.NewMemoryEngine()
+	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()

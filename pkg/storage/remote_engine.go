@@ -44,6 +44,7 @@ type RemoteEngineConfig struct {
 // remoteTransport abstracts Bolt vs HTTP execution of Cypher statements.
 type remoteTransport interface {
 	query(ctx context.Context, statement string, params map[string]interface{}) ([][]interface{}, error)
+	queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error)
 	queryBatch(ctx context.Context, statements []remoteStatement) error
 	close() error
 }
@@ -162,6 +163,37 @@ func (b *boltTransport) query(ctx context.Context, statement string, params map[
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (b *boltTransport) queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	session := b.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: b.database,
+		AccessMode:   neo4j.AccessModeWrite,
+	})
+	defer func() { _ = session.Close(ctx) }()
+
+	result, err := session.Run(ctx, statement, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	columns, err := result.Keys()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get result keys: %w", err)
+	}
+	rows := make([][]interface{}, 0)
+	for result.Next(ctx) {
+		record := result.Record()
+		row := make([]interface{}, len(record.Values))
+		for i, v := range record.Values {
+			row[i] = normalizeBoltValue(v)
+		}
+		rows = append(rows, row)
+	}
+	if err := result.Err(); err != nil {
+		return nil, nil, err
+	}
+	return columns, rows, nil
 }
 
 func (b *boltTransport) queryBatch(ctx context.Context, statements []remoteStatement) error {
@@ -335,6 +367,24 @@ func (h *httpTransport) query(ctx context.Context, statement string, params map[
 		rows = append(rows, data.Row)
 	}
 	return rows, nil
+}
+
+func (h *httpTransport) queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	txResp, err := h.doRequest(ctx, remoteTxRequest{
+		Statements: []remoteStatement{{Statement: statement, Parameters: params}},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(txResp.Results) == 0 {
+		return []string{}, [][]interface{}{}, nil
+	}
+	result := txResp.Results[0]
+	rows := make([][]interface{}, 0, len(result.Data))
+	for _, data := range result.Data {
+		rows = append(rows, data.Row)
+	}
+	return result.Columns, rows, nil
 }
 
 func (h *httpTransport) queryBatch(ctx context.Context, statements []remoteStatement) error {
@@ -956,4 +1006,20 @@ func (r *RemoteEngine) EdgeCount() (int64, error) {
 
 func (r *RemoteEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
 	return 0, 0, fmt.Errorf("DeleteByPrefix is not supported for remote engines (prefix=%s)", prefix)
+}
+
+// QueryCypher executes an arbitrary Cypher query against the remote instance
+// and returns column names and raw rows. This is used by the fabric layer to
+// dispatch fragment queries to remote constituents without going through the
+// node/edge Engine abstraction.
+//
+// The Bolt transport returns columns from the result record keys.
+// The HTTP transport returns columns from the tx API response.
+func (r *RemoteEngine) QueryCypher(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = defaultCtx()
+		defer cancel()
+	}
+	return r.transport.queryWithColumns(ctx, statement, params)
 }
