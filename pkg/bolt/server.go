@@ -1449,7 +1449,8 @@ func (s *Session) handleRun(data []byte) error {
 		if s.server != nil && s.server.config.LogQueries {
 			fmt.Printf("[BOLT] ERROR: %v\n", err)
 		}
-		return s.sendFailure("Neo.ClientError.Statement.SyntaxError", err.Error())
+		code, msg := mapBoltQueryError(err)
+		return s.sendFailure(code, msg)
 	}
 
 	// Per-database RBAC: filter SHOW DATABASES results by CanSeeDatabase so principals only see DBs they may access
@@ -1497,6 +1498,26 @@ func (s *Session) handleRun(data []byte) error {
 		return err
 	}
 	return s.flushIfPending()
+}
+
+func mapBoltQueryError(err error) (code, message string) {
+	if err == nil {
+		return "Neo.ClientError.Statement.SyntaxError", ""
+	}
+	msg := err.Error()
+	if strings.HasPrefix(msg, "Neo.") {
+		if idx := strings.Index(msg, ":"); idx > 0 {
+			return strings.TrimSpace(msg[:idx]), strings.TrimSpace(msg[idx+1:])
+		}
+		return msg, msg
+	}
+	if start := strings.Index(msg, "Neo."); start >= 0 {
+		rest := msg[start:]
+		if idx := strings.Index(rest, ":"); idx > 0 {
+			return strings.TrimSpace(rest[:idx]), strings.TrimSpace(rest[idx+1:])
+		}
+	}
+	return "Neo.ClientError.Statement.SyntaxError", msg
 }
 
 // truncateQuery truncates a query for logging.

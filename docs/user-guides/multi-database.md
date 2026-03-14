@@ -539,32 +539,32 @@ This preserves service-principal or user identity across Fabric-style fan-out.
 #### Define Remote Constituents in Cypher
 
 ```cypher
-CREATE COMPOSITE DATABASE caremark
-  ALIAS tr FOR DATABASE caremark_tr
+CREATE COMPOSITE DATABASE nornic
+  ALIAS tr FOR DATABASE nornic_tr
     AT "https://shard-a.example/nornic-db"
     OIDC CREDENTIAL FORWARDING
     TYPE remote
     ACCESS read_write
-  ALIAS txt FOR DATABASE caremark_txt
+  ALIAS txt FOR DATABASE nornic_txt
     AT "https://shard-b.example/nornic-db"
-    USER "svc-caremark"
+    USER "svc-nornic"
     PASSWORD "svc-password"
     TYPE remote
     ACCESS read_write
 ```
 
 ```cypher
-ALTER COMPOSITE DATABASE caremark
-  ADD ALIAS rx FOR DATABASE caremark_rx
+ALTER COMPOSITE DATABASE nornic
+  ADD ALIAS rx FOR DATABASE nornic_rx
     AT "https://shard-c.example/nornic-db"
-    SECRET REF "spn-caremark-c"
+    SECRET REF "spn-nornic-c"
     OIDC CREDENTIAL FORWARDING
     TYPE remote
     ACCESS read
 ```
 
 ```cypher
-SHOW CONSTITUENTS FOR COMPOSITE DATABASE caremark
+SHOW CONSTITUENTS FOR COMPOSITE DATABASE nornic
 ```
 
 Result columns include `alias`, `database`, `type`, `access_mode`, `uri`, `secret_ref`, `auth_mode`, `user`.
@@ -607,24 +607,92 @@ Create/query data directly on remote shards first:
 curl -s -u admin:password \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"CREATE (n:Translation {id:\"tr-1\", textKey:\"WELCOME\"})"}]}' \
-  "https://shard-a.example/nornic-db/db/caremark_tr/tx/commit"
+  "https://shard-a.example/nornic-db/db/nornic_tr/tx/commit"
 
 curl -s -u admin:password \
   -H "Content-Type: application/json" \
   -d '{"statements":[{"statement":"CREATE (n:TranslationText {translationId:\"tr-1\", locale:\"en-US\", value:\"Welcome\"})"}]}' \
-  "https://shard-b.example/nornic-db/db/caremark_txt/tx/commit"
+  "https://shard-b.example/nornic-db/db/nornic_txt/tx/commit"
 ```
 
 #### Verification Query (Composite Read)
 
 ```cypher
-:USE caremark
+:USE nornic
 MATCH (n)
 RETURN labels(n) AS labels, count(*) AS c
 ORDER BY labels
 ```
 
 Expected: rows from both remote constituents appear in one result stream.
+
+#### Fabric-Style Subquery Routing (USE inside CALL)
+
+You can route each subquery to a specific constituent alias:
+
+```cypher
+USE nornic
+CALL {
+  USE nornic.tr
+  MATCH (t:Translation)
+  RETURN t.id AS translationId, t.textKey AS textKey
+}
+CALL {
+  USE nornic.txt
+  MATCH (tt:TranslationText)
+  RETURN count(tt) AS textCount
+}
+RETURN translationId, textKey, textCount
+```
+
+Behavior:
+
+- The outer query context runs on `nornic`.
+- Each `CALL { USE nornic.<alias> ... }` block executes on that constituent.
+- Results are merged in outer query order.
+- The same semantics are used across Bolt, HTTP transaction API, and GraphQL execution paths.
+
+#### Transaction Behavior for Composite/Remote
+
+- Explicit transactions (`BEGIN`/`COMMIT`/`ROLLBACK`) are supported through the standard protocol transaction APIs.
+- Distributed writes are constrained to one write shard per transaction (many-read/one-write model).
+- Attempting writes on a second shard in the same transaction returns a deterministic transaction error.
+- Identity/auth context is forwarded for remote constituent execution when OIDC credential forwarding is configured.
+
+Example: valid explicit transaction (one write shard, multi-shard reads)
+
+```cypher
+BEGIN
+CALL {
+  USE nornic.tr
+  CREATE (t:Translation {id: "tr-tx-1", textKey: "ORDERS_WHERE"})
+  RETURN count(t) AS c
+}
+RETURN c
+COMMIT
+```
+
+Example: rejected explicit transaction (write on second shard in same tx)
+
+```cypher
+BEGIN
+CALL {
+  USE nornic.tr
+  CREATE (t:Translation {id: "tr-tx-2"})
+  RETURN count(t) AS c
+}
+RETURN c
+CALL {
+  USE nornic.txt
+  CREATE (tt:TranslationText {translationId: "tr-tx-2", locale: "en-US", value: "Where are my orders?"})
+  RETURN count(tt) AS c
+}
+RETURN c
+```
+
+Expected error:
+
+`Neo.ClientError.Transaction.ForbiddenDueToTransactionType: Writing to more than one database per transaction is not allowed`
 
 #### Troubleshooting
 
@@ -651,12 +719,11 @@ No `Authorization` header on incoming request
   - `NORNICDB_ENCRYPTION_PASSWORD`
   - `NORNICDB_AUTH_JWT_SECRET`
 
-### Limitations
+### Current Constraints
 
-- **No Distributed Transactions**: Writes to multiple constituents are not atomic
-- **Routing Configuration**: Advanced routing rules are not yet user-configurable (uses default hash-based routing)
-
-## Limitations (v1)
+- One transaction can write to only one constituent shard (many-read/one-write model).
+- Routing rule customization is currently limited compared to full custom planner policies.
+- Cross-shard relationship semantics depend on explicit query patterns and available IDs.
 
 ## See Also
 

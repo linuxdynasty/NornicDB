@@ -153,10 +153,10 @@ func TestManagerNewManagerDefaultTTLAndTouchNil(t *testing.T) {
 	mgr.Touch(nil)
 }
 
-func TestManagerOpenWithExecutorBeginFailure(t *testing.T) {
+func TestManagerOpenWithExecutorCompositeBeginSupported(t *testing.T) {
 	mgr := NewManager(time.Second, newExecutorFactory(t))
 
-	// CompositeEngine does not support explicit transactions (BEGIN).
+	// CompositeEngine explicit BEGIN is supported via Fabric transaction context.
 	c := storage.NewCompositeEngine(
 		map[string]storage.Engine{"a": storage.NewMemoryEngine()},
 		map[string]string{"a": "a"},
@@ -164,7 +164,12 @@ func TestManagerOpenWithExecutorBeginFailure(t *testing.T) {
 	)
 	exec := cypher.NewStorageExecutor(c)
 
-	if _, err := mgr.OpenWithExecutor(context.Background(), "neo4j", exec); err == nil {
-		t.Fatalf("expected begin failure for non-transactional engine")
+	session, err := mgr.OpenWithExecutor(context.Background(), "neo4j", exec)
+	if err != nil {
+		t.Fatalf("expected composite begin to succeed, got: %v", err)
 	}
+	if session == nil {
+		t.Fatalf("expected non-nil session")
+	}
+	_ = mgr.RollbackAndDelete(context.Background(), session)
 }

@@ -376,7 +376,7 @@ func TestImportScriptQueryPattern(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-create all the lookup nodes (mimics the import script)
-	_, err := exec.Execute(ctx, `CREATE (b:BusinessArea {name: 'Caremark'})`, nil)
+	_, err := exec.Execute(ctx, `CREATE (b:BusinessArea {name: 'nornic'})`, nil)
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, `CREATE (p:Page {url: '/test/page'})`, nil)
 	require.NoError(t, err)
@@ -393,7 +393,7 @@ func TestImportScriptQueryPattern(t *testing.T) {
 			ON CREATE SET e.aiAuditScore = 85
 			
 			WITH e
-			MATCH (b:BusinessArea {name: 'Caremark'})
+			MATCH (b:BusinessArea {name: 'nornic'})
 			MERGE (e)-[:IN_BUSINESS_AREA]->(b)
 			
 			WITH e
@@ -468,7 +468,7 @@ func TestImportScriptQueryPattern(t *testing.T) {
 			ON CREATE SET e.aiAuditScore = 65
 			
 			WITH e
-			MATCH (b:BusinessArea {name: 'Caremark'})
+			MATCH (b:BusinessArea {name: 'nornic'})
 			MERGE (e)-[:IN_BUSINESS_AREA]->(b)
 			
 			WITH e
@@ -511,7 +511,7 @@ func TestImportScriptQueryPattern(t *testing.T) {
 			ON CREATE SET e.aiAuditScore = 55
 			
 			WITH e
-			MATCH (b:BusinessArea {name: 'Caremark'})
+			MATCH (b:BusinessArea {name: 'nornic'})
 			MERGE (e)-[:IN_BUSINESS_AREA]->(b)
 			
 			WITH e

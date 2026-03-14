@@ -2,6 +2,7 @@ package bolt
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -1242,6 +1243,26 @@ func TestBoltCoverage_ServerMessageAndRunHelpers(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, <-done)
 			assert.Equal(t, "Neo.ClientError.Statement.SyntaxError", code)
+
+			serverConnWrapped, clientConnWrapped := net.Pipe()
+			defer serverConnWrapped.Close()
+			defer clientConnWrapped.Close()
+			session = newTestSession(serverConnWrapped, &mockExecutor{
+				executeFunc: func(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+					return nil, fmt.Errorf("apply input failed: Neo.ClientError.Transaction.ForbiddenDueToTransactionType: Writing to more than one database per transaction is not allowed")
+				},
+			})
+			session.server = &Server{config: DefaultConfig(), sessions: map[string]*Session{}}
+			session.authenticated = true
+			session.authResult = &BoltAuthResult{Authenticated: true, Username: "reader", Permissions: []string{"read", "write", "schema"}}
+
+			done = make(chan error, 1)
+			go func() { done <- session.handleRun(buildRunMessageData("RETURN wrapped", nil, nil)) }()
+			code, msg, err := AssertFailure(t, clientConnWrapped)
+			require.NoError(t, err)
+			require.NoError(t, <-done)
+			assert.Equal(t, "Neo.ClientError.Transaction.ForbiddenDueToTransactionType", code)
+			assert.Contains(t, msg, "Writing to more than one database per transaction is not allowed")
 
 			serverConn2, clientConn2 := net.Pipe()
 			defer serverConn2.Close()

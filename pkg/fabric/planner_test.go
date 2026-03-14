@@ -31,10 +31,10 @@ func TestPlan_SimpleQueryNoUse(t *testing.T) {
 
 func TestPlan_LeadingUseClause(t *testing.T) {
 	catalog := NewCatalog()
-	catalog.Register("caremark", &LocationLocal{DBName: "caremark"})
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
 	p := NewFabricPlanner(catalog)
 
-	frag, err := p.Plan("USE caremark MATCH (n) RETURN n", "nornic")
+	frag, err := p.Plan("USE nornic MATCH (n) RETURN n", "nornic")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -43,8 +43,8 @@ func TestPlan_LeadingUseClause(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected FragmentExec, got %T", frag)
 	}
-	if exec.GraphName != "caremark" {
-		t.Errorf("expected caremark, got %s", exec.GraphName)
+	if exec.GraphName != "nornic" {
+		t.Errorf("expected nornic, got %s", exec.GraphName)
 	}
 	if exec.Query != "MATCH (n) RETURN n" {
 		t.Errorf("expected remaining query, got %s", exec.Query)
@@ -53,10 +53,10 @@ func TestPlan_LeadingUseClause(t *testing.T) {
 
 func TestPlan_LeadingUseDotted(t *testing.T) {
 	catalog := NewCatalog()
-	catalog.Register("caremark.tr", &LocationRemote{DBName: "caremark_tr", URI: "bolt://a:7687"})
+	catalog.Register("nornic.tr", &LocationRemote{DBName: "nornic_tr", URI: "bolt://a:7687"})
 	p := NewFabricPlanner(catalog)
 
-	frag, err := p.Plan("USE caremark.tr MATCH (n) RETURN n", "nornic")
+	frag, err := p.Plan("USE nornic.tr MATCH (n) RETURN n", "nornic")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,20 +65,20 @@ func TestPlan_LeadingUseDotted(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected FragmentExec, got %T", frag)
 	}
-	if exec.GraphName != "caremark.tr" {
-		t.Errorf("expected caremark.tr, got %s", exec.GraphName)
+	if exec.GraphName != "nornic.tr" {
+		t.Errorf("expected nornic.tr, got %s", exec.GraphName)
 	}
 }
 
 func TestPlan_CallUseSubquery(t *testing.T) {
 	catalog := NewCatalog()
-	catalog.Register("caremark", &LocationLocal{DBName: "caremark"})
-	catalog.Register("caremark.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
+	catalog.Register("nornic.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
 	p := NewFabricPlanner(catalog)
 
-	query := `USE caremark
+	query := `USE nornic
 CALL {
-  USE caremark.tr
+  USE nornic.tr
   MATCH (t:Translation)
   RETURN t.id AS translationId
 }
@@ -89,7 +89,7 @@ RETURN translationId`
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should be an Apply chain: Apply(input=Apply(input=Init, inner=Exec(caremark.tr)), inner=Exec(trailing RETURN))
+	// Should be an Apply chain: Apply(input=Apply(input=Init, inner=Exec(nornic.tr)), inner=Exec(trailing RETURN))
 	apply, ok := frag.(*FragmentApply)
 	if !ok {
 		t.Fatalf("expected FragmentApply at root, got %T", frag)
@@ -100,11 +100,11 @@ RETURN translationId`
 	if !ok {
 		t.Fatalf("expected FragmentExec for trailing RETURN, got %T", apply.Inner)
 	}
-	if innerExec.GraphName != "caremark" {
-		t.Errorf("expected trailing fragment on caremark, got %s", innerExec.GraphName)
+	if innerExec.GraphName != "nornic" {
+		t.Errorf("expected trailing fragment on nornic, got %s", innerExec.GraphName)
 	}
 
-	// The inner apply contains the CALL { USE caremark.tr ... } block.
+	// The inner apply contains the CALL { USE nornic.tr ... } block.
 	innerApply, ok := apply.Input.(*FragmentApply)
 	if !ok {
 		t.Fatalf("expected FragmentApply for CALL block, got %T", apply.Input)
@@ -114,26 +114,26 @@ RETURN translationId`
 	if !ok {
 		t.Fatalf("expected FragmentExec for CALL body, got %T", innerApply.Inner)
 	}
-	if callExec.GraphName != "caremark.tr" {
-		t.Errorf("expected caremark.tr, got %s", callExec.GraphName)
+	if callExec.GraphName != "nornic.tr" {
+		t.Errorf("expected nornic.tr, got %s", callExec.GraphName)
 	}
 }
 
 func TestPlan_MultipleCallUseSubqueries(t *testing.T) {
 	catalog := NewCatalog()
-	catalog.Register("caremark", &LocationLocal{DBName: "caremark"})
-	catalog.Register("caremark.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
-	catalog.Register("caremark.txt", &LocationRemote{DBName: "txt", URI: "bolt://b:7687"})
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
+	catalog.Register("nornic.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
+	catalog.Register("nornic.txt", &LocationRemote{DBName: "txt", URI: "bolt://b:7687"})
 	p := NewFabricPlanner(catalog)
 
-	query := `USE caremark
+	query := `USE nornic
 CALL {
-  USE caremark.tr
+  USE nornic.tr
   MATCH (t:Translation)
   RETURN t.id AS translationId, t.textKey AS textKey
 }
 CALL {
-  USE caremark.txt
+  USE nornic.txt
   WITH translationId
   MATCH (tt:TranslationText)
   WHERE tt.translationId = translationId

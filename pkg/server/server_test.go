@@ -859,10 +859,66 @@ func TestHandleOpenTransaction_ForwardsAuthToRemoteConstituentFactory(t *testing
 	resp := makeRequest(t, server, "POST", "/db/comp_remote/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
-	// CompositeEngine does not support explicit transactions yet; we still verify
+	// Composite explicit transactions are supported; ensure tx open succeeds and
 	// auth forwarding reached remote constituent resolution on transaction open.
-	require.Equal(t, http.StatusInternalServerError, resp.Code, resp.Body.String())
+	require.Equal(t, http.StatusCreated, resp.Code, resp.Body.String())
 	require.Equal(t, "Bearer "+token, capturedAuth)
+	var txResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &txResp))
+	require.NotNil(t, txResp["commit"])
+}
+
+func TestCompositeExplicitTx_SecondWriteShardErrorCode(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	dbManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbManager.CreateDatabase("shard_a"))
+	require.NoError(t, dbManager.CreateDatabase("shard_b"))
+	require.NoError(t, dbManager.CreateCompositeDatabase("cmp_tx_code", []multidb.ConstituentRef{
+		{Alias: "a", DatabaseName: "shard_a", Type: "local", AccessMode: "read_write"},
+		{Alias: "b", DatabaseName: "shard_b", Type: "local", AccessMode: "read_write"},
+	}))
+	server.dbManager = dbManager
+	server.txSessions = txsession.NewManager(30*time.Second, server.newExecutorForDatabase)
+
+	// Open explicit transaction.
+	openResp := makeRequest(t, server, "POST", "/db/cmp_tx_code/tx", map[string]interface{}{"statements": []map[string]interface{}{}}, "Bearer "+token)
+	require.Equal(t, http.StatusCreated, openResp.Code, openResp.Body.String())
+	var open map[string]interface{}
+	require.NoError(t, json.Unmarshal(openResp.Body.Bytes(), &open))
+	commitURL, _ := open["commit"].(string)
+	require.NotEmpty(t, commitURL)
+	txPath := strings.TrimSuffix(strings.TrimPrefix(commitURL, "http://localhost:7474"), "/commit")
+
+	// First write on shard a succeeds.
+	firstResp := makeRequest(t, server, "POST", txPath, map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CALL { USE cmp_tx_code.a CREATE (n:W {id:'1'}) RETURN count(n) AS c } RETURN c"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, firstResp.Code, firstResp.Body.String())
+
+	// Second write on shard b in same tx must fail with Neo4j tx type code.
+	secondResp := makeRequest(t, server, "POST", txPath, map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CALL { USE cmp_tx_code.b CREATE (n:W {id:'2'}) RETURN count(n) AS c } RETURN c"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, secondResp.Code, secondResp.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(secondResp.Body.Bytes(), &body))
+	errs, ok := body["errors"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, errs)
+	firstErr, ok := errs[0].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "Neo.ClientError.Transaction.ForbiddenDueToTransactionType", firstErr["code"])
 }
 
 func TestServerNew_ConfiguresDefaultRemoteEngineFactory(t *testing.T) {

@@ -22,6 +22,11 @@ func (e *StorageExecutor) shouldUseFabricPlanner(cypher string) bool {
 }
 
 func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
+	tx := fabric.NewFabricTransaction(fmt.Sprintf("fab-%d", time.Now().UnixNano()))
+	return e.executeViaFabricWithTx(ctx, cypher, params, tx, true)
+}
+
+func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher string, params map[string]interface{}, tx *fabric.FabricTransaction, autoCommit bool) (*ExecuteResult, error) {
 	catalog, err := e.buildFabricCatalog()
 	if err != nil {
 		return nil, err
@@ -29,6 +34,15 @@ func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, p
 
 	authToken := GetAuthTokenFromContext(ctx)
 	localExec := fabric.NewLocalFragmentExecutor(&cypherFabricExecutor{base: e, authToken: authToken}, func(dbName string) (storage.Engine, error) {
+		if e.dbManager != nil {
+			engineIface, err := e.dbManager.GetStorageForUse(dbName, authToken)
+			if err == nil {
+				if engine, ok := engineIface.(storage.Engine); ok {
+					return engine, nil
+				}
+				return nil, fmt.Errorf("storage engine has unexpected type for '%s'", dbName)
+			}
+		}
 		scoped, _, err := e.scopedExecutorForUse(dbName, authToken)
 		if err != nil {
 			return nil, err
@@ -43,21 +57,20 @@ func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, p
 	if dbFromCtx := GetUseDatabaseFromContext(ctx); strings.TrimSpace(dbFromCtx) != "" {
 		sessionDB = dbFromCtx
 	}
-	fragment, err := planner.Plan(cypher, sessionDB)
+	gateway := fabric.NewQueryGateway(planner, fabric.NewFabricExecutor(catalog, localExec, remoteExec))
+	stream, err := gateway.Execute(ctx, tx, cypher, sessionDB, params, authToken)
 	if err != nil {
+		// In explicit transactions (autoCommit=false), preserve transaction lifecycle
+		// for client-issued COMMIT/ROLLBACK. In autocommit mode, rollback immediately.
+		if autoCommit {
+			_ = tx.Rollback(func(_ *fabric.SubTransaction) error { return nil })
+		}
 		return nil, err
 	}
-
-	exec := fabric.NewFabricExecutor(catalog, localExec, remoteExec)
-	tx := fabric.NewFabricTransaction(fmt.Sprintf("fab-%d", time.Now().UnixNano()))
-
-	stream, err := exec.Execute(ctx, tx, fragment, params, authToken)
-	if err != nil {
-		_ = tx.Rollback(func(_ *fabric.SubTransaction) error { return nil })
-		return nil, err
-	}
-	if err := tx.Commit(func(_ *fabric.SubTransaction) error { return nil }, func(_ *fabric.SubTransaction) error { return nil }); err != nil {
-		return nil, err
+	if autoCommit {
+		if err := tx.Commit(func(_ *fabric.SubTransaction) error { return nil }, func(_ *fabric.SubTransaction) error { return nil }); err != nil {
+			return nil, err
+		}
 	}
 	if stream == nil {
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil

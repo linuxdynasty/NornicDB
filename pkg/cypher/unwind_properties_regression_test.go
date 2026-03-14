@@ -16,7 +16,7 @@ func TestCreateParsesBacktickedPropertyKeys(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := exec.Execute(ctx, `
-CREATE (n:MongoRecord {`+"`_mongo_collection`"+`: 'caremark_chat_prompts', `+"`_mongo_id`"+`: 'm1'})
+CREATE (n:MongoRecord {`+"`_mongo_collection`"+`: 'nornic_chat_prompts', `+"`_mongo_id`"+`: 'm1'})
 `, nil)
 	if err != nil {
 		t.Fatalf("CREATE with backticked property keys failed: %v", err)
@@ -32,8 +32,8 @@ RETURN n._mongo_collection
 	if len(result.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(result.Rows))
 	}
-	if got := result.Rows[0][0]; got != "caremark_chat_prompts" {
-		t.Fatalf("expected _mongo_collection=caremark_chat_prompts, got %#v", got)
+	if got := result.Rows[0][0]; got != "nornic_chat_prompts" {
+		t.Fatalf("expected _mongo_collection=nornic_chat_prompts, got %#v", got)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestSetWholeMapLiteralParsesBacktickedKeys(t *testing.T) {
 
 	_, err = exec.Execute(ctx, `
 MATCH (n:MongoRecord {_mongo_id: 'm2'})
-SET n = {`+"`_mongo_collection`"+`: 'caremark_language_list', `+"`_mongo_database`"+`: 'caremark-translation', `+"`_mongo_id`"+`: 'm2'}
+SET n = {`+"`_mongo_collection`"+`: 'nornic_language_list', `+"`_mongo_database`"+`: 'nornic-translation', `+"`_mongo_id`"+`: 'm2'}
 `, nil)
 	if err != nil {
 		t.Fatalf("SET whole-map with backticked keys failed: %v", err)
@@ -66,11 +66,11 @@ RETURN n._mongo_collection, n._mongo_database
 	if len(result.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(result.Rows))
 	}
-	if got := result.Rows[0][0]; got != "caremark_language_list" {
-		t.Fatalf("expected _mongo_collection=caremark_language_list, got %#v", got)
+	if got := result.Rows[0][0]; got != "nornic_language_list" {
+		t.Fatalf("expected _mongo_collection=nornic_language_list, got %#v", got)
 	}
-	if got := result.Rows[0][1]; got != "caremark-translation" {
-		t.Fatalf("expected _mongo_database=caremark-translation, got %#v", got)
+	if got := result.Rows[0][1]; got != "nornic-translation" {
+		t.Fatalf("expected _mongo_database=nornic-translation, got %#v", got)
 	}
 }
 
@@ -88,8 +88,8 @@ SET n = row.properties
 		"rows": []map[string]interface{}{
 			{
 				"properties": map[string]interface{}{
-					"_mongo_database":   "caremark-translation",
-					"_mongo_collection": "caremark_translation",
+					"_mongo_database":   "nornic-translation",
+					"_mongo_collection": "nornic_translation",
 					"_mongo_id":         "m3",
 				},
 			},
@@ -109,8 +109,8 @@ RETURN n._mongo_collection, n._mongo_database, n._mongo_id
 	if len(result.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(result.Rows))
 	}
-	if got := result.Rows[0][0]; got != "caremark_translation" {
-		t.Fatalf("expected _mongo_collection=caremark_translation, got %#v", got)
+	if got := result.Rows[0][0]; got != "nornic_translation" {
+		t.Fatalf("expected _mongo_collection=nornic_translation, got %#v", got)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestUnwindCreateSetWholeMapFromParameter_LargeBatch(t *testing.T) {
 	for i := 0; i < total; i++ {
 		rows = append(rows, map[string]interface{}{
 			"mongo_id":    fmt.Sprintf("bulk-%d", i),
-			"source":      "caremark_translation",
+			"source":      "nornic_translation",
 			"code":        i,
 			"description": fmt.Sprintf("entry-%d", i),
 		})
@@ -168,7 +168,7 @@ func TestUnwindCreateSetWholeMapFromParameter_LargeBatch_RowPropertiesWorks(t *t
 		rows = append(rows, map[string]interface{}{
 			"properties": map[string]interface{}{
 				"mongo_id":    fmt.Sprintf("bulk-%d", i),
-				"source":      "caremark_translation",
+				"source":      "nornic_translation",
 				"code":        i,
 				"description": fmt.Sprintf("entry-%d", i),
 			},
@@ -205,12 +205,12 @@ func TestParseValue_MapLiterals(t *testing.T) {
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
-	val := exec.parseValue("{_mongo_id: 'm4', _mongo_collection: 'caremark_translation'}")
+	val := exec.parseValue("{_mongo_id: 'm4', _mongo_collection: 'nornic_translation'}")
 	if _, ok := val.(map[string]interface{}); !ok {
 		t.Fatalf("expected plain map literal to parse as map, got %T", val)
 	}
 
-	val = exec.parseValue("{`_mongo_id`: 'm5', `_mongo_collection`: 'caremark_translation'}")
+	val = exec.parseValue("{`_mongo_id`: 'm5', `_mongo_collection`: 'nornic_translation'}")
 	if _, ok := val.(map[string]interface{}); !ok {
 		t.Fatalf("expected backticked map literal to parse as map, got %T", val)
 	}
@@ -224,7 +224,7 @@ func TestCreateSetWholeMapLiteral(t *testing.T) {
 
 	_, err := exec.Execute(ctx, `
 CREATE (n:MongoRecord)
-SET n = {_mongo_id: 'm6', _mongo_collection: 'caremark_translation', _mongo_database: 'caremark-translation'}
+SET n = {_mongo_id: 'm6', _mongo_collection: 'nornic_translation', _mongo_database: 'nornic-translation'}
 `, nil)
 	if err != nil {
 		t.Fatalf("CREATE...SET whole-map failed: %v", err)
@@ -251,7 +251,7 @@ func TestReplaceVariableInQuery_ForNestedMapPropertyAccess(t *testing.T) {
 	out := exec.replaceVariableInQuery(query, "row", map[string]interface{}{
 		"properties": map[string]interface{}{
 			"_mongo_id":         "m7",
-			"_mongo_collection": "caremark_translation",
+			"_mongo_collection": "nornic_translation",
 		},
 	})
 

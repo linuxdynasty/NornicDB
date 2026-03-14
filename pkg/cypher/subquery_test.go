@@ -139,8 +139,8 @@ func TestCountSubqueryZero(t *testing.T) {
 func TestCallSubquery_UseClauseInBodySwitchesNamespace(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
-	rootStore := storage.NewNamespacedEngine(baseStore, "caremark")
-	trStore := storage.NewNamespacedEngine(baseStore, "caremark.tr")
+	rootStore := storage.NewNamespacedEngine(baseStore, "nornic")
+	trStore := storage.NewNamespacedEngine(baseStore, "nornic.tr")
 
 	exec := NewStorageExecutor(rootStore)
 	ctx := context.Background()
@@ -154,7 +154,7 @@ func TestCallSubquery_UseClauseInBodySwitchesNamespace(t *testing.T) {
 
 	result, err := exec.Execute(ctx, `
 		CALL {
-			USE caremark.tr
+			USE nornic.tr
 			MATCH (t:Translation)
 			RETURN t.id AS translationId
 		}
@@ -170,9 +170,9 @@ func TestCallSubquery_UseClauseInBodySwitchesNamespace(t *testing.T) {
 func TestCallSubquery_ChainedUseWithImport(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
-	rootStore := storage.NewNamespacedEngine(baseStore, "caremark")
-	trStore := storage.NewNamespacedEngine(baseStore, "caremark.tr")
-	txtStore := storage.NewNamespacedEngine(baseStore, "caremark.txt")
+	rootStore := storage.NewNamespacedEngine(baseStore, "nornic")
+	trStore := storage.NewNamespacedEngine(baseStore, "nornic.tr")
+	txtStore := storage.NewNamespacedEngine(baseStore, "nornic.txt")
 	exec := NewStorageExecutor(rootStore)
 	ctx := context.Background()
 
@@ -209,14 +209,14 @@ func TestCallSubquery_ChainedUseWithImport(t *testing.T) {
 	require.NoError(t, err)
 
 	result, err := exec.Execute(ctx, `
-		USE caremark
+		USE nornic
 		CALL {
-			USE caremark.tr
+			USE nornic.tr
 			MATCH (t:Translation)
 			RETURN t.id AS translationId, t.textKey AS textKey, t.textKey128 AS textKey128
 		}
 		CALL {
-			USE caremark.txt
+			USE nornic.txt
 			WITH translationId
 			MATCH (tt:TranslationText)
 			WHERE tt.translationId = translationId

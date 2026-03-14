@@ -13,7 +13,7 @@ var ErrSecondWriteShard = fmt.Errorf("Neo.ClientError.Transaction.ForbiddenDueTo
 
 // SubTransaction represents an open sub-transaction on a single shard.
 type SubTransaction struct {
-	// ShardName identifies the constituent (e.g. "caremark.tr").
+	// ShardName identifies the constituent (e.g. "nornic.tr").
 	ShardName string
 
 	// IsWrite is true if any write has been performed on this shard.

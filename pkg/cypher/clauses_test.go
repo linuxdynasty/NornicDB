@@ -1443,8 +1443,8 @@ SET n = row.properties
 		"rows": []map[string]interface{}{
 			{
 				"properties": map[string]interface{}{
-					"_mongo_database":   "caremark-translation",
-					"_mongo_collection": "caremark_language_list",
+					"_mongo_database":   "nornic-translation",
+					"_mongo_collection": "nornic_language_list",
 					"_mongo_id":         "abc123",
 					"name":              "English",
 				},
@@ -1465,11 +1465,11 @@ RETURN n._mongo_collection AS coll, n._mongo_database AS db, n._mongo_id AS id
 	if len(result.Rows) != 1 {
 		t.Fatalf("expected 1 imported node, got %d", len(result.Rows))
 	}
-	if got := result.Rows[0][0]; got != "caremark_language_list" {
-		t.Fatalf("expected _mongo_collection=caremark_language_list, got %#v", got)
+	if got := result.Rows[0][0]; got != "nornic_language_list" {
+		t.Fatalf("expected _mongo_collection=nornic_language_list, got %#v", got)
 	}
-	if got := result.Rows[0][1]; got != "caremark-translation" {
-		t.Fatalf("expected _mongo_database=caremark-translation, got %#v", got)
+	if got := result.Rows[0][1]; got != "nornic-translation" {
+		t.Fatalf("expected _mongo_database=nornic-translation, got %#v", got)
 	}
 	if got := result.Rows[0][2]; got != "abc123" {
 		t.Fatalf("expected _mongo_id=abc123, got %#v", got)

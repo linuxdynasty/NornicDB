@@ -69,7 +69,7 @@ type FragmentExec struct {
 	// Query is the Cypher query string to execute against the target graph.
 	Query string
 
-	// GraphName identifies the target graph (e.g. "caremark.tr").
+	// GraphName identifies the target graph (e.g. "nornic.tr").
 	// For dotted names, the part before the dot is the composite database
 	// and the part after the dot is the constituent alias.
 	GraphName string

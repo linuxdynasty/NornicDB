@@ -89,7 +89,7 @@ func (e *StorageExecutor) scopedExecutorForUse(db string, authToken string) (*St
 	}
 
 	if e.dbManager != nil {
-		// Handle dotted composite.constituent references (e.g. "caremark.tr").
+		// Handle dotted composite.constituent references (e.g. "nornic.tr").
 		// Split at first dot: composite name + constituent alias.
 		if dotIdx := strings.IndexByte(targetDB, '.'); dotIdx > 0 {
 			compositeName := targetDB[:dotIdx]

@@ -6,11 +6,15 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/fabric"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
+
+var firstUseGraphPattern = regexp.MustCompile(`(?is)\bUSE\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)`)
 
 // TransactionContext holds the active transaction for a Cypher session.
 type TransactionContext struct {
@@ -65,6 +69,20 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 		break
 	}
 
+	// Composite engines use FabricTransaction coordinator semantics.
+	// This supports explicit BEGIN/COMMIT/ROLLBACK at API level for composite routes.
+	if _, ok := engine.(*storage.CompositeEngine); ok {
+		e.txContext = &TransactionContext{
+			tx:     fabric.NewFabricTransaction(fmt.Sprintf("fabtx-%d", time.Now().UnixNano())),
+			engine: engine,
+			active: true,
+		}
+		return &ExecuteResult{
+			Columns: []string{"status"},
+			Rows:    [][]interface{}{{"Transaction started"}},
+		}, nil
+	}
+
 	// Start transaction for any engine that supports BeginTransaction.
 	txEngine, ok := engine.(interface {
 		BeginTransaction() (*storage.BadgerTransaction, error)
@@ -117,6 +135,8 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 	case *storage.BadgerTransaction:
 		opCount = tx.OperationCount()
 		err = tx.Commit()
+	case *fabric.FabricTransaction:
+		err = tx.Commit(func(_ *fabric.SubTransaction) error { return nil }, func(_ *fabric.SubTransaction) error { return nil })
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
 	}
@@ -175,6 +195,13 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 	switch tx := e.txContext.tx.(type) {
 	case *storage.BadgerTransaction:
 		err = tx.Rollback()
+	case *fabric.FabricTransaction:
+		// If already rolled back, treat as idempotent rollback success.
+		if tx.State() != "open" {
+			err = nil
+		} else {
+			err = tx.Rollback(func(_ *fabric.SubTransaction) error { return nil })
+		}
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
 	}
@@ -200,6 +227,25 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 // Uses the same transactionStorageWrapper pattern as implicit transactions,
 // routing writes through the transaction for atomicity and rollback support.
 func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
+	if ftx, ok := e.txContext.tx.(*fabric.FabricTransaction); ok {
+		if looksLikeWriteQuery(cypher) {
+			if graph := extractFirstUseGraph(cypher); graph != "" {
+				if _, err := ftx.GetOrOpen(graph, true); err != nil {
+					return nil, err
+				}
+			}
+		}
+		// For composite/fabric transactions, route through shared fabric gateway when
+		// query has multi-graph CALL { USE ... } patterns so write-shard constraints are
+		// enforced across statements within the same explicit transaction.
+		params := getParamsFromContext(ctx)
+		if e.shouldUseFabricPlanner(cypher) {
+			return e.executeViaFabricWithTx(ctx, cypher, params, ftx, false)
+		}
+		// Non-fabric-shaped queries still run on the scoped engine in explicit tx session.
+		return e.executeWithoutTransaction(ctx, cypher, upperQuery)
+	}
+
 	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
 	tx, ok := e.txContext.tx.(*storage.BadgerTransaction)
 	if !ok {
@@ -226,6 +272,23 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 
 	// Execute the query - getStorage() will automatically use the transaction wrapper
 	return e.executeQueryAgainstStorage(txCtx, cypher, upperQuery)
+}
+
+func looksLikeWriteQuery(cypher string) bool {
+	upper := strings.ToUpper(cypher)
+	return strings.Contains(upper, "CREATE") ||
+		strings.Contains(upper, "MERGE") ||
+		strings.Contains(upper, "DELETE") ||
+		strings.Contains(upper, "SET ") ||
+		strings.Contains(upper, "REMOVE ")
+}
+
+func extractFirstUseGraph(cypher string) string {
+	m := firstUseGraphPattern.FindStringSubmatch(cypher)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
 }
 
 // executeQueryAgainstStorage executes query with current storage context.

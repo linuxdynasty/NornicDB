@@ -559,7 +559,7 @@ func (e *StorageExecutor) executeCallSubquery(ctx context.Context, cypher string
 	}
 
 	// Check if the subquery body starts with USE — this indicates a fabric
-	// cross-database subquery (e.g. CALL { USE caremark.tr MATCH ... }).
+	// cross-database subquery (e.g. CALL { USE nornic.tr MATCH ... }).
 	// Resolve the target database and execute against that engine.
 	subqueryExecutor := e
 	if useDB, useRemaining, hasUse, useErr := parseLeadingUseClause(subqueryBody); hasUse || useErr != nil {

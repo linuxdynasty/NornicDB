@@ -664,13 +664,13 @@ class Neo4jImporter:
         """Import Application Contacts with relationships."""
         count = 0
         for idx, row in df.iterrows():
-            structure = row.get('Caremark Ops Structure')
+            structure = row.get('nornic Ops Structure')
             if pd.isna(structure) or str(structure).strip() == '':
                 continue
                 
             props = {
                 'id': f"appcontact_{idx}",
-                'caremark_ops_structure': str(structure).strip(),
+                'nornic_ops_structure': str(structure).strip(),
                 'cmk_com': str(row.get('CMK.com', '')) if pd.notna(row.get('CMK.com')) else None,
                 'cvsh_app': str(row.get('CVSH App', '')) if pd.notna(row.get('CVSH App')) else None,
                 'cvsh_app_mapping': str(row.get('CVSH App Mapping', '')) if pd.notna(row.get('CVSH App Mapping')) else None,
@@ -701,12 +701,12 @@ class Neo4jImporter:
             """, app_id=app_id)
             
             # Link to Area (ops structure as area)
-            area_id = self.get_or_create_area(props['caremark_ops_structure'])
+            area_id = self.get_or_create_area(props['nornic_ops_structure'])
             if area_id:
                 self._execute_query("""
                     MATCH (a:ApplicationContact {id: $app_id}), (area:Area {name: $area_name})
                     MERGE (a)-[:BELONGS_TO]->(area)
-                """, app_id=app_id, area_name=props['caremark_ops_structure'])
+                """, app_id=app_id, area_name=props['nornic_ops_structure'])
             
             # Link Product Lead
             product_lead = props.get('product_lead')
@@ -1225,8 +1225,8 @@ BAU: Team Member → Supervisor → WS Point of Contact → POC Manager''',
         # Link Product to their corresponding Applications
         self._execute_query("""
             MATCH (app:ApplicationContact)
-            WHERE app.product_application_service IS NOT NULL OR app.caremark_ops_structure IS NOT NULL
-            WITH app, COALESCE(app.product_application_service, app.caremark_ops_structure) as product_name
+            WHERE app.product_application_service IS NOT NULL OR app.nornic_ops_structure IS NOT NULL
+            WITH app, COALESCE(app.product_application_service, app.nornic_ops_structure) as product_name
             MERGE (prod:Product {name: product_name})
             MERGE (app)-[:FOR_PRODUCT]->(prod)
         """)

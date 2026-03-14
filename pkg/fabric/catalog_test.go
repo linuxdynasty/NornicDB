@@ -113,14 +113,14 @@ func TestCatalog_ListGraphs(t *testing.T) {
 
 func TestCatalog_DottedCompositeConstituent(t *testing.T) {
 	c := NewCatalog()
-	c.Register("caremark", &LocationLocal{DBName: "caremark"})
-	c.Register("caremark.tr", &LocationRemote{
-		DBName:   "caremark_tr",
+	c.Register("nornic", &LocationLocal{DBName: "nornic"})
+	c.Register("nornic.tr", &LocationRemote{
+		DBName:   "nornic_tr",
 		URI:      "bolt://shard-a:7687",
 		AuthMode: "oidc_forwarding",
 	})
-	c.Register("caremark.txt", &LocationRemote{
-		DBName:   "caremark_txt",
+	c.Register("nornic.txt", &LocationRemote{
+		DBName:   "nornic_txt",
 		URI:      "bolt://shard-b:7687",
 		AuthMode: "user_password",
 		User:     "svc",
@@ -128,7 +128,7 @@ func TestCatalog_DottedCompositeConstituent(t *testing.T) {
 	})
 
 	// Resolve composite itself.
-	loc, err := c.Resolve("caremark")
+	loc, err := c.Resolve("nornic")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestCatalog_DottedCompositeConstituent(t *testing.T) {
 	}
 
 	// Resolve constituent with OIDC forwarding.
-	loc, err = c.Resolve("caremark.tr")
+	loc, err = c.Resolve("nornic.tr")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,15 +145,15 @@ func TestCatalog_DottedCompositeConstituent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected LocationRemote, got %T", loc)
 	}
-	if remote.DBName != "caremark_tr" {
-		t.Errorf("expected caremark_tr, got %s", remote.DBName)
+	if remote.DBName != "nornic_tr" {
+		t.Errorf("expected nornic_tr, got %s", remote.DBName)
 	}
 	if remote.AuthMode != "oidc_forwarding" {
 		t.Errorf("expected oidc_forwarding, got %s", remote.AuthMode)
 	}
 
 	// Resolve constituent with user/password.
-	loc, err = c.Resolve("caremark.txt")
+	loc, err = c.Resolve("nornic.txt")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

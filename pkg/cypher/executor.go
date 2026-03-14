@@ -120,6 +120,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
+	"github.com/orneryd/nornicdb/pkg/fabric"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -570,6 +571,14 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	if e.shouldUseFabricPlanner(cypher) {
 		mergedParams := e.mergeShellParams(params)
 		ctx = context.WithValue(ctx, paramsKey, mergedParams)
+		// When an explicit transaction is active on a composite route, execute through
+		// the same FabricTransaction so many-read/one-write constraints are enforced
+		// across all statements in the session.
+		if e.txContext != nil && e.txContext.active {
+			if ftx, ok := e.txContext.tx.(*fabric.FabricTransaction); ok {
+				return e.executeViaFabricWithTx(ctx, cypher, mergedParams, ftx, false)
+			}
+		}
 		return e.executeViaFabric(ctx, cypher, mergedParams)
 	}
 

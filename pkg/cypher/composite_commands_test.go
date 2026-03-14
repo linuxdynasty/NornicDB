@@ -352,7 +352,7 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.NotNil(t, res)
 		require.Equal(t, [][]interface{}{{"c1"}}, res.Rows)
 
-		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote ALIAS tr FOR DATABASE caremark_tr AT 'https://shard-a.example/nornic-db' SECRET REF 'spn-a' TYPE remote ACCESS read ALIAS txt FOR DATABASE caremark_txt AT 'https://shard-b.example/nornic-db' SECRET REF 'spn-b' TYPE remote ACCESS read_write")
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote ALIAS tr FOR DATABASE nornic_tr AT 'https://shard-a.example/nornic-db' SECRET REF 'spn-a' TYPE remote ACCESS read ALIAS txt FOR DATABASE nornic_txt AT 'https://shard-b.example/nornic-db' SECRET REF 'spn-b' TYPE remote ACCESS read_write")
 		require.NoError(t, err)
 		require.Equal(t, [][]interface{}{{"c_remote"}}, res.Rows)
 		createdRefs, err := adapter.GetCompositeConstituents("c_remote")
@@ -365,7 +365,7 @@ func TestExecuteCreateDropAndShowCompositeDatabase_DirectHandlers(t *testing.T) 
 		require.Equal(t, "read", first["access_mode"])
 		require.Equal(t, "oidc_forwarding", first["auth_mode"])
 
-		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote_basic ALIAS tr FOR DATABASE caremark_tr AT 'https://shard-a.example/nornic-db' USER 'svc-user' PASSWORD 'svc-pass' TYPE remote ACCESS read")
+		res, err = exec.executeCreateCompositeDatabase(ctx, "CREATE COMPOSITE DATABASE c_remote_basic ALIAS tr FOR DATABASE nornic_tr AT 'https://shard-a.example/nornic-db' USER 'svc-user' PASSWORD 'svc-pass' TYPE remote ACCESS read")
 		require.NoError(t, err)
 		require.Equal(t, [][]interface{}{{"c_remote_basic"}}, res.Rows)
 		createdRefs, err = adapter.GetCompositeConstituents("c_remote_basic")
@@ -566,7 +566,7 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "database name cannot be empty")
 
-	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS r FOR DATABASE d2 AT 'https://remote.example/nornic-db' SECRET REF 'spn-caremark' TYPE remote ACCESS read")
+	_, err = exec.executeAlterCompositeDatabase(ctx, "ALTER COMPOSITE DATABASE comp_err ADD ALIAS r FOR DATABASE d2 AT 'https://remote.example/nornic-db' SECRET REF 'spn-nornic' TYPE remote ACCESS read")
 	require.NoError(t, err)
 
 	list, err := adapter.GetCompositeConstituents("comp_err")
@@ -576,7 +576,7 @@ func TestExecuteAlterCompositeDatabase_DirectErrorBranches(t *testing.T) {
 	require.Equal(t, "r", last["alias"])
 	require.Equal(t, "remote", last["type"])
 	require.Equal(t, "https://remote.example/nornic-db", last["uri"])
-	require.Equal(t, "spn-caremark", last["secret_ref"])
+	require.Equal(t, "spn-nornic", last["secret_ref"])
 	require.Equal(t, "read", last["access_mode"])
 	require.Equal(t, "oidc_forwarding", last["auth_mode"])
 
