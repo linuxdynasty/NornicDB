@@ -14,7 +14,7 @@ type mockCypherExecutor struct {
 	err     error
 }
 
-func (m *mockCypherExecutor) ExecuteQuery(_ context.Context, _ storage.Engine, query string, _ map[string]interface{}) ([]string, [][]interface{}, error) {
+func (m *mockCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage.Engine, query string, _ map[string]interface{}) ([]string, [][]interface{}, error) {
 	if m.err != nil {
 		return nil, nil, m.err
 	}

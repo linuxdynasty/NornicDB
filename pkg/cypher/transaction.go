@@ -18,13 +18,14 @@ var firstUseGraphPattern = regexp.MustCompile(`(?is)\bUSE\s+([A-Za-z_][A-Za-z0-9
 
 // TransactionContext holds the active transaction for a Cypher session.
 type TransactionContext struct {
-	tx          interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
-	engine      storage.Engine
-	active      bool
-	wal         *storage.WAL
-	walSeqStart uint64
-	database    string
-	txID        string
+	tx              interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
+	engine          storage.Engine
+	active          bool
+	wal             *storage.WAL
+	walSeqStart     uint64
+	database        string
+	txID            string
+	fabricRemoteExe *fabric.RemoteFragmentExecutor
 }
 
 // parseTransactionStatement checks if query is BEGIN/COMMIT/ROLLBACK.
@@ -140,7 +141,7 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 		opCount = tx.OperationCount()
 		err = tx.Commit()
 	case *fabric.FabricTransaction:
-		err = tx.Commit(func(_ *fabric.SubTransaction) error { return nil }, func(_ *fabric.SubTransaction) error { return nil })
+		err = tx.Commit(nil, nil)
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
 	}
@@ -167,11 +168,19 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 		if wal != nil && walSeqStart > 0 {
 			_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
 		}
+		if e.txContext.fabricRemoteExe != nil {
+			_ = e.txContext.fabricRemoteExe.Close()
+			e.txContext.fabricRemoteExe = nil
+		}
 		e.txContext.active = false
 		e.txContext = nil
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 
+	if e.txContext.fabricRemoteExe != nil {
+		_ = e.txContext.fabricRemoteExe.Close()
+		e.txContext.fabricRemoteExe = nil
+	}
 	e.txContext.active = false
 	e.txContext = nil
 
@@ -204,7 +213,7 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 		if tx.State() != "open" {
 			err = nil
 		} else {
-			err = tx.Rollback(func(_ *fabric.SubTransaction) error { return nil })
+			err = tx.Rollback(nil)
 		}
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
@@ -212,6 +221,10 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 
 	if e.txContext.wal != nil && e.txContext.walSeqStart > 0 {
 		_, _ = e.txContext.wal.AppendTxAbort(e.txContext.database, e.txContext.txID, "rollback")
+	}
+	if e.txContext.fabricRemoteExe != nil {
+		_ = e.txContext.fabricRemoteExe.Close()
+		e.txContext.fabricRemoteExe = nil
 	}
 
 	e.txContext.active = false

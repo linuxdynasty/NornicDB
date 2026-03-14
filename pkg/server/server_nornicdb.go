@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
@@ -71,6 +72,14 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 
 		// Start background clearing and regeneration
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					// Background regeneration can race with DB shutdown in tests/teardown.
+					// Never crash the process for this async maintenance path.
+					log.Printf("[EMBED] ⚠️ Regeneration aborted during shutdown: %v", rec)
+				}
+			}()
+
 			log.Printf("[EMBED] Starting background regeneration - stopping worker and clearing embeddings...")
 
 			// First, reset the embed worker to stop any in-progress work and clear its state
@@ -81,6 +90,10 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 			// Now clear all embeddings
 			cleared, err := s.db.ClearAllEmbeddings()
 			if err != nil {
+				if errors.Is(err, nornicdb.ErrClosed) || strings.Contains(strings.ToLower(err.Error()), "closed") {
+					log.Printf("[EMBED] ℹ️ Regeneration skipped: database is closing")
+					return
+				}
 				log.Printf("[EMBED] ❌ Failed to clear embeddings: %v", err)
 				return
 			}
@@ -233,6 +246,11 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
 		return
 	}
+	if s.dbManager.IsCompositeDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported",
+			fmt.Sprintf("Search rebuild on composite database '%s' is not supported; target a constituent database explicitly.", dbName))
+		return
+	}
 	// Rebuild is a write to the database; require ResolvedAccess.Write for this DB.
 	if !s.getResolvedAccess(claims, dbName).Write {
 		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
@@ -331,6 +349,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
 		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
 			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+	if s.dbManager.IsCompositeDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported",
+			fmt.Sprintf("Search on composite database '%s' is not supported; target a constituent database explicitly.", dbName))
 		return
 	}
 
@@ -633,6 +656,11 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
 		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
 			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+	if s.dbManager.IsCompositeDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported",
+			fmt.Sprintf("Vector similarity on composite database '%s' is not supported; target a constituent database explicitly.", dbName))
 		return
 	}
 

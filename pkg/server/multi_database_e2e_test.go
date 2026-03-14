@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -381,6 +382,20 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 
 	// Step 10: Query composite database
 	t.Run("Step10_QueryCompositeDatabase", func(t *testing.T) {
+		toInt64Value := func(v interface{}) int64 {
+			switch n := v.(type) {
+			case float64:
+				return int64(n)
+			case int:
+				return int64(n)
+			case int64:
+				return n
+			default:
+				t.Fatalf("expected numeric value, got %T (%v)", v, v)
+				return 0
+			}
+		}
+
 		// Verify composite database exists before querying
 		if !server.dbManager.Exists("test_composite") {
 			// Dump databases for debugging
@@ -388,7 +403,7 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			t.Fatalf("composite database should exist; current databases: %+v", dbs)
 		}
 
-		// Query all Person nodes across both databases
+		// Plain root MATCH on composite should be rejected (strict Neo4j/Fabric semantics).
 		resp := makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
 			"statements": []map[string]interface{}{
 				{"statement": "MATCH (p:Person) RETURN p.name as name, p.db as db, labels(p) as labels ORDER BY p.name"},
@@ -398,85 +413,92 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 
 		var result TransactionResponse
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-		require.Len(t, result.Results, 1)
-		// Should return 4 rows: Alice, Bob, Charlie, Diana
-		assert.Equal(t, 4, len(result.Results[0].Data), "composite should see 4 Person nodes")
+		require.NotEmpty(t, result.Errors, "root composite MATCH must be rejected without constituent target")
 
-		// Count all nodes across both databases
-		resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
-			"statements": []map[string]interface{}{
-				{"statement": "MATCH (n) RETURN count(n) as total_nodes"},
-			},
-		}, "Bearer "+token)
-		require.Equal(t, http.StatusOK, resp.Code)
-
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-		require.Len(t, result.Results, 1)
-		assert.Equal(t, int64(6), int64(result.Results[0].Data[0].Row[0].(float64)), "composite should see 6 total nodes (3+3)")
-
-		// Count nodes by label - verify we can query across constituents
-		// Use a query that properly handles labels and groups them
-		resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
-			"statements": []map[string]interface{}{
-				{"statement": "MATCH (n) UNWIND labels(n) as label RETURN label, count(*) as count ORDER BY label"},
-			},
-		}, "Bearer "+token)
-		require.Equal(t, http.StatusOK, resp.Code)
-
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-		require.Len(t, result.Results, 1)
-		if len(result.Errors) > 0 {
-			t.Fatalf("Query failed: %v", result.Errors)
-		}
-
-		// Should have exactly 3 label types: Company, Order, Person
-		// If not, capture detailed label data below before failing
+		// Query each constituent from the composite connection via USE.
+		personCount := int64(0)
+		totalNodeCount := int64(0)
 		labelsFound := make(map[string]bool)
-		totalCount := int64(0)
-		for _, row := range result.Results[0].Data {
-			if len(row.Row) >= 2 {
-				if label, ok := row.Row[0].(string); ok && label != "" {
-					labelsFound[label] = true
-				}
-				if count, ok := row.Row[1].(float64); ok {
-					totalCount += int64(count)
-				}
-			}
-		}
-
-		// Verify specific nodes and their labels exist
-		resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
-			"statements": []map[string]interface{}{
-				{"statement": "MATCH (n) RETURN n.name as name, labels(n) as labels ORDER BY name"},
-			},
-		}, "Bearer "+token)
-		require.Equal(t, http.StatusOK, resp.Code)
-
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-		require.Len(t, result.Results, 1)
-		if len(result.Errors) > 0 {
-			t.Fatalf("Label verification query failed: %v", result.Errors)
-		}
-
+		totalLabelCount := int64(0)
 		nameToLabels := make(map[string][]string)
 		orderLabelFound := false
-		for _, row := range result.Results[0].Data {
-			if len(row.Row) >= 2 {
-				name, _ := row.Row[0].(string)
-				if labelList, ok := row.Row[1].([]interface{}); ok {
-					var labels []string
-					for _, l := range labelList {
-						if s, ok := l.(string); ok {
-							labels = append(labels, s)
-							if s == "Order" {
-								orderLabelFound = true
+
+		for _, alias := range []string{"db_a", "db_b"} {
+			// Person rows by constituent.
+			resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{"statement": fmt.Sprintf("USE test_composite.%s MATCH (p:Person) RETURN p.name as name, p.db as db, labels(p) as labels ORDER BY p.name", alias)},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code)
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Len(t, result.Results, 1)
+			require.Empty(t, result.Errors)
+			personCount += int64(len(result.Results[0].Data))
+
+			// Total nodes by constituent.
+			resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{"statement": fmt.Sprintf("USE test_composite.%s MATCH (n) RETURN count(n) as total_nodes", alias)},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code)
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Len(t, result.Results, 1)
+			require.Empty(t, result.Errors)
+			totalNodeCount += toInt64Value(result.Results[0].Data[0].Row[0])
+
+			// Labels per constituent.
+			resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{"statement": fmt.Sprintf("USE test_composite.%s MATCH (n) UNWIND labels(n) as label RETURN label, count(*) as count ORDER BY label", alias)},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code)
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Len(t, result.Results, 1)
+			require.Empty(t, result.Errors)
+			for _, row := range result.Results[0].Data {
+				if len(row.Row) >= 2 {
+					label, _ := row.Row[0].(string)
+					if label != "" {
+						labelsFound[label] = true
+					}
+					totalLabelCount += toInt64Value(row.Row[1])
+				}
+			}
+
+			// Node names + labels per constituent.
+			resp = makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{"statement": fmt.Sprintf("USE test_composite.%s MATCH (n) RETURN n.name as name, labels(n) as labels ORDER BY name", alias)},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code)
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Len(t, result.Results, 1)
+			require.Empty(t, result.Errors)
+			for _, row := range result.Results[0].Data {
+				if len(row.Row) >= 2 {
+					name, _ := row.Row[0].(string)
+					if labelList, ok := row.Row[1].([]interface{}); ok {
+						var labels []string
+						for _, l := range labelList {
+							if s, ok := l.(string); ok {
+								labels = append(labels, s)
+								if s == "Order" {
+									orderLabelFound = true
+								}
 							}
 						}
+						nameToLabels[name] = labels
 					}
-					nameToLabels[name] = labels
 				}
 			}
 		}
+
+		assert.Equal(t, int64(4), personCount, "composite routed queries should see 4 Person nodes")
+		assert.Equal(t, int64(6), totalNodeCount, "composite routed queries should see 6 total nodes (3+3)")
 
 		require.Contains(t, nameToLabels, "Acme Corp", "Company node should be present")
 		require.Contains(t, nameToLabels, "Alice", "Person nodes should be present")
@@ -487,11 +509,11 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 		assert.Contains(t, nameToLabels["Acme Corp"], "Company", "Acme Corp should have Company label")
 		assert.True(t, orderLabelFound, "composite view should include a node with Order label; labels map=%+v", nameToLabels)
 
-		require.Equal(t, 3, len(labelsFound), "expected exactly 3 label types (Company, Order, Person), got labelsFound=%+v, rows=%+v, nameToLabels=%+v", labelsFound, result.Results[0].Data, nameToLabels)
+		require.Equal(t, 3, len(labelsFound), "expected exactly 3 label types (Company, Order, Person), got labelsFound=%+v, nameToLabels=%+v", labelsFound, nameToLabels)
 		assert.True(t, labelsFound["Company"], "should have Company label")
 		assert.True(t, labelsFound["Order"], "should have Order label")
 		assert.True(t, labelsFound["Person"], "should have Person label")
-		assert.Equal(t, int64(6), totalCount, "total count across all labels should be 6")
+		assert.Equal(t, int64(6), totalLabelCount, "total count across all labels should be 6")
 	})
 
 	// Step 11: Verify composite database isolation

@@ -224,6 +224,20 @@ type DatabaseManagerInterface interface {
 	DefaultDatabaseName() string
 }
 
+// constituentAwareExists checks whether a database name refers to an existing
+// database or a valid composite constituent (e.g. "composite.alias").
+// It tries the ExistsOrIsConstituent method if the manager supports it,
+// otherwise falls back to Exists.
+func constituentAwareExists(mgr DatabaseManagerInterface, name string) bool {
+	type constituentResolver interface {
+		ExistsOrIsConstituent(name string) bool
+	}
+	if cr, ok := mgr.(constituentResolver); ok {
+		return cr.ExistsOrIsConstituent(name)
+	}
+	return mgr.Exists(name)
+}
+
 // QueryExecutor executes Cypher queries for the Bolt server.
 //
 // This interface allows the Bolt server to be decoupled from the specific
@@ -1209,9 +1223,10 @@ func (s *Session) handleHello(data []byte) error {
 		dbName = s.server.dbManager.DefaultDatabaseName()
 	}
 
-	// Validate database exists (if dbManager is configured)
+	// Validate database exists (if dbManager is configured).
+	// Use constituentAwareExists to accept dotted composite.alias references.
 	if dbName != "" && s.server != nil && s.server.dbManager != nil {
-		if !s.server.dbManager.Exists(dbName) {
+		if !constituentAwareExists(s.server.dbManager, dbName) {
 			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
 				fmt.Sprintf("Database '%s' does not exist", dbName))
 		}
@@ -1399,7 +1414,7 @@ func (s *Session) handleRun(data []byte) error {
 			dbName = "nornic" // single-DB mode default
 		}
 	}
-	if s.server != nil && s.server.dbManager != nil && dbName != "" && !s.server.dbManager.Exists(dbName) {
+	if s.server != nil && s.server.dbManager != nil && dbName != "" && !constituentAwareExists(s.server.dbManager, dbName) {
 		return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
 			fmt.Sprintf("Database '%s' does not exist", dbName))
 	}

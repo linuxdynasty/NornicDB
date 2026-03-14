@@ -431,6 +431,24 @@ func (m *DatabaseManager) GetStorageWithAuth(name string, authToken string) (sto
 		return engine, nil
 	}
 
+	// Resolve dotted composite constituent references first (e.g. "cmp.tr").
+	// This is required for protocol-level USE routing where the effective database
+	// name is a constituent graph reference, not a top-level database metadata key.
+	if ref, resolvedName, ok := m.resolveCompositeConstituentInternal(name); ok {
+		if strings.EqualFold(strings.TrimSpace(ref.Type), "remote") {
+			runtimeRef := ref
+			if strings.EqualFold(strings.TrimSpace(runtimeRef.AuthMode), "user_password") {
+				decrypted, decErr := m.decryptStoredRemotePassword(runtimeRef.Password)
+				if decErr != nil {
+					return nil, fmt.Errorf("failed to resolve remote credentials for constituent '%s': %w", runtimeRef.Alias, decErr)
+				}
+				runtimeRef.Password = decrypted
+			}
+			return m.getRemoteStorageInternal(runtimeRef, authToken)
+		}
+		return m.getStorageInternal(resolvedName)
+	}
+
 	// Validate database exists
 	info, exists := m.databases[name]
 	if !exists {
@@ -501,6 +519,42 @@ func (m *DatabaseManager) GetStorageWithAuth(name string, authToken string) (sto
 	m.engines[name] = engine
 
 	return engine, nil
+}
+
+// resolveCompositeConstituentInternal resolves dotted graph references in the form
+// "<composite>.<alias>" to a constituent reference and resolved backing database name.
+// Must be called with lock held.
+func (m *DatabaseManager) resolveCompositeConstituentInternal(name string) (ConstituentRef, string, bool) {
+	dotIdx := strings.IndexByte(name, '.')
+	if dotIdx <= 0 || dotIdx >= len(name)-1 {
+		return ConstituentRef{}, "", false
+	}
+
+	compositeName := strings.TrimSpace(name[:dotIdx])
+	constituentAlias := strings.TrimSpace(name[dotIdx+1:])
+	if compositeName == "" || constituentAlias == "" {
+		return ConstituentRef{}, "", false
+	}
+
+	info, exists := m.databases[compositeName]
+	if !exists || info.Type != "composite" {
+		return ConstituentRef{}, "", false
+	}
+	for _, ref := range info.Constituents {
+		if !strings.EqualFold(ref.Alias, constituentAlias) {
+			continue
+		}
+		resolvedName := ref.DatabaseName
+		if !strings.EqualFold(strings.TrimSpace(ref.Type), "remote") {
+			var err error
+			resolvedName, err = m.resolveDatabaseInternal(ref.DatabaseName)
+			if err != nil {
+				return ConstituentRef{}, "", false
+			}
+		}
+		return ref, resolvedName, true
+	}
+	return ConstituentRef{}, "", false
 }
 
 // getStorageInternal gets storage for a database without resolving aliases.

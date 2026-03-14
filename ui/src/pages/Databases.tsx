@@ -247,11 +247,11 @@ export function Databases() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {databases.map((db) => (
-              (() => {
-                const ready = db.searchReady === true;
-                const searchLabel = ready ? 'ready' : (db.searchBuilding ? 'warming' : 'pending');
-                return (
+            {databases.map((db) => {
+              const isComposite = db.type === 'composite';
+              const ready = db.searchReady === true;
+              const searchLabel = ready ? 'ready' : (db.searchBuilding ? 'warming' : 'pending');
+              return (
               <div
                 key={db.name}
                 className="bg-norse-shadow border border-norse-rune rounded-lg p-4 hover:border-nornic-primary transition-colors"
@@ -259,7 +259,7 @@ export function Databases() {
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex-1">
                     <h3 className="text-lg font-semibold text-white mb-1">{db.name}</h3>
-                    <div className="flex items-center gap-2 text-sm text-norse-silver">
+                    <div className="flex items-center gap-2 text-sm text-norse-silver flex-wrap">
                       <span
                         className={`px-2 py-1 rounded text-xs ${
                           db.status === 'online' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
@@ -267,20 +267,26 @@ export function Databases() {
                       >
                         {db.status}
                       </span>
-                      <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs border ${
-                        ready
-                          ? 'bg-green-900/20 text-green-300 border-green-700/50'
-                          : 'bg-yellow-900/20 text-yellow-300 border-yellow-700/50'
-                      }`}>
-                        <span
-                          className={`inline-block w-2 h-2 rounded-full ${
-                            ready
-                              ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.9)]'
-                              : 'bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.9)] animate-pulse'
-                          }`}
-                        />
-                        search {searchLabel}
-                      </span>
+                      {isComposite ? (
+                        <span className="px-2 py-1 rounded text-xs bg-blue-900/30 text-blue-400 border border-blue-700/50">
+                          composite
+                        </span>
+                      ) : (
+                        <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs border ${
+                          ready
+                            ? 'bg-green-900/20 text-green-300 border-green-700/50'
+                            : 'bg-yellow-900/20 text-yellow-300 border-yellow-700/50'
+                        }`}>
+                          <span
+                            className={`inline-block w-2 h-2 rounded-full ${
+                              ready
+                                ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.9)]'
+                                : 'bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.9)] animate-pulse'
+                            }`}
+                          />
+                          search {searchLabel}
+                        </span>
+                      )}
                       {db.default && (
                         <span className="px-2 py-1 rounded text-xs bg-valhalla-gold/20 text-valhalla-gold">
                           default
@@ -316,34 +322,61 @@ export function Databases() {
                   </div>
                 </div>
 
-                <div className="space-y-2 text-sm">
-                  {!ready && (
+                {isComposite ? (
+                  <div className="space-y-2 text-sm">
+                    <div className="text-norse-silver text-xs font-medium uppercase tracking-wide">Constituents</div>
+                    {db.constituents && db.constituents.length > 0 ? (
+                      <div className="space-y-1.5">
+                        {db.constituents.map((c) => (
+                          <div key={c.alias} className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-white font-medium truncate">{c.alias}</span>
+                              <span className="text-norse-silver">→</span>
+                              <span className="text-norse-silver truncate">{c.type === 'remote' && c.uri ? c.uri : c.databaseName}</span>
+                            </div>
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] shrink-0 ${
+                              c.type === 'remote'
+                                ? 'bg-purple-900/30 text-purple-400'
+                                : 'bg-norse-rune/50 text-norse-silver'
+                            }`}>
+                              {c.type}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-norse-silver italic">No constituents</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    {!ready && (
+                      <div className="flex justify-between">
+                        <span className="text-norse-silver">Search ETA:</span>
+                        <span className="text-yellow-300 font-medium">{formatEta(db.searchEtaSeconds)}</span>
+                      </div>
+                    )}
                     <div className="flex justify-between">
-                      <span className="text-norse-silver">Search ETA:</span>
-                      <span className="text-yellow-300 font-medium">{formatEta(db.searchEtaSeconds)}</span>
+                      <span className="text-norse-silver">Nodes:</span>
+                      <span className="text-white font-medium">{db.nodeCount.toLocaleString()}</span>
                     </div>
-                  )}
-                  <div className="flex justify-between">
-                    <span className="text-norse-silver">Nodes:</span>
-                    <span className="text-white font-medium">{db.nodeCount.toLocaleString()}</span>
+                    <div className="flex justify-between">
+                      <span className="text-norse-silver">Edges:</span>
+                      <span className="text-white font-medium">{db.edgeCount.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-norse-silver">Node Storage:</span>
+                      <span className="text-white font-medium">{formatBytes(db.nodeStorageBytes)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-norse-silver">Managed Embeddings:</span>
+                      <span className="text-white font-medium">{formatBytes(db.managedEmbeddingBytes)}</span>
+                    </div>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-norse-silver">Edges:</span>
-                    <span className="text-white font-medium">{db.edgeCount.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-norse-silver">Node Storage:</span>
-                    <span className="text-white font-medium">{formatBytes(db.nodeStorageBytes)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-norse-silver">Managed Embeddings:</span>
-                    <span className="text-white font-medium">{formatBytes(db.managedEmbeddingBytes)}</span>
-                  </div>
-                </div>
+                )}
               </div>
               );
-              })()
-            ))}
+            })}
           </div>
         )}
       </main>
@@ -409,37 +442,79 @@ export function Databases() {
               <span className="text-white font-medium">{selectedDatabase.name}</span>
             </div>
             <div className="flex justify-between">
+              <span className="text-norse-silver">Type:</span>
+              <span className="text-white font-medium">{selectedDatabase.type ?? 'standard'}</span>
+            </div>
+            <div className="flex justify-between">
               <span className="text-norse-silver">Status:</span>
               <span className="text-white font-medium">{selectedDatabase.status}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-norse-silver">Search:</span>
-              <span className={`font-medium ${selectedDatabase.searchReady ? 'text-green-300' : 'text-yellow-300'}`}>
-                {selectedDatabase.searchReady ? 'ready' : (selectedDatabase.searchBuilding ? 'warming' : 'pending')}
-              </span>
-            </div>
-            {!selectedDatabase.searchReady && (
-              <div className="flex justify-between">
-                <span className="text-norse-silver">Search ETA:</span>
-                <span className="text-yellow-300 font-medium">{formatEta(selectedDatabase.searchEtaSeconds)}</span>
-              </div>
+            {selectedDatabase.type === 'composite' ? (
+              <>
+                <div className="border-t border-norse-rune pt-3 mt-3">
+                  <div className="text-norse-silver text-xs font-medium uppercase tracking-wide mb-2">Constituents</div>
+                  {selectedDatabase.constituents && selectedDatabase.constituents.length > 0 ? (
+                    <div className="space-y-2">
+                      {selectedDatabase.constituents.map((c) => (
+                        <div key={c.alias} className="bg-norse-stone/50 rounded px-3 py-2 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-white font-medium">{c.alias}</span>
+                            <div className="flex items-center gap-1.5">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                c.type === 'remote'
+                                  ? 'bg-purple-900/30 text-purple-400'
+                                  : 'bg-norse-rune/50 text-norse-silver'
+                              }`}>
+                                {c.type}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-norse-rune/50 text-norse-silver">
+                                {c.accessMode}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="text-norse-silver text-xs truncate">
+                            {c.type === 'remote' && c.uri ? c.uri : c.databaseName}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-norse-silver italic">No constituents</div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Search:</span>
+                  <span className={`font-medium ${selectedDatabase.searchReady ? 'text-green-300' : 'text-yellow-300'}`}>
+                    {selectedDatabase.searchReady ? 'ready' : (selectedDatabase.searchBuilding ? 'warming' : 'pending')}
+                  </span>
+                </div>
+                {!selectedDatabase.searchReady && (
+                  <div className="flex justify-between">
+                    <span className="text-norse-silver">Search ETA:</span>
+                    <span className="text-yellow-300 font-medium">{formatEta(selectedDatabase.searchEtaSeconds)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Nodes:</span>
+                  <span className="text-white font-medium">{selectedDatabase.nodeCount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Edges:</span>
+                  <span className="text-white font-medium">{selectedDatabase.edgeCount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Node Storage:</span>
+                  <span className="text-white font-medium">{formatBytes(selectedDatabase.nodeStorageBytes)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Managed Embeddings:</span>
+                  <span className="text-white font-medium">{formatBytes(selectedDatabase.managedEmbeddingBytes)}</span>
+                </div>
+              </>
             )}
-            <div className="flex justify-between">
-              <span className="text-norse-silver">Nodes:</span>
-              <span className="text-white font-medium">{selectedDatabase.nodeCount.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-norse-silver">Edges:</span>
-              <span className="text-white font-medium">{selectedDatabase.edgeCount.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-norse-silver">Node Storage:</span>
-              <span className="text-white font-medium">{formatBytes(selectedDatabase.nodeStorageBytes)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-norse-silver">Managed Embeddings:</span>
-              <span className="text-white font-medium">{formatBytes(selectedDatabase.managedEmbeddingBytes)}</span>
-            </div>
           </div>
         ) : (
           <div className="text-norse-silver">No database selected.</div>

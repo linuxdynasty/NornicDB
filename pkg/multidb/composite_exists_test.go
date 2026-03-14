@@ -1,0 +1,221 @@
+package multidb
+
+import (
+	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+)
+
+func TestExistsOrIsConstituent_StandardDB(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("mydb"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+
+	if !mgr.ExistsOrIsConstituent("mydb") {
+		t.Fatal("expected ExistsOrIsConstituent to return true for standard database")
+	}
+}
+
+func TestExistsOrIsConstituent_CompositeDB(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("shard_a"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("comp", []ConstituentRef{
+		{Alias: "a", DatabaseName: "shard_a", Type: "local", AccessMode: "read_write"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	if !mgr.ExistsOrIsConstituent("comp") {
+		t.Fatal("expected ExistsOrIsConstituent to return true for composite database")
+	}
+}
+
+func TestExistsOrIsConstituent_ConstituentDotted(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("shard_a"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("translations", []ConstituentRef{
+		{Alias: "tr", DatabaseName: "shard_a", Type: "local", AccessMode: "read_write"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	if !mgr.ExistsOrIsConstituent("translations.tr") {
+		t.Fatal("expected ExistsOrIsConstituent to return true for dotted constituent reference")
+	}
+}
+
+func TestExistsOrIsConstituent_ConstituentDotted_CaseInsensitive(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("shard_a"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("translations", []ConstituentRef{
+		{Alias: "TR", DatabaseName: "shard_a", Type: "local", AccessMode: "read_write"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	if !mgr.ExistsOrIsConstituent("translations.tr") {
+		t.Fatal("expected case-insensitive constituent alias match")
+	}
+}
+
+func TestExistsOrIsConstituent_Unknown(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if mgr.ExistsOrIsConstituent("doesnotexist") {
+		t.Fatal("expected ExistsOrIsConstituent to return false for unknown database")
+	}
+}
+
+func TestExistsOrIsConstituent_DottedButNotComposite(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("notcomposite"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+
+	if mgr.ExistsOrIsConstituent("notcomposite.alias") {
+		t.Fatal("expected false for dotted name where base is not a composite")
+	}
+}
+
+func TestExistsOrIsConstituent_DottedWrongAlias(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("shard_a"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("comp", []ConstituentRef{
+		{Alias: "a", DatabaseName: "shard_a", Type: "local", AccessMode: "read_write"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	if mgr.ExistsOrIsConstituent("comp.nonexistent") {
+		t.Fatal("expected false for dotted name with wrong alias")
+	}
+}
+
+func TestExistsOrIsConstituent_Alias(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("realdb"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateAlias("myalias", "realdb"); err != nil {
+		t.Fatalf("CreateAlias failed: %v", err)
+	}
+
+	if !mgr.ExistsOrIsConstituent("myalias") {
+		t.Fatal("expected ExistsOrIsConstituent to return true for database alias")
+	}
+}
+
+func TestGetStorageWithAuth_ConstituentDotted_Local(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := NewDatabaseManager(base, nil)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateDatabase("shard_local"); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("cmp", []ConstituentRef{
+		{Alias: "a", DatabaseName: "shard_local", Type: "local", AccessMode: "read_write"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	engine, err := mgr.GetStorageWithAuth("cmp.a", "Bearer token")
+	if err != nil {
+		t.Fatalf("GetStorageWithAuth for dotted constituent failed: %v", err)
+	}
+	if engine == nil {
+		t.Fatal("expected non-nil engine for dotted constituent")
+	}
+}
+
+func TestGetStorageWithAuth_ConstituentDotted_RemoteFactory(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	var gotAuth string
+
+	mgr, err := NewDatabaseManager(base, &Config{
+		RemoteEngineFactory: func(_ ConstituentRef, authToken string) (storage.Engine, error) {
+			gotAuth = authToken
+			return storage.NewMemoryEngine(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDatabaseManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.CreateCompositeDatabase("cmp_remote", []ConstituentRef{
+		{Alias: "r", DatabaseName: "tenant_r", Type: "remote", AccessMode: "read_write", URI: "http://remote"},
+	}); err != nil {
+		t.Fatalf("CreateCompositeDatabase failed: %v", err)
+	}
+
+	engine, err := mgr.GetStorageWithAuth("cmp_remote.r", "Bearer forwarded")
+	if err != nil {
+		t.Fatalf("GetStorageWithAuth for dotted remote constituent failed: %v", err)
+	}
+	if engine == nil {
+		t.Fatal("expected non-nil remote engine for dotted constituent")
+	}
+	if gotAuth != "Bearer forwarded" {
+		t.Fatalf("expected forwarded auth token, got %q", gotAuth)
+	}
+}

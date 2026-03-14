@@ -1448,6 +1448,13 @@ func (c *CompositeEngine) flushAsyncEngine(engine Engine) {
 	}
 }
 
+// IsComposite returns true, identifying this engine as a composite database.
+// This enables type-assertion-free composite detection via interface check:
+//
+//	type compositeChecker interface { IsComposite() bool }
+//	if cc, ok := engine.(compositeChecker); ok && cc.IsComposite() { ... }
+func (c *CompositeEngine) IsComposite() bool { return true }
+
 // Ensure CompositeEngine implements Engine interface
 var _ Engine = (*CompositeEngine)(nil)
 

@@ -28,26 +28,82 @@ var (
 		`(?i)^CREATE\s+FULLTEXT\s+INDEX\s+(` + identifierCompatPattern + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(?\s*(\w+)\s*:\s*(` + identifierCompatPattern + `)\s*\)?\s+ON(?:\s+EACH)?\s+(.+)$`)
 )
 
+// isCompositeRoot returns true if the storage engine is a composite database root.
+// Schema DDL and introspection commands must be rejected on composite roots —
+// callers must target a specific constituent via USE <composite>.<alias>.
+func isCompositeRoot(engine storage.Engine) bool {
+	type compositeChecker interface {
+		IsComposite() bool
+	}
+	if cc, ok := engine.(compositeChecker); ok {
+		return cc.IsComposite()
+	}
+	return false
+}
+
+// isCompositeAllowedCommand returns true for system/admin commands that are
+// valid at composite root level without requiring a constituent target.
+func isCompositeAllowedCommand(cypher string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	prefixes := []string{
+		"SHOW DATABASE", "SHOW COMPOSITE", "SHOW CONSTITUENTS",
+		"SHOW ALIASES", "SHOW LIMITS", "SHOW PROCEDURES", "SHOW FUNCTIONS",
+		// Schema introspection/DDL commands pass through to their own handlers
+		// which return more specific composite-root error messages.
+		"SHOW INDEX", "SHOW FULLTEXT INDEX", "SHOW RANGE INDEX", "SHOW VECTOR INDEX",
+		"SHOW CONSTRAINT",
+		"CREATE INDEX", "CREATE RANGE INDEX", "CREATE FULLTEXT INDEX", "CREATE VECTOR INDEX",
+		"CREATE CONSTRAINT",
+		"DROP INDEX", "DROP CONSTRAINT",
+		"CREATE DATABASE", "DROP DATABASE",
+		"CREATE COMPOSITE", "DROP COMPOSITE", "ALTER COMPOSITE",
+		"CREATE ALIAS", "DROP ALIAS",
+		"BEGIN", "COMMIT", "ROLLBACK",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(upper, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // executeSchemaCommand handles CREATE CONSTRAINT and CREATE INDEX commands.
 func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if isCompositeRoot(e.storage) {
+		return nil, fmt.Errorf("Neo.ClientError.Statement.NotAllowed: " +
+			"Schema DDL on composite databases requires a constituent target. " +
+			"Use USE <composite>.<alias> to target a specific constituent")
+	}
+
 	upper := strings.ToUpper(cypher)
+
+	var result *ExecuteResult
+	var err error
 
 	// Order matters: check more specific patterns first
 	if strings.Contains(upper, "CREATE CONSTRAINT") {
-		return e.executeCreateConstraint(ctx, cypher)
+		result, err = e.executeCreateConstraint(ctx, cypher)
 	} else if strings.Contains(upper, "DROP CONSTRAINT") {
-		return e.executeDropConstraint(ctx, cypher)
+		result, err = e.executeDropConstraint(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE FULLTEXT INDEX") {
-		return e.executeCreateFulltextIndex(ctx, cypher)
+		result, err = e.executeCreateFulltextIndex(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE VECTOR INDEX") {
-		return e.executeCreateVectorIndex(ctx, cypher)
+		result, err = e.executeCreateVectorIndex(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE RANGE INDEX") {
-		return e.executeCreateRangeIndex(ctx, cypher)
+		result, err = e.executeCreateRangeIndex(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE INDEX") {
-		return e.executeCreateIndex(ctx, cypher)
+		result, err = e.executeCreateIndex(ctx, cypher)
+	} else {
+		return nil, fmt.Errorf("unknown schema command: %s", cypher)
 	}
 
-	return nil, fmt.Errorf("unknown schema command: %s", cypher)
+	// Invalidate query cache — cached SHOW INDEXES/CONSTRAINTS results are now stale.
+	if err == nil && e.cache != nil {
+		e.cache.Invalidate()
+	}
+
+	return result, err
 }
 
 // executeCreateConstraint handles CREATE CONSTRAINT commands.
@@ -403,6 +459,61 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	return nil, fmt.Errorf("invalid CREATE CONSTRAINT syntax")
+}
+
+// executeDropIndex handles DROP INDEX commands.
+//
+// Supported syntax:
+//
+//	DROP INDEX index_name
+//	DROP INDEX index_name IF EXISTS
+func (e *StorageExecutor) executeDropIndex(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if isCompositeRoot(e.storage) {
+		return nil, fmt.Errorf("Neo.ClientError.Statement.NotAllowed: " +
+			"Schema DDL on composite databases requires a constituent target. " +
+			"Use USE <composite>.<alias> to target a specific constituent")
+	}
+
+	trimmed := strings.TrimSpace(cypher)
+	upper := strings.ToUpper(trimmed)
+
+	// Strip "DROP INDEX" prefix.
+	rest := strings.TrimSpace(trimmed[len("DROP INDEX"):])
+	if rest == "" {
+		return nil, fmt.Errorf("invalid DROP INDEX syntax: index name required")
+	}
+
+	ifExists := false
+	upperRest := strings.ToUpper(rest)
+	// Check for trailing IF EXISTS.
+	if idx := strings.Index(upperRest, "IF EXISTS"); idx >= 0 {
+		ifExists = true
+		rest = strings.TrimSpace(rest[:idx])
+	}
+	_ = upper // suppress unused
+
+	// Extract index name (may be backtick-quoted).
+	name := strings.TrimSpace(rest)
+	if len(name) >= 2 && name[0] == '`' && name[len(name)-1] == '`' {
+		name = strings.ReplaceAll(name[1:len(name)-1], "``", "`")
+	}
+	if name == "" {
+		return nil, fmt.Errorf("invalid DROP INDEX syntax: index name required")
+	}
+
+	if err := e.storage.GetSchema().DropIndex(name); err != nil {
+		if ifExists && strings.Contains(err.Error(), "does not exist") {
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+		}
+		return nil, err
+	}
+
+	// Invalidate query cache — cached SHOW INDEXES results are now stale.
+	if e.cache != nil {
+		e.cache.Invalidate()
+	}
+
+	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 }
 
 // executeDropConstraint handles DROP CONSTRAINT commands.

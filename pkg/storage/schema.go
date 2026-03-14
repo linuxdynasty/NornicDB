@@ -1073,6 +1073,90 @@ func (sm *SchemaManager) AddConstraint(c Constraint) error {
 	return nil
 }
 
+// DropIndex removes an index (by name) from the schema.
+// It searches across all index types: property, composite, fulltext, vector, and range.
+func (sm *SchemaManager) DropIndex(name string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Track what we dropped for rollback on persist failure.
+	type dropped struct {
+		kind string
+		key  string
+	}
+	var d dropped
+
+	// compositeIndexes, fulltextIndexes, vectorIndexes, rangeIndexes are keyed by name.
+	if _, ok := sm.compositeIndexes[name]; ok {
+		d = dropped{kind: "composite", key: name}
+	} else if _, ok := sm.fulltextIndexes[name]; ok {
+		d = dropped{kind: "fulltext", key: name}
+	} else if _, ok := sm.vectorIndexes[name]; ok {
+		d = dropped{kind: "vector", key: name}
+	} else if _, ok := sm.rangeIndexes[name]; ok {
+		d = dropped{kind: "range", key: name}
+	} else {
+		// propertyIndexes are keyed by "label:property[0]", so search by name.
+		for key, idx := range sm.propertyIndexes {
+			if idx.Name == name {
+				d = dropped{kind: "property", key: key}
+				break
+			}
+		}
+	}
+
+	if d.kind == "" {
+		return fmt.Errorf("index %q does not exist", name)
+	}
+
+	// Stash the old value for rollback, then delete.
+	var oldProperty *PropertyIndex
+	var oldComposite *CompositeIndex
+	var oldFulltext *FulltextIndex
+	var oldVector *VectorIndex
+	var oldRange *RangeIndex
+
+	switch d.kind {
+	case "property":
+		oldProperty = sm.propertyIndexes[d.key]
+		delete(sm.propertyIndexes, d.key)
+	case "composite":
+		oldComposite = sm.compositeIndexes[d.key]
+		delete(sm.compositeIndexes, d.key)
+	case "fulltext":
+		oldFulltext = sm.fulltextIndexes[d.key]
+		delete(sm.fulltextIndexes, d.key)
+	case "vector":
+		oldVector = sm.vectorIndexes[d.key]
+		delete(sm.vectorIndexes, d.key)
+	case "range":
+		oldRange = sm.rangeIndexes[d.key]
+		delete(sm.rangeIndexes, d.key)
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			// Rollback in-memory delete.
+			switch d.kind {
+			case "property":
+				sm.propertyIndexes[d.key] = oldProperty
+			case "composite":
+				sm.compositeIndexes[d.key] = oldComposite
+			case "fulltext":
+				sm.fulltextIndexes[d.key] = oldFulltext
+			case "vector":
+				sm.vectorIndexes[d.key] = oldVector
+			case "range":
+				sm.rangeIndexes[d.key] = oldRange
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 // DropConstraint removes a constraint (by name) from the schema.
 // This supports both standard constraints and property type constraints.
 func (sm *SchemaManager) DropConstraint(name string) error {

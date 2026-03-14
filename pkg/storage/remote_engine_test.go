@@ -985,3 +985,131 @@ func TestRemoteEngineHTTPQueryBatch(t *testing.T) {
 		t.Fatalf("expected queryBatch error")
 	}
 }
+
+func TestRemoteEngineHTTPExplicitTxLifecycle(t *testing.T) {
+	var opened bool
+	var executed bool
+	var committed bool
+	var rolledBack bool
+	engine := makeEngineWithTransport(t, "http://remote.example", func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx"):
+			opened = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"results":[],"errors":[],"commit":"http://remote.example/db/remote_db/tx/1/commit"}`,
+				)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/1"):
+			executed = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"results":[{"columns":["n"],"data":[{"row":[1]}]}],"errors":[]}`,
+				)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/1/commit"):
+			committed = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		case req.Method == http.MethodDelete && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/1"):
+			rolledBack = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: 404,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		}
+	})
+	tx, err := engine.BeginCypherTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginCypherTx failed: %v", err)
+	}
+	cols, rows, err := tx.QueryCypher(context.Background(), "RETURN 1 AS n", nil)
+	if err != nil {
+		t.Fatalf("QueryCypher failed: %v", err)
+	}
+	if len(cols) != 1 || cols[0] != "n" || len(rows) != 1 || len(rows[0]) != 1 {
+		t.Fatalf("unexpected query result: cols=%v rows=%v", cols, rows)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if !opened || !executed || !committed || rolledBack {
+		t.Fatalf("unexpected lifecycle flags opened=%v executed=%v committed=%v rolledBack=%v", opened, executed, committed, rolledBack)
+	}
+}
+
+func TestRemoteEngineHTTPExplicitTxRollbackLifecycle(t *testing.T) {
+	var opened bool
+	var executed bool
+	var committed bool
+	var rolledBack bool
+	engine := makeEngineWithTransport(t, "http://remote.example", func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx"):
+			opened = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"results":[],"errors":[],"commit":"http://remote.example/db/remote_db/tx/2/commit"}`,
+				)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/2"):
+			executed = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"results":[{"columns":["n"],"data":[{"row":[1]}]}],"errors":[]}`,
+				)),
+			}, nil
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/2/commit"):
+			committed = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		case req.Method == http.MethodDelete && strings.HasSuffix(req.URL.Path, "/db/remote_db/tx/2"):
+			rolledBack = true
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: 404,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"results":[],"errors":[]}`)),
+			}, nil
+		}
+	})
+	tx, err := engine.BeginCypherTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginCypherTx failed: %v", err)
+	}
+	if _, _, err := tx.QueryCypher(context.Background(), "RETURN 1 AS n", nil); err != nil {
+		t.Fatalf("QueryCypher failed: %v", err)
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatalf("Rollback failed: %v", err)
+	}
+	if !opened || !executed || committed || !rolledBack {
+		t.Fatalf("unexpected lifecycle flags opened=%v executed=%v committed=%v rolledBack=%v", opened, executed, committed, rolledBack)
+	}
+}

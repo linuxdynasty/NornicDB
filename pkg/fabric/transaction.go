@@ -22,6 +22,12 @@ type SubTransaction struct {
 
 	// State tracks the lifecycle: "open", "committed", "rolledback".
 	State string
+
+	// commitFn/rollbackFn are optional per-participant lifecycle handlers.
+	// When present, Commit()/Rollback() use these callbacks if global callbacks
+	// are not provided by the caller.
+	commitFn   CommitCallback
+	rollbackFn RollbackCallback
 }
 
 // FabricTransaction coordinates sub-transactions across participating shards
@@ -138,6 +144,21 @@ func (t *FabricTransaction) SubTransactions() map[string]*SubTransaction {
 	return result
 }
 
+// BindParticipantCallbacks binds per-subtransaction commit/rollback callbacks.
+// Existing bindings are replaced.
+func (t *FabricTransaction) BindParticipantCallbacks(shardName string, commitFn CommitCallback, rollbackFn RollbackCallback) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	sub, ok := t.subTxns[shardName]
+	if !ok {
+		return fmt.Errorf("sub-transaction '%s' not found", shardName)
+	}
+	sub.commitFn = commitFn
+	sub.rollbackFn = rollbackFn
+	return nil
+}
+
 // CommitCallback is called for each sub-transaction during commit.
 // The callback should perform the actual commit on the shard.
 // If any callback returns an error, commit halts and the remaining
@@ -148,7 +169,14 @@ type CommitCallback func(sub *SubTransaction) error
 type RollbackCallback func(sub *SubTransaction) error
 
 // Commit commits all open sub-transactions using the provided callback.
-// On partial failure, remaining sub-transactions are rolled back.
+// On partial failure, remaining sub-transactions are rolled back via compensation.
+//
+// Limitation: this is not a full 2PC (two-phase commit) coordinator. Compensation
+// rollback is best-effort — if a shard commit succeeds but a subsequent shard fails,
+// the already-committed shard's changes cannot be truly undone (only compensated).
+// Neo4j Fabric has the same fundamental constraint for cross-shard transactions.
+// The many-read/one-write invariant mitigates this by limiting write exposure to a
+// single shard per transaction.
 func (t *FabricTransaction) Commit(commitFn CommitCallback, rollbackFn RollbackCallback) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -166,7 +194,15 @@ func (t *FabricTransaction) Commit(commitFn CommitCallback, rollbackFn RollbackC
 		if sub.State != "open" {
 			continue
 		}
-		if err := commitFn(sub); err != nil {
+		commit := commitFn
+		if commit == nil {
+			commit = sub.commitFn
+		}
+		if commit == nil {
+			sub.State = "committed"
+			continue
+		}
+		if err := commit(sub); err != nil {
 			commitErr = fmt.Errorf("commit failed on shard '%s': %w", sub.ShardName, err)
 			break
 		}
@@ -177,8 +213,12 @@ func (t *FabricTransaction) Commit(commitFn CommitCallback, rollbackFn RollbackC
 		var compensationErrs []string
 		for _, sub := range t.subTxns {
 			if sub.State == "committed" || sub.State == "open" {
-				if rollbackFn != nil {
-					if err := rollbackFn(sub); err != nil {
+				rollback := rollbackFn
+				if rollback == nil {
+					rollback = sub.rollbackFn
+				}
+				if rollback != nil {
+					if err := rollback(sub); err != nil {
 						compensationErrs = append(compensationErrs, fmt.Sprintf("%s: %v", sub.ShardName, err))
 					}
 				}
@@ -210,8 +250,12 @@ func (t *FabricTransaction) Rollback(rollbackFn RollbackCallback) error {
 		if sub.State != "open" {
 			continue
 		}
-		if rollbackFn != nil {
-			if err := rollbackFn(sub); err != nil {
+		rollback := rollbackFn
+		if rollback == nil {
+			rollback = sub.rollbackFn
+		}
+		if rollback != nil {
+			if err := rollback(sub); err != nil {
 				lastErr = fmt.Errorf("rollback failed on shard '%s': %w", sub.ShardName, err)
 			}
 		}

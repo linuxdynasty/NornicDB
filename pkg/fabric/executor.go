@@ -71,10 +71,13 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 
 	// Register with the distributed transaction if present.
 	if tx != nil {
-		_, err := tx.GetOrOpen(f.GraphName, f.IsWrite)
+		participant := participantKeyFromLocation(loc)
+		sub, err := tx.GetOrOpen(participant, f.IsWrite)
 		if err != nil {
 			return nil, err
 		}
+		ctx = WithFabricTransaction(ctx, tx)
+		ctx = WithSubTransaction(ctx, sub)
 	}
 
 	switch l := loc.(type) {
@@ -92,6 +95,17 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 
 	default:
 		return nil, fmt.Errorf("unsupported location type: %T", loc)
+	}
+}
+
+func participantKeyFromLocation(loc Location) string {
+	switch l := loc.(type) {
+	case *LocationLocal:
+		return "local:" + strings.TrimSpace(l.DBName)
+	case *LocationRemote:
+		return "remote:" + strings.TrimSpace(l.URI) + "|" + strings.TrimSpace(l.DBName)
+	default:
+		return fmt.Sprintf("unknown:%T", loc)
 	}
 }
 

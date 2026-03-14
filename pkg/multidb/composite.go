@@ -331,6 +331,45 @@ func (m *DatabaseManager) IsCompositeDatabase(name string) bool {
 	return exists && info.Type == "composite"
 }
 
+// ExistsOrIsConstituent returns true if the name refers to an existing database
+// or a valid composite constituent in dotted "composite.alias" form.
+// This is used by protocol entry paths (Bolt/HTTP) to avoid premature
+// DB-not-found rejection for constituent graph references.
+func (m *DatabaseManager) ExistsOrIsConstituent(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Direct database match.
+	if m.databases[name] != nil {
+		return true
+	}
+
+	// Check alias match.
+	for _, info := range m.databases {
+		for _, alias := range info.Aliases {
+			if alias == name {
+				return true
+			}
+		}
+	}
+
+	// Dotted composite.alias form.
+	if dotIdx := strings.IndexByte(name, '.'); dotIdx > 0 && dotIdx < len(name)-1 {
+		compositeName := name[:dotIdx]
+		constituentAlias := name[dotIdx+1:]
+		info, exists := m.databases[compositeName]
+		if exists && info.Type == "composite" {
+			for _, ref := range info.Constituents {
+				if strings.EqualFold(ref.Alias, constituentAlias) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // resolveDatabaseInternal resolves a database name or alias to the actual database name.
 // Must be called with lock held.
 func (m *DatabaseManager) resolveDatabaseInternal(nameOrAlias string) (string, error) {

@@ -54,10 +54,20 @@ export interface CypherResponse {
   }>;
 }
 
+export interface ConstituentInfo {
+  alias: string;
+  databaseName: string;
+  type: string;       // "local" or "remote"
+  accessMode: string; // "read", "write", "read_write"
+  uri?: string;       // only for remote constituents
+}
+
 export interface DatabaseInfo {
   name: string;
   status: string;
   default: boolean;
+  type?: string;                    // "standard", "composite", "system"
+  constituents?: ConstituentInfo[]; // only for composite databases
   nodeCount: number;
   edgeCount: number;
   nodeStorageBytes?: number;

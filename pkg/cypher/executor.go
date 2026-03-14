@@ -601,6 +601,15 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 		return scopedExec.Execute(ctx, remaining, params)
 	}
 
+	// Reject data queries on composite root — callers must USE a constituent.
+	// System/admin commands (SHOW DATABASES, CREATE/DROP DATABASE, ALTER, SHOW COMPOSITE,
+	// SHOW CONSTITUENTS, SHOW ALIASES, SHOW LIMITS, BEGIN, COMMIT, ROLLBACK) are allowed.
+	if isCompositeRoot(e.storage) && !isCompositeAllowedCommand(cypher) {
+		return nil, fmt.Errorf("Neo.ClientError.Statement.NotAllowed: " +
+			"Queries on composite databases require explicit graph targeting. " +
+			"Use USE <composite>.<alias> to target a specific constituent")
+	}
+
 	// Merge session-scoped shell parameters with per-call parameters.
 	// Explicit params win over shell params to preserve HTTP/Bolt semantics.
 	params = e.mergeShellParams(params)
@@ -1896,9 +1905,12 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		return e.executeSchemaCommand(ctx, cypher)
 	case isDropProcedureCommand(cypher):
 		return e.executeDropProcedure(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "DROP", "INDEX") == 0:
+		// DROP INDEX — execute real drop against the target schema.
+		return e.executeDropIndex(ctx, cypher)
 	case findKeywordIndex(cypher, "DROP") == 0:
-		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
-		// Must be at start (position 0) to be a standalone clause
+		// Other DROP variants (not INDEX, not CONSTRAINT, not ALIAS, not PROCEDURE)
+		// treat as no-op for forward compatibility.
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	case findKeywordIndex(cypher, "WITH") == 0:
 		// Must be at start (position 0) to be a standalone clause

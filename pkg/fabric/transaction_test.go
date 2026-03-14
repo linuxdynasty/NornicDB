@@ -187,6 +187,40 @@ func TestFabricTransaction_CommitAfterCommit(t *testing.T) {
 	}
 }
 
+func TestFabricTransaction_CommitUsesBoundParticipantCallbacks(t *testing.T) {
+	tx := NewFabricTransaction("tx-009b")
+	_, err := tx.GetOrOpen("shard_a", true)
+	if err != nil {
+		t.Fatalf("GetOrOpen failed: %v", err)
+	}
+
+	committed := false
+	rolledBack := false
+	if err := tx.BindParticipantCallbacks(
+		"shard_a",
+		func(_ *SubTransaction) error {
+			committed = true
+			return nil
+		},
+		func(_ *SubTransaction) error {
+			rolledBack = true
+			return nil
+		},
+	); err != nil {
+		t.Fatalf("BindParticipantCallbacks failed: %v", err)
+	}
+
+	if err := tx.Commit(nil, nil); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if !committed {
+		t.Fatal("expected bound commit callback to run")
+	}
+	if rolledBack {
+		t.Fatal("did not expect rollback callback during successful commit")
+	}
+}
+
 func TestFabricTransaction_RollbackAll(t *testing.T) {
 	tx := NewFabricTransaction("tx-010")
 

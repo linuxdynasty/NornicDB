@@ -16,6 +16,11 @@ import (
 
 // executeShowIndexes handles SHOW INDEXES command
 func (e *StorageExecutor) executeShowIndexes(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if isCompositeRoot(e.storage) {
+		return nil, fmt.Errorf("Neo.ClientError.Statement.NotAllowed: " +
+			"SHOW INDEXES on composite databases requires a constituent target. " +
+			"Use USE <composite>.<alias> SHOW INDEXES")
+	}
 	schema := e.storage.GetSchema()
 	rows := [][]interface{}{}
 	upper := strings.ToUpper(strings.TrimSpace(cypher))
@@ -81,6 +86,11 @@ func (e *StorageExecutor) executeShowIndexes(ctx context.Context, cypher string)
 
 // executeShowConstraints handles SHOW CONSTRAINTS command
 func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if isCompositeRoot(e.storage) {
+		return nil, fmt.Errorf("Neo.ClientError.Statement.NotAllowed: " +
+			"SHOW CONSTRAINTS on composite databases requires a constituent target. " +
+			"Use USE <composite>.<alias> SHOW CONSTRAINTS")
+	}
 	schema := e.storage.GetSchema()
 	rows := [][]interface{}{}
 

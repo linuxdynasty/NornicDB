@@ -1,6 +1,6 @@
 # Fabric Gap Analysis: `main...remote-const`
 
-_Last updated: 2026-03-13_
+_Last updated: 2026-03-14_
 
 ## Scope
 
@@ -243,7 +243,11 @@ Primary semantic targets reviewed so far:
 - Bolt database metadata routing has targeted coverage in `pkg/bolt/server_test.go`.
 - Storage-size tracking changes in `pkg/multidb/storage_size_cache.go` and `pkg/multidb/storage_size_tracking_engine.go` are covered indirectly through `pkg/multidb/manager_test.go` and `pkg/multidb/enforcement_test.go` and do not materially change Fabric API parity.
 
-### Uncovered or Insufficiently Covered Gaps
+### Historical Gap Inventory (Baseline Findings)
+
+This list captures the original baseline findings before recent fixes.  
+Current status is tracked in **Current Parity Snapshot**, **Tracked TODOs**, and
+**Verification Update (2026-03-14)** below.
 
 1. **No tests found for dynamic graph references**
    - No coverage located for `USE graph.byName(...)`.
@@ -284,17 +288,58 @@ Primary semantic targets reviewed so far:
 11. **Bolt auth-aware remote composite bootstrap is untested**
    - No Bolt test was found showing top-level database selection for a remote composite uses caller-auth-aware storage resolution rather than unauthenticated `GetStorage()`.
 
+12. **Constituent addressing usability gap (`USE <composite>.<alias>`) still leaks to DB-not-found paths**
+   - Repro observed in current build:
+     - `USE translations.tr`
+     - `SHOW INDEXES`
+   - Returned error:
+     - `Neo.ClientError.Database.DatabaseNotFound: Database 'translations.tr' not found`
+   - Expected Neo4j/Fabric-compatible behavior:
+     - `translations.tr` should resolve as a constituent graph selection of composite `translations`, not a top-level physical database lookup.
+   - Impact:
+     - Constituent-scoped schema/introspection flows are not reliably usable from clients that emit canonical `USE composite.alias` sequences.
+   - Required fix:
+     - enforce constituent resolution before any top-level DB lookup in both Bolt and HTTP execution entry paths, and add e2e coverage for `USE composite.alias` + `SHOW INDEXES` and `CREATE/DROP INDEX`.
+
+13. **Index schema scope semantics mismatch on composite root**
+   - Current behavior:
+     - `SHOW INDEXES` / `SHOW FULLTEXT INDEXES` read `storage.GetSchema()`.
+     - For composite storage, `GetSchema()` merges constituent metadata.
+     - `CREATE INDEX` / `CREATE FULLTEXT INDEX` write through `e.storage.GetSchema().Add*Index(...)`.
+   - Neo4j/Fabric-compatible expectation:
+     - indexes are constituent-local;
+     - schema commands are explicitly targeted by `USE <constituent>`;
+     - composite-root schema DDL should not implicitly mutate merged/derived schema state.
+   - Impact:
+     - root-composite schema behavior can diverge from Neo4j operational semantics and client expectations.
+   - Required fix:
+     - reject schema DDL on composite root unless a constituent target is resolved;
+     - require/use constituent-scoped execution (`USE <composite>.<alias> ...`) for CREATE/DROP index flows.
+
+14. **`SHOW INDEXES` must be constituent-scoped on composites (strict Neo4j semantics)**
+   - Current behavior:
+     - merged composite schema can present aggregate index metadata without constituent provenance.
+   - Neo4j/Fabric-compatible expectation:
+     - `SHOW INDEXES` / `SHOW FULLTEXT INDEXES` are schema-introspection commands over a single graph;
+     - on composites, callers must target a constituent graph (for example `USE <composite>.<alias> SHOW INDEXES`);
+     - composite-root aggregate index introspection is not a supported mode.
+   - Required fix:
+     - reject `SHOW INDEXES` / `SHOW FULLTEXT INDEXES` when executed on composite root without resolved constituent target;
+     - lock behavior with Bolt + HTTP e2e tests for both reject and success paths.
+
 ## Current Parity Snapshot
 
 | Area | Status | Notes |
 |---|---|---|
 | Direct `USE db` parsing | Complete | identifiers, quoted names, and strict resolution/validation are implemented |
-| `USE composite.alias` | Complete | direct composite constituent path implemented with scope enforcement |
+| `USE composite.alias` | Complete | parser/executor and protocol entry paths resolve constituent targets before DB-not-found checks; covered in cypher/server/bolt tests |
 | `USE graph.byName()` | Complete | implemented and covered in planner/use parsing tests |
 | `USE graph.byElementId()` | Complete | implemented and covered in planner/use parsing tests |
 | `USE` in subqueries | Complete | recursive CALL-subquery decomposition (including nested `CALL` blocks), strict in-scope target validation, and planner/e2e regression coverage |
 | `USE` in union parts | Complete | implemented and covered in Fabric planner tests |
 | Remote auth forwarding isolation | Complete | auth-aware cache keying + isolation tests in `pkg/fabric/remote_executor_test.go` |
+| Composite-root schema DDL semantics | Complete | composite root rejects CREATE/DROP INDEX, CREATE/DROP CONSTRAINT with Neo4j-compatible errors; constituent-scoped DDL works via `USE <composite>.<alias>` |
+| Composite index introspection semantics | Complete | `SHOW INDEXES`/`SHOW FULLTEXT INDEXES`/`SHOW CONSTRAINTS` rejected on composite root; constituent-scoped introspection works |
 | Many-read / one-write enforcement | Complete | enforced in Fabric transaction coordinator and covered by tx tests |
 | Distributed commit/rollback safety | Complete | compensation rollback on partial commit failure with regression test coverage |
 | Bolt ROUTE behavior | Complete | routing table payload populated and role/address content assertions added |
@@ -303,7 +348,7 @@ Primary semantic targets reviewed so far:
 | HTTP explicit tx ownership/isolation | Complete | owner-bound tx sessions + cross-caller reuse rejection e2e test |
 | HTTP explicit tx graph-level authorization | Complete | effective target graph auth enforced and covered in explicit-tx e2e test |
 | HTTP end-to-end Fabric semantics | Complete | both native `USE` and `:USE` flows are supported and tested |
-| Coverage for new Fabric API surface | Complete | targeted unit/integration/e2e coverage added for previously open parity gaps |
+| Coverage for new Fabric API surface | Complete | schema/introspection, explicit tx (local+remote participants), ownership/auth checks, and composite stats/search parity are covered with deterministic tests and CI gate |
 
 ## Tested-vs-Untested Conclusion
 
@@ -343,12 +388,220 @@ The items below were re-verified against current code and tests after the strict
 
 ## Current Judgment
 
-- **Implemented API surface:** materially complete for the audited Fabric gaps.
-- **Behavioral parity for fixed gaps:** materially complete for the implemented scope.
-- **Coverage quality:** strong, with targeted e2e regression coverage added for the prior TBD enhancements.
+- **Implemented API surface:** near-complete. Composite schema DDL, index introspection, DROP INDEX, plain query rejection, and constituent addressing gaps are all resolved.
+- **Behavioral parity for fixed gaps:** strong. Composite-root correctly rejects schema DDL, SHOW INDEXES/CONSTRAINTS, and plain data queries. Constituent-scoped operations work correctly via `USE <composite>.<alias>`.
+- **Coverage quality:** strong overall with deterministic unit/e2e tests covering composite schema/query semantics, remote participant explicit tx handle lifecycle, deterministic composite stats provenance, and CI parity gating.
+
+## Verification Update (2026-03-14)
+
+Validated in this branch:
+
+- Deterministic pass of key cypher regressions and doc-example tests (`-count=5`):
+  - `TestDropIndex_BacktickQuoted`
+  - `TestDropIndex_RealExecution`
+  - `TestExecuteUnsupportedQuery`
+  - `TestDocExample_CompositeRootSchemaRejected`
+  - `TestDocExample_DropIndexIfExistsOnConstituent`
+  - `TestDocExample_PlainQueryOnCompositeRejected`
+  - `TestCompositeDatabase_EndToEnd`
+  - `TestCompositeDatabase_ComplexQuery`
+  - `TestCompositeDatabase_QueryWithRelationships`
+- Deterministic pass of new Bolt/storage/multidb tests (`-count=5`):
+  - `pkg/bolt/server_composite_schema_test.go`
+  - `pkg/storage/schema_drop_index_test.go`
+  - `pkg/multidb/composite_exists_test.go`
+- Package suite pass:
+  - `go test ./pkg/cypher ./pkg/storage ./pkg/multidb ./pkg/bolt ./pkg/fabric ./pkg/txsession -count=1`
+
+Verified compatibility improvements:
+
+- Cache invalidation for schema DDL now prevents stale `SHOW INDEXES` results.
+- Composite-root schema DDL/introspection rejection is enforced with constituent-target guidance.
+- `DROP INDEX` now executes real drop semantics with `IF EXISTS` no-op behavior on missing index.
+- Bolt-side dotted `composite.alias` existence checks now avoid premature `DatabaseNotFound`.
+
+Status after implementation pass:
+
+- [x] Cross-protocol HTTP e2e for composite schema/index flows is now covered.
+- [x] Composite-root search endpoint parity is enforced in server/search paths (composite roots rejected with explicit constituent guidance).
+- [x] Full explicit distributed transaction parity for remote participants is implemented end-to-end for explicit transaction handle lifecycle (open/query/commit/rollback through real remote tx handles).
+- [x] HTTP e2e composite constraint semantics are covered (`USE <composite>.<alias>` CREATE/SHOW/DROP CONSTRAINT).
+- [x] Deterministic provenance fields are included for constituent-aggregated composite `/db/{composite}` stats output.
+- [x] CI composite parity gate added (`scripts/ci-composite-parity.sh`, wired in `.github/workflows/ci.yml`).
+
+## Required E2E Parity Changes (Strict Neo4j Compatibility)
+
+The following behavior is required to declare Fabric parity for composite databases.
+
+1. **Constituent-local schema semantics must be enforced**
+   - Reject schema DDL on composite root unless the resolved target is a constituent graph.
+   - Require `USE <composite>.<alias>` (or equivalent resolved graph reference) for:
+     - `CREATE INDEX` / `DROP INDEX`
+     - `CREATE CONSTRAINT` / `DROP CONSTRAINT`
+   - Remove any implicit merged-composite schema mutation path.
+
+2. **Index introspection semantics must be strict and non-ambiguous**
+   - `SHOW INDEXES` and `SHOW FULLTEXT INDEXES` must require constituent scope.
+   - Composite-root index introspection must be rejected.
+   - Aggregate merged composite index catalogs are not authoritative schema and must not be presented as such.
+
+3. **`DROP INDEX` must be real, never no-op on accepted syntax**
+   - Accepted `DROP INDEX` statements must execute against the targeted constituent schema.
+   - Failures must return Neo4j-compatible errors (not silent success/no-op).
+
+4. **Composite query model must align with Fabric routing semantics**
+   - Do not treat composite root as implicit union graph for plain `MATCH`.
+   - Require explicit graph targeting semantics consistent with Neo4j Fabric.
+
+5. **Graph resolution order must run before DB-not-found rejection**
+   - `composite.alias`, `graph.byName(...)`, and `graph.byElementId(...)` must resolve through Fabric catalog/use-evaluator flow before top-level database existence checks.
+   - This applies across Bolt and HTTP entry paths.
+
+6. **Explicit distributed transaction semantics must be end-to-end real**
+   - Open and track real subtransactions per participating shard/remote.
+   - Commit/rollback must execute through real shard transaction handles (not no-op callbacks).
+   - Maintain strict many-read/one-write enforcement.
+
+7. **Composite search behavior must be provenance-correct**
+   - Never create a synthetic namespaced “composite search service” fallback.
+   - Aggregate search and stats explicitly from constituent services.
+   - `/db/{composite}` search/stat outputs must be deterministic and provenance-correct.
+
+## Concrete Parity Implementation Steps
+
+The items below are the concrete implementation plan to reach strict Neo4j/Fabric parity for composite schema/search semantics.
+
+1. **Classify effective graph target before schema/search execution**
+   - Add a single resolver used by Bolt + HTTP + Cypher execution entry points:
+     - input: session DB, optional `USE` target (`composite.alias`, `graph.byName`, `graph.byElementId`)
+     - output: `{kind: standard|composite-root|constituent, resolvedDatabase, compositeName, alias}`
+   - Run this resolver before any top-level DB-not-found rejection.
+   - Wire in:
+     - `pkg/bolt/server.go`
+     - `pkg/server/server_db.go`
+     - `pkg/server/server_nornicdb.go`
+     - `pkg/cypher/executor_use.go`
+
+2. **Enforce constituent-only schema operations**
+   - Reject schema ops when target classification is `composite-root`:
+     - `CREATE/DROP INDEX`, `SHOW INDEXES`, `SHOW FULLTEXT INDEXES`
+     - `CREATE/DROP CONSTRAINT`
+   - Allow only when target classification is `constituent`.
+   - Return Neo4j-style client semantic errors (not generic not-found/no-op).
+   - Wire in:
+     - `pkg/cypher/executor_show.go`
+     - `pkg/cypher/schema.go`
+     - schema command dispatch in executor paths.
+
+3. **Remove merged composite schema as authoritative for DDL/introspection**
+   - Keep merged schema only for internal compatibility where needed, but do not use it for:
+     - schema writes
+     - schema introspection on composite root
+   - If session DB is composite root and no constituent target is resolved, reject.
+   - Scope/guard:
+     - `pkg/storage/composite_engine.go` (`GetSchema()` consumers in Cypher/server paths).
+
+4. **Fix `DROP INDEX` semantics**
+   - Ensure accepted `DROP INDEX` always executes against resolved constituent schema manager.
+   - Remove silent success/no-op on accepted syntax.
+   - Align error behavior with Neo4j:
+     - missing index -> explicit client schema error
+     - invalid target -> constituent-required semantic error.
+
+5. **Fix composite search service behavior**
+   - Do not create/search/index a service keyed by composite-root DB using composite storage.
+   - For composite-root search endpoints:
+     - reject as unsupported on composite root;
+     - require explicit constituent graph target (`USE <composite>.<alias>`) for search/index-related operations.
+   - No synthetic fallback namespace indexing under composite root.
+   - Wire in:
+     - `pkg/server/server_nornicdb.go`
+     - `pkg/nornicdb/search_services.go`
+     - `pkg/nornicdb/db_admin.go`
+
+6. **Implement deterministic constituent-aggregated stats**
+   - `/db/{composite}` stats/search metadata must be derived from constituent services only.
+   - Require stable ordering and provenance fields (`constituent`, `database`) for aggregated outputs.
+   - Ensure cache behavior does not hide constituent transitions.
+
+7. **Lock behavior with cross-protocol e2e parity suite**
+   - Bolt and HTTP both must validate:
+     - `USE composite.alias SHOW/CREATE/DROP INDEX` success
+     - composite-root `SHOW/CREATE/DROP INDEX` rejection
+     - composite-root constraints rejection unless constituent-targeted
+     - no composite-root search index build fallback
+     - deterministic constituent-derived search/stats outputs.
+
+8. **Compatibility guardrails in CI**
+   - Add a dedicated parity target that must pass before merge:
+     - `go test ./pkg/bolt -run Fabric|Composite`
+     - `go test ./pkg/server -run Composite|Search|Index`
+     - `go test ./pkg/cypher -run Composite|Index|Constraint|Show`
+   - Gate on failure for any reintroduction of composite-root schema/search behavior.
+
+## Minimum Parity Test Gate (Must Pass)
+
+1. Bolt and HTTP e2e for `USE <composite>.<alias>`:
+   - `SHOW INDEXES`
+   - `CREATE INDEX` / `DROP INDEX`
+2. Composite-root schema DDL rejection tests:
+   - index and constraint DDL rejected without resolved constituent target.
+3. `SHOW INDEXES` parity tests:
+   - constituent-scoped success;
+   - composite-root rejection.
+4. Composite explicit transaction tests:
+   - cross-shard reads;
+   - single-shard write;
+   - commit/rollback durability and correctness.
+5. Composite search/stat tests:
+   - prove no phantom composite namespace indexing;
+   - prove deterministic constituent-derived stats.
 
 ## Tracked TODOs
 
 - [x] Add deep Bolt `ROUTE` routing-table content compatibility assertions.
 - [x] Add cross-caller HTTP explicit tx reuse rejection e2e test.
 - [x] Add explicit tx graph-target authorization mismatch e2e test.
+- [x] Fix protocol entry-path ordering so constituent graph resolution runs before top-level DB existence checks.
+  - Bolt: `constituentAwareExists()` helper in `pkg/bolt/server.go` checks `ConstituentExistsChecker` interface before rejecting.
+  - HTTP: `dbManager.ExistsOrIsConstituent()` in `pkg/server/server_db.go` accepts dotted `composite.alias` patterns.
+  - Multidb: `ExistsOrIsConstituent()` in `pkg/multidb/composite.go` resolves standard DBs, composites, dotted constituents, and aliases.
+- [x] Enforce Neo4j-compatible schema scope: reject `CREATE/DROP INDEX` on composite root without resolved constituent target.
+  - `isCompositeRoot()` guard in `pkg/cypher/schema.go` (`executeSchemaCommand`, `executeDropIndex`).
+  - Returns `Neo.ClientError.Statement.NotAllowed` with actionable error message.
+- [x] Enforce strict Neo4j-compatible composite introspection: `SHOW INDEXES` / `SHOW FULLTEXT INDEXES` require resolved constituent target and must reject composite-root execution.
+  - Guards in `pkg/cypher/executor_show.go` (`executeShowIndexes`, `executeShowConstraints`).
+- [x] Extend strict schema-scope enforcement to constraints: reject `CREATE/DROP CONSTRAINT` on composite root without resolved constituent target.
+  - Covered by `executeSchemaCommand` composite-root guard which handles both CREATE and DROP CONSTRAINT.
+- [x] Remove accepted `DROP INDEX` no-op behavior; execute real constituent drop and return Neo4j-compatible errors.
+  - `executeDropIndex()` in `pkg/cypher/schema.go` calls `storage.SchemaManager.DropIndex()`.
+  - `DropIndex()` in `pkg/storage/schema.go` searches all index types (property, composite, fulltext, vector, range) with persist rollback.
+  - Missing index returns `index "X" does not exist`; `IF EXISTS` variant is a silent no-op.
+  - Query cache invalidation added on successful schema DDL to prevent stale SHOW INDEXES results.
+- [x] Tighten composite query model: reject implicit-union plain `MATCH` on composite root unless explicitly graph-targeted.
+  - Guard in `pkg/cypher/executor.go` after USE clause handling rejects plain data queries (MATCH, CREATE, MERGE, DELETE, SET, REMOVE, RETURN) on composite root.
+  - `isCompositeAllowedCommand()` permits system/admin commands (SHOW DATABASES, CREATE DATABASE, schema DDL which has its own guards, etc.).
+- [x] Remove synthetic composite search-service/index fallback in server execution paths.
+  - Partial: `pkg/cypher/executor_use.go` stops inheriting parent search service for composite-scoped executors.
+  - Completed path hardening: `pkg/server/server_db.go` skips attaching search services for composite-root executors; `pkg/server/server_nornicdb.go` rejects composite-root search/rebuild/similar requests.
+  - Remaining: deterministic constituent provenance fields for aggregated composite stats/search metadata.
+- [x] Add e2e tests for `USE <composite>.<alias>` followed by `SHOW INDEXES`, `CREATE INDEX`, and `DROP INDEX`.
+  - Partial: cypher + bolt unit/integration coverage exists.
+  - Remaining: HTTP `/db/{composite}/tx/commit` e2e coverage for the same flows.
+  - Cypher-level tests in `pkg/cypher/composite_schema_test.go`:
+    - `TestConstituent_CreateIndex_Success`, `TestConstituent_ShowIndexes_Success`, `TestConstituent_DropIndex_Success`, `TestConstituent_ShowConstraints_Success`
+    - `TestDocExample_CreateIndexOnConstituent`, `TestDocExample_ShowIndexesOnConstituent`, `TestDocExample_DropIndexOnConstituent`, `TestDocExample_DropIndexIfExistsOnConstituent`
+    - `TestDocExample_CompositeRootSchemaRejected` (6 sub-tests: CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW INDEXES, SHOW CONSTRAINTS)
+    - `TestDocExample_PlainQueryOnCompositeRejected`
+  - Bolt-level tests in `pkg/bolt/server_composite_schema_test.go`.
+  - Multidb-level tests in `pkg/multidb/composite_exists_test.go`.
+  - Storage-level tests in `pkg/storage/schema_drop_index_test.go`.
+- [x] Add cross-protocol e2e tests for index semantics (HTTP path):
+  - HTTP: `/db/{composite}/tx/commit` with in-statement `USE composite.alias` for SHOW/CREATE/DROP INDEX flows.
+- [x] Add cross-protocol e2e tests for constraint semantics (HTTP path):
+  - HTTP: `/db/{composite}/tx/commit` with in-statement `USE composite.alias` for CREATE/DROP CONSTRAINT flows.
+- [x] Complete explicit distributed transaction coordinator semantics end-to-end for remote participants (real subtx handles for open/commit/rollback across remote shards).
+  - Local constituent handles are now real and covered by commit/rollback durability tests in `pkg/cypher/composite_transaction_fabric_test.go`.
+  - Note: many-read/one-write enforcement and compensation rollback are implemented. Full global 2PC remains an architectural limitation.
+- [x] Add deterministic provenance fields for any constituent-aggregated composite stats/search outputs.
+- [x] Add CI parity gate for composite schema/search semantics to block regressions.

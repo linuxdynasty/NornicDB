@@ -46,7 +46,15 @@ type remoteTransport interface {
 	query(ctx context.Context, statement string, params map[string]interface{}) ([][]interface{}, error)
 	queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error)
 	queryBatch(ctx context.Context, statements []remoteStatement) error
+	beginCypherTx(ctx context.Context) (RemoteCypherTx, error)
 	close() error
+}
+
+// RemoteCypherTx represents an explicit remote Cypher transaction handle.
+type RemoteCypherTx interface {
+	QueryCypher(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error)
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context) error
 }
 
 // RemoteEngine implements Engine by forwarding operations to a remote NornicDB instance
@@ -107,6 +115,11 @@ func NewRemoteEngine(cfg RemoteEngineConfig) (*RemoteEngine, error) {
 type boltTransport struct {
 	driver   neo4j.DriverWithContext
 	database string
+}
+
+type boltCypherTx struct {
+	session neo4j.SessionWithContext
+	tx      neo4j.ExplicitTransaction
 }
 
 func newBoltTransport(uri, database string, cfg RemoteEngineConfig) (*boltTransport, error) {
@@ -244,6 +257,53 @@ func (b *boltTransport) queryBatch(ctx context.Context, statements []remoteState
 	return err
 }
 
+func (b *boltTransport) beginCypherTx(ctx context.Context) (RemoteCypherTx, error) {
+	session := b.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: b.database,
+		AccessMode:   neo4j.AccessModeWrite,
+	})
+	tx, err := session.BeginTransaction(ctx)
+	if err != nil {
+		_ = session.Close(ctx)
+		return nil, err
+	}
+	return &boltCypherTx{session: session, tx: tx}, nil
+}
+
+func (t *boltCypherTx) QueryCypher(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	result, err := t.tx.Run(ctx, statement, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	columns, err := result.Keys()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get result keys: %w", err)
+	}
+	rows := make([][]interface{}, 0)
+	for result.Next(ctx) {
+		record := result.Record()
+		row := make([]interface{}, len(record.Values))
+		for i, v := range record.Values {
+			row[i] = normalizeBoltValue(v)
+		}
+		rows = append(rows, row)
+	}
+	if err := result.Err(); err != nil {
+		return nil, nil, err
+	}
+	return columns, rows, nil
+}
+
+func (t *boltCypherTx) Commit(ctx context.Context) error {
+	defer func() { _ = t.session.Close(ctx) }()
+	return t.tx.Commit(ctx)
+}
+
+func (t *boltCypherTx) Rollback(ctx context.Context) error {
+	defer func() { _ = t.session.Close(ctx) }()
+	return t.tx.Rollback(ctx)
+}
+
 func (b *boltTransport) close() error {
 	return b.driver.Close(context.Background())
 }
@@ -311,6 +371,14 @@ type httpTransport struct {
 	client    *http.Client
 }
 
+type httpCypherTx struct {
+	transport   *httpTransport
+	executeURL  string
+	commitURL   string
+	rollbackURL string
+	closed      bool
+}
+
 type remoteTxRequest struct {
 	Statements []remoteStatement `json:"statements"`
 }
@@ -353,12 +421,30 @@ func (h *httpTransport) commitURL() string {
 	return fmt.Sprintf("%s/db/%s/tx/commit", h.baseURL, h.database)
 }
 
-func (h *httpTransport) doRequest(ctx context.Context, body remoteTxRequest) (*remoteTxResponse, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
+func (h *httpTransport) txOpenURL() string {
+	if strings.HasSuffix(h.baseURL, "/tx/commit") {
+		return strings.TrimSuffix(h.baseURL, "/commit")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.commitURL(), bytes.NewReader(raw))
+	if strings.Contains(h.baseURL, "/db/") {
+		return h.baseURL + "/tx"
+	}
+	return fmt.Sprintf("%s/db/%s/tx", h.baseURL, h.database)
+}
+
+func (h *httpTransport) doRequest(ctx context.Context, body remoteTxRequest) (*remoteTxResponse, error) {
+	return h.doRequestToURL(ctx, http.MethodPost, h.commitURL(), body)
+}
+
+func (h *httpTransport) doRequestToURL(ctx context.Context, method string, targetURL string, body interface{}) (*remoteTxResponse, error) {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +514,96 @@ func (h *httpTransport) queryBatch(ctx context.Context, statements []remoteState
 	return err
 }
 
+func (h *httpTransport) beginCypherTx(ctx context.Context) (RemoteCypherTx, error) {
+	openBody := remoteTxRequest{Statements: []remoteStatement{}}
+	raw, err := json.Marshal(openBody)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.txOpenURL(), bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if h.user != "" || h.password != "" {
+		req.SetBasicAuth(h.user, h.password)
+	} else if h.authToken != "" {
+		req.Header.Set("Authorization", h.authToken)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var openResp struct {
+		Commit string `json:"commit"`
+		Errors []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &openResp); err != nil {
+		return nil, fmt.Errorf("remote tx open decode failed (status=%d): %w", resp.StatusCode, err)
+	}
+	if len(openResp.Errors) > 0 {
+		return nil, fmt.Errorf("%s: %s", openResp.Errors[0].Code, openResp.Errors[0].Message)
+	}
+	if strings.TrimSpace(openResp.Commit) == "" {
+		return nil, fmt.Errorf("remote tx open returned empty commit URL")
+	}
+	executeURL := strings.TrimSuffix(openResp.Commit, "/commit")
+	return &httpCypherTx{
+		transport:   h,
+		executeURL:  executeURL,
+		commitURL:   openResp.Commit,
+		rollbackURL: executeURL,
+	}, nil
+}
+
 func (h *httpTransport) close() error { return nil }
+
+func (t *httpCypherTx) QueryCypher(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	if t.closed {
+		return nil, nil, fmt.Errorf("remote transaction is closed")
+	}
+	txResp, err := t.transport.doRequestToURL(ctx, http.MethodPost, t.executeURL, remoteTxRequest{
+		Statements: []remoteStatement{{Statement: statement, Parameters: params}},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(txResp.Results) == 0 {
+		return []string{}, [][]interface{}{}, nil
+	}
+	result := txResp.Results[0]
+	rows := make([][]interface{}, 0, len(result.Data))
+	for _, data := range result.Data {
+		rows = append(rows, data.Row)
+	}
+	return result.Columns, rows, nil
+}
+
+func (t *httpCypherTx) Commit(ctx context.Context) error {
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	_, err := t.transport.doRequestToURL(ctx, http.MethodPost, t.commitURL, remoteTxRequest{Statements: []remoteStatement{}})
+	return err
+}
+
+func (t *httpCypherTx) Rollback(ctx context.Context) error {
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	_, err := t.transport.doRequestToURL(ctx, http.MethodDelete, t.rollbackURL, nil)
+	return err
+}
 
 // ---------------------------------------------------------------------------
 // Helpers shared across transports
@@ -1058,4 +1233,14 @@ func (r *RemoteEngine) QueryCypher(ctx context.Context, statement string, params
 		defer cancel()
 	}
 	return r.transport.queryWithColumns(ctx, statement, params)
+}
+
+// BeginCypherTx opens an explicit remote transaction handle.
+func (r *RemoteEngine) BeginCypherTx(ctx context.Context) (RemoteCypherTx, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = defaultCtx()
+		defer cancel()
+	}
+	return r.transport.beginCypherTx(ctx)
 }

@@ -17,6 +17,7 @@ type RemoteFragmentExecutor struct {
 	// engineCache caches RemoteEngine instances by URI+database key to avoid
 	// reconnecting on every fragment execution.
 	engineCache map[string]*storage.RemoteEngine
+	txHandles   map[string]storage.RemoteCypherTx
 	mu          sync.RWMutex
 }
 
@@ -24,6 +25,7 @@ type RemoteFragmentExecutor struct {
 func NewRemoteFragmentExecutor() *RemoteFragmentExecutor {
 	return &RemoteFragmentExecutor{
 		engineCache: make(map[string]*storage.RemoteEngine),
+		txHandles:   make(map[string]storage.RemoteCypherTx),
 	}
 }
 
@@ -41,8 +43,7 @@ func (r *RemoteFragmentExecutor) Execute(ctx context.Context, loc *LocationRemot
 		return nil, fmt.Errorf("failed to connect to remote '%s' at %s: %w", loc.DBName, loc.URI, err)
 	}
 
-	// Use the remote engine's transport to execute the query.
-	columns, rows, err := executeRemoteQuery(ctx, engine, query, params)
+	columns, rows, err := r.executeRemoteQuery(ctx, engine, query, params)
 	if err != nil {
 		return nil, fmt.Errorf("remote execution on '%s' (%s) failed: %w", loc.DBName, loc.URI, err)
 	}
@@ -59,6 +60,12 @@ func (r *RemoteFragmentExecutor) Close() error {
 	defer r.mu.Unlock()
 
 	var lastErr error
+	for key, handle := range r.txHandles {
+		if err := handle.Rollback(context.Background()); err != nil {
+			lastErr = fmt.Errorf("failed to rollback remote tx handle '%s': %w", key, err)
+		}
+		delete(r.txHandles, key)
+	}
 	for key, engine := range r.engineCache {
 		if err := engine.Close(); err != nil {
 			lastErr = fmt.Errorf("failed to close remote engine '%s': %w", key, err)
@@ -132,11 +139,46 @@ func (r *RemoteFragmentExecutor) getOrCreateEngine(loc *LocationRemote, authToke
 // executeRemoteQuery runs a Cypher query via a RemoteEngine and returns columns + rows.
 // This uses the engine's GetNodesByLabel as a transport mechanism for arbitrary Cypher.
 // The RemoteEngine.transport.query method handles the actual Bolt/HTTP execution.
-func executeRemoteQuery(ctx context.Context, engine *storage.RemoteEngine, query string, params map[string]interface{}) ([]string, [][]interface{}, error) {
-	// Access the transport directly via the QueryCypher method.
-	columns, rows, err := engine.QueryCypher(ctx, query, params)
+func (r *RemoteFragmentExecutor) executeRemoteQuery(ctx context.Context, engine *storage.RemoteEngine, query string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	sub, hasSub := SubTransactionFromContext(ctx)
+	if !hasSub || sub == nil {
+		return engine.QueryCypher(ctx, query, params)
+	}
+	handle, err := r.getOrCreateTxHandle(ctx, sub, engine)
 	if err != nil {
 		return nil, nil, err
 	}
-	return columns, rows, nil
+	return handle.QueryCypher(ctx, query, params)
+}
+
+func (r *RemoteFragmentExecutor) getOrCreateTxHandle(ctx context.Context, sub *SubTransaction, engine *storage.RemoteEngine) (storage.RemoteCypherTx, error) {
+	r.mu.RLock()
+	if handle, ok := r.txHandles[sub.ShardName]; ok {
+		r.mu.RUnlock()
+		return handle, nil
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if handle, ok := r.txHandles[sub.ShardName]; ok {
+		return handle, nil
+	}
+	handle, err := engine.BeginCypherTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tx, ok := FabricTransactionFromContext(ctx)
+	if !ok || tx == nil {
+		_ = handle.Rollback(ctx)
+		return nil, fmt.Errorf("fabric transaction context is missing for remote sub-transaction '%s'", sub.ShardName)
+	}
+	commitFn := func(_ *SubTransaction) error { return handle.Commit(ctx) }
+	rollbackFn := func(_ *SubTransaction) error { return handle.Rollback(ctx) }
+	if err := tx.BindParticipantCallbacks(sub.ShardName, commitFn, rollbackFn); err != nil {
+		_ = handle.Rollback(ctx)
+		return nil, err
+	}
+	r.txHandles[sub.ShardName] = handle
+	return handle, nil
 }

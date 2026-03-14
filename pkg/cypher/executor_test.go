@@ -119,8 +119,13 @@ func TestExecuteUnsupportedQuery(t *testing.T) {
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 
-	// DROP INDEX is now a no-op (NornicDB manages indexes internally)
-	result, err := exec.Execute(context.Background(), "DROP INDEX idx", nil)
+	// DROP INDEX on a non-existent index returns an error (Neo4j semantics).
+	_, err := exec.Execute(context.Background(), "DROP INDEX idx", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "does not exist")
+
+	// DROP INDEX IF EXISTS on a non-existent index is a silent no-op.
+	result, err := exec.Execute(context.Background(), "DROP INDEX idx IF EXISTS", nil)
 	assert.NoError(t, err)
 	assert.Empty(t, result.Columns)
 	assert.Empty(t, result.Rows)

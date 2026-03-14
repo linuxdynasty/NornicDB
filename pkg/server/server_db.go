@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -275,8 +276,10 @@ func (s *Server) getExecutorForDatabaseWithAuth(dbName string, authToken string)
 	executor := cypher.NewStorageExecutor(storageEngine)
 	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
 
-	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
-		executor.SetSearchService(searchSvc)
+	if !s.dbManager.IsCompositeDatabase(dbName) {
+		if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+			executor.SetSearchService(searchSvc)
+		}
 	}
 
 	if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
@@ -323,8 +326,11 @@ func (s *Server) newExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
 
 	// Reuse DB's cached search service instead of creating a new one.
-	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
-		executor.SetSearchService(searchSvc)
+	// Composite roots do not own a search service; search/index operations must target constituents.
+	if !s.dbManager.IsCompositeDatabase(dbName) {
+		if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+			executor.SetSearchService(searchSvc)
+		}
 	}
 
 	// Copy query embedder from the base DB executor so string-input vector procedures work.
@@ -619,9 +625,9 @@ func (a *databaseInfoAdapter) CreatedAt() time.Time {
 //   - For large databases, this may take a few milliseconds
 //   - Consider caching if this endpoint is called frequently
 func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbName string) {
-	// Check if database exists
-	// This is a fast lookup in the DatabaseManager's metadata
-	if !s.dbManager.Exists(dbName) {
+	// Check if database exists (also accepts dotted composite.alias references).
+	// This is a fast lookup in the DatabaseManager's metadata.
+	if !s.dbManager.ExistsOrIsConstituent(dbName) {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Database.DatabaseNotFound",
 			fmt.Sprintf("Database '%s' not found", dbName))
 		return
@@ -634,8 +640,85 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		return
 	}
 
-	// Get storage for this database to get stats
-	// This returns a NamespacedEngine that provides isolated access
+	// Check if this is the default database
+	defaultDB := s.dbManager.DefaultDatabaseName()
+
+	// For composite databases, return constituent info instead of size stats.
+	if s.dbManager.IsCompositeDatabase(dbName) {
+		constituents, _ := s.dbManager.GetCompositeConstituents(dbName)
+		sort.Slice(constituents, func(i, j int) bool {
+			return strings.ToLower(constituents[i].Alias) < strings.ToLower(constituents[j].Alias)
+		})
+		consList := make([]map[string]interface{}, 0, len(constituents))
+		for _, c := range constituents {
+			entry := map[string]interface{}{
+				"alias":        c.Alias,
+				"databaseName": c.DatabaseName,
+				"type":         c.Type,
+				"accessMode":   c.AccessMode,
+			}
+			if c.Type == "remote" && c.URI != "" {
+				entry["uri"] = c.URI
+			}
+			consList = append(consList, entry)
+		}
+		stats, partial := s.compositeConstituentStats(r, dbName)
+		var totalNodes int64
+		var totalEdges int64
+		var totalNodeStorage int64
+		var totalEmbeddingBytes int64
+		aggReady := len(stats) > 0 && !partial
+		aggBuilding := false
+		aggInitialized := len(stats) > 0 && !partial
+		var aggProcessed int64
+		var aggTotal int64
+		var aggRate float64
+		aggETA := int64(-1)
+		for i, item := range stats {
+			totalNodes += item["nodeCount"].(int64)
+			totalEdges += item["edgeCount"].(int64)
+			totalNodeStorage += item["nodeStorageBytes"].(int64)
+			totalEmbeddingBytes += item["managedEmbeddingBytes"].(int64)
+			ready := item["searchReady"].(bool)
+			building := item["searchBuilding"].(bool)
+			initialized := item["searchInitialized"].(bool)
+			aggReady = aggReady && ready
+			aggBuilding = aggBuilding || building
+			aggInitialized = aggInitialized && initialized
+			aggProcessed += item["searchProcessed"].(int64)
+			aggTotal += item["searchTotal"].(int64)
+			aggRate += item["searchRate"].(float64)
+			if i == 0 || item["searchEtaSeconds"].(int64) > aggETA {
+				aggETA = item["searchEtaSeconds"].(int64)
+			}
+		}
+		response := map[string]interface{}{
+			"name":                  dbName,
+			"status":                "online",
+			"default":               dbName == defaultDB,
+			"type":                  "composite",
+			"constituents":          consList,
+			"nodeCount":             totalNodes,
+			"edgeCount":             totalEdges,
+			"nodeStorageBytes":      totalNodeStorage,
+			"managedEmbeddingBytes": totalEmbeddingBytes,
+			"searchReady":           aggReady,
+			"searchBuilding":        aggBuilding,
+			"searchInitialized":     aggInitialized,
+			"searchPhase":           "constituent_aggregate",
+			"searchProcessed":       aggProcessed,
+			"searchTotal":           aggTotal,
+			"searchRate":            aggRate,
+			"searchEtaSeconds":      aggETA,
+			"statsAggregation":      "constituent_sum",
+			"statsPartial":          partial,
+			"statsProvenance":       stats,
+		}
+		s.writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	// Standard database: return size and search stats.
 	storage, err := s.dbManager.GetStorage(dbName)
 	if err != nil {
 		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.Database.General",
@@ -643,30 +726,24 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		return
 	}
 
-	// Get stats from the namespaced storage
-	// These counts reflect only data in this database (due to namespacing)
 	nodeCount, err := storage.NodeCount()
 	if err != nil {
-		// Log error but continue with 0 count
 		nodeCount = 0
 	}
 	edgeCount, err := storage.EdgeCount()
 	if err != nil {
-		// Log error but continue with 0 count
 		edgeCount = 0
 	}
 	_, nodeStorageBytes, _ := s.dbManager.GetStorageSize(dbName)
 	_, _, managedEmbeddingBytes := s.db.GetDatabaseManagedEmbeddingStats(dbName)
 
-	// Check if this is the default database
-	// The default database is configured at startup and cannot be dropped
-	defaultDB := s.dbManager.DefaultDatabaseName()
 	searchStatus := s.db.GetDatabaseSearchStatus(dbName)
 
 	response := map[string]interface{}{
 		"name":                  dbName,
 		"status":                "online",
 		"default":               dbName == defaultDB,
+		"type":                  "standard",
 		"nodeCount":             nodeCount,
 		"edgeCount":             edgeCount,
 		"nodeStorageBytes":      nodeStorageBytes,
@@ -681,6 +758,79 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		"searchEtaSeconds":      searchStatus.ETASeconds,
 	}
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) compositeConstituentStats(r *http.Request, compositeName string) ([]map[string]interface{}, bool) {
+	constituents, err := s.dbManager.GetCompositeConstituents(compositeName)
+	if err != nil {
+		return nil, true
+	}
+	sort.Slice(constituents, func(i, j int) bool {
+		return strings.ToLower(constituents[i].Alias) < strings.ToLower(constituents[j].Alias)
+	})
+	authToken := strings.TrimSpace(r.Header.Get("Authorization"))
+	stats := make([]map[string]interface{}, 0, len(constituents))
+	partial := false
+	for _, c := range constituents {
+		row := map[string]interface{}{
+			"alias":                 c.Alias,
+			"database":              c.DatabaseName,
+			"type":                  c.Type,
+			"accessMode":            c.AccessMode,
+			"reachable":             true,
+			"nodeCount":             int64(0),
+			"edgeCount":             int64(0),
+			"nodeStorageBytes":      int64(0),
+			"managedEmbeddingBytes": int64(0),
+			"searchReady":           false,
+			"searchBuilding":        false,
+			"searchInitialized":     false,
+			"searchPhase":           "not_initialized",
+			"searchProcessed":       int64(0),
+			"searchTotal":           int64(0),
+			"searchRate":            float64(0),
+			"searchEtaSeconds":      int64(-1),
+		}
+		target := compositeName + "." + c.Alias
+		engine, getErr := s.dbManager.GetStorageWithAuth(target, authToken)
+		if getErr != nil {
+			partial = true
+			row["reachable"] = false
+			row["error"] = getErr.Error()
+			stats = append(stats, row)
+			continue
+		}
+		nodeCount, nErr := engine.NodeCount()
+		edgeCount, eErr := engine.EdgeCount()
+		if nErr != nil || eErr != nil {
+			partial = true
+			row["reachable"] = false
+			if nErr != nil {
+				row["error"] = nErr.Error()
+			} else {
+				row["error"] = eErr.Error()
+			}
+			stats = append(stats, row)
+			continue
+		}
+		_, nodeStorageBytes, _ := s.dbManager.GetStorageSize(c.DatabaseName)
+		_, _, managedEmbeddingBytes := s.db.GetDatabaseManagedEmbeddingStats(c.DatabaseName)
+		searchStatus := s.db.GetDatabaseSearchStatus(c.DatabaseName)
+		row["nodeCount"] = nodeCount
+		row["edgeCount"] = edgeCount
+		row["nodeStorageBytes"] = nodeStorageBytes
+		row["managedEmbeddingBytes"] = managedEmbeddingBytes
+		row["searchReady"] = searchStatus.Ready
+		row["searchBuilding"] = searchStatus.Building
+		row["searchInitialized"] = searchStatus.Initialized
+		row["searchPhase"] = searchStatus.Phase
+		row["searchProcessed"] = searchStatus.ProcessedNodes
+		row["searchTotal"] = searchStatus.TotalNodes
+		row["searchRate"] = searchStatus.RateNodesPerSec
+		row["searchEtaSeconds"] = searchStatus.ETASeconds
+		stats = append(stats, row)
+	}
+	return stats, partial
 }
 
 // handleClusterStatus returns cluster status (standalone mode)
@@ -1013,8 +1163,9 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		// Check if database exists before attempting to get executor
-		if !s.dbManager.Exists(effectiveDbName) {
+		// Check if database exists before attempting to get executor.
+		// Use ExistsOrIsConstituent to accept dotted composite.alias references.
+		if !s.dbManager.ExistsOrIsConstituent(effectiveDbName) {
 			response.Errors = append(response.Errors, QueryError{
 				Code:    "Neo.ClientError.Database.DatabaseNotFound",
 				Message: fmt.Sprintf("Database '%s' not found", effectiveDbName),

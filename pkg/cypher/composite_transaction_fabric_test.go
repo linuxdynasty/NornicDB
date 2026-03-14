@@ -2,6 +2,10 @@ package cypher
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/fabric"
@@ -138,4 +142,248 @@ RETURN c
 	require.Contains(t, err.Error(), "Writing to more than one database per transaction is not allowed")
 	_, err = exec.Execute(ctx, "ROLLBACK", nil)
 	require.NoError(t, err)
+}
+
+func TestCompositeExplicitTx_RollbackRevertsWrites(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("rollback_shard"))
+	require.NoError(t, mgr.CreateCompositeDatabase("cmp_rb", []multidb.ConstituentRef{
+		{Alias: "rb", DatabaseName: "rollback_shard", Type: "local", AccessMode: "read_write"},
+	}))
+
+	cmpStore, err := mgr.GetStorage("cmp_rb")
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(cmpStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+CALL {
+  USE cmp_rb.rb
+  CREATE (n:TxRollback {id: 'rb-1'})
+  RETURN count(n) AS c
+}
+RETURN c
+`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "ROLLBACK", nil)
+	require.NoError(t, err)
+
+	verify := NewStorageExecutor(cmpStore)
+	verify.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	res, err := verify.Execute(ctx, "CALL { USE cmp_rb.rb MATCH (n:TxRollback {id: 'rb-1'}) RETURN count(n) AS c } RETURN c", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(0), res.Rows[0][0])
+}
+
+func TestCompositeExplicitTx_CommitPersistsWrites(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("commit_shard"))
+	require.NoError(t, mgr.CreateCompositeDatabase("cmp_cm", []multidb.ConstituentRef{
+		{Alias: "cm", DatabaseName: "commit_shard", Type: "local", AccessMode: "read_write"},
+	}))
+
+	cmpStore, err := mgr.GetStorage("cmp_cm")
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(cmpStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+CALL {
+  USE cmp_cm.cm
+  CREATE (n:TxCommit {id: 'cm-1'})
+  RETURN count(n) AS c
+}
+RETURN c
+`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
+
+	verify := NewStorageExecutor(cmpStore)
+	verify.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	res, err := verify.Execute(ctx, "CALL { USE cmp_cm.cm MATCH (n:TxCommit {id: 'cm-1'}) RETURN count(n) AS c } RETURN c", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), res.Rows[0][0])
+}
+
+func TestCompositeExplicitTx_RemoteParticipantCommitLifecycle(t *testing.T) {
+	var (
+		openCount     int
+		execCount     int
+		commitCount   int
+		rollbackCount int
+	)
+	var remote *httptest.Server
+	remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote/tx"):
+			openCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{},
+				"errors":  []any{},
+				"commit":  remote.URL + "/db/tenant_remote/tx/1/commit",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote/tx/1"):
+			execCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{
+						"columns": []string{"c"},
+						"data":    []any{map[string]any{"row": []any{1}}},
+					},
+				},
+				"errors": []any{},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote/tx/1/commit"):
+			commitCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "errors": []any{}})
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/db/tenant_remote/tx/1"):
+			rollbackCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "errors": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer remote.Close()
+
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(ref multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			return storage.NewRemoteEngine(storage.RemoteEngineConfig{
+				URI:       ref.URI,
+				Database:  ref.DatabaseName,
+				AuthToken: authToken,
+				User:      ref.User,
+				Password:  ref.Password,
+			})
+		},
+	})
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateCompositeDatabase("cmp_remote", []multidb.ConstituentRef{
+		{Alias: "r", DatabaseName: "tenant_remote", Type: "remote", AccessMode: "read_write", URI: remote.URL, AuthMode: "oidc_forwarding"},
+	}))
+
+	cmpStore, err := mgr.GetStorageWithAuth("cmp_remote", "Bearer tx-token")
+	require.NoError(t, err)
+	exec := NewStorageExecutor(cmpStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CALL { USE cmp_remote.r CREATE (n:RemoteTx {id: 'r1'}) RETURN count(n) AS c } RETURN c", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, openCount)
+	require.Equal(t, 1, execCount)
+	require.Equal(t, 1, commitCount)
+	require.Equal(t, 0, rollbackCount)
+}
+
+func TestCompositeExplicitTx_RemoteParticipantRollbackLifecycle(t *testing.T) {
+	var (
+		openCount     int
+		execCount     int
+		commitCount   int
+		rollbackCount int
+	)
+	var remote *httptest.Server
+	remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote_rb/tx"):
+			openCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{},
+				"errors":  []any{},
+				"commit":  remote.URL + "/db/tenant_remote_rb/tx/2/commit",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote_rb/tx/2"):
+			execCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{
+						"columns": []string{"c"},
+						"data":    []any{map[string]any{"row": []any{1}}},
+					},
+				},
+				"errors": []any{},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/db/tenant_remote_rb/tx/2/commit"):
+			commitCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "errors": []any{}})
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/db/tenant_remote_rb/tx/2"):
+			rollbackCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "errors": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer remote.Close()
+
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, &multidb.Config{
+		DefaultDatabase: "nornic",
+		SystemDatabase:  "system",
+		RemoteEngineFactory: func(ref multidb.ConstituentRef, authToken string) (storage.Engine, error) {
+			return storage.NewRemoteEngine(storage.RemoteEngineConfig{
+				URI:       ref.URI,
+				Database:  ref.DatabaseName,
+				AuthToken: authToken,
+				User:      ref.User,
+				Password:  ref.Password,
+			})
+		},
+	})
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateCompositeDatabase("cmp_remote_rb", []multidb.ConstituentRef{
+		{Alias: "r", DatabaseName: "tenant_remote_rb", Type: "remote", AccessMode: "read_write", URI: remote.URL, AuthMode: "oidc_forwarding"},
+	}))
+
+	cmpStore, err := mgr.GetStorageWithAuth("cmp_remote_rb", "Bearer tx-token")
+	require.NoError(t, err)
+	exec := NewStorageExecutor(cmpStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	ctx := context.Background()
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CALL { USE cmp_remote_rb.r CREATE (n:RemoteTx {id: 'r2'}) RETURN count(n) AS c } RETURN c", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "ROLLBACK", nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, openCount)
+	require.Equal(t, 1, execCount)
+	require.Equal(t, 0, commitCount)
+	require.Equal(t, 1, rollbackCount)
 }

@@ -12,7 +12,7 @@ import (
 // circular imports.
 type CypherExecutor interface {
 	// ExecuteQuery runs a Cypher query against a storage engine and returns columns + rows.
-	ExecuteQuery(ctx context.Context, engine storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error)
+	ExecuteQuery(ctx context.Context, dbName string, engine storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error)
 }
 
 // LocalFragmentExecutor executes fragments against a local storage engine
@@ -41,7 +41,7 @@ func (l *LocalFragmentExecutor) Execute(ctx context.Context, loc *LocationLocal,
 		return nil, fmt.Errorf("failed to get storage for database '%s': %w", loc.DBName, err)
 	}
 
-	columns, rows, err := l.cypherExec.ExecuteQuery(ctx, engine, query, params)
+	columns, rows, err := l.cypherExec.ExecuteQuery(ctx, loc.DBName, engine, query, params)
 	if err != nil {
 		return nil, fmt.Errorf("local execution on '%s' failed: %w", loc.DBName, err)
 	}

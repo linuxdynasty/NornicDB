@@ -420,23 +420,50 @@ CREATE COMPOSITE DATABASE analytics
 
 ### Querying Composite Databases
 
-Once created, you can query a composite database just like any other database:
+Composite databases require explicit graph targeting using `USE <composite>.<alias>` to direct
+queries to specific constituents. Plain queries (MATCH, CREATE, MERGE, etc.) on the composite
+root are rejected — this matches Neo4j Fabric semantics.
 
 ```cypher
 -- Switch to composite database
 :USE analytics
 
--- Query across all constituents
-MATCH (n:Person)
-RETURN count(n)  -- Counts across all tenant databases
+-- Target a specific constituent using USE
+CALL {
+  USE analytics.tenant_a
+  MATCH (n:Person)
+  RETURN n.name AS name
+}
+RETURN name
 
--- Create nodes (routed to appropriate constituent)
-CREATE (n:Person {name: "Alice", database_id: "db_a"})
-
--- Match across all constituents
-MATCH (n:Person)
-WHERE n.database_id = "db_a"
+-- Write to a specific constituent
+CALL {
+  USE analytics.tenant_a
+  CREATE (n:Person {name: "Alice"})
+  RETURN n
+}
 RETURN n
+
+-- Query across multiple constituents (fan-out)
+CALL {
+  USE analytics.tenant_a
+  MATCH (n:Person) RETURN n.name AS name
+}
+CALL {
+  USE analytics.tenant_b
+  MATCH (n:Person) RETURN n.name AS name
+}
+RETURN name
+```
+
+**Important:** Plain queries without `USE` on a composite database will fail:
+
+```cypher
+-- This is REJECTED on composite databases:
+:USE analytics
+MATCH (n:Person) RETURN n
+-- Error: Queries on composite databases require explicit graph targeting.
+--        Use USE <composite>.<alias> to target a specific constituent
 ```
 
 ### Managing Composite Databases
@@ -473,26 +500,61 @@ ALTER COMPOSITE DATABASE analytics
 - **Data Federation**: Query distributed data transparently
 - **Multi-Region Queries**: Access data from databases in different regions
 
-### Schema Merging
+### Schema DDL on Composite Databases
 
-Composite databases automatically merge schemas (constraints and indexes) from all constituent databases:
+Schema commands (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW INDEXES, SHOW CONSTRAINTS)
+must target a specific constituent — they cannot run on the composite root. This matches
+Neo4j Fabric semantics.
 
 ```cypher
--- Each constituent can have its own indexes and constraints
--- In tenant_a:
-CREATE INDEX ON :Person(name)
-CREATE CONSTRAINT unique_person_email ON (p:Person) ASSERT p.email IS UNIQUE
+-- REJECTED: schema DDL on composite root
+:USE analytics
+SHOW INDEXES
+-- Error: SHOW INDEXES on composite databases requires a constituent target.
+--        Use USE <composite>.<alias> SHOW INDEXES
 
--- In tenant_b:
-CREATE INDEX ON :Company(name)
-CREATE INDEX ON :Company(country, city)
+CREATE INDEX idx_name FOR (p:Person) ON (p.name)
+-- Error: Schema DDL on composite databases requires a constituent target.
+--        Use USE <composite>.<alias> to target a specific constituent
 
--- Querying the composite database shows all merged schemas
-SHOW INDEXES  -- Shows indexes from all constituents
-SHOW CONSTRAINTS  -- Shows constraints from all constituents
+DROP INDEX idx_name
+-- Error: Schema DDL on composite databases requires a constituent target.
+
+-- CORRECT: target a specific constituent
+:USE analytics.tenant_a
+CREATE INDEX idx_name FOR (p:Person) ON (p.name)
+SHOW INDEXES
+DROP INDEX idx_name
+DROP INDEX idx_name IF EXISTS  -- silent no-op if index doesn't exist
 ```
 
-**Schema Merging Details:**
+#### HTTP Transaction API Example (Composite + USE)
+
+Schema operations over HTTP follow the same rule: the statement must target a constituent.
+
+```bash
+# Rejected: composite-root SHOW INDEXES
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"SHOW INDEXES"}]}' \
+  "http://localhost:7474/db/analytics/tx/commit"
+
+# Accepted: constituent-scoped schema DDL/introspection
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"USE analytics.tenant_a CREATE INDEX idx_name FOR (p:Person) ON (p.name)"}]}' \
+  "http://localhost:7474/db/analytics/tx/commit"
+
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"USE analytics.tenant_a SHOW INDEXES"}]}' \
+  "http://localhost:7474/db/analytics/tx/commit"
+```
+
+### Schema Merging (Read-Only View)
+
+The `CompositeEngine.GetSchema()` method merges schemas from all constituents for
+programmatic access. This merged view is read-only metadata:
 
 - **Constraints**: All constraint types (UNIQUE, NODE_KEY, EXISTS) are merged from all constituents
 - **Indexes**: All index types are merged:
@@ -501,15 +563,15 @@ SHOW CONSTRAINTS  -- Shows constraints from all constituents
   - Full-text indexes
   - Vector indexes
   - Range indexes
-- **Deduplication**: If multiple constituents have indexes/constraints with the same name, only one is shown in the merged schema
-- **Metadata Only**: The merged schema shows metadata only - actual indexed data remains in constituent databases
+- **Deduplication**: If multiple constituents have indexes/constraints with the same name, only one is shown
+- **Metadata Only**: The merged schema shows metadata only — actual indexed data remains in constituent databases
 
 ### How It Works
 
-1. **Query Routing**: Queries are automatically routed to relevant constituents based on labels and properties
-2. **Result Merging**: Results from all constituents are merged transparently (duplicates removed by ID)
-3. **Write Routing**: Write operations are routed to the appropriate constituent based on routing rules
-4. **Schema Merging**: Constraints and indexes from all constituents are merged into a unified schema view
+1. **Explicit Graph Targeting**: Queries use `USE <composite>.<alias>` to target specific constituents (Neo4j Fabric semantics)
+2. **Fabric Planner Decomposition**: Queries with `USE` clauses are decomposed into fragments at USE-clause boundaries by the Fabric planner
+3. **Many-Read/One-Write**: Reads can span any number of constituents; only one constituent may receive writes per transaction
+4. **Schema Merging**: Constraints and indexes from all constituents are merged into a unified metadata view (read-only)
 
 ### Remote Constituents
 
@@ -619,8 +681,15 @@ curl -s -u admin:password \
 
 ```cypher
 :USE nornic
-MATCH (n)
-RETURN labels(n) AS labels, count(*) AS c
+CALL {
+  USE nornic.tr
+  MATCH (n) RETURN labels(n) AS labels
+}
+CALL {
+  USE nornic.txt
+  MATCH (n) RETURN labels(n) AS labels
+}
+RETURN labels, count(*) AS c
 ORDER BY labels
 ```
 
@@ -658,6 +727,66 @@ Behavior:
 - Distributed writes are constrained to one write shard per transaction (many-read/one-write model).
 - Attempting writes on a second shard in the same transaction returns a deterministic transaction error.
 - Identity/auth context is forwarded for remote constituent execution when OIDC credential forwarding is configured.
+- For local constituents, explicit transactions use real per-constituent subtransactions with commit/rollback durability.
+- For remote constituents, explicit transactions now use real remote transaction handles (`/db/{db}/tx` open, statement execution, commit/rollback) bound to the distributed transaction coordinator lifecycle.
+
+#### Search Behavior on Composite Roots
+
+Search endpoints do not execute on composite roots. This matches strict graph-target semantics.
+
+- `POST /nornicdb/search` with `database=<composite>`: rejected
+- `POST /nornicdb/search/rebuild` with `database=<composite>`: rejected
+- `POST /nornicdb/similar` with `database=<composite>`: rejected
+
+Use a constituent database instead (for example `analytics.tenant_a` as the database target).
+
+#### Composite Database Stats Provenance
+
+`GET /db/{composite}` returns deterministic constituent provenance fields for aggregated stats:
+
+- `statsAggregation`: always `constituent_sum` for composite databases
+- `statsPartial`: `true` when one or more constituent stats could not be collected
+- `statsProvenance`: alias-sorted list of per-constituent stats (`alias`, `database`, `type`, `nodeCount`, `edgeCount`, `nodeStorageBytes`, `managedEmbeddingBytes`, search readiness/progress fields)
+
+This ensures aggregate counts are traceable to constituent databases and stable across calls.
+
+#### Composite Schema Operations Over HTTP (Neo4j-Compatible Targeting)
+
+Schema operations on composites must target a constituent via `USE <composite>.<alias>`.
+
+Create and inspect a unique constraint on a constituent:
+
+```bash
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"USE nornic.tr CREATE CONSTRAINT tr_id_unique FOR (n:Translation) REQUIRE n.id IS UNIQUE"}]}' \
+  "http://localhost:7474/db/nornic/tx/commit"
+
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"USE nornic.tr SHOW CONSTRAINTS"}]}' \
+  "http://localhost:7474/db/nornic/tx/commit"
+```
+
+Drop the constraint:
+
+```bash
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"USE nornic.tr DROP CONSTRAINT tr_id_unique"}]}' \
+  "http://localhost:7474/db/nornic/tx/commit"
+```
+
+Composite-root schema introspection/DDL is rejected:
+
+```bash
+curl -s -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"SHOW CONSTRAINTS"}]}' \
+  "http://localhost:7474/db/nornic/tx/commit"
+```
+
+Expected: Neo4j-style client semantic error instructing you to target a constituent graph.
 
 Example: valid explicit transaction (one write shard, multi-shard reads)
 
