@@ -51,6 +51,19 @@ export function Databases() {
     return `${m}m ${s}s`;
   };
 
+  const formatBytes = (bytes?: number): string => {
+    const n = typeof bytes === 'number' && Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = n;
+    let unitIdx = -1;
+    do {
+      value /= 1024;
+      unitIdx++;
+    } while (value >= 1024 && unitIdx < units.length - 1);
+    return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unitIdx]}`;
+  };
+
   const loadDatabases = useCallback(async () => {
     try {
       setError('');
@@ -318,6 +331,14 @@ export function Databases() {
                     <span className="text-norse-silver">Edges:</span>
                     <span className="text-white font-medium">{db.edgeCount.toLocaleString()}</span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-norse-silver">Node Storage:</span>
+                    <span className="text-white font-medium">{formatBytes(db.nodeStorageBytes)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-norse-silver">Managed Embeddings:</span>
+                    <span className="text-white font-medium">{formatBytes(db.managedEmbeddingBytes)}</span>
+                  </div>
                 </div>
               </div>
               );
@@ -410,6 +431,14 @@ export function Databases() {
             <div className="flex justify-between">
               <span className="text-norse-silver">Edges:</span>
               <span className="text-white font-medium">{selectedDatabase.edgeCount.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-norse-silver">Node Storage:</span>
+              <span className="text-white font-medium">{formatBytes(selectedDatabase.nodeStorageBytes)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-norse-silver">Managed Embeddings:</span>
+              <span className="text-white font-medium">{formatBytes(selectedDatabase.managedEmbeddingBytes)}</span>
             </div>
           </div>
         ) : (

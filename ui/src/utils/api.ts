@@ -60,6 +60,8 @@ export interface DatabaseInfo {
   default: boolean;
   nodeCount: number;
   edgeCount: number;
+  nodeStorageBytes?: number;
+  managedEmbeddingBytes?: number;
   searchReady?: boolean;
   searchBuilding?: boolean;
   searchInitialized?: boolean;

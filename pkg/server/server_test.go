@@ -2421,6 +2421,17 @@ func TestHandleDatabaseInfo(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.Code)
 	}
+
+	var info map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &info); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if _, ok := info["nodeStorageBytes"].(float64); !ok {
+		t.Fatalf("expected nodeStorageBytes in response, got %T", info["nodeStorageBytes"])
+	}
+	if _, ok := info["managedEmbeddingBytes"].(float64); !ok {
+		t.Fatalf("expected managedEmbeddingBytes in response, got %T", info["managedEmbeddingBytes"])
+	}
 }
 
 // =============================================================================

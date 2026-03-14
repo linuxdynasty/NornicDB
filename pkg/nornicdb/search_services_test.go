@@ -89,6 +89,28 @@ func TestSearchServices_HelperBranches(t *testing.T) {
 		require.Len(t, drained, 1)
 		require.True(t, drained["a"].remove)
 	})
+
+	t.Run("GetDatabaseManagedEmbeddingStats reports bytes per database", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.EmbeddingDimensions = 3
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		require.NoError(t, svc.IndexNode(&storage.Node{
+			ID:              storage.NodeID("embed-stats-node"),
+			Labels:          []string{"Doc"},
+			Properties:      map[string]interface{}{"title": "x"},
+			ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		}))
+
+		count, dims, bytes := db.GetDatabaseManagedEmbeddingStats(db.defaultDatabaseName())
+		require.Equal(t, 1, count)
+		require.Equal(t, 3, dims)
+		require.Equal(t, int64(12), bytes)
+	})
 }
 
 func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {

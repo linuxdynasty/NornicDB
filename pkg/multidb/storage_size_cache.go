@@ -1,0 +1,113 @@
+package multidb
+
+import (
+	"fmt"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+)
+
+// ensureStorageSizeInitialized performs one-time exact size calculation from storage
+// and caches the result for O(1) future reads.
+func (m *DatabaseManager) ensureStorageSizeInitialized(databaseName string, engine storage.Engine) error {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+	if !exists {
+		return ErrDatabaseNotFound
+	}
+
+	info.sizeMu.RLock()
+	if info.sizeInitialized {
+		info.sizeMu.RUnlock()
+		return nil
+	}
+	info.sizeMu.RUnlock()
+
+	nodeSize, edgeSize, err := m.calculateStorageSizeFromEngine(engine)
+	if err != nil {
+		return err
+	}
+
+	info.sizeMu.Lock()
+	if !info.sizeInitialized {
+		info.nodeSize = nodeSize
+		info.edgeSize = edgeSize
+		info.totalSize = nodeSize + edgeSize
+		info.sizeInitialized = true
+	}
+	info.sizeMu.Unlock()
+	return nil
+}
+
+// markStorageSizeDirty marks cached size as stale. The next read/operation will
+// recalculate from storage.
+func (m *DatabaseManager) markStorageSizeDirty(databaseName string) {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+	if !exists {
+		return
+	}
+	info.sizeMu.Lock()
+	info.sizeInitialized = false
+	info.sizeMu.Unlock()
+}
+
+// applyStorageSizeDelta updates cached size counters in O(1). If a previous operation
+// marked the cache dirty, deltas are ignored until re-initialization.
+func (m *DatabaseManager) applyStorageSizeDelta(databaseName string, nodeDelta, edgeDelta int64) {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+	if !exists {
+		return
+	}
+	info.sizeMu.Lock()
+	defer info.sizeMu.Unlock()
+	if !info.sizeInitialized {
+		return
+	}
+	info.nodeSize += nodeDelta
+	info.edgeSize += edgeDelta
+	info.totalSize += nodeDelta + edgeDelta
+	if info.nodeSize < 0 {
+		info.nodeSize = 0
+	}
+	if info.edgeSize < 0 {
+		info.edgeSize = 0
+	}
+	if info.totalSize < 0 {
+		info.totalSize = 0
+	}
+}
+
+func (m *DatabaseManager) calculateStorageSizeFromEngine(engine storage.Engine) (int64, int64, error) {
+	var nodeSize int64
+	var edgeSize int64
+
+	nodes, err := engine.AllNodes()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get all nodes for size calculation: %w", err)
+	}
+	for _, node := range nodes {
+		size, sizeErr := calculateNodeSize(node)
+		if sizeErr != nil {
+			return 0, 0, fmt.Errorf("failed to calculate node size: %w", sizeErr)
+		}
+		nodeSize += size
+	}
+
+	edges, err := engine.AllEdges()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get all edges for size calculation: %w", err)
+	}
+	for _, edge := range edges {
+		size, sizeErr := calculateEdgeSize(edge)
+		if sizeErr != nil {
+			return 0, 0, fmt.Errorf("failed to calculate edge size: %w", sizeErr)
+		}
+		edgeSize += size
+	}
+
+	return nodeSize, edgeSize, nil
+}

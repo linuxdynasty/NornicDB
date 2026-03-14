@@ -558,6 +558,30 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 	}
 }
 
+// GetDatabaseManagedEmbeddingStats returns managed embedding usage for a database.
+// managedBytes is computed as embedding_count * vector_dimensions * 4 (float32 bytes).
+func (db *DB) GetDatabaseManagedEmbeddingStats(dbName string) (embeddingCount int, vectorDimensions int, managedBytes int64) {
+	if strings.TrimSpace(dbName) == "" {
+		dbName = db.defaultDatabaseName()
+	}
+	if dbName == "system" {
+		return 0, 0, 0
+	}
+
+	svc, err := db.getOrCreateSearchService(dbName, nil)
+	if err != nil || svc == nil {
+		return 0, 0, 0
+	}
+
+	embeddingCount = svc.EmbeddingCount()
+	vectorDimensions = svc.VectorIndexDimensions()
+	if embeddingCount <= 0 || vectorDimensions <= 0 {
+		return embeddingCount, vectorDimensions, 0
+	}
+	managedBytes = int64(embeddingCount) * int64(vectorDimensions) * 4
+	return embeddingCount, vectorDimensions, managedBytes
+}
+
 // runClusteringOnceAllDatabases runs k-means for each database. Stops when ctx is cancelled (e.g. shutdown).
 func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
 	if ctx == nil {

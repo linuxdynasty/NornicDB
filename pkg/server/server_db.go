@@ -457,7 +457,9 @@ func (a *databaseInfoAdapter) CreatedAt() time.Time {
 //	  "status": "online",
 //	  "default": false,
 //	  "nodeCount": 1234,
-//	  "edgeCount": 5678
+//	  "edgeCount": 5678,
+//	  "nodeStorageBytes": 123456,
+//	  "managedEmbeddingBytes": 4194304
 //	}
 //
 // Errors:
@@ -472,7 +474,9 @@ func (a *databaseInfoAdapter) CreatedAt() time.Time {
 //	  "status": "online",
 //	  "default": false,
 //	  "nodeCount": 100,
-//	  "edgeCount": 50
+//	  "edgeCount": 50,
+//	  "nodeStorageBytes": 20480,
+//	  "managedEmbeddingBytes": 12288
 //	}
 //
 // Thread Safety:
@@ -520,6 +524,8 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		// Log error but continue with 0 count
 		edgeCount = 0
 	}
+	_, nodeStorageBytes, _ := s.dbManager.GetStorageSize(dbName)
+	_, _, managedEmbeddingBytes := s.db.GetDatabaseManagedEmbeddingStats(dbName)
 
 	// Check if this is the default database
 	// The default database is configured at startup and cannot be dropped
@@ -527,19 +533,21 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 	searchStatus := s.db.GetDatabaseSearchStatus(dbName)
 
 	response := map[string]interface{}{
-		"name":              dbName,
-		"status":            "online",
-		"default":           dbName == defaultDB,
-		"nodeCount":         nodeCount,
-		"edgeCount":         edgeCount,
-		"searchReady":       searchStatus.Ready,
-		"searchBuilding":    searchStatus.Building,
-		"searchInitialized": searchStatus.Initialized,
-		"searchPhase":       searchStatus.Phase,
-		"searchProcessed":   searchStatus.ProcessedNodes,
-		"searchTotal":       searchStatus.TotalNodes,
-		"searchRate":        searchStatus.RateNodesPerSec,
-		"searchEtaSeconds":  searchStatus.ETASeconds,
+		"name":                  dbName,
+		"status":                "online",
+		"default":               dbName == defaultDB,
+		"nodeCount":             nodeCount,
+		"edgeCount":             edgeCount,
+		"nodeStorageBytes":      nodeStorageBytes,
+		"managedEmbeddingBytes": managedEmbeddingBytes,
+		"searchReady":           searchStatus.Ready,
+		"searchBuilding":        searchStatus.Building,
+		"searchInitialized":     searchStatus.Initialized,
+		"searchPhase":           searchStatus.Phase,
+		"searchProcessed":       searchStatus.ProcessedNodes,
+		"searchTotal":           searchStatus.TotalNodes,
+		"searchRate":            searchStatus.RateNodesPerSec,
+		"searchEtaSeconds":      searchStatus.ETASeconds,
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

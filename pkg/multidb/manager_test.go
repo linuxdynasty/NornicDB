@@ -832,3 +832,118 @@ func TestDatabaseManager_BackwardsCompatibility(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, nodes, 1)
 }
+
+func TestDatabaseManager_GetStorageSize_LazyInitFromRealData(t *testing.T) {
+	inner := storage.NewMemoryEngine()
+	defer inner.Close()
+
+	manager, err := NewDatabaseManager(inner, nil)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.CreateDatabase("tenant_size"))
+	store, err := manager.GetStorage("tenant_size")
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     storage.NodeID("a"),
+		Labels: []string{"Person"},
+		Properties: map[string]any{
+			"name": "alice",
+			"age":  int64(42),
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     storage.NodeID("b"),
+		Labels: []string{"Person"},
+		Properties: map[string]any{
+			"name": "bob",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         storage.EdgeID("ab"),
+		StartNode:  storage.NodeID("a"),
+		EndNode:    storage.NodeID("b"),
+		Type:       "KNOWS",
+		Properties: map[string]any{"since": int64(2020)},
+	}))
+
+	total, nodeBytes, edgeBytes := manager.GetStorageSize("tenant_size")
+	assert.Greater(t, total, int64(0))
+	assert.Greater(t, nodeBytes, int64(0))
+	assert.Greater(t, edgeBytes, int64(0))
+	assert.Equal(t, total, nodeBytes+edgeBytes)
+
+	base := storage.NewNamespacedEngine(inner, "tenant_size")
+	wantNodeBytes, wantEdgeBytes, calcErr := manager.calculateStorageSizeFromEngine(base)
+	require.NoError(t, calcErr)
+	assert.Equal(t, wantNodeBytes+wantEdgeBytes, total)
+	assert.Equal(t, wantNodeBytes, nodeBytes)
+	assert.Equal(t, wantEdgeBytes, edgeBytes)
+}
+
+func TestDatabaseManager_GetStorageSize_IncrementalTrackingMatchesExactBytes(t *testing.T) {
+	inner := storage.NewMemoryEngine()
+	defer inner.Close()
+
+	manager, err := NewDatabaseManager(inner, nil)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.CreateDatabase("tenant_delta"))
+	store, err := manager.GetStorage("tenant_delta")
+	require.NoError(t, err)
+
+	// Seed cache at zero to force incremental path for later writes.
+	total, nodeBytes, edgeBytes := manager.GetStorageSize("tenant_delta")
+	assert.Zero(t, total)
+	assert.Zero(t, nodeBytes)
+	assert.Zero(t, edgeBytes)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     storage.NodeID("n1"),
+		Labels: []string{"Item"},
+		Properties: map[string]any{
+			"name": "one",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     storage.NodeID("n2"),
+		Labels: []string{"Item"},
+		Properties: map[string]any{
+			"name": "two",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateEdge(&storage.Edge{
+		ID:         storage.EdgeID("e1"),
+		StartNode:  storage.NodeID("n1"),
+		EndNode:    storage.NodeID("n2"),
+		Type:       "REL",
+		Properties: map[string]any{"weight": 1.5},
+	}))
+
+	// Update node to change byte footprint.
+	require.NoError(t, store.UpdateNode(&storage.Node{
+		ID:     storage.NodeID("n1"),
+		Labels: []string{"Item"},
+		Properties: map[string]any{
+			"name":  "one",
+			"extra": "payload",
+		},
+	}))
+
+	// Delete node with connected edge; cached edge bytes should also decrement.
+	require.NoError(t, store.DeleteNode(storage.NodeID("n1")))
+
+	gotTotal, gotNodeBytes, gotEdgeBytes := manager.GetStorageSize("tenant_delta")
+	base := storage.NewNamespacedEngine(inner, "tenant_delta")
+	wantNodeBytes, wantEdgeBytes, calcErr := manager.calculateStorageSizeFromEngine(base)
+	require.NoError(t, calcErr)
+	assert.Equal(t, wantNodeBytes+wantEdgeBytes, gotTotal)
+	assert.Equal(t, wantNodeBytes, gotNodeBytes)
+	assert.Equal(t, wantEdgeBytes, gotEdgeBytes)
+}

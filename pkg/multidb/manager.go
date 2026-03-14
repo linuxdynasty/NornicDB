@@ -52,8 +52,8 @@ type DatabaseManager struct {
 	// Configuration
 	config *Config
 
-	// Cached namespaced engines (avoid recreating)
-	engines map[string]*storage.NamespacedEngine
+	// Cached database-scoped engines (avoid recreating)
+	engines map[string]storage.Engine
 
 	// Factory used to create storage engines for remote constituents.
 	remoteEngineFactory RemoteEngineFactory
@@ -155,7 +155,7 @@ func NewDatabaseManager(inner storage.Engine, config *Config) (*DatabaseManager,
 		inner:               inner,
 		databases:           make(map[string]*DatabaseInfo),
 		config:              config,
-		engines:             make(map[string]*storage.NamespacedEngine),
+		engines:             make(map[string]storage.Engine),
 		remoteEngineFactory: config.RemoteEngineFactory,
 	}
 	if key := strings.TrimSpace(config.RemoteCredentialEncryptionKey); key != "" {
@@ -496,7 +496,8 @@ func (m *DatabaseManager) GetStorageWithAuth(name string, authToken string) (sto
 	// Create namespaced engine for standard databases
 	// Note: Limit enforcement is handled separately via LimitChecker
 	// which is created on-demand when needed (not stored here)
-	engine := storage.NewNamespacedEngine(m.inner, name)
+	baseEngine := storage.NewNamespacedEngine(m.inner, name)
+	engine := newSizeTrackingEngine(baseEngine, m, name)
 	m.engines[name] = engine
 
 	return engine, nil
@@ -520,8 +521,9 @@ func (m *DatabaseManager) getStorageInternal(name string) (storage.Engine, error
 		return nil, ErrDatabaseOffline
 	}
 
-	// Create namespaced engine
-	engine := storage.NewNamespacedEngine(m.inner, name)
+	// Create namespaced engine with storage-size tracking.
+	baseEngine := storage.NewNamespacedEngine(m.inner, name)
+	engine := newSizeTrackingEngine(baseEngine, m, name)
 	m.engines[name] = engine
 
 	return engine, nil
@@ -623,7 +625,7 @@ func (m *DatabaseManager) Close() error {
 	defer m.mu.Unlock()
 
 	// Clear all cached engines
-	m.engines = make(map[string]*storage.NamespacedEngine)
+	m.engines = make(map[string]storage.Engine)
 
 	// Close the underlying storage
 	return m.inner.Close()
@@ -813,19 +815,7 @@ func (m *DatabaseManager) validateAliasName(alias string) error {
 //
 // Thread-safe: This method is safe to call from multiple goroutines.
 func (m *DatabaseManager) IncrementStorageSize(databaseName string, nodeSize, edgeSize int64) {
-	m.mu.RLock()
-	info, exists := m.databases[databaseName]
-	m.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	info.sizeMu.Lock()
-	info.totalSize += nodeSize + edgeSize
-	info.nodeSize += nodeSize
-	info.edgeSize += edgeSize
-	info.sizeMu.Unlock()
+	m.applyStorageSizeDelta(databaseName, nodeSize, edgeSize)
 }
 
 // DecrementStorageSize decrements the tracked storage size for a database.
@@ -850,29 +840,7 @@ func (m *DatabaseManager) IncrementStorageSize(databaseName string, nodeSize, ed
 // Thread-safe: This method is safe to call from multiple goroutines.
 // Defensive: Size is prevented from going negative (resets to 0 if underflow).
 func (m *DatabaseManager) DecrementStorageSize(databaseName string, nodeSize, edgeSize int64) {
-	m.mu.RLock()
-	info, exists := m.databases[databaseName]
-	m.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	info.sizeMu.Lock()
-	info.totalSize -= nodeSize + edgeSize
-	info.nodeSize -= nodeSize
-	info.edgeSize -= edgeSize
-	// Ensure size doesn't go negative (defensive)
-	if info.totalSize < 0 {
-		info.totalSize = 0
-	}
-	if info.nodeSize < 0 {
-		info.nodeSize = 0
-	}
-	if info.edgeSize < 0 {
-		info.edgeSize = 0
-	}
-	info.sizeMu.Unlock()
+	m.applyStorageSizeDelta(databaseName, -nodeSize, -edgeSize)
 }
 
 // GetStorageSize returns the current tracked storage size for a database.
@@ -895,11 +863,21 @@ func (m *DatabaseManager) DecrementStorageSize(databaseName string, nodeSize, ed
 func (m *DatabaseManager) GetStorageSize(databaseName string) (int64, int64, int64) {
 	m.mu.RLock()
 	info, exists := m.databases[databaseName]
+	var engine storage.Engine
+	if exists {
+		if cached, ok := m.engines[databaseName]; ok {
+			engine = cached
+		} else {
+			engine = storage.NewNamespacedEngine(m.inner, databaseName)
+		}
+	}
 	m.mu.RUnlock()
 
 	if !exists {
 		return 0, 0, 0
 	}
+
+	_ = m.ensureStorageSizeInitialized(databaseName, engine)
 
 	info.sizeMu.RLock()
 	defer info.sizeMu.RUnlock()
