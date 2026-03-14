@@ -19,3 +19,12 @@ func TestStripLeadingWithImportsForFabricRecord_UnwindPipelineIsStripped(t *test
 		t.Fatalf("expected stripped query %q, got %q", want, got)
 	}
 }
+
+func TestStripLeadingWithImportsForFabricRecord_UseClauseIsStripped(t *testing.T) {
+	query := "WITH textKey128 USE translations.txr MATCH (tt) WHERE tt.translationId = textKey128 RETURN collect(tt) AS texts"
+	got := stripLeadingWithImportsForFabricRecord(query, map[string]interface{}{"textKey128": "abc"})
+	want := "USE translations.txr MATCH (tt) WHERE tt.translationId = $textKey128 RETURN collect(tt) AS texts"
+	if got != want {
+		t.Fatalf("expected stripped query %q, got %q", want, got)
+	}
+}

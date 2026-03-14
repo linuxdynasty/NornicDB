@@ -993,11 +993,23 @@ func isSimpleWithImportClause(withClause string, importCols []string) bool {
 		return false
 	}
 	parts := splitTopLevelCSV(lhs)
-	if len(parts) != len(importCols) {
+	if len(parts) == 0 {
 		return false
 	}
-	for i, p := range parts {
-		if strings.TrimSpace(p) != strings.TrimSpace(importCols[i]) {
+	allowed := make(map[string]struct{}, len(importCols))
+	for _, col := range importCols {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		allowed[col] = struct{}{}
+	}
+	for _, p := range parts {
+		name := strings.TrimSpace(p)
+		if !isSimpleIdentifier(name) {
+			return false
+		}
+		if _, ok := allowed[name]; !ok {
 			return false
 		}
 	}

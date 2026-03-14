@@ -609,9 +609,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		boltConfig.RequireAuth = true
 	}
 
-	// Create query executor adapter
+	// Create query executor adapter (fallback for single-DB mode) and bind Bolt
+	// to the same database manager used by HTTP so multi-db/composite/fabric
+	// semantics are identical across protocols.
 	queryExecutor := NewDBQueryExecutor(db)
-	boltServer := bolt.New(boltConfig, queryExecutor)
+	boltServer := bolt.NewWithDatabaseManager(boltConfig, queryExecutor, httpServer.GetDatabaseManager())
 	// Wire per-database access from HTTP server so Bolt enforces same policy (allowlist + principal roles)
 	boltServer.SetDatabaseAccessModeResolver(httpServer.GetDatabaseAccessModeForRoles)
 	// Wire per-DB read/write for mutation checks (Phase 4)

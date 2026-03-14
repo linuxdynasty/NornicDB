@@ -13,6 +13,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/multidb"
 )
 
 // =============================================================================
@@ -86,6 +87,15 @@ func (s *Server) GetDatabaseAccessModeForRoles(roles []string) auth.DatabaseAcce
 // Prefer getDatabaseAccessMode(claims) or GetDatabaseAccessModeForRoles(roles) when principal is known.
 func (s *Server) GetDatabaseAccessMode() auth.DatabaseAccessMode {
 	return s.getDatabaseAccessMode(nil)
+}
+
+// GetDatabaseManager returns the server's multi-database manager so external
+// protocol frontends can route through the same database-resolution path.
+func (s *Server) GetDatabaseManager() *multidb.DatabaseManager {
+	if s == nil {
+		return nil
+	}
+	return s.dbManager
 }
 
 // getResolvedAccess returns per-DB read/write for (claims, dbName). When privilegesStore is set, uses it; else falls back to global PermRead/PermWrite.

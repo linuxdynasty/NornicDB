@@ -298,7 +298,8 @@ func stripLeadingWithImportsForFabricRecord(query string, recordBindings map[str
 	if !(startsWithKeywordFold(rest, "MATCH") ||
 		startsWithKeywordFold(rest, "OPTIONAL MATCH") ||
 		startsWithKeywordFold(rest, "RETURN") ||
-		startsWithKeywordFold(rest, "UNWIND")) {
+		startsWithKeywordFold(rest, "UNWIND") ||
+		startsWithKeywordFold(rest, "USE")) {
 		return query
 	}
 	imports := splitCommaTopLevelLocal(withClause)
@@ -365,6 +366,7 @@ func findLeadingWithEndLocal(query string) int {
 			startsWithKeywordAtLocal(query, i, "OPTIONAL MATCH") ||
 			startsWithKeywordAtLocal(query, i, "RETURN") ||
 			startsWithKeywordAtLocal(query, i, "WHERE") ||
+			startsWithKeywordAtLocal(query, i, "USE") ||
 			startsWithKeywordAtLocal(query, i, "WITH") ||
 			startsWithKeywordAtLocal(query, i, "CALL") ||
 			startsWithKeywordAtLocal(query, i, "CREATE") ||

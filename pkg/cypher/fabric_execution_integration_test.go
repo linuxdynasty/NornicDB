@@ -329,9 +329,21 @@ RETURN textKey, textKey128, texts
 	require.NoError(t, err)
 	require.Equal(t, []string{"textKey", "textKey128", "texts"}, res.Columns)
 	require.Len(t, res.Rows, 2)
+	byKey := make(map[string][]interface{}, len(res.Rows))
 	for _, row := range res.Rows {
 		require.Len(t, row, 3)
+		textKey, _ := row[0].(string)
+		textKey128, _ := row[1].(string)
+		require.NotEqual(t, "coalesce(textKey, textKey128)", textKey)
+		require.NotEqual(t, "textKey128", textKey128)
+		texts, ok := row[2].([]interface{})
+		require.True(t, ok, "texts should be a list")
+		byKey[textKey128] = texts
 	}
+	require.Contains(t, byKey, "h1")
+	require.Contains(t, byKey, "h2")
+	require.Len(t, byKey["h1"], 1)
+	require.Len(t, byKey["h2"], 1)
 }
 
 func TestExecute_FabricCorrelatedCallUseChain_ListComprehensionJoin(t *testing.T) {
