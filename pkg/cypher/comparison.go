@@ -299,7 +299,16 @@ func (e *StorageExecutor) evaluateInOp(node *storage.Node, variable, whereClause
 		return false
 	}
 
-	listVal := e.evaluateExpressionWithContext(right, nodes, nil)
+	rightIdent := strings.TrimSpace(right)
+	var listVal interface{}
+	if isValidIdentifier(rightIdent) {
+		if v, ok := e.fabricRecordBindings[rightIdent]; ok {
+			listVal = v
+		}
+	}
+	if listVal == nil {
+		listVal = e.evaluateExpressionWithContext(right, nodes, nil)
+	}
 	items, ok := toInterfaceSlice(listVal)
 	if !ok {
 		return false

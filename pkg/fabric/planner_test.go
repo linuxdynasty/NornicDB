@@ -260,8 +260,8 @@ RETURN translationId, textKey, texts`
 func TestPlan_CallWithThenUseSubquery(t *testing.T) {
 	catalog := NewCatalog()
 	catalog.Register("translations", &LocationLocal{DBName: "translations"})
-	catalog.Register("translations.tr", &LocationLocal{DBName: "caremark_tr"})
-	catalog.Register("translations.txr", &LocationLocal{DBName: "caremark_txt"})
+	catalog.Register("translations.tr", &LocationLocal{DBName: "nornic_tr"})
+	catalog.Register("translations.txr", &LocationLocal{DBName: "nornic_txt"})
 	p := NewFabricPlanner(catalog)
 
 	query := `USE translations
@@ -350,6 +350,71 @@ RETURN collect(tt) AS texts
 	}
 	if !ok {
 		t.Fatalf("expected WITH ... USE ... block to be detected as fabric block")
+	}
+}
+
+func TestCallBlockContainsFabricUse_WithPipelineThenUse(t *testing.T) {
+	body := `
+WITH rows
+UNWIND rows AS r
+WITH collect(DISTINCT r.textKey128) AS keys
+USE translations.txr
+MATCH (tt)
+WHERE tt.textKey128 IN keys
+RETURN collect(tt) AS texts
+`
+	ok, err := callBlockContainsFabricUse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected WITH/UNWIND/.../USE block to be detected as fabric block")
+	}
+}
+
+func TestPlan_MidQueryUseAfterPipeline(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("translations", &LocationLocal{DBName: "translations"})
+	catalog.Register("translations.txr", &LocationLocal{DBName: "caremark_txt"})
+	p := NewFabricPlanner(catalog)
+
+	query := `WITH rows
+UNWIND rows AS r
+WITH collect(DISTINCT r.textKey128) AS keys
+USE translations.txr
+MATCH (tt:MongoDocument)
+WHERE tt.textKey128 IN keys
+RETURN tt.textKey128 AS k, collect(tt) AS texts`
+
+	frag, err := p.Plan(query, "translations")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	root, ok := frag.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected apply root for mid-query USE, got %T", frag)
+	}
+	prefixExec, ok := root.Input.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected prefix apply, got %T", root.Input)
+	}
+	pe, ok := prefixExec.Inner.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected prefix exec, got %T", prefixExec.Inner)
+	}
+	if pe.GraphName != "translations" {
+		t.Fatalf("expected prefix graph translations, got %s", pe.GraphName)
+	}
+	up := strings.TrimSpace(strings.ToUpper(pe.Query))
+	if !(strings.HasSuffix(up, "RETURN KEYS") || strings.HasSuffix(up, "RETURN *")) {
+		t.Fatalf("expected prefix query to materialize row bindings via RETURN alias, got %q", pe.Query)
+	}
+	innerExec, ok := root.Inner.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected inner exec after USE, got %T", root.Inner)
+	}
+	if innerExec.GraphName != "translations.txr" {
+		t.Fatalf("expected USE-routed graph translations.txr, got %s", innerExec.GraphName)
 	}
 }
 

@@ -292,6 +292,15 @@ func stripLeadingWithImportsForFabricRecord(query string, recordBindings map[str
 	if rest == "" {
 		return query
 	}
+	// Stripping is safe for simple imported bindings when the next clause is a
+	// top-level read/projection/pipeline clause that can resolve identifiers from
+	// Fabric record bindings.
+	if !(startsWithKeywordFold(rest, "MATCH") ||
+		startsWithKeywordFold(rest, "OPTIONAL MATCH") ||
+		startsWithKeywordFold(rest, "RETURN") ||
+		startsWithKeywordFold(rest, "UNWIND")) {
+		return query
+	}
 	imports := splitCommaTopLevelLocal(withClause)
 	if len(imports) == 0 {
 		return query
@@ -305,7 +314,12 @@ func stripLeadingWithImportsForFabricRecord(query string, recordBindings map[str
 			return query
 		}
 	}
-	return rest
+	rewritten := rest
+	for _, item := range imports {
+		name := strings.TrimSpace(item)
+		rewritten = replaceStandaloneCypherIdentifier(rewritten, name, "$"+name)
+	}
+	return rewritten
 }
 
 func findLeadingWithEndLocal(query string) int {

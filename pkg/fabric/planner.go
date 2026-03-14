@@ -18,7 +18,7 @@ func extractGraphReference(s string) (string, string, bool, error) {
 	trimmed := strings.TrimSpace(s)
 	lower := strings.ToLower(trimmed)
 
-	for _, prefix := range []string{"graph.byname(", "graph.byelementid("} {
+	for _, prefix := range graphReferencePrefixes {
 		if !strings.HasPrefix(lower, prefix) {
 			continue
 		}
@@ -42,6 +42,11 @@ func extractGraphReference(s string) (string, string, bool, error) {
 	}
 
 	return "", "", false, nil
+}
+
+var graphReferencePrefixes = [...]string{
+	"graph.byname(",
+	"graph.byelementid(",
 }
 
 func findMatchingParen(s string, pos int) (int, error) {
@@ -320,6 +325,46 @@ func (p *FabricPlanner) planSingleQuery(trimmed string, sessionDB string) (Fragm
 	}
 
 	if len(fabricBlocks) == 0 {
+		// Support top-level mid-query USE routing (e.g. "WITH ... USE db MATCH ...").
+		// This keeps prefixes in the current graph and routes the remainder to the USE target.
+		if prefix, rest, ok := splitAtTopLevelUse(remaining); ok {
+			subDB, subRest, hasUse, err := parseLeadingUse(rest)
+			if err != nil {
+				return nil, err
+			}
+			if !hasUse {
+				return nil, fmt.Errorf("invalid USE clause")
+			}
+			if err := p.validateUseTarget(topDB, subDB); err != nil {
+				return nil, err
+			}
+			inner, err := p.planSingleQuery(subRest, subDB)
+			if err != nil {
+				return nil, err
+			}
+			prefix = strings.TrimSpace(prefix)
+			if prefix == "" {
+				return inner, nil
+			}
+			prefix = ensureRowProducingPrefix(prefix)
+			prefixExec := &FragmentExec{
+				Input:     &FragmentInit{Columns: nil},
+				Query:     prefix,
+				GraphName: topDB,
+				Columns:   nil,
+				IsWrite:   queryIsWrite(prefix),
+			}
+			return &FragmentApply{
+				Input: &FragmentApply{
+					Input:   &FragmentInit{Columns: nil},
+					Inner:   prefixExec,
+					Columns: nil,
+				},
+				Inner:   inner,
+				Columns: nil,
+			}, nil
+		}
+
 		// Simple case: single-graph query, no CALL {} blocks at this scope.
 		isWrite := queryIsWrite(remaining)
 		return &FragmentExec{
@@ -335,6 +380,318 @@ func (p *FabricPlanner) planSingleQuery(trimmed string, sessionDB string) (Fragm
 	// The top-level USE sets the default graph; each CALL { USE ... } block
 	// targets a different constituent.
 	return p.planMultiGraph(topDB, remaining, fabricBlocks)
+}
+
+func splitAtTopLevelUse(query string) (string, string, bool) {
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
+	parenDepth := 0
+	braceDepth := 0
+	bracketDepth := 0
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+
+		switch {
+		case inSingleQuote:
+			if ch == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		case inDoubleQuote:
+			if ch == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+			continue
+		case '"':
+			inDoubleQuote = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			parenDepth++
+			continue
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			continue
+		case '{':
+			braceDepth++
+			continue
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			continue
+		case '[':
+			bracketDepth++
+			continue
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			continue
+		}
+
+		if parenDepth != 0 || braceDepth != 0 || bracketDepth != 0 {
+			continue
+		}
+		if !keywordAt(query, i, "USE") {
+			continue
+		}
+		// Leading USE is already handled by parseLeadingUse.
+		if strings.TrimSpace(query[:i]) == "" {
+			continue
+		}
+		return query[:i], query[i:], true
+	}
+
+	return "", "", false
+}
+
+func ensureRowProducingPrefix(query string) string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return trimmed
+	}
+	if hasTopLevelReturnClause(trimmed) {
+		return trimmed
+	}
+	if startsWithFold(trimmed, "WITH ") {
+		if aliases := trailingWithAliases(trimmed); len(aliases) > 0 {
+			return trimmed + " RETURN " + strings.Join(aliases, ", ")
+		}
+	}
+	return trimmed + " RETURN *"
+}
+
+func hasTopLevelReturnClause(query string) bool {
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
+	parenDepth := 0
+	braceDepth := 0
+	bracketDepth := 0
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		switch {
+		case inSingleQuote:
+			if ch == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		case inDoubleQuote:
+			if ch == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+			continue
+		case '"':
+			inDoubleQuote = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			parenDepth++
+			continue
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			continue
+		case '{':
+			braceDepth++
+			continue
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			continue
+		case '[':
+			bracketDepth++
+			continue
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			continue
+		}
+		if parenDepth != 0 || braceDepth != 0 || bracketDepth != 0 {
+			continue
+		}
+		if keywordAt(query, i, "RETURN") {
+			return true
+		}
+	}
+	return false
+}
+
+func trailingWithAliases(query string) []string {
+	lastWith := -1
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
+	parenDepth := 0
+	braceDepth := 0
+	bracketDepth := 0
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		switch {
+		case inSingleQuote:
+			if ch == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		case inDoubleQuote:
+			if ch == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+			continue
+		case '"':
+			inDoubleQuote = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			parenDepth++
+			continue
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			continue
+		case '{':
+			braceDepth++
+			continue
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			continue
+		case '[':
+			bracketDepth++
+			continue
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			continue
+		}
+		if parenDepth != 0 || braceDepth != 0 || bracketDepth != 0 {
+			continue
+		}
+		if keywordAt(query, i, "WITH") {
+			lastWith = i
+		}
+	}
+	if lastWith < 0 {
+		return nil
+	}
+
+	clause := strings.TrimSpace(query[lastWith+len("WITH"):])
+	if clause == "" {
+		return nil
+	}
+	parts := splitTopLevelCSV(clause)
+	aliases := make([]string, 0, len(parts))
+	for _, p := range parts {
+		item := strings.TrimSpace(p)
+		if item == "" {
+			continue
+		}
+		if idx := lastAsIndexFold(item); idx >= 0 {
+			alias := strings.TrimSpace(item[idx+4:])
+			if isValidIdentifier(alias) {
+				aliases = append(aliases, alias)
+			}
+			continue
+		}
+		if isValidIdentifier(item) {
+			aliases = append(aliases, item)
+		}
+	}
+	return aliases
+}
+
+func isValidIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+			continue
+		}
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // planMultiGraph builds a Fragment tree for queries with top-level CALL {} subqueries.
@@ -721,6 +1078,9 @@ func callBlockContainsFabricUse(body string) (bool, error) {
 	if hasWithUse {
 		return true, nil
 	}
+	if _, _, ok := splitAtTopLevelUse(body); ok {
+		return true, nil
+	}
 
 	nested, err := extractTopLevelCallBlocks(body)
 	if err != nil {
@@ -905,6 +1265,21 @@ func startsWithFold(s, prefix string) bool {
 		return false
 	}
 	return strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func containsFold(s, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(s) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(needle); i++ {
+		if strings.EqualFold(s[i:i+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func isWhitespace(b byte) bool {

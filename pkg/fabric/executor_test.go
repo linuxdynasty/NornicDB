@@ -471,6 +471,50 @@ func TestRewriteLeadingWithImports_NoLeadingWithReturn(t *testing.T) {
 	}
 }
 
+func TestExecuteApplyInMemoryProjection_WithCollectMapReturnAlias(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"textKey", "textKey128"},
+		Rows: [][]interface{}{
+			{"k1", "h1"},
+			{"k2", "h2"},
+		},
+	}
+	query := "WITH collect({textKey: textKey, textKey128: textKey128}) AS rows\nRETURN rows"
+	res, handled := executeApplyInMemoryProjection(input, query)
+	if !handled {
+		t.Fatal("expected projection to be handled")
+	}
+	if res == nil {
+		t.Fatal("expected non-nil projection result")
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected one aggregated row, got %d", len(res.Rows))
+	}
+}
+
+func TestMergeBindings(t *testing.T) {
+	parent := map[string]interface{}{"rows": []interface{}{1, 2}, "x": "parent"}
+	row := map[string]interface{}{"x": "row", "k": "v"}
+	got := mergeBindings(parent, row)
+	if got["rows"] == nil || got["k"] != "v" || got["x"] != "row" {
+		t.Fatalf("unexpected merged bindings: %#v", got)
+	}
+}
+
+func TestSynthesizeEmptyCollectOnlyReturn(t *testing.T) {
+	cols, row, ok := synthesizeEmptyCollectOnlyReturn("MATCH (n) RETURN collect(n.id) AS ids")
+	if !ok {
+		t.Fatal("expected collect-only return to synthesize empty row")
+	}
+	if len(cols) != 1 || cols[0] != "ids" {
+		t.Fatalf("unexpected columns: %#v", cols)
+	}
+	values, ok := row[0].([]interface{})
+	if !ok || len(values) != 0 {
+		t.Fatalf("expected empty list value, got %#v", row[0])
+	}
+}
+
 func BenchmarkDeduplicateRows(b *testing.B) {
 	rows := make([][]interface{}, 0, 10000)
 	for i := 0; i < 5000; i++ {

@@ -284,6 +284,55 @@ func TestEvaluateInOpMatch(t *testing.T) {
 	assert.Len(t, result.Rows, 1)
 }
 
+func TestEvaluateInOpMatch_UsesFabricRecordBindingList(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (:Doc {id:'a', textKey128:'h1'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Doc {id:'b', textKey128:'h2'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:Doc {id:'c', textKey128:'h3'})", nil)
+	require.NoError(t, err)
+
+	exec.fabricRecordBindings = map[string]interface{}{
+		"keys": []interface{}{"h1", "h2"},
+	}
+	t.Cleanup(func() { exec.fabricRecordBindings = nil })
+
+	res, err := exec.Execute(ctx, "MATCH (n:Doc) WHERE n.textKey128 IN keys RETURN n.textKey128 AS k ORDER BY k", nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"k"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	assert.ElementsMatch(t, []interface{}{"h1", "h2"}, []interface{}{res.Rows[0][0], res.Rows[1][0]})
+}
+
+func TestExecuteUnwind_WithCollectDistinctProjection(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.WithValue(context.Background(), paramsKey, map[string]interface{}{
+		"rows": []interface{}{
+			map[string]interface{}{"textKey128": "h1"},
+			map[string]interface{}{"textKey128": "h2"},
+			map[string]interface{}{"textKey128": "h1"},
+		},
+	})
+
+	res, err := exec.executeUnwind(ctx, `
+UNWIND $rows AS r
+WITH collect(DISTINCT r.textKey128) AS keys
+RETURN keys`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"keys"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	keys, ok := res.Rows[0][0].([]interface{})
+	require.True(t, ok)
+	require.ElementsMatch(t, []interface{}{"h1", "h2"}, keys)
+}
+
 // Test Parser default case in Parse
 func TestParserDefaultCase(t *testing.T) {
 	parser := NewParser()

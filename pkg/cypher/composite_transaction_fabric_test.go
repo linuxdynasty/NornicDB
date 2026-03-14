@@ -90,14 +90,14 @@ func TestCompositeExplicitTx_DocumentationExamples(t *testing.T) {
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
-	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
-		{Alias: "txt", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("nornic_cmp_tx", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txt", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
 	}))
 
-	cmpStore, err := mgr.GetStorage("caremark")
+	cmpStore, err := mgr.GetStorage("nornic_cmp_tx")
 	require.NoError(t, err)
 	exec := NewStorageExecutor(cmpStore)
 	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
@@ -108,7 +108,7 @@ func TestCompositeExplicitTx_DocumentationExamples(t *testing.T) {
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, `
 CALL {
-  USE caremark.tr
+  USE nornic_cmp_tx.tr
   CREATE (t:Translation {id: "tr-tx-1", textKey: "ORDERS_WHERE"})
   RETURN count(t) AS c
 }
@@ -123,7 +123,7 @@ RETURN c
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, `
 CALL {
-  USE caremark.tr
+  USE nornic_cmp_tx.tr
   CREATE (t:Translation {id: "tr-tx-2"})
   RETURN count(t) AS c
 }
@@ -132,7 +132,7 @@ RETURN c
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, `
 CALL {
-  USE caremark.txt
+  USE nornic_cmp_tx.txt
   CREATE (tt:TranslationText {translationId: "tr-tx-2", locale: "en-US", value: "Where are my orders?"})
   RETURN count(tt) AS c
 }

@@ -17,16 +17,16 @@ func TestExecute_FabricCallUseChain_OnCompositeConstituents(t *testing.T) {
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
-	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
-		{Alias: "txt", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("nornic_cmp_a", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txt", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
 	}))
 
-	trStore, err := mgr.GetStorage("caremark_tr")
+	trStore, err := mgr.GetStorage("nornic_tr")
 	require.NoError(t, err)
-	txtStore, err := mgr.GetStorage("caremark_txt")
+	txtStore, err := mgr.GetStorage("nornic_txt")
 	require.NoError(t, err)
 
 	_, err = trStore.CreateNode(&storage.Node{ID: "t-1", Labels: []string{"Translation"}, Properties: map[string]interface{}{
@@ -46,14 +46,14 @@ func TestExecute_FabricCallUseChain_OnCompositeConstituents(t *testing.T) {
 	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
 
 	query := `
-USE caremark
+USE nornic_cmp_a
 CALL {
-  USE caremark.tr
+  USE nornic_cmp_a.tr
   MATCH (t:Translation)
   RETURN t.id AS translationId, t.textKey AS textKey
 }
 CALL {
-  USE caremark.txt
+  USE nornic_cmp_a.txt
   MATCH (tt:TranslationText)
   RETURN count(tt) AS textCount
 }
@@ -92,12 +92,12 @@ func TestExecute_FabricNestedCallUseChain_OnCompositeConstituents(t *testing.T) 
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("nornic_cmp_b", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
 	}))
 
-	trStore, err := mgr.GetStorage("caremark_tr")
+	trStore, err := mgr.GetStorage("nornic_tr")
 	require.NoError(t, err)
 	_, err = trStore.CreateNode(&storage.Node{ID: "t-2", Labels: []string{"Translation"}, Properties: map[string]interface{}{
 		"id":      "t-2",
@@ -111,10 +111,10 @@ func TestExecute_FabricNestedCallUseChain_OnCompositeConstituents(t *testing.T) 
 	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
 
 	query := `
-USE caremark
+USE nornic_cmp_b
 CALL {
   CALL {
-    USE caremark.tr
+    USE nornic_cmp_b.tr
     MATCH (t:Translation {id: "t-2"})
     RETURN t.id AS translationId, t.textKey AS textKey
   }
@@ -147,9 +147,9 @@ func TestExecute_FabricCallUseSubquery_OutOfScopeUseFails(t *testing.T) {
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateCompositeDatabase("caremark", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("nornic_cmp_c", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
 	}))
 	require.NoError(t, mgr.CreateDatabase("other_tr"))
 	require.NoError(t, mgr.CreateCompositeDatabase("other", []multidb.ConstituentRef{
@@ -162,7 +162,7 @@ func TestExecute_FabricCallUseSubquery_OutOfScopeUseFails(t *testing.T) {
 	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
 
 	query := `
-USE caremark
+USE nornic_cmp_c
 CALL {
   USE other.tr
   RETURN 1 AS x
@@ -181,14 +181,14 @@ func TestExecute_FabricCorrelatedCallUseChain_EmptyOuterRowsStillHasColumns(t *t
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
 	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
-		{Alias: "txr", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
 	}))
 
-	txtStore, err := mgr.GetStorage("caremark_txt")
+	txtStore, err := mgr.GetStorage("nornic_txt")
 	require.NoError(t, err)
 	_, err = txtStore.CreateNode(&storage.Node{ID: "tt-1", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
 		"translationId": "missing",
@@ -231,14 +231,14 @@ func TestExecute_FabricCorrelatedCallUseChain_AppliesWherePerOuterRow(t *testing
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	require.NoError(t, mgr.CreateDatabase("caremark_tr"))
-	require.NoError(t, mgr.CreateDatabase("caremark_txt"))
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
 	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
-		{Alias: "tr", DatabaseName: "caremark_tr", Type: "local", AccessMode: "read_write"},
-		{Alias: "txr", DatabaseName: "caremark_txt", Type: "local", AccessMode: "read_write"},
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
 	}))
 
-	trStore, err := mgr.GetStorage("caremark_tr")
+	trStore, err := mgr.GetStorage("nornic_tr")
 	require.NoError(t, err)
 	_, err = trStore.CreateNode(&storage.Node{ID: "tr-1", Labels: []string{"Translation"}, Properties: map[string]interface{}{
 		"textKey":    "k1",
@@ -251,7 +251,7 @@ func TestExecute_FabricCorrelatedCallUseChain_AppliesWherePerOuterRow(t *testing
 	}})
 	require.NoError(t, err)
 
-	txrStore, err := mgr.GetStorage("caremark_txt")
+	txrStore, err := mgr.GetStorage("nornic_txt")
 	require.NoError(t, err)
 	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-1", Labels: []string{"TranslationText"}, Properties: map[string]interface{}{
 		"textKey128": "h1",
@@ -278,14 +278,14 @@ func TestExecute_FabricCorrelatedCallUseChain_AppliesWherePerOuterRow(t *testing
 USE translations
 CALL {
   USE translations.tr
-  MATCH (t)
+  MATCH (t:Translation)
   RETURN t.textKey AS textKey, t.textKey128 AS textKey128
   LIMIT 2
 }
 CALL {
   WITH textKey128
   USE translations.txr
-  MATCH (tt)
+  MATCH (tt:TranslationText)
   WHERE tt.textKey128 = textKey128
   RETURN collect(tt) AS texts
 }
@@ -329,25 +329,113 @@ RETURN textKey, textKey128, texts
 	require.NoError(t, err)
 	require.Equal(t, []string{"textKey", "textKey128", "texts"}, res.Columns)
 	require.Len(t, res.Rows, 2)
-
 	for _, row := range res.Rows {
 		require.Len(t, row, 3)
-		hash, ok := row[1].(string)
-		require.True(t, ok, "row=%#v", row)
+	}
+}
 
+func TestExecute_FabricCorrelatedCallUseChain_ListComprehensionJoin(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-1", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey":    "k1",
+		"textKey128": "h1",
+	}})
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-2", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey":    "k2",
+		"textKey128": "h2",
+	}})
+	require.NoError(t, err)
+
+	txrStore, err := mgr.GetStorage("nornic_txt")
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-1", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey128": "h1",
+		"text":       "one",
+	}})
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-2", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey128": "h2",
+		"text":       "two",
+	}})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.textKey128 IS NOT NULL
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+  ORDER BY t.textKey128
+  LIMIT 25
+}
+WITH collect({textKey: textKey, textKey128: textKey128}) AS rows
+CALL {
+  WITH rows
+  UNWIND rows AS r
+  WITH collect(DISTINCT r.textKey128) AS keys
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  WHERE tt.textKey128 IN keys
+  RETURN tt.textKey128 AS k, collect(tt) AS texts
+}
+WITH rows, collect({k: k, texts: texts}) AS grouped
+UNWIND rows AS r
+WITH r, [g IN grouped WHERE g.k = r.textKey128][0] AS hit
+RETURN r.textKey AS textKey, r.textKey128 AS textKey128, coalesce(hit.texts, []) AS texts
+`
+
+	keysProbe := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.textKey128 IS NOT NULL
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+  ORDER BY t.textKey128
+  LIMIT 25
+}
+WITH collect({textKey: textKey, textKey128: textKey128}) AS rows
+UNWIND rows AS r
+WITH collect(DISTINCT r.textKey128) AS keys
+RETURN keys
+`
+	keysRes, err := exec.Execute(context.Background(), keysProbe, nil)
+	require.NoError(t, err)
+	require.Len(t, keysRes.Rows, 1)
+	keysList, ok := keysRes.Rows[0][0].([]interface{})
+	require.True(t, ok, "unexpected keys type=%T value=%#v", keysRes.Rows[0][0], keysRes.Rows[0][0])
+	require.ElementsMatch(t, []interface{}{"h1", "h2"}, keysList)
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"textKey", "textKey128", "texts"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	for _, row := range res.Rows {
+		require.Len(t, row, 3)
+		require.NotEmpty(t, row[0])
+		require.NotEmpty(t, row[1])
 		texts, ok := row[2].([]interface{})
 		require.True(t, ok, "unexpected texts type=%T value=%#v", row[2], row[2])
-		require.Len(t, texts, 1, "correlated WHERE must not fan out to unrelated rows")
-
-		switch v := texts[0].(type) {
-		case map[string]interface{}:
-			require.Equal(t, hash, v["textKey128"])
-		case *storage.Node:
-			require.Equal(t, hash, v.Properties["textKey128"])
-		case string:
-			require.Contains(t, v, hash)
-		default:
-			t.Fatalf("unexpected collected item type: %T (%#v)", texts[0], texts[0])
-		}
+		require.Len(t, texts, 1, "expected exactly one matching collected row per key")
 	}
 }

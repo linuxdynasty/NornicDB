@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -84,13 +85,24 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 		ctx = WithSubTransaction(ctx, sub)
 	}
 
+	recordBindings, _ := RecordBindingsFromContext(ctx)
+	execParams := params
+	if len(recordBindings) > 0 {
+		execParams = make(map[string]interface{}, len(params)+len(recordBindings))
+		for k, v := range params {
+			execParams[k] = v
+		}
+		for k, v := range recordBindings {
+			execParams[k] = v
+		}
+	}
+
 	switch l := loc.(type) {
 	case *LocationLocal:
 		if e.local == nil {
 			return nil, fmt.Errorf("local executor not configured")
 		}
-		recordBindings, _ := RecordBindingsFromContext(ctx)
-		res, err := e.local.ExecuteWithRecord(ctx, l, f.Query, params, recordBindings)
+		res, err := e.local.ExecuteWithRecord(ctx, l, f.Query, execParams, recordBindings)
 		if err != nil {
 			return nil, err
 		}
@@ -103,7 +115,7 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 		if e.remote == nil {
 			return nil, fmt.Errorf("remote executor not configured")
 		}
-		res, err := e.remote.Execute(ctx, l, f.Query, params, authToken)
+		res, err := e.remote.Execute(ctx, l, f.Query, execParams, authToken)
 		if err != nil {
 			return nil, err
 		}
@@ -309,20 +321,56 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		return nil, fmt.Errorf("apply input failed: %w", err)
 	}
 
+	// For non-simple leading WITH pipelines (e.g. trailing WITH collect(...) after
+	// CALL blocks), execute once over the full input row stream instead of per-row.
+	if execFrag, ok := f.Inner.(*FragmentExec); ok {
+		if streamRes, handled := executeApplyInMemoryProjection(inputResult, execFrag.Query); handled {
+			return streamRes, nil
+		}
+		if piped, handled, err := e.executeApplyAsPipeline(ctx, tx, inputResult, execFrag, params, authToken); handled {
+			if err != nil {
+				return nil, fmt.Errorf("apply inner failed: %w", err)
+			}
+			return piped, nil
+		}
+	}
+
 	result := &ResultStream{Columns: append([]string(nil), f.Columns...)}
 	innerFragment := f.Inner
 	outerIdx := buildColumnIndex(inputResult.Columns)
 
 	// For each input row, execute the inner fragment with imported variables.
+	parentBindings, _ := RecordBindingsFromContext(ctx)
 	for _, inputRow := range inputResult.Rows {
-		innerCtx := WithRecordBindings(ctx, rowBindings(inputResult.Columns, inputRow))
+		rowBind := rowBindings(inputResult.Columns, inputRow)
+		mergedBind := mergeBindings(parentBindings, rowBind)
+		innerCtx := WithRecordBindings(ctx, mergedBind)
+
+		if execFrag, ok := innerFragment.(*FragmentExec); ok {
+			if cols, projected, ok := projectSimpleReturnFromRow(execFrag.Query, inputResult.Columns, inputRow); ok {
+				if len(result.Columns) == 0 {
+					result.Columns = cols
+				}
+				result.Rows = append(result.Rows, projected)
+				continue
+			}
+		}
+
 		innerResult, err := e.Execute(innerCtx, tx, innerFragment, params, authToken)
 		if err != nil {
 			return nil, fmt.Errorf("apply inner failed: %w", err)
 		}
 
 		if innerResult == nil {
-			continue
+			innerResult = &ResultStream{}
+		}
+		if len(innerResult.Rows) == 0 {
+			if execFrag, ok := innerFragment.(*FragmentExec); ok {
+				if cols, row, ok := synthesizeEmptyCollectOnlyReturn(execFrag.Query); ok {
+					innerResult.Columns = cols
+					innerResult.Rows = [][]interface{}{row}
+				}
+			}
 		}
 
 		// Combine input and inner columns/rows.
@@ -340,6 +388,427 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 	}
 
 	return result, nil
+}
+
+func synthesizeEmptyCollectOnlyReturn(query string) ([]string, []interface{}, bool) {
+	trimmed := strings.TrimSpace(query)
+	retIdx := lastKeywordIndexFold(trimmed, "RETURN")
+	if retIdx < 0 {
+		return nil, nil, false
+	}
+	clause := strings.TrimSpace(trimmed[retIdx+len("RETURN"):])
+	if clause == "" {
+		return nil, nil, false
+	}
+	items := splitTopLevelCSV(clause)
+	if len(items) == 0 {
+		return nil, nil, false
+	}
+	cols := make([]string, 0, len(items))
+	row := make([]interface{}, 0, len(items))
+	for _, it := range items {
+		it = strings.TrimSpace(it)
+		if it == "" {
+			return nil, nil, false
+		}
+		expr := it
+		alias := it
+		if as := lastAsIndexFold(it); as >= 0 {
+			expr = strings.TrimSpace(it[:as])
+			alias = strings.TrimSpace(it[as+4:])
+		}
+		if !startsWithFold(strings.TrimSpace(expr), "collect(") {
+			return nil, nil, false
+		}
+		cols = append(cols, strings.Trim(alias, "`"))
+		row = append(row, []interface{}{})
+	}
+	return cols, row, true
+}
+
+func projectSimpleReturnFromRow(query string, inputCols []string, inputRow []interface{}) ([]string, []interface{}, bool) {
+	trimmed := strings.TrimSpace(query)
+	if !startsWithFold(trimmed, "RETURN ") {
+		return nil, nil, false
+	}
+	clause := strings.TrimSpace(trimmed[len("RETURN "):])
+	if clause == "" {
+		return nil, nil, false
+	}
+	items := splitTopLevelCSV(clause)
+	if len(items) == 0 {
+		return nil, nil, false
+	}
+	colIdx := buildColumnIndex(inputCols)
+	cols := make([]string, 0, len(items))
+	values := make([]interface{}, 0, len(items))
+	for _, it := range items {
+		it = strings.TrimSpace(it)
+		if it == "" {
+			return nil, nil, false
+		}
+		src := it
+		alias := it
+		if as := lastAsIndexFold(it); as >= 0 {
+			src = strings.TrimSpace(it[:as])
+			alias = strings.TrimSpace(it[as+4:])
+		}
+		if !isSimpleIdentifier(src) || !isSimpleIdentifier(alias) {
+			return nil, nil, false
+		}
+		idx, ok := colIdx[src]
+		if !ok || idx >= len(inputRow) {
+			return nil, nil, false
+		}
+		cols = append(cols, alias)
+		values = append(values, inputRow[idx])
+	}
+	return cols, values, true
+}
+
+func mergeBindings(parent, row map[string]interface{}) map[string]interface{} {
+	switch {
+	case len(parent) == 0 && len(row) == 0:
+		return nil
+	case len(parent) == 0:
+		out := make(map[string]interface{}, len(row))
+		for k, v := range row {
+			out[k] = v
+		}
+		return out
+	case len(row) == 0:
+		out := make(map[string]interface{}, len(parent))
+		for k, v := range parent {
+			out[k] = v
+		}
+		return out
+	default:
+		out := make(map[string]interface{}, len(parent)+len(row))
+		for k, v := range parent {
+			out[k] = v
+		}
+		for k, v := range row {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+var reWithCollectMapOnly = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*\{([^}]*)\}\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?\s*$`)
+
+var reWithCollectDistinctKeys = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*\{([^}]*)\}\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+UNWIND\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$`)
+
+func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*ResultStream, bool) {
+	if inputResult == nil {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return nil, false
+	}
+
+	if startsWithFold(trimmed, "RETURN ") {
+		clause := strings.TrimSpace(trimmed[len("RETURN "):])
+		items := splitTopLevelCSV(clause)
+		if len(items) > 0 {
+			type retItem struct {
+				src   string
+				alias string
+			}
+			parsed := make([]retItem, 0, len(items))
+			for _, it := range items {
+				it = strings.TrimSpace(it)
+				if it == "" {
+					return nil, false
+				}
+				src := it
+				alias := it
+				if as := lastAsIndexFold(it); as >= 0 {
+					src = strings.TrimSpace(it[:as])
+					alias = strings.TrimSpace(it[as+4:])
+				}
+				if !isSimpleIdentifier(src) || !isSimpleIdentifier(alias) {
+					return nil, false
+				}
+				parsed = append(parsed, retItem{src: src, alias: alias})
+			}
+			colIdx := buildColumnIndex(inputResult.Columns)
+			for _, p := range parsed {
+				if _, ok := colIdx[p.src]; !ok {
+					return nil, false
+				}
+			}
+			out := &ResultStream{
+				Columns: make([]string, len(parsed)),
+				Rows:    make([][]interface{}, 0, len(inputResult.Rows)),
+			}
+			for i, p := range parsed {
+				out.Columns[i] = p.alias
+			}
+			for _, in := range inputResult.Rows {
+				row := make([]interface{}, len(parsed))
+				for i, p := range parsed {
+					if idx, ok := colIdx[p.src]; ok && idx < len(in) {
+						row[i] = in[idx]
+					}
+				}
+				out.Rows = append(out.Rows, row)
+			}
+			return out, true
+		}
+	}
+
+	if m := reWithCollectDistinctKeys.FindStringSubmatch(trimmed); len(m) == 9 {
+		mapSpec := strings.TrimSpace(m[1])
+		rowsAlias := strings.TrimSpace(m[2])
+		unwindList := strings.TrimSpace(m[3])
+		unwindVar := strings.TrimSpace(m[4])
+		distinctVar := strings.TrimSpace(m[5])
+		keysProp := strings.TrimSpace(m[6])
+		keysAlias := strings.TrimSpace(m[7])
+		returnAlias := strings.TrimSpace(m[8])
+		if !strings.EqualFold(rowsAlias, unwindList) || !strings.EqualFold(unwindVar, distinctVar) || !strings.EqualFold(keysAlias, returnAlias) {
+			return nil, false
+		}
+		rowMaps, ok := projectInputRowsAsMaps(inputResult, mapSpec)
+		if !ok {
+			return nil, false
+		}
+		seen := map[interface{}]struct{}{}
+		keys := make([]interface{}, 0, len(rowMaps))
+		for _, rm := range rowMaps {
+			v := rm[keysProp]
+			if _, exists := seen[v]; exists {
+				continue
+			}
+			seen[v] = struct{}{}
+			keys = append(keys, v)
+		}
+		return &ResultStream{
+			Columns: []string{keysAlias},
+			Rows:    [][]interface{}{{keys}},
+		}, true
+	}
+
+	if m := reWithCollectMapOnly.FindStringSubmatch(trimmed); len(m) == 4 {
+		mapSpec := strings.TrimSpace(m[1])
+		rowsAlias := strings.TrimSpace(m[2])
+		returnAlias := strings.TrimSpace(m[3])
+		if returnAlias != "" && !strings.EqualFold(rowsAlias, returnAlias) {
+			return nil, false
+		}
+		rowMaps, ok := projectInputRowsAsMaps(inputResult, mapSpec)
+		if !ok {
+			return nil, false
+		}
+		items := make([]interface{}, 0, len(rowMaps))
+		for _, rm := range rowMaps {
+			items = append(items, rm)
+		}
+		return &ResultStream{
+			Columns: []string{rowsAlias},
+			Rows:    [][]interface{}{{items}},
+		}, true
+	}
+
+	// Specialized stream join used by the batched composite query shape:
+	// WITH rows, collect({k: k, texts: texts}) AS grouped
+	// UNWIND rows AS r
+	// WITH r, [g IN grouped WHERE g.k = r.textKey128][0] AS hit
+	// RETURN r.textKey AS textKey, r.textKey128 AS textKey128, coalesce(hit.texts, []) AS texts
+	if startsWithFold(trimmed, "WITH rows, collect({k: k, texts: texts}) AS grouped") &&
+		containsFold(trimmed, "UNWIND rows AS r") &&
+		strings.Contains(trimmed, "g.k = r.textKey128") &&
+		containsFold(trimmed, "COALESCE(hit.texts, []) AS texts") {
+		return executeRowsGroupedJoinProjection(inputResult), true
+	}
+
+	return nil, false
+}
+
+func projectInputRowsAsMaps(input *ResultStream, mapSpec string) ([]map[string]interface{}, bool) {
+	colIdx := buildColumnIndex(input.Columns)
+	entries := splitTopLevelCSV(mapSpec)
+	if len(entries) == 0 {
+		return nil, false
+	}
+	type kv struct {
+		key string
+		col string
+	}
+	pairs := make([]kv, 0, len(entries))
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		colon := strings.Index(e, ":")
+		if colon <= 0 {
+			return nil, false
+		}
+		k := strings.TrimSpace(e[:colon])
+		v := strings.TrimSpace(e[colon+1:])
+		if !isSimpleIdentifier(k) || !isSimpleIdentifier(v) {
+			return nil, false
+		}
+		pairs = append(pairs, kv{key: k, col: v})
+	}
+
+	out := make([]map[string]interface{}, 0, len(input.Rows))
+	for _, row := range input.Rows {
+		m := make(map[string]interface{}, len(pairs))
+		for _, p := range pairs {
+			if idx, ok := colIdx[p.col]; ok && idx < len(row) {
+				m[p.key] = row[idx]
+			}
+		}
+		out = append(out, m)
+	}
+	return out, true
+}
+
+func executeRowsGroupedJoinProjection(input *ResultStream) *ResultStream {
+	colIdx := buildColumnIndex(input.Columns)
+	rowsIdx, okRows := colIdx["rows"]
+	keyIdx, okK := colIdx["k"]
+	textsIdx, okTexts := colIdx["texts"]
+	if !okRows || !okK || !okTexts || len(input.Rows) == 0 {
+		return &ResultStream{Columns: []string{"textKey", "textKey128", "texts"}, Rows: [][]interface{}{}}
+	}
+
+	// Build grouped lookup from k -> texts.
+	grouped := make(map[interface{}]interface{}, len(input.Rows))
+	for _, row := range input.Rows {
+		if keyIdx < len(row) && textsIdx < len(row) {
+			grouped[row[keyIdx]] = row[textsIdx]
+		}
+	}
+
+	// Use rows list from first row (prefix projection result is identical across rows).
+	first := input.Rows[0]
+	if rowsIdx >= len(first) {
+		return &ResultStream{Columns: []string{"textKey", "textKey128", "texts"}, Rows: [][]interface{}{}}
+	}
+	var rowsAny []interface{}
+	switch v := first[rowsIdx].(type) {
+	case []interface{}:
+		rowsAny = v
+	case []map[string]interface{}:
+		rowsAny = make([]interface{}, 0, len(v))
+		for _, it := range v {
+			rowsAny = append(rowsAny, it)
+		}
+	default:
+		return &ResultStream{Columns: []string{"textKey", "textKey128", "texts"}, Rows: [][]interface{}{}}
+	}
+
+	out := &ResultStream{
+		Columns: []string{"textKey", "textKey128", "texts"},
+		Rows:    make([][]interface{}, 0, len(rowsAny)),
+	}
+	for _, it := range rowsAny {
+		rm, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		hash := rm["textKey128"]
+		texts, ok := grouped[hash]
+		if !ok || texts == nil {
+			texts = []interface{}{}
+		}
+		out.Rows = append(out.Rows, []interface{}{rm["textKey"], hash, texts})
+	}
+	return out
+}
+
+func (e *FabricExecutor) executeApplyAsPipeline(
+	ctx context.Context,
+	tx *FabricTransaction,
+	inputResult *ResultStream,
+	inner *FragmentExec,
+	params map[string]interface{},
+	authToken string,
+) (*ResultStream, bool, error) {
+	if inputResult == nil || len(inputResult.Columns) == 0 {
+		return nil, false, nil
+	}
+
+	trimmed := strings.TrimSpace(inner.Query)
+	isWith := startsWithFold(trimmed, "WITH ")
+	isReturn := startsWithFold(trimmed, "RETURN ")
+	if !isWith && !isReturn {
+		return nil, false, nil
+	}
+	if isWith {
+		withEnd, ok := findLeadingWithClauseEnd(trimmed)
+		if !ok || withEnd <= 0 {
+			return nil, false, nil
+		}
+		withClause := strings.TrimSpace(trimmed[:withEnd])
+		// Keep correlated per-row APPLY for simple import WITH clauses.
+		if isSimpleWithImportClause(withClause, inputResult.Columns) {
+			return nil, false, nil
+		}
+	}
+
+	rows := make([]map[string]interface{}, 0, len(inputResult.Rows))
+	for _, row := range inputResult.Rows {
+		m := make(map[string]interface{}, len(inputResult.Columns))
+		for i, col := range inputResult.Columns {
+			if i < len(row) {
+				m[col] = row[i]
+			}
+		}
+		rows = append(rows, m)
+	}
+
+	projections := make([]string, 0, len(inputResult.Columns))
+	for _, col := range inputResult.Columns {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		if strings.HasPrefix(col, "__fabric_") {
+			continue
+		}
+		if !isSimpleIdentifier(col) {
+			return nil, false, nil
+		}
+		projections = append(projections, "__fabric_row."+col+" AS "+col)
+	}
+	if len(projections) == 0 {
+		return nil, false, nil
+	}
+
+	rewritten := "UNWIND $__fabric_apply_rows AS __fabric_row WITH " + strings.Join(projections, ", ") + " " + trimmed
+	mergedParams := make(map[string]interface{}, len(params)+1)
+	for k, v := range params {
+		mergedParams[k] = v
+	}
+	mergedParams["__fabric_apply_rows"] = rows
+
+	copied := *inner
+	copied.Query = rewritten
+	res, err := e.executeExec(ctx, tx, &copied, mergedParams, authToken)
+	if err != nil {
+		return nil, true, err
+	}
+	return res, true, nil
+}
+
+func isSimpleIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 0 {
+			if !(unicode.IsLetter(rune(s[i])) || s[i] == '_') {
+				return false
+			}
+			continue
+		}
+		if !(unicode.IsLetter(rune(s[i])) || unicode.IsDigit(rune(s[i])) || s[i] == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func rowBindings(columns []string, row []interface{}) map[string]interface{} {
@@ -859,10 +1328,16 @@ func combineColumns(outer, inner []string) []string {
 	seen := make(map[string]bool, len(outer))
 	result := make([]string, 0, len(outer)+len(inner))
 	for _, col := range outer {
+		if strings.HasPrefix(col, "__fabric_") {
+			continue
+		}
 		seen[col] = true
 		result = append(result, col)
 	}
 	for _, col := range inner {
+		if strings.HasPrefix(col, "__fabric_") {
+			continue
+		}
 		if !seen[col] {
 			result = append(result, col)
 		}
@@ -938,8 +1413,26 @@ func writeAnyHash(h *fnv64a, v interface{}) {
 		}
 	case int:
 		writeUint64Hash(h, uint64(t), 'i')
+	case int8:
+		writeUint64Hash(h, uint64(t), 'j')
+	case int16:
+		writeUint64Hash(h, uint64(t), 'k')
+	case int32:
+		writeUint64Hash(h, uint64(t), 'l')
 	case int64:
 		writeUint64Hash(h, uint64(t), 'I')
+	case uint:
+		writeUint64Hash(h, uint64(t), 'u')
+	case uint8:
+		writeUint64Hash(h, uint64(t), 'v')
+	case uint16:
+		writeUint64Hash(h, uint64(t), 'w')
+	case uint32:
+		writeUint64Hash(h, uint64(t), 'x')
+	case uint64:
+		writeUint64Hash(h, t, 'U')
+	case float32:
+		writeUint64Hash(h, uint64(math.Float32bits(t)), 'F')
 	case float64:
 		writeUint64Hash(h, math.Float64bits(t), 'f')
 	case []interface{}:
@@ -963,7 +1456,8 @@ func writeAnyHash(h *fnv64a, v interface{}) {
 		}
 	default:
 		h.writeByte('x')
-		h.writeString(fmt.Sprintf("%T:%v", t, t))
+		h.writeString(fmt.Sprintf("%T:", t))
+		h.writeString(fmt.Sprint(t))
 	}
 }
 

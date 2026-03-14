@@ -2038,6 +2038,14 @@ func (e *StorageExecutor) executeReturn(ctx context.Context, cypher string) (*Ex
 			continue
 		}
 
+		// Fabric APPLY correlated bindings (e.g., RETURN textKey, textKey128, texts).
+		if isValidIdentifier(part) {
+			if v, ok := e.fabricRecordBindings[part]; ok {
+				values = append(values, v)
+				continue
+			}
+		}
+
 		// Try to evaluate as a function or expression first
 		result := e.evaluateExpressionWithContext(part, nil, nil)
 		if result != nil {

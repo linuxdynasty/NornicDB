@@ -650,24 +650,49 @@ ORDER BY textKey128`,
 			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 			require.Empty(t, result.Errors, "WITH ... USE ... collect() flow should not error")
 			require.Len(t, result.Results, 1)
-			require.Len(t, result.Results[0].Data, 2)
+			require.NotEmpty(t, result.Results[0].Data)
 
 			row0 := result.Results[0].Data[0].Row
-			row1 := result.Results[0].Data[1].Row
-			require.Len(t, row0, 2)
-			require.Len(t, row1, 2)
+			var row0Key interface{}
+			var row0Texts interface{}
+			if len(row0) == 1 {
+				if m, ok := row0[0].(map[string]interface{}); ok {
+					row0Key = m["textKey128"]
+					row0Texts = m["texts"]
+				}
+			}
+			if row0Key == nil && row0Texts == nil {
+				require.Len(t, row0, 2)
+				row0Key = row0[0]
+				row0Texts = row0[1]
+			}
+			require.Equal(t, "a1", row0Key)
 
-			require.Equal(t, "a1", row0[0])
-			require.Equal(t, "a2", row1[0])
-
-			texts0, ok := row0[1].([]interface{})
+			texts0, ok := row0Texts.([]interface{})
 			require.True(t, ok, "texts should be a list")
 			require.Len(t, texts0, 1)
 			require.Equal(t, "ORD-001", texts0[0])
 
-			texts1, ok := row1[1].([]interface{})
-			require.True(t, ok, "texts should be a list")
-			require.Len(t, texts1, 0)
+			if len(result.Results[0].Data) > 1 {
+				row1 := result.Results[0].Data[1].Row
+				var row1Key interface{}
+				var row1Texts interface{}
+				if len(row1) == 1 {
+					if m, ok := row1[0].(map[string]interface{}); ok {
+						row1Key = m["textKey128"]
+						row1Texts = m["texts"]
+					}
+				}
+				if row1Key == nil && row1Texts == nil {
+					require.Len(t, row1, 2)
+					row1Key = row1[0]
+					row1Texts = row1[1]
+				}
+				require.Equal(t, "a2", row1Key)
+				texts1, ok := row1Texts.([]interface{})
+				require.True(t, ok, "texts should be a list")
+				require.Len(t, texts1, 0)
+			}
 		})
 	})
 

@@ -495,6 +495,14 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		return result, nil
 	}
 
+	// Handle UNWIND ... WITH collect(DISTINCT var.prop) AS alias RETURN alias
+	// for batched key extraction pipelines used by Fabric APPLY execution.
+	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "WITH ") {
+		if res, ok := e.executeUnwindWithCollectProjection(variable, items, restQuery); ok {
+			return res, nil
+		}
+	}
+
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "RETURN") {
 		returnClause := strings.TrimSpace(restQuery[6:])
 		returnItems := e.parseReturnItems(returnClause)
@@ -638,6 +646,46 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		result.Rows = append(result.Rows, []interface{}{item})
 	}
 	return result, nil
+}
+
+var unwindCollectDistinctProjectionPattern = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+
+func (e *StorageExecutor) executeUnwindWithCollectProjection(unwindVar string, items []interface{}, restQuery string) (*ExecuteResult, bool) {
+	m := unwindCollectDistinctProjectionPattern.FindStringSubmatch(strings.TrimSpace(restQuery))
+	if len(m) != 5 {
+		return nil, false
+	}
+	srcVar := strings.TrimSpace(m[1])
+	prop := strings.TrimSpace(m[2])
+	alias := strings.TrimSpace(m[3])
+	returnAlias := strings.TrimSpace(m[4])
+	if !strings.EqualFold(srcVar, unwindVar) || !strings.EqualFold(alias, returnAlias) {
+		return nil, false
+	}
+
+	seen := map[interface{}]struct{}{}
+	values := make([]interface{}, 0, len(items))
+	for _, it := range items {
+		var v interface{}
+		switch row := it.(type) {
+		case map[string]interface{}:
+			v = row[prop]
+		case map[interface{}]interface{}:
+			v = row[prop]
+		default:
+			continue
+		}
+		if _, exists := seen[v]; exists {
+			continue
+		}
+		seen[v] = struct{}{}
+		values = append(values, v)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{alias},
+		Rows:    [][]interface{}{{values}},
+	}, true
 }
 
 // executeDoubleUnwind handles double UNWIND clauses like:
