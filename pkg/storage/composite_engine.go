@@ -163,18 +163,34 @@ func (c *CompositeEngine) GetConstituentByAlias(alias string) (Engine, error) {
 }
 
 // routeWrite determines which constituent should receive a write operation.
-// Implements full routing using configured routing rules with intelligent fallbacks.
+// For Neo4j Fabric-compatible behavior, writes must be explicitly targeted.
+// We only route deterministically when:
+//   - there is exactly one writable constituent, or
+//   - properties["database_id"] explicitly identifies a writable constituent
+//     alias or backing database name.
+//
+// Otherwise, routing is ambiguous and the caller must scope writes via USE.
 func (c *CompositeEngine) routeWrite(operation string, labels []string, properties map[string]interface{}, writableConstituents []string) string {
 	if len(writableConstituents) == 0 {
 		return ""
+	}
+	if len(writableConstituents) == 1 {
+		return writableConstituents[0]
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// 0. Property auto-routing for database identifiers (explicit database selection)
+	_ = operation
+	_ = labels
+
+	// Explicit property routing for database identifiers.
 	if properties != nil {
-		if dbVal, ok := properties["database_id"].(string); ok && dbVal != "" {
+		if dbVal, ok := properties["database_id"].(string); ok {
+			dbVal = strings.TrimSpace(dbVal)
+			if dbVal == "" {
+				return ""
+			}
 			for _, alias := range writableConstituents {
 				if alias == dbVal || c.constituentNames[alias] == dbVal {
 					return alias
@@ -183,76 +199,7 @@ func (c *CompositeEngine) routeWrite(operation string, labels []string, properti
 		}
 	}
 
-	// 1. Label-based routing: Use configured routing rules
-	if len(labels) > 0 {
-		firstLabel := strings.ToLower(labels[0])
-		if constituents, exists := c.labelRouting[firstLabel]; exists && len(constituents) > 0 {
-			// Route to first configured constituent for this label
-			// Verify it's writable
-			for _, alias := range constituents {
-				for _, writable := range writableConstituents {
-					if alias == writable {
-						return alias
-					}
-				}
-			}
-		}
-
-		// Fallback: Check if label matches a constituent alias (auto-routing)
-		for _, alias := range writableConstituents {
-			if strings.ToLower(alias) == firstLabel {
-				return alias
-			}
-		}
-	}
-
-	// 2. Property-based routing: Check configured property routing rules
-	if properties != nil {
-		for propName, propMap := range c.propertyRouting {
-			if value, exists := properties[propName]; exists {
-				if constituent, found := propMap[value]; found {
-					// Verify constituent is writable
-					for _, writable := range writableConstituents {
-						if constituent == writable {
-							return constituent
-						}
-					}
-				}
-				// Try default for this property
-				if defaultConstituent, hasDefault := c.propertyDefaults[propName]; hasDefault {
-					for _, writable := range writableConstituents {
-						if defaultConstituent == writable {
-							return defaultConstituent
-						}
-					}
-				}
-			}
-		}
-
-		// Fallback: Check common routing property (database_id) with hashing
-		if databaseID, exists := properties["database_id"]; exists {
-			dbHash := hashValue(databaseID)
-			index := dbHash % len(writableConstituents)
-			if index < 0 {
-				index = -index
-			}
-			return writableConstituents[index]
-		}
-	}
-
-	// 3. Label hash-based routing: Use consistent hashing on first label
-	// This provides deterministic routing when no explicit rules match
-	if len(labels) > 0 {
-		labelHash := hashString(labels[0])
-		index := labelHash % len(writableConstituents)
-		if index < 0 {
-			index = -index
-		}
-		return writableConstituents[index]
-	}
-
-	// 4. Default: route to first writable constituent
-	return writableConstituents[0]
+	return ""
 }
 
 // hashString computes a consistent hash for a string value.
@@ -309,8 +256,7 @@ func (c *CompositeEngine) CreateNode(node *Node) (NodeID, error) {
 	// Determine routing based on node labels and properties
 	targetConstituent := c.routeWrite("create_node", node.Labels, node.Properties, writeConstituents)
 	if targetConstituent == "" {
-		// No routing rule matches - use first writable constituent
-		targetConstituent = writeConstituents[0]
+		return "", fmt.Errorf("ambiguous composite write target: use USE <composite.constituent> or set properties.database_id to a writable constituent")
 	}
 
 	engine, err := c.getConstituent(targetConstituent)
@@ -1138,8 +1084,7 @@ func (c *CompositeEngine) BulkCreateNodes(nodes []*Node) error {
 	for _, node := range nodes {
 		targetConstituent := c.routeWrite("create_node", node.Labels, node.Properties, writeConstituents)
 		if targetConstituent == "" {
-			// No routing rule - use first writable
-			targetConstituent = writeConstituents[0]
+			return fmt.Errorf("ambiguous composite write target in bulk create: use USE <composite.constituent> or set properties.database_id")
 		}
 		nodeGroups[targetConstituent] = append(nodeGroups[targetConstituent], node)
 	}

@@ -63,28 +63,32 @@ func (s *Server) handleDatabaseEndpoint(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func statementTargetDatabase(defaultDB string, statement string) string {
+func statementTargetDatabase(defaultDB string, statement string) (string, error) {
 	db := strings.TrimSpace(defaultDB)
 	trimmed := strings.TrimSpace(statement)
 	if trimmed == "" {
-		return db
+		return db, nil
 	}
 
 	if strings.HasPrefix(strings.ToUpper(trimmed), ":USE ") {
 		parts := strings.Fields(trimmed)
-		if len(parts) >= 2 {
-			return strings.TrimSpace(parts[1])
+		if len(parts) < 2 {
+			return "", fmt.Errorf(":USE requires a database name")
 		}
-		return db
+		target := strings.TrimSpace(parts[1])
+		if target == "" {
+			return "", fmt.Errorf(":USE requires a database name")
+		}
+		return target, nil
 	}
 
 	if !strings.HasPrefix(strings.ToUpper(trimmed), "USE ") {
-		return db
+		return db, nil
 	}
 
 	rest := strings.TrimSpace(trimmed[len("USE"):])
 	if rest == "" {
-		return db
+		return "", fmt.Errorf("USE requires a database name")
 	}
 
 	if strings.HasPrefix(strings.ToLower(rest), "graph.byname(") || strings.HasPrefix(strings.ToLower(rest), "graph.byelementid(") {
@@ -93,13 +97,13 @@ func statementTargetDatabase(defaultDB string, statement string) string {
 		if open >= 0 && close > open {
 			arg := strings.TrimSpace(rest[open+1 : close])
 			if len(arg) >= 2 && ((arg[0] == '\'' && arg[len(arg)-1] == '\'') || (arg[0] == '"' && arg[len(arg)-1] == '"')) {
-				return arg[1 : len(arg)-1]
+				return arg[1 : len(arg)-1], nil
 			}
 			if arg != "" {
-				return strings.Fields(arg)[0]
+				return strings.Fields(arg)[0], nil
 			}
 		}
-		return db
+		return "", fmt.Errorf("USE %s requires a valid graph reference argument", rest)
 	}
 
 	if rest[0] == '`' {
@@ -109,18 +113,61 @@ func statementTargetDatabase(defaultDB string, statement string) string {
 					i++
 					continue
 				}
-				return strings.ReplaceAll(rest[1:i], "``", "`")
+				return strings.ReplaceAll(rest[1:i], "``", "`"), nil
 			}
 		}
-		return db
+		return "", fmt.Errorf("USE has unterminated quoted database name")
 	}
 
 	parts := strings.Fields(rest)
-	if len(parts) > 0 {
-		return strings.TrimSpace(parts[0])
+	if len(parts) == 0 {
+		return "", fmt.Errorf("USE requires a database name")
+	}
+	return strings.TrimSpace(parts[0]), nil
+}
+
+func normalizeStatementForExecution(defaultDB string, statement string) (effectiveDB string, query string, err error) {
+	effectiveDB = strings.TrimSpace(defaultDB)
+	query = statement
+	trimmed := strings.TrimSpace(statement)
+	if trimmed == "" {
+		return effectiveDB, "", nil
 	}
 
-	return db
+	if strings.HasPrefix(strings.ToUpper(trimmed), ":USE") {
+		lines := strings.Split(statement, "\n")
+		remainingLines := make([]string, 0, len(lines))
+		foundUse := false
+		for _, line := range lines {
+			lineTrimmed := strings.TrimSpace(line)
+			if !foundUse && strings.HasPrefix(strings.ToUpper(lineTrimmed), ":USE") {
+				parts := strings.Fields(lineTrimmed)
+				if len(parts) < 2 {
+					return "", "", fmt.Errorf(":USE requires a database name")
+				}
+				effectiveDB = strings.TrimSpace(parts[1])
+				if effectiveDB == "" {
+					return "", "", fmt.Errorf(":USE requires a database name")
+				}
+				foundUse = true
+				if len(parts) > 2 {
+					remainingLines = append(remainingLines, strings.Join(parts[2:], " "))
+				}
+				continue
+			}
+			remainingLines = append(remainingLines, line)
+		}
+		if foundUse {
+			query = strings.TrimSpace(strings.Join(remainingLines, "\n"))
+		}
+		return effectiveDB, query, nil
+	}
+
+	target, targetErr := statementTargetDatabase(defaultDB, statement)
+	if targetErr != nil {
+		return "", "", targetErr
+	}
+	return target, query, nil
 }
 
 func transactionOwnerKey(r *http.Request, claims *auth.JWTClaims) string {
@@ -926,57 +973,14 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
-		// Extract :USE command from this statement if present
-		// Each statement can have its own :USE command to switch databases
-		effectiveDbName := defaultDbName
-		queryStatement := stmt.Statement
-
-		// Check if statement starts with :USE
-		trimmedStmt := strings.TrimSpace(stmt.Statement)
-		if strings.HasPrefix(trimmedStmt, ":USE") || strings.HasPrefix(trimmedStmt, ":use") {
-			lines := strings.Split(stmt.Statement, "\n")
-			var remainingLines []string
-			foundUse := false
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if !foundUse && (strings.HasPrefix(trimmed, ":USE") || strings.HasPrefix(trimmed, ":use")) {
-					// Extract database name from :USE command
-					parts := strings.Fields(trimmed)
-					if len(parts) >= 2 {
-						effectiveDbName = parts[1]
-					}
-					foundUse = true
-					// Check if there's more content on this line after :USE command
-					// Format: ":USE dbname rest of query"
-					useIndex := strings.Index(trimmed, ":USE")
-					if useIndex == -1 {
-						useIndex = strings.Index(strings.ToUpper(trimmed), ":USE")
-					}
-					if useIndex >= 0 {
-						// Find where :USE command ends (after database name)
-						afterUse := trimmed[useIndex+4:] // Skip ":USE"
-						afterUse = strings.TrimSpace(afterUse)
-						// Extract database name and remaining query
-						fields := strings.Fields(afterUse)
-						if len(fields) > 0 {
-							// Database name is first field, rest is the query
-							if len(fields) > 1 {
-								remainingQuery := strings.Join(fields[1:], " ")
-								if remainingQuery != "" {
-									remainingLines = append(remainingLines, remainingQuery)
-								}
-							}
-						}
-					}
-					// Skip the :USE line itself (already processed)
-					continue
-				}
-				remainingLines = append(remainingLines, line)
-			}
-			if foundUse {
-				queryStatement = strings.Join(remainingLines, "\n")
-				queryStatement = strings.TrimSpace(queryStatement)
-			}
+		effectiveDbName, queryStatement, resolveErr := normalizeStatementForExecution(defaultDbName, stmt.Statement)
+		if resolveErr != nil {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Message: resolveErr.Error(),
+			})
+			hasError = true
+			continue
 		}
 
 		// Per-database access: deny if principal may not access this database (Neo4j-aligned).
@@ -1456,7 +1460,14 @@ func (s *Server) executeTxStatements(
 ) {
 	ctx = cypher.WithAuthToken(ctx, authToken)
 	for _, stmt := range statements {
-		effectiveDB := statementTargetDatabase(dbName, stmt.Statement)
+		effectiveDB, queryStatement, resolveErr := normalizeStatementForExecution(dbName, stmt.Statement)
+		if resolveErr != nil {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Message: resolveErr.Error(),
+			})
+			continue
+		}
 		if !s.getDatabaseAccessMode(claims).CanAccessDatabase(effectiveDB) {
 			response.Errors = append(response.Errors, QueryError{
 				Code:    "Neo.ClientError.Security.Forbidden",
@@ -1465,7 +1476,7 @@ func (s *Server) executeTxStatements(
 			continue
 		}
 
-		if isMutationQuery(stmt.Statement) {
+		if isMutationQuery(queryStatement) {
 			if claims == nil {
 				response.Errors = append(response.Errors, QueryError{
 					Code:    "Neo.ClientError.Security.Forbidden",
@@ -1482,7 +1493,7 @@ func (s *Server) executeTxStatements(
 			}
 		}
 
-		result, err := s.txSessions.ExecuteInSession(ctx, session, stmt.Statement, stmt.Parameters)
+		result, err := s.txSessions.ExecuteInSession(ctx, session, queryStatement, stmt.Parameters)
 		if err != nil {
 			code, message := mapSessionExecError(err)
 			response.Errors = append(response.Errors, QueryError{

@@ -3,8 +3,8 @@ package fabric
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
+	"unicode"
 )
 
 // FabricExecutor walks a Fragment tree and dispatches each FragmentExec
@@ -161,8 +161,6 @@ func importColumnsFromFragment(f Fragment) []string {
 	return nil
 }
 
-var leadingWithRegex = regexp.MustCompile(`(?is)^\\s*WITH\\s+(.+?)\\b(MATCH|RETURN|CALL|CREATE|MERGE|UNWIND|OPTIONAL|WHERE|SET|DELETE)\\b`)
-
 func rewriteLeadingWithImports(query string, importCols []string) string {
 	if len(importCols) == 0 {
 		return query
@@ -183,14 +181,144 @@ func rewriteLeadingWithImports(query string, importCols []string) string {
 	if len(assignments) == 0 {
 		return query
 	}
-
-	m := leadingWithRegex.FindStringSubmatchIndex(trimmed)
-	if len(m) < 6 {
+	withEnd, ok := findLeadingWithClauseEnd(trimmed)
+	if !ok || withEnd <= 0 {
 		return query
 	}
-	keyword := trimmed[m[4]:m[5]]
-	rest := strings.TrimSpace(trimmed[m[5]:])
-	return "WITH " + strings.Join(assignments, ", ") + " " + keyword + " " + rest
+	rest := strings.TrimSpace(trimmed[withEnd:])
+	if rest == "" {
+		return "WITH " + strings.Join(assignments, ", ")
+	}
+	return "WITH " + strings.Join(assignments, ", ") + " " + rest
+}
+
+func findLeadingWithClauseEnd(query string) (int, bool) {
+	if query == "" {
+		return 0, false
+	}
+	i := skipLeadingSpace(query, 0)
+	if !hasKeywordAt(query, i, "WITH") {
+		return 0, false
+	}
+	i += len("WITH")
+	i = skipLeadingSpace(query, i)
+
+	depth := 0
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+
+	for idx := i; idx < len(query); idx++ {
+		ch := query[idx]
+
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				if idx+1 < len(query) && query[idx+1] == '\'' {
+					idx++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(', '[', '{':
+			depth++
+			continue
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+
+		if depth == 0 && isCypherClauseStart(query, idx) {
+			return idx, true
+		}
+	}
+
+	return len(query), true
+}
+
+func isCypherClauseStart(query string, idx int) bool {
+	keywords := []string{
+		"OPTIONAL MATCH",
+		"DETACH DELETE",
+		"ORDER BY",
+		"LOAD CSV",
+		"MATCH",
+		"RETURN",
+		"CALL",
+		"CREATE",
+		"MERGE",
+		"UNWIND",
+		"WHERE",
+		"SET",
+		"DELETE",
+		"WITH",
+		"FOREACH",
+		"UNION",
+		"LIMIT",
+		"SKIP",
+	}
+	for _, kw := range keywords {
+		if hasKeywordAt(query, idx, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasKeywordAt(query string, idx int, keyword string) bool {
+	if idx < 0 || idx+len(keyword) > len(query) {
+		return false
+	}
+	if idx > 0 {
+		prev := rune(query[idx-1])
+		if unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' {
+			return false
+		}
+	}
+	segment := query[idx : idx+len(keyword)]
+	if !strings.EqualFold(segment, keyword) {
+		return false
+	}
+	end := idx + len(keyword)
+	if end < len(query) {
+		next := rune(query[end])
+		if unicode.IsLetter(next) || unicode.IsDigit(next) || next == '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func skipLeadingSpace(s string, idx int) int {
+	for idx < len(s) && unicode.IsSpace(rune(s[idx])) {
+		idx++
+	}
+	return idx
 }
 
 // executeUnion executes both branches and merges results.

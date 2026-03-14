@@ -19,24 +19,24 @@ type compositeStreamEngine struct {
 
 type compositeErrorEngine struct {
 	*MemoryEngine
-	getNodeErr          error
-	getEdgeErr          error
-	firstNodeErr        error
-	returnNilFirstNode  bool
-	outgoingErr         error
-	incomingErr         error
-	betweenErr          error
-	byTypeErr           error
-	allNodesErr         error
-	allEdgesErr         error
-	batchGetErr         error
-	nodeCountErr        error
-	edgeCountErr        error
-	closeErr            error
-	createNodeErr       error
-	createEdgeErr       error
-	bulkCreateNodesErr  error
-	bulkCreateEdgesErr  error
+	getNodeErr         error
+	getEdgeErr         error
+	firstNodeErr       error
+	returnNilFirstNode bool
+	outgoingErr        error
+	incomingErr        error
+	betweenErr         error
+	byTypeErr          error
+	allNodesErr        error
+	allEdgesErr        error
+	batchGetErr        error
+	nodeCountErr       error
+	edgeCountErr       error
+	closeErr           error
+	createNodeErr      error
+	createEdgeErr      error
+	bulkCreateNodesErr error
+	bulkCreateEdgesErr error
 }
 
 func (e *compositeErrorEngine) GetNode(id NodeID) (*Node, error) {
@@ -486,7 +486,7 @@ func TestCompositeEngine_CreateNode(t *testing.T) {
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Person"},
-		Properties: map[string]interface{}{"name": "Alice"},
+		Properties: map[string]interface{}{"name": "Alice", "database_id": "db1"},
 	}
 	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
@@ -702,9 +702,9 @@ func TestCompositeEngine_BulkCreateNodes(t *testing.T) {
 
 	// Create multiple nodes
 	nodes := []*Node{
-		{ID: NodeID(prefixTestID("node1")), Labels: []string{"Person"}},
-		{ID: NodeID(prefixTestID("node2")), Labels: []string{"Person"}},
-		{ID: NodeID(prefixTestID("node3")), Labels: []string{"Company"}},
+		{ID: NodeID(prefixTestID("node1")), Labels: []string{"Person"}, Properties: map[string]interface{}{"database_id": "db1"}},
+		{ID: NodeID(prefixTestID("node2")), Labels: []string{"Person"}, Properties: map[string]interface{}{"database_id": "db1"}},
+		{ID: NodeID(prefixTestID("node3")), Labels: []string{"Company"}, Properties: map[string]interface{}{"database_id": "db2"}},
 	}
 	err := composite.BulkCreateNodes(nodes)
 	require.NoError(t, err)
@@ -1707,18 +1707,8 @@ func TestCompositeEngine_routeWrite_LabelBased(t *testing.T) {
 		Properties: map[string]interface{}{},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
-
-	// Node should be in one of the constituents
-	found := false
-	for _, engine := range []Engine{engine1, engine2} {
-		_, err := engine.GetNode(node.ID)
-		if err == nil {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "Node should be created in one of the constituents")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_PropertyBased_Int64(t *testing.T) {
@@ -1741,14 +1731,15 @@ func TestCompositeEngine_routeWrite_PropertyBased_Int64(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with int64 database_id (hash fallback)
+	// Non-string database_id is ambiguous and must be rejected.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"database_id": int64(123)},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_PropertyBased_Int(t *testing.T) {
@@ -1771,14 +1762,15 @@ func TestCompositeEngine_routeWrite_PropertyBased_Int(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with int database_id (hash fallback)
+	// Non-string database_id is ambiguous and must be rejected.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"database_id": 456},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_PropertyBased_NegativeHash(t *testing.T) {
@@ -1801,14 +1793,15 @@ func TestCompositeEngine_routeWrite_PropertyBased_NegativeHash(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with negative int64 database_id (tests negative hash handling)
+	// Non-string database_id is ambiguous and must be rejected.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"database_id": int64(-123)},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_PropertyBased_NegativeInt(t *testing.T) {
@@ -1831,14 +1824,15 @@ func TestCompositeEngine_routeWrite_PropertyBased_NegativeInt(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with negative int database_id (tests negative hash handling)
+	// Non-string database_id is ambiguous and must be rejected.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"database_id": -456},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_LabelBased_NegativeHash(t *testing.T) {
@@ -1861,15 +1855,15 @@ func TestCompositeEngine_routeWrite_LabelBased_NegativeHash(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with label that produces negative hash
-	// Use a label that will produce a negative hash value
+	// Label-only routing is ambiguous and must be rejected.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{"Z"}, // Single char that might produce negative hash
 		Properties: map[string]interface{}{},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_NoLabelsNoProperties(t *testing.T) {
@@ -1892,14 +1886,15 @@ func TestCompositeEngine_routeWrite_NoLabelsNoProperties(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with no labels and no properties (should use default)
+	// No explicit routing target must fail for multi-writable composites.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{},
 		Properties: nil,
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_routeWrite_PropertiesWithoutDatabaseID(t *testing.T) {
@@ -1922,14 +1917,15 @@ func TestCompositeEngine_routeWrite_PropertiesWithoutDatabaseID(t *testing.T) {
 	}
 	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
 
-	// Test routing with properties but no database_id (should use default)
+	// No explicit routing target must fail for multi-writable composites.
 	node := &Node{
 		ID:         NodeID(prefixTestID("node1")),
 		Labels:     []string{},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
 	_, err := composite.CreateNode(node)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous composite write target")
 }
 
 func TestCompositeEngine_hashValue(t *testing.T) {
@@ -1956,16 +1952,13 @@ func TestCompositeEngine_routeWrite_DirectBranches(t *testing.T) {
 	assert.Equal(t, "", composite.routeWrite("create", nil, nil, nil))
 	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"database_id": "db1"}, []string{"db1", "db2"}))
 	assert.Equal(t, "db2", composite.routeWrite("create", nil, map[string]interface{}{"database_id": "analytics"}, []string{"db1", "db2"}))
-	assert.Equal(t, "db2", composite.routeWrite("create", []string{"Person"}, nil, []string{"db1", "db2"}))
-	assert.Equal(t, "db1", composite.routeWrite("create", []string{"db1"}, nil, []string{"db1", "db2"}))
-	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "t1"}, []string{"db1", "db2"}))
-	assert.Equal(t, "db2", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "unknown"}, []string{"db1", "db2"}))
-
-	expectedHashRoute := []string{"db1", "db2"}[hashValue(int32(3))%2]
-	assert.Equal(t, expectedHashRoute, composite.routeWrite("create", nil, map[string]interface{}{"database_id": int32(3)}, []string{"db1", "db2"}))
-
-	assert.Equal(t, []string{"db1", "db2"}[hashString("Other")%2], composite.routeWrite("create", []string{"Other"}, nil, []string{"db1", "db2"}))
-	assert.Equal(t, "db1", composite.routeWrite("create", nil, map[string]interface{}{"other": "value"}, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", []string{"Person"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", []string{"db1"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "t1"}, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", nil, map[string]interface{}{"tenant": "unknown"}, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", nil, map[string]interface{}{"database_id": int32(3)}, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", []string{"Other"}, nil, []string{"db1", "db2"}))
+	assert.Equal(t, "", composite.routeWrite("create", nil, map[string]interface{}{"other": "value"}, []string{"db1", "db2"}))
 }
 
 func TestCompositeEngine_CreateNode_NoWritableConstituents(t *testing.T) {
@@ -2470,7 +2463,11 @@ func TestCompositeEngine_ErrorPaths(t *testing.T) {
 		composite.SetLabelRouting("ErrLabel", []string{"err"})
 
 		errEngine.createNodeErr = boom
-		_, err := composite.CreateNode(&Node{ID: NodeID(prefixTestID("route-node")), Labels: []string{"ErrLabel"}})
+		_, err := composite.CreateNode(&Node{
+			ID:         NodeID(prefixTestID("route-node")),
+			Labels:     []string{"ErrLabel"},
+			Properties: map[string]interface{}{"database_id": "err"},
+		})
 		require.ErrorIs(t, err, boom)
 		errEngine.createNodeErr = nil
 
@@ -2487,7 +2484,11 @@ func TestCompositeEngine_ErrorPaths(t *testing.T) {
 		errEngine.createEdgeErr = nil
 
 		errEngine.bulkCreateNodesErr = boom
-		err = composite.BulkCreateNodes([]*Node{{ID: NodeID(prefixTestID("bulk-node")), Labels: []string{"ErrLabel"}}})
+		err = composite.BulkCreateNodes([]*Node{{
+			ID:         NodeID(prefixTestID("bulk-node")),
+			Labels:     []string{"ErrLabel"},
+			Properties: map[string]interface{}{"database_id": "err"},
+		}})
 		require.ErrorContains(t, err, "failed to create nodes in constituent 'err'")
 		errEngine.bulkCreateNodesErr = nil
 

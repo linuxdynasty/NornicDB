@@ -52,12 +52,12 @@ func TestCompositeDatabase_EndToEnd(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create nodes in tenant_a (via composite)
-	_, err = exec.Execute(ctx, `CREATE (a:Person {name: "Alice", tenant: "a"})`, nil)
+	// Create nodes in tenant_a (explicit target routing)
+	_, err = exec.Execute(ctx, `CREATE (a:Person {name: "Alice", tenant: "a", database_id: "tenant_a"})`, nil)
 	require.NoError(t, err)
 
-	// Create nodes in tenant_b (via composite)
-	_, err = exec.Execute(ctx, `CREATE (b:Person {name: "Bob", tenant: "b"})`, nil)
+	// Create nodes in tenant_b (explicit target routing)
+	_, err = exec.Execute(ctx, `CREATE (b:Person {name: "Bob", tenant: "b", database_id: "tenant_b"})`, nil)
 	require.NoError(t, err)
 
 	// Query across both constituents
@@ -134,10 +134,10 @@ func TestCompositeDatabase_ComplexQuery(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create data in both constituents
-	_, err = exec.Execute(ctx, `CREATE (a:Person {name: "Alice", age: 30})`, nil)
+	// Create data in both constituents with explicit target routing.
+	_, err = exec.Execute(ctx, `CREATE (a:Person {name: "Alice", age: 30, database_id: "`+db1Name+`"})`, nil)
 	require.NoError(t, err)
-	_, err = exec.Execute(ctx, `CREATE (b:Person {name: "Bob", age: 25})`, nil)
+	_, err = exec.Execute(ctx, `CREATE (b:Person {name: "Bob", age: 25, database_id: "`+db2Name+`"})`, nil)
 	require.NoError(t, err)
 
 	// Complex query with WHERE and aggregation

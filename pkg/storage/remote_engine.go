@@ -145,21 +145,15 @@ func (b *boltTransport) query(ctx context.Context, statement string, params map[
 	})
 	defer func() { _ = session.Close(ctx) }()
 
-	result, err := session.Run(ctx, statement, params)
-	if err != nil {
-		return nil, err
-	}
-
-	rows := make([][]interface{}, 0)
-	for result.Next(ctx) {
-		record := result.Record()
+	var rows [][]interface{}
+	_, err := executeManagedStatement(ctx, session, statement, params, func(_ []string, record *neo4j.Record) {
 		row := make([]interface{}, len(record.Values))
 		for i, v := range record.Values {
 			row[i] = normalizeBoltValue(v)
 		}
 		rows = append(rows, row)
-	}
-	if err := result.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -172,28 +166,59 @@ func (b *boltTransport) queryWithColumns(ctx context.Context, statement string, 
 	})
 	defer func() { _ = session.Close(ctx) }()
 
-	result, err := session.Run(ctx, statement, params)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	columns, err := result.Keys()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get result keys: %w", err)
-	}
 	rows := make([][]interface{}, 0)
-	for result.Next(ctx) {
-		record := result.Record()
+	columns, err := executeManagedStatement(ctx, session, statement, params, func(_ []string, record *neo4j.Record) {
 		row := make([]interface{}, len(record.Values))
 		for i, v := range record.Values {
 			row[i] = normalizeBoltValue(v)
 		}
 		rows = append(rows, row)
-	}
-	if err := result.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, nil, err
 	}
 	return columns, rows, nil
+}
+
+func executeManagedStatement(
+	ctx context.Context,
+	session neo4j.SessionWithContext,
+	statement string,
+	params map[string]interface{},
+	onRecord func(columns []string, record *neo4j.Record),
+) ([]string, error) {
+	runInTx := func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, statement, params)
+		if err != nil {
+			return nil, err
+		}
+		columns, err := result.Keys()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get result keys: %w", err)
+		}
+		for result.Next(ctx) {
+			onRecord(columns, result.Record())
+		}
+		if err := result.Err(); err != nil {
+			return nil, err
+		}
+		return columns, nil
+	}
+	mode := accessModeForStatement(statement)
+	if mode == neo4j.AccessModeWrite {
+		v, err := session.ExecuteWrite(ctx, runInTx)
+		if err != nil {
+			return nil, err
+		}
+		cols, _ := v.([]string)
+		return cols, nil
+	}
+	v, err := session.ExecuteRead(ctx, runInTx)
+	if err != nil {
+		return nil, err
+	}
+	cols, _ := v.([]string)
+	return cols, nil
 }
 
 func (b *boltTransport) queryBatch(ctx context.Context, statements []remoteStatement) error {

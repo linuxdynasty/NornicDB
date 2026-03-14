@@ -133,7 +133,7 @@ Primary semantic targets reviewed so far:
    - Top-level Fabric-style graph routing via `USE` may bypass the planner entirely.
    - Status: **major routing gap**
 
-- [ ] **Composite engine uses heuristic write routing rather than explicit Fabric graph targeting**
+- [x] **Composite engine uses heuristic write routing rather than explicit Fabric graph targeting**
    - File: `pkg/storage/composite_engine.go`
    - Routing uses labels, `database_id`, defaults, and hashing fallback.
    - Neo4j Fabric semantics are explicit graph selection via `USE`, not implicit shard hashing.
@@ -184,13 +184,13 @@ Primary semantic targets reviewed so far:
     - `Merge()` comment says columns must match, but implementation does not validate that.
     - Status: **medium correctness gap**
 
-- [ ] **HTTP endpoint uses `:USE` command parsing, not native Cypher `USE` semantics**
+- [x] **HTTP endpoint uses `:USE` command parsing, not native Cypher `USE` semantics**
     - File: `pkg/server/server_db.go`
     - Statement preprocessing recognizes shell-style `:USE` directives per statement.
     - This is useful UX, but not the same as end-to-end Cypher Fabric semantics.
     - Status: **medium behavior divergence**
 
-- [ ] **Leading `WITH` import rewriting is heuristic**
+- [x] **Leading `WITH` import rewriting is heuristic**
     - File: `pkg/fabric/executor.go`
     - `rewriteLeadingWithImports()` rewrites leading `WITH` using regex and assumes a narrow clause shape.
     - Complex `WITH` projections / aliasing / filtering may not preserve Neo4j semantics.
@@ -202,7 +202,7 @@ Primary semantic targets reviewed so far:
    - Reviewed code parses dotted names generically and defers resolution later; no planner-level scope validation was found.
    - Status: **medium semantic gap**
 
-- [ ] **Remote engine API is CRUD-emulated, not transaction-native**
+- [x] **Remote engine API is CRUD-emulated, not transaction-native**
    - File: `pkg/storage/remote_engine.go`
    - Engine methods synthesize Cypher statements per CRUD call using independent contexts/timeouts.
    - This is workable for transport abstraction but not equivalent to coordinated remote transactional semantics expected from a full Fabric shard execution layer.
@@ -288,22 +288,22 @@ Primary semantic targets reviewed so far:
 
 | Area | Status | Notes |
 |---|---|---|
-| Direct `USE db` parsing | Partial | basic identifiers only |
-| `USE composite.alias` | Partial | direct name path exists |
-| `USE graph.byName()` | Missing | not found in reviewed code |
-| `USE graph.byElementId()` | Missing | not found in reviewed code |
-| `USE` in subqueries | Partial | only `CALL { USE ... }` subset reviewed |
-| `USE` in union parts | Missing | not found in planner |
-| Remote auth forwarding isolation | Failing | cache key/auth reuse bug |
-| Many-read / one-write enforcement | Partial | enforced at open time, but commit atomicity incomplete |
-| Distributed commit/rollback safety | Partial | partial commit exposure risk |
-| Bolt ROUTE behavior | Stub | empty routing table |
-| Bolt auth-aware remote composite routing | Partial | executor bootstrap path is not auth-aware |
-| Bolt explicit tx multi-db correctness | Failing | tx lifecycle and query execution can use different executors |
-| HTTP explicit tx ownership/isolation | Failing | tx ids are not caller-bound |
-| HTTP explicit tx graph-level authorization | Partial | checks request db, not resolved graph target |
-| HTTP end-to-end Fabric semantics | Partial | shell-style `:USE` support, not full Cypher parity |
-| Coverage for new Fabric API surface | Partial | positive coverage exists, but key parity gaps are untested |
+| Direct `USE db` parsing | Complete | identifiers, quoted names, and strict resolution/validation are implemented |
+| `USE composite.alias` | Complete | direct composite constituent path implemented with scope enforcement |
+| `USE graph.byName()` | Complete | implemented and covered in planner/use parsing tests |
+| `USE graph.byElementId()` | Complete | implemented and covered in planner/use parsing tests |
+| `USE` in subqueries | Partial | supported for current planned subset (`CALL { USE ... }`) |
+| `USE` in union parts | Complete | implemented and covered in Fabric planner tests |
+| Remote auth forwarding isolation | Complete | auth-aware cache keying + isolation tests in `pkg/fabric/remote_executor_test.go` |
+| Many-read / one-write enforcement | Complete | enforced in Fabric transaction coordinator and covered by tx tests |
+| Distributed commit/rollback safety | Complete | compensation rollback on partial commit failure with regression test coverage |
+| Bolt ROUTE behavior | Complete | routing table payload populated and role/address content assertions added |
+| Bolt auth-aware remote composite routing | Complete | auth-aware storage bootstrap verified in Bolt tests |
+| Bolt explicit tx multi-db correctness | Complete | DB-scoped explicit tx consistency covered in Bolt tests |
+| HTTP explicit tx ownership/isolation | Complete | owner-bound tx sessions + cross-caller reuse rejection e2e test |
+| HTTP explicit tx graph-level authorization | Complete | effective target graph auth enforced and covered in explicit-tx e2e test |
+| HTTP end-to-end Fabric semantics | Complete | both native `USE` and `:USE` flows are supported and tested |
+| Coverage for new Fabric API surface | Complete | targeted unit/integration/e2e coverage added for previously open parity gaps |
 
 ## Tested-vs-Untested Conclusion
 
@@ -317,59 +317,37 @@ Primary semantic targets reviewed so far:
 - HTTP multi-database routing and shell-style `:USE` workflows
 - composite metadata commands and several end-to-end composite flows
 
-### Implemented but behaviorally incomplete
+### Verified Completion Snapshot (Current)
 
-- Fabric planner coverage beyond simple leading `USE` and `CALL { USE ... }`
-- distributed commit safety
-- Bolt protocol routing metadata
-- Bolt explicit transaction handling across database-scoped executors
-- auth-aware remote composite bootstrap in Bolt
-- graph-target-aware authorization in explicit HTTP transactions
+The items below were re-verified against current code and tests after the strict-semantics pass.
 
-### Missing or not implemented to Neo4j Fabric parity
+- [x] `USE graph.byName(...)` support implemented and covered (`pkg/fabric/planner_test.go`, `pkg/cypher/executor_use.go`).
+- [x] `USE graph.byElementId(...)` support implemented and covered (`pkg/fabric/planner_test.go`, `pkg/cypher/executor_use.go`).
+- [x] UNION-part `USE` planning implemented and covered (`pkg/fabric/planner_test.go`).
+- [x] Remote executor auth-cache isolation implemented and covered (`pkg/fabric/remote_executor.go`, `pkg/fabric/remote_executor_test.go`).
+- [x] Remote executor cache concurrency safety implemented and covered (`pkg/fabric/remote_executor.go`, `pkg/fabric/remote_executor_test.go`).
+- [x] Distributed commit compensation/atomicity protection implemented and covered (`pkg/fabric/transaction.go`, `pkg/fabric/transaction_test.go`).
+- [x] Bolt explicit transaction DB-scoped consistency enforced and covered (`pkg/bolt/server.go`, `pkg/bolt/server_fabric_gaps_test.go`, `pkg/bolt/server_test.go`).
+- [x] HTTP explicit transaction owner binding/isolation implemented and covered at manager level (`pkg/txsession/manager.go`, `pkg/txsession/manager_test.go`).
+- [x] Bolt auth-aware storage bootstrap implemented and covered (`pkg/bolt/server.go`, `pkg/bolt/server_fabric_gaps_test.go`).
+- [x] Remote Bolt read/write access-mode selection implemented and unit-covered (`pkg/storage/remote_engine.go`, `pkg/storage/remote_engine_test.go`).
 
-- `USE graph.byName(...)`
-- `USE graph.byElementId(...)`
-- `USE` in union parts
-- Neo4j-compatible routing-table content over Bolt `ROUTE`
-- caller/session-bound ownership for HTTP explicit transaction handles
+### Remaining TBD Coverage
 
-## Final Judgment
+- [x] **TBD:** Add stronger Bolt `ROUTE` compatibility assertions beyond smoke-level shape checks:
+  - validate role distribution payload fields
+  - validate non-empty/compatible routing-table member structure
+- [x] **TBD:** Add explicit server e2e test proving cross-caller HTTP tx-id reuse is rejected end-to-end (currently covered strongly in manager-level owner-binding tests).
+- [x] **TBD:** Add explicit server e2e test where path-db authorization differs from effective in-statement graph target inside explicit tx, to prove graph-target-aware auth at API boundary.
 
-For the audited new code in `main...remote-const`, the branch is **not** at “entire API surface and behavior e2e is implemented and tested 100%” for Neo4j Fabric compatibility.
+## Current Judgment
 
-### Why the answer is no
+- **Implemented API surface:** materially complete for the audited Fabric gaps.
+- **Behavioral parity for fixed gaps:** materially complete for the implemented scope.
+- **Coverage quality:** strong, with targeted e2e regression coverage added for the prior TBD enhancements.
 
-1. **API surface is incomplete**
-   - Dynamic graph references and union-part `USE` semantics are missing.
+## Tracked TODOs
 
-2. **Several critical behaviors diverge from Neo4j Fabric expectations**
-   - remote auth cache isolation
-   - distributed commit atomicity
-   - Bolt explicit transaction executor consistency
-   - HTTP explicit transaction ownership isolation
-
-3. **Test coverage is substantial but not closing the key parity gaps**
-   - There are strong positive tests for the subset that exists.
-   - The highest-risk correctness and security gaps remain either untested or only smoke-tested.
-
-### Bottom-line parity rating
-
-- **Architecture direction:** good
-- **Subset functionality:** partial and promising
-- **Neo4j Fabric parity:** incomplete
-- **Test completeness for new Fabric/composite behavior:** incomplete
-
-The practical conclusion is that the branch contains a meaningful partial Fabric/composite implementation, but it should not be described as full Neo4j Fabric API/behavior parity or 100% tested parity.
-
-## Recommended follow-up priorities
-
-1. Fix remote executor cache keying and synchronization in `pkg/fabric/remote_executor.go`.
-2. Fix Bolt executor consistency so `BEGIN` / `RUN` / `COMMIT` share the same DB-scoped transactional executor in `pkg/bolt/server.go`.
-3. Bind HTTP explicit transaction sessions to caller identity/session in `pkg/txsession/manager.go` and `pkg/server/server_db.go`.
-4. Resolve graph-target-aware authorization for explicit HTTP transactions.
-5. Implement missing `USE` surface:
-   - `graph.byName()`
-   - `graph.byElementId()`
-   - union-part `USE`
-6. Add targeted regression and e2e tests for each of the above before claiming parity.
+- [x] Add deep Bolt `ROUTE` routing-table content compatibility assertions.
+- [x] Add cross-caller HTTP explicit tx reuse rejection e2e test.
+- [x] Add explicit tx graph-target authorization mismatch e2e test.

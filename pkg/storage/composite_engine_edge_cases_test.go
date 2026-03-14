@@ -73,15 +73,14 @@ func TestCompositeEngine_OfflineConstituent(t *testing.T) {
 	// Should return nodes from db1 (db2 is offline but we skip it)
 	assert.GreaterOrEqual(t, len(nodes), 1)
 
-	// Write should still work with db1
-	// Note: CreateNode routes to a constituent, so it should work if db1 is still open
-	node2 := &Node{ID: NodeID(prefixTestID("node2")), Labels: []string{"Person"}}
-	_, err = composite.CreateNode(node2)
-	// May succeed if routed to db1, or fail if routed to db2
-	// Either way, the composite engine handles it
-	if err != nil {
-		assert.Contains(t, err.Error(), "storage closed")
+	// Write should still work when explicitly targeted to online db1.
+	node2 := &Node{
+		ID:         NodeID(prefixTestID("node2")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"database_id": "db1"},
 	}
+	_, err = composite.CreateNode(node2)
+	require.NoError(t, err)
 }
 
 func TestCompositeEngine_AllConstituentsOffline(t *testing.T) {
@@ -113,14 +112,15 @@ func TestCompositeEngine_AllConstituentsOffline(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, len(nodes))
 
-	// Write operations should fail with storage closed error
-	node := &Node{ID: NodeID(prefixTestID("node1")), Labels: []string{"Person"}}
+	// Write operations should fail with storage closed error when explicitly targeted.
+	node := &Node{
+		ID:         NodeID(prefixTestID("node1")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"database_id": "db1"},
+	}
 	_, err = composite.CreateNode(node)
 	assert.Error(t, err)
-	// May be "no writable constituents available" or "storage closed" depending on routing
-	assert.True(t, err.Error() == "no writable constituents available" ||
-		err.Error() == "storage closed" ||
-		containsSubstring(err.Error(), "storage closed"))
+	assert.True(t, err.Error() == "storage closed" || containsSubstring(err.Error(), "storage closed"))
 }
 
 func TestCompositeEngine_CircularDependencyPrevention(t *testing.T) {

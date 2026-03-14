@@ -378,3 +378,29 @@ func TestDeduplicateRows(t *testing.T) {
 		t.Errorf("expected 2 rows after dedup, got %d", len(deduped))
 	}
 }
+
+func TestRewriteLeadingWithImports_DeterministicClauseBoundary(t *testing.T) {
+	query := "WITH id, size([x IN [1,2,3] WHERE x > 1]) AS c MATCH (n) WHERE n.id = id RETURN n"
+	rewritten := rewriteLeadingWithImports(query, []string{"id"})
+	expected := "WITH $id AS id MATCH (n) WHERE n.id = id RETURN n"
+	if rewritten != expected {
+		t.Fatalf("expected %q, got %q", expected, rewritten)
+	}
+}
+
+func TestRewriteLeadingWithImports_RespectsQuotedKeywords(t *testing.T) {
+	query := "WITH 'MATCH as text' AS txt, id RETURN txt, id"
+	rewritten := rewriteLeadingWithImports(query, []string{"id"})
+	expected := "WITH $id AS id RETURN txt, id"
+	if rewritten != expected {
+		t.Fatalf("expected %q, got %q", expected, rewritten)
+	}
+}
+
+func TestRewriteLeadingWithImports_NoLeadingWith(t *testing.T) {
+	query := "MATCH (n) RETURN n"
+	rewritten := rewriteLeadingWithImports(query, []string{"id"})
+	if rewritten != query {
+		t.Fatalf("expected query unchanged, got %q", rewritten)
+	}
+}

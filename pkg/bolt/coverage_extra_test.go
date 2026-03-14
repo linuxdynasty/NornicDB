@@ -985,6 +985,33 @@ func TestBoltCoverage_ServerMessageAndRunHelpers(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, <-done)
 		assert.Contains(t, meta, "rt")
+		rt, ok := meta["rt"].(map[string]any)
+		require.True(t, ok, "expected rt metadata map")
+		ttl, ok := rt["ttl"].(int64)
+		require.True(t, ok, "expected int64 ttl in routing table")
+		assert.Greater(t, ttl, int64(0))
+		rawServers, ok := rt["servers"].([]any)
+		require.True(t, ok, "expected servers list in routing table")
+		require.NotEmpty(t, rawServers)
+		roles := map[string]bool{}
+		for _, entry := range rawServers {
+			serverEntry, ok := entry.(map[string]any)
+			require.True(t, ok, "expected routing server entry map")
+			role, ok := serverEntry["role"].(string)
+			require.True(t, ok, "expected routing server role")
+			roles[role] = true
+			addresses, ok := serverEntry["addresses"].([]any)
+			require.True(t, ok, "expected routing server addresses list")
+			require.NotEmpty(t, addresses, "expected non-empty addresses for role %s", role)
+			for _, addr := range addresses {
+				addrStr, ok := addr.(string)
+				require.True(t, ok, "expected address string for role %s", role)
+				assert.NotEmpty(t, addrStr)
+			}
+		}
+		assert.True(t, roles["ROUTE"], "expected ROUTE role in routing table")
+		assert.True(t, roles["READ"], "expected READ role in routing table")
+		assert.True(t, roles["WRITE"], "expected WRITE role in routing table")
 	})
 
 	t.Run("rollback without transaction succeeds", func(t *testing.T) {

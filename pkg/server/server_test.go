@@ -2061,6 +2061,18 @@ func TestHandleImplicitTransaction_BranchMatrix(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
+	t.Run("native USE statement is accepted", func(t *testing.T) {
+		body := `{"statements":[{"statement":"USE nornic RETURN 1 AS n"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+			Username: "admin",
+			Roles:    []string{"admin"},
+		}))
+		rec := httptest.NewRecorder()
+		server.handleImplicitTransaction(rec, req, dbName)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
 	t.Run("comment-only statement yields empty result and includeStats", func(t *testing.T) {
 		body := `{"statements":[{"statement":"// comment only","includeStats":true},{"statement":"RETURN 1 AS n","includeStats":true}]}`
 		req := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/commit", strings.NewReader(body))
@@ -3981,4 +3993,74 @@ func TestAuthUtilityBranches_MinorGaps(t *testing.T) {
 	roleEntRec := httptest.NewRecorder()
 	server.handleRoleEntitlements(roleEntRec, roleEntReq)
 	require.Equal(t, http.StatusOK, roleEntRec.Code)
+}
+
+func TestExplicitTransaction_OwnerIsolationAcrossCallers(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+
+	ownerA := &auth.JWTClaims{Username: "admin", Roles: []string{"admin"}}
+	ownerB := &auth.JWTClaims{Username: "other-admin", Roles: []string{"admin"}}
+
+	openReq := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx", strings.NewReader(`{"statements":[]}`))
+	openReq = openReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, ownerA))
+	openRec := httptest.NewRecorder()
+	server.handleOpenTransaction(openRec, openReq, dbName)
+	require.Equal(t, http.StatusCreated, openRec.Code)
+
+	var openPayload map[string]interface{}
+	require.NoError(t, json.NewDecoder(openRec.Body).Decode(&openPayload))
+	commitURL, _ := openPayload["commit"].(string)
+	require.NotEmpty(t, commitURL)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+	require.NotEmpty(t, txID)
+
+	execReq := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/"+txID, strings.NewReader(`{"statements":[{"statement":"RETURN 1 AS n"}]}`))
+	execReq = execReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, ownerB))
+	execRec := httptest.NewRecorder()
+	server.handleExecuteInTransaction(execRec, execReq, dbName, txID)
+	require.Equal(t, http.StatusNotFound, execRec.Code)
+}
+
+func TestExplicitTransaction_UsesEffectiveGraphForAuthorization(t *testing.T) {
+	server, _ := setupTestServer(t)
+	dbName := server.dbManager.DefaultDatabaseName()
+	require.NoError(t, server.dbManager.CreateDatabase("private"))
+	require.NotNil(t, server.allowlistStore)
+	require.NotNil(t, server.privilegesStore)
+	require.NoError(t, server.allowlistStore.SaveRoleDatabases(context.Background(), "viewer", []string{dbName}))
+	require.NoError(t, server.privilegesStore.SavePrivilege(context.Background(), "viewer", dbName, true, false))
+
+	viewerClaims := &auth.JWTClaims{Username: "reader", Roles: []string{"viewer"}}
+
+	openReq := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx", strings.NewReader(`{"statements":[]}`))
+	openReq = openReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, viewerClaims))
+	openRec := httptest.NewRecorder()
+	server.handleOpenTransaction(openRec, openReq, dbName)
+	require.Equal(t, http.StatusCreated, openRec.Code)
+
+	var openPayload map[string]interface{}
+	require.NoError(t, json.NewDecoder(openRec.Body).Decode(&openPayload))
+	commitURL, _ := openPayload["commit"].(string)
+	require.NotEmpty(t, commitURL)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+	require.NotEmpty(t, txID)
+
+	execReq := httptest.NewRequest(http.MethodPost, "/db/"+dbName+"/tx/"+txID, strings.NewReader(`{"statements":[{"statement":"USE private RETURN 1 AS n"}]}`))
+	execReq = execReq.WithContext(context.WithValue(context.Background(), contextKeyClaims, viewerClaims))
+	execRec := httptest.NewRecorder()
+	server.handleExecuteInTransaction(execRec, execReq, dbName, txID)
+	require.Equal(t, http.StatusOK, execRec.Code)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(execRec.Body).Decode(&payload))
+	errs, ok := payload["errors"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, errs)
+	firstErr, ok := errs[0].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "Neo.ClientError.Security.Forbidden", firstErr["code"])
+	require.Contains(t, fmt.Sprint(firstErr["message"]), "private")
 }
