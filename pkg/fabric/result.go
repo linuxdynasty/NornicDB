@@ -31,6 +31,20 @@ func (r *ResultStream) Merge(other *ResultStream) {
 	}
 	if len(r.Columns) == 0 {
 		r.Columns = other.Columns
+	} else if !sameColumns(r.Columns, other.Columns) {
+		return
 	}
 	r.Rows = append(r.Rows, other.Rows...)
+}
+
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

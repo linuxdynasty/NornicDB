@@ -144,6 +144,29 @@ func TestManagerOpenWithExecutorErrors(t *testing.T) {
 	}
 }
 
+func TestManagerOwnerBoundSessions(t *testing.T) {
+	mgr := NewManager(time.Second, newExecutorFactory(t))
+
+	session, err := mgr.OpenForOwner(context.Background(), "neo4j", "user:alice")
+	if err != nil {
+		t.Fatalf("open for owner failed: %v", err)
+	}
+
+	if got, ok := mgr.GetForOwner(session.ID, "user:alice"); !ok || got == nil {
+		t.Fatalf("expected owner-bound session lookup to succeed")
+	}
+	if got, ok := mgr.GetForOwner(session.ID, "user:bob"); ok || got != nil {
+		t.Fatalf("expected mismatched owner lookup to fail")
+	}
+	if got, ok := mgr.GetForOwner(session.ID, ""); ok || got != nil {
+		t.Fatalf("expected empty owner lookup to fail for owner-bound session")
+	}
+
+	if err := mgr.RollbackAndDelete(context.Background(), session); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+}
+
 func TestManagerNewManagerDefaultTTLAndTouchNil(t *testing.T) {
 	mgr := NewManager(0, newExecutorFactory(t))
 	if mgr.ttl != 30*time.Second {

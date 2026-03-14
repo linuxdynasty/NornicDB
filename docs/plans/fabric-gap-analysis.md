@@ -71,26 +71,26 @@ Primary semantic targets reviewed so far:
 
 ### Critical Gaps
 
-1. **Remote auth cache isolation bug**
+- [x] **Remote auth cache isolation bug**
    - File: `pkg/fabric/remote_executor.go`
    - `engineCache` is keyed by URI/database/auth mode only.
    - Forwarded bearer token and explicit credentials are not part of the cache key.
    - Risk: one caller can reuse a remote engine established under another caller's auth context.
    - Status: **critical behavior bug**
 
-2. **Remote executor cache is not synchronized**
+- [x] **Remote executor cache is not synchronized**
    - File: `pkg/fabric/remote_executor.go`
    - `engineCache` is mutable shared state with no mutex.
    - Status: **critical concurrency gap**
 
-3. **Distributed commit is not atomic on partial commit failure**
+- [x] **Distributed commit is not atomic on partial commit failure**
    - File: `pkg/fabric/transaction.go`
    - `Commit()` marks already-committed subtransactions as committed and only rolls back still-open ones.
    - This can leave the distributed transaction partially committed.
    - Neo4j Fabric semantics require coordinated transaction behavior, not partial success exposure.
    - Status: **critical semantic gap**
 
-4. **Planner only recognizes a narrow Fabric subset**
+- [x] **Planner only recognizes a narrow Fabric subset**
    - Files: `pkg/fabric/planner.go`, `pkg/cypher/executor_fabric.go`
    - Current path only plans:
      - leading `USE ...`
@@ -102,14 +102,14 @@ Primary semantic targets reviewed so far:
      - broader graph-reference parsing/escaping rules
    - Status: **major API surface gap**
 
-5. **Planner loses outer-query structure around Fabric subqueries**
+- [x] **Planner loses outer-query structure around Fabric subqueries**
    - File: `pkg/fabric/planner.go`
    - `planMultiGraph()` builds apply chain from extracted `CALL { USE ... }` blocks, then only appends trailing clauses after the last block.
    - Query clauses before the first `CALL { USE ... }` are not modeled as executable fragments.
    - This means valid correlated / preparatory outer query structure can be dropped or misrepresented.
    - Status: **major correctness gap**
 
-6. **Planner does not implement UNION-part `USE` semantics**
+- [x] **Planner does not implement UNION-part `USE` semantics**
    - File: `pkg/fabric/planner.go`
    - Reviewed planner logic extracts leading `USE` and `CALL { USE ... }` blocks only.
    - No branch planning was found for:
@@ -117,7 +117,7 @@ Primary semantic targets reviewed so far:
      - `UNION ALL` variants with graph switching
    - Status: **major API surface gap**
 
-7. **`USE` parsing is still limited to direct identifiers**
+- [x] **`USE` parsing is still limited to direct identifiers**
    - Files: `pkg/cypher/executor_use.go`, `pkg/fabric/planner.go`, `pkg/cypher/transaction.go`
    - Reviewed parsers handle simple identifiers and backtick-quoted names.
    - No support found for:
@@ -127,50 +127,50 @@ Primary semantic targets reviewed so far:
 
 ### Major Gaps
 
-8. **Fabric planner activation heuristic is too narrow**
+- [x] **Fabric planner activation heuristic is too narrow**
    - File: `pkg/cypher/executor_fabric.go`
    - `shouldUseFabricPlanner()` only checks for `CALL { USE ... }`.
    - Top-level Fabric-style graph routing via `USE` may bypass the planner entirely.
    - Status: **major routing gap**
 
-9. **Composite engine uses heuristic write routing rather than explicit Fabric graph targeting**
+- [ ] **Composite engine uses heuristic write routing rather than explicit Fabric graph targeting**
    - File: `pkg/storage/composite_engine.go`
    - Routing uses labels, `database_id`, defaults, and hashing fallback.
    - Neo4j Fabric semantics are explicit graph selection via `USE`, not implicit shard hashing.
    - Status: **major semantic divergence**
 
-10. **Bolt ROUTE support is stubbed**
+- [x] **Bolt ROUTE support is stubbed**
    - File: `pkg/bolt/server.go`
    - `handleRoute()` returns TTL with empty server list.
    - This is protocol-shape compatible only, not behaviorally compatible routing metadata.
    - Status: **major protocol gap**
 
-11. **Bolt session-to-database executor creation does not use auth-aware storage resolution**
+- [x] **Bolt session-to-database executor creation does not use auth-aware storage resolution**
     - File: `pkg/bolt/server.go`
     - `getExecutorForDatabase()` uses `dbManager.GetStorage(dbName)`, not auth-aware resolution.
     - For composite databases with remote constituents, this can instantiate composite/remote access paths without caller auth forwarding at executor creation time.
     - Status: **major auth propagation gap**
 
-12. **Remote Bolt transport always opens write sessions**
+- [x] **Remote Bolt transport always opens write sessions**
     - File: `pkg/storage/remote_engine.go`
     - All session configs use `neo4j.AccessModeWrite`, even for reads.
     - That diverges from expected remote routing and access-mode semantics.
     - Status: **major behavioral gap**
 
-13. **HTTP explicit transaction sessions are identified only by tx id, not caller/session ownership**
+- [x] **HTTP explicit transaction sessions are identified only by tx id, not caller/session ownership**
    - Files: `pkg/txsession/manager.go`, `pkg/server/server_db.go`
    - Reviewed transaction session state stores database/executor/expiry, but no caller binding.
    - HTTP follow-up calls validate only `txID` + `dbName`.
    - Neo4j transaction handles are session/connection scoped; this is a security/behavior mismatch.
    - Status: **major security gap**
 
-14. **HTTP explicit transaction access checks are evaluated against the path database, not the effective graph target**
+- [x] **HTTP explicit transaction access checks are evaluated against the path database, not the effective graph target**
    - File: `pkg/server/server_db.go`
    - `executeTxStatements()` checks writes against the request `dbName`, not a resolved per-statement `USE` target.
    - This can diverge from actual graph touched by Fabric/composite queries.
    - Status: **major authorization gap**
 
-15. **Bolt explicit transactions are not executor-stable in multi-database mode**
+- [x] **Bolt explicit transactions are not executor-stable in multi-database mode**
    - File: `pkg/bolt/server.go`
    - `handleBegin()` / `handleCommit()` / `handleRollback()` operate on `s.executor`.
    - `handleRun()` swaps to a fresh per-query executor from `getExecutorForDatabase(dbName)` whenever a DB manager is present.
@@ -179,30 +179,30 @@ Primary semantic targets reviewed so far:
 
 ### Medium Gaps
 
-16. **Result stream merge contract is undocumented in code but unenforced**
+- [x] **Result stream merge contract is undocumented in code but unenforced**
     - File: `pkg/fabric/result.go`
     - `Merge()` comment says columns must match, but implementation does not validate that.
     - Status: **medium correctness gap**
 
-17. **HTTP endpoint uses `:USE` command parsing, not native Cypher `USE` semantics**
+- [ ] **HTTP endpoint uses `:USE` command parsing, not native Cypher `USE` semantics**
     - File: `pkg/server/server_db.go`
     - Statement preprocessing recognizes shell-style `:USE` directives per statement.
     - This is useful UX, but not the same as end-to-end Cypher Fabric semantics.
     - Status: **medium behavior divergence**
 
-18. **Leading `WITH` import rewriting is heuristic**
+- [ ] **Leading `WITH` import rewriting is heuristic**
     - File: `pkg/fabric/executor.go`
     - `rewriteLeadingWithImports()` rewrites leading `WITH` using regex and assumes a narrow clause shape.
     - Complex `WITH` projections / aliasing / filtering may not preserve Neo4j semantics.
     - Status: **medium semantic risk**
 
-19. **Composite constituent scope rules are not visibly enforced in planner/parser path**
+- [x] **Composite constituent scope rules are not visibly enforced in planner/parser path**
    - Files: `pkg/fabric/planner.go`, `pkg/cypher/executor_use.go`
    - Neo4j restricts `USE` on a composite connection to constituents of the current composite.
    - Reviewed code parses dotted names generically and defers resolution later; no planner-level scope validation was found.
    - Status: **medium semantic gap**
 
-20. **Remote engine API is CRUD-emulated, not transaction-native**
+- [ ] **Remote engine API is CRUD-emulated, not transaction-native**
    - File: `pkg/storage/remote_engine.go`
    - Engine methods synthesize Cypher statements per CRUD call using independent contexts/timeouts.
    - This is workable for transport abstraction but not equivalent to coordinated remote transactional semantics expected from a full Fabric shard execution layer.

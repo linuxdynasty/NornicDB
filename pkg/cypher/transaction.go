@@ -66,6 +66,10 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 			engine = namespacedEngine.GetInnerEngine()
 			continue
 		}
+		if wrapper, ok := engine.(interface{ GetInnerEngine() storage.Engine }); ok {
+			engine = wrapper.GetInnerEngine()
+			continue
+		}
 		break
 	}
 

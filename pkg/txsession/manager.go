@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type ExecutorFactory func(dbName string) (*cypher.StorageExecutor, error)
 type Session struct {
 	ID       string
 	Database string
+	Owner    string
 	Executor *cypher.StorageExecutor
 	Expires  time.Time
 
@@ -52,6 +54,10 @@ func NewManager(ttl time.Duration, factory ExecutorFactory) *Manager {
 }
 
 func (m *Manager) Open(ctx context.Context, dbName string) (*Session, error) {
+	return m.OpenForOwner(ctx, dbName, "")
+}
+
+func (m *Manager) OpenForOwner(ctx context.Context, dbName string, owner string) (*Session, error) {
 	if m.factory == nil {
 		return nil, fmt.Errorf("transaction manager factory is not configured")
 	}
@@ -60,13 +66,17 @@ func (m *Manager) Open(ctx context.Context, dbName string) (*Session, error) {
 		return nil, err
 	}
 
-	return m.OpenWithExecutor(ctx, dbName, executor)
+	return m.OpenWithExecutorForOwner(ctx, dbName, executor, owner)
 }
 
 // OpenWithExecutor opens a transaction session using a pre-built executor.
 // This is used when executor construction depends on request context (for example
 // forwarding auth to remote composite constituents).
 func (m *Manager) OpenWithExecutor(ctx context.Context, dbName string, executor *cypher.StorageExecutor) (*Session, error) {
+	return m.OpenWithExecutorForOwner(ctx, dbName, executor, "")
+}
+
+func (m *Manager) OpenWithExecutorForOwner(ctx context.Context, dbName string, executor *cypher.StorageExecutor, owner string) (*Session, error) {
 	if executor == nil {
 		return nil, fmt.Errorf("transaction executor is not available")
 	}
@@ -79,6 +89,7 @@ func (m *Manager) OpenWithExecutor(ctx context.Context, dbName string, executor 
 	session := &Session{
 		ID:       m.idFunc(),
 		Database: dbName,
+		Owner:    strings.TrimSpace(owner),
 		Executor: executor,
 		Expires:  now.Add(m.ttl),
 	}
@@ -91,9 +102,26 @@ func (m *Manager) OpenWithExecutor(ctx context.Context, dbName string, executor 
 }
 
 func (m *Manager) Get(txID string) (*Session, bool) {
+	return m.GetForOwner(txID, "")
+}
+
+func (m *Manager) GetForOwner(txID string, owner string) (*Session, bool) {
 	m.mu.RLock()
 	session, ok := m.sessions[txID]
 	m.mu.RUnlock()
+	if !ok || session == nil {
+		return nil, false
+	}
+	boundOwner := strings.TrimSpace(session.Owner)
+	if boundOwner == "" {
+		return session, true
+	}
+	if strings.TrimSpace(owner) == "" {
+		return nil, false
+	}
+	if boundOwner != strings.TrimSpace(owner) {
+		return nil, false
+	}
 	return session, ok
 }
 

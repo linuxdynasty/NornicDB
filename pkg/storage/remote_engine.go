@@ -141,7 +141,7 @@ func buildNeo4jAuth(cfg RemoteEngineConfig) neo4j.AuthToken {
 func (b *boltTransport) query(ctx context.Context, statement string, params map[string]interface{}) ([][]interface{}, error) {
 	session := b.driver.NewSession(ctx, neo4j.SessionConfig{
 		DatabaseName: b.database,
-		AccessMode:   neo4j.AccessModeWrite,
+		AccessMode:   accessModeForStatement(statement),
 	})
 	defer func() { _ = session.Close(ctx) }()
 
@@ -168,7 +168,7 @@ func (b *boltTransport) query(ctx context.Context, statement string, params map[
 func (b *boltTransport) queryWithColumns(ctx context.Context, statement string, params map[string]interface{}) ([]string, [][]interface{}, error) {
 	session := b.driver.NewSession(ctx, neo4j.SessionConfig{
 		DatabaseName: b.database,
-		AccessMode:   neo4j.AccessModeWrite,
+		AccessMode:   accessModeForStatement(statement),
 	})
 	defer func() { _ = session.Close(ctx) }()
 
@@ -221,6 +221,17 @@ func (b *boltTransport) queryBatch(ctx context.Context, statements []remoteState
 
 func (b *boltTransport) close() error {
 	return b.driver.Close(context.Background())
+}
+
+func accessModeForStatement(statement string) neo4j.AccessMode {
+	upper := strings.ToUpper(statement)
+	writeKeywords := []string{"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET ", "REMOVE ", "DROP ", "ALTER ", "RENAME ", "GRANT ", "REVOKE "}
+	for _, kw := range writeKeywords {
+		if strings.Contains(upper, kw) {
+			return neo4j.AccessModeWrite
+		}
+	}
+	return neo4j.AccessModeRead
 }
 
 // normalizeBoltValue converts neo4j dbtype values into the map shapes that

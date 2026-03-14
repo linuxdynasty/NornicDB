@@ -252,6 +252,46 @@ func TestFabricTransaction_CommitFailureRollsBackRemaining(t *testing.T) {
 	}
 }
 
+func TestFabricTransaction_CommitFailureCompensatesCommittedShards(t *testing.T) {
+	tx := NewFabricTransaction("tx-013")
+
+	_, _ = tx.GetOrOpen("shard_a", false)
+	_, _ = tx.GetOrOpen("shard_b", false)
+
+	committed := make([]string, 0, 2)
+	rolledBack := make([]string, 0, 2)
+	err := tx.Commit(
+		func(sub *SubTransaction) error {
+			committed = append(committed, sub.ShardName)
+			if sub.ShardName == "shard_b" {
+				return fmt.Errorf("commit failed")
+			}
+			return nil
+		},
+		func(sub *SubTransaction) error {
+			rolledBack = append(rolledBack, sub.ShardName)
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected commit error")
+	}
+	if tx.State() != "rolledback" {
+		t.Fatalf("expected rolledback state, got %s", tx.State())
+	}
+
+	if len(rolledBack) != 2 {
+		t.Fatalf("expected compensation rollback on all participants, got %v", rolledBack)
+	}
+
+	state := tx.SubTransactions()
+	for name, sub := range state {
+		if sub.State != "rolledback" {
+			t.Fatalf("expected subtransaction %s to be rolledback, got %s", name, sub.State)
+		}
+	}
+}
+
 func TestFabricTransaction_SubTransactions(t *testing.T) {
 	tx := NewFabricTransaction("tx-014")
 

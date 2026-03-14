@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // Compile-time interface assertion (also in remote_engine.go, duplicated here per project convention).
@@ -415,6 +417,32 @@ func TestNormalizeBoltValue(t *testing.T) {
 	}
 	if v := normalizeBoltValue("hello"); v != "hello" {
 		t.Fatalf("expected passthrough for string")
+	}
+}
+
+func TestAccessModeForStatement(t *testing.T) {
+	tests := []struct {
+		name      string
+		statement string
+		wantWrite bool
+	}{
+		{name: "read", statement: "MATCH (n) RETURN n", wantWrite: false},
+		{name: "create", statement: "CREATE (n:Person)", wantWrite: true},
+		{name: "merge", statement: "MERGE (n:Person {id: 1})", wantWrite: true},
+		{name: "delete", statement: "MATCH (n) DELETE n", wantWrite: true},
+		{name: "set", statement: "MATCH (n) SET n.x = 1", wantWrite: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := accessModeForStatement(tt.statement)
+			if tt.wantWrite && got != neo4j.AccessModeWrite {
+				t.Fatalf("expected write access mode, got %v", got)
+			}
+			if !tt.wantWrite && got != neo4j.AccessModeRead {
+				t.Fatalf("expected read access mode, got %v", got)
+			}
+		})
 	}
 }
 

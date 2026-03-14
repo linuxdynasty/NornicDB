@@ -95,3 +95,19 @@ func TestResultStream_MergeEmptyRows(t *testing.T) {
 		t.Errorf("expected 1 row after empty merge, got %d", a.RowCount())
 	}
 }
+
+func TestResultStream_MergeSkipsMismatchedColumns(t *testing.T) {
+	a := &ResultStream{
+		Columns: []string{"x"},
+		Rows:    [][]interface{}{{1}},
+	}
+	b := &ResultStream{
+		Columns: []string{"y"},
+		Rows:    [][]interface{}{{2}},
+	}
+
+	a.Merge(b)
+	if got := a.RowCount(); got != 1 {
+		t.Fatalf("expected mismatched merge to be ignored, got %d rows", got)
+	}
+}

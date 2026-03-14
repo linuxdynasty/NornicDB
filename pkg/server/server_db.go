@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -59,6 +61,88 @@ func (s *Server) handleDatabaseEndpoint(w http.ResponseWriter, r *http.Request) 
 	default:
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "unknown endpoint")
 	}
+}
+
+func statementTargetDatabase(defaultDB string, statement string) string {
+	db := strings.TrimSpace(defaultDB)
+	trimmed := strings.TrimSpace(statement)
+	if trimmed == "" {
+		return db
+	}
+
+	if strings.HasPrefix(strings.ToUpper(trimmed), ":USE ") {
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 2 {
+			return strings.TrimSpace(parts[1])
+		}
+		return db
+	}
+
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "USE ") {
+		return db
+	}
+
+	rest := strings.TrimSpace(trimmed[len("USE"):])
+	if rest == "" {
+		return db
+	}
+
+	if strings.HasPrefix(strings.ToLower(rest), "graph.byname(") || strings.HasPrefix(strings.ToLower(rest), "graph.byelementid(") {
+		open := strings.Index(rest, "(")
+		close := strings.LastIndex(rest, ")")
+		if open >= 0 && close > open {
+			arg := strings.TrimSpace(rest[open+1 : close])
+			if len(arg) >= 2 && ((arg[0] == '\'' && arg[len(arg)-1] == '\'') || (arg[0] == '"' && arg[len(arg)-1] == '"')) {
+				return arg[1 : len(arg)-1]
+			}
+			if arg != "" {
+				return strings.Fields(arg)[0]
+			}
+		}
+		return db
+	}
+
+	if rest[0] == '`' {
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '`' {
+				if i+1 < len(rest) && rest[i+1] == '`' {
+					i++
+					continue
+				}
+				return strings.ReplaceAll(rest[1:i], "``", "`")
+			}
+		}
+		return db
+	}
+
+	parts := strings.Fields(rest)
+	if len(parts) > 0 {
+		return strings.TrimSpace(parts[0])
+	}
+
+	return db
+}
+
+func transactionOwnerKey(r *http.Request, claims *auth.JWTClaims) string {
+	if claims != nil {
+		if sub := strings.TrimSpace(claims.Sub); sub != "" {
+			return "sub:" + sub
+		}
+		if user := strings.TrimSpace(claims.Username); user != "" {
+			return "user:" + user
+		}
+		if email := strings.TrimSpace(claims.Email); email != "" {
+			return "email:" + email
+		}
+	}
+	if r != nil {
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		if authHeader != "" {
+			sum := sha256.Sum256([]byte(authHeader))
+			return "auth:" + hex.EncodeToString(sum[:])
+		}
+	}
+	return "anonymous"
 }
 
 // getExecutorForDatabase returns a Cypher executor scoped to the specified database.
@@ -1372,6 +1456,15 @@ func (s *Server) executeTxStatements(
 ) {
 	ctx = cypher.WithAuthToken(ctx, authToken)
 	for _, stmt := range statements {
+		effectiveDB := statementTargetDatabase(dbName, stmt.Statement)
+		if !s.getDatabaseAccessMode(claims).CanAccessDatabase(effectiveDB) {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Security.Forbidden",
+				Message: fmt.Sprintf("Access to database '%s' is not allowed.", effectiveDB),
+			})
+			continue
+		}
+
 		if isMutationQuery(stmt.Statement) {
 			if claims == nil {
 				response.Errors = append(response.Errors, QueryError{
@@ -1380,10 +1473,10 @@ func (s *Server) executeTxStatements(
 				})
 				continue
 			}
-			if !s.getResolvedAccess(claims, dbName).Write {
+			if !s.getResolvedAccess(claims, effectiveDB).Write {
 				response.Errors = append(response.Errors, QueryError{
 					Code:    "Neo.ClientError.Security.Forbidden",
-					Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
+					Message: fmt.Sprintf("Write on database '%s' is not allowed.", effectiveDB),
 				})
 				continue
 			}
@@ -1444,6 +1537,7 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 	var txSession *txsession.Session
 	var err error
 	authToken := r.Header.Get("Authorization")
+	ownerKey := transactionOwnerKey(r, claims)
 	if authToken != "" && s.databaseHasRemoteConstituent(dbName) {
 		executor, execErr := s.getExecutorForDatabaseWithAuth(dbName, authToken)
 		if execErr != nil {
@@ -1457,9 +1551,9 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 			s.writeJSON(w, http.StatusInternalServerError, response)
 			return
 		}
-		txSession, err = s.txSessions.OpenWithExecutor(r.Context(), dbName, executor)
+		txSession, err = s.txSessions.OpenWithExecutorForOwner(r.Context(), dbName, executor, ownerKey)
 	} else {
-		txSession, err = s.txSessions.Open(r.Context(), dbName)
+		txSession, err = s.txSessions.OpenForOwner(r.Context(), dbName, ownerKey)
 	}
 	if err != nil {
 		if errors.Is(err, multidb.ErrDatabaseNotFound) {
@@ -1509,7 +1603,7 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	tx, ok := s.txSessions.Get(txID)
+	tx, ok := s.txSessions.GetForOwner(txID, transactionOwnerKey(r, claims))
 	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
@@ -1552,7 +1646,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		LastBookmarks: []string{s.generateBookmark()},
 	}
 
-	tx, ok := s.txSessions.Get(txID)
+	tx, ok := s.txSessions.GetForOwner(txID, transactionOwnerKey(r, claims))
 	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
@@ -1594,7 +1688,7 @@ func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tx, ok := s.txSessions.Get(txID)
+	tx, ok := s.txSessions.GetForOwner(txID, transactionOwnerKey(r, getClaims(r)))
 	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return

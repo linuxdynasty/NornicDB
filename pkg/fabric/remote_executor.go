@@ -2,7 +2,11 @@ package fabric
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -13,6 +17,7 @@ type RemoteFragmentExecutor struct {
 	// engineCache caches RemoteEngine instances by URI+database key to avoid
 	// reconnecting on every fragment execution.
 	engineCache map[string]*storage.RemoteEngine
+	mu          sync.RWMutex
 }
 
 // NewRemoteFragmentExecutor creates a remote executor.
@@ -50,6 +55,9 @@ func (r *RemoteFragmentExecutor) Execute(ctx context.Context, loc *LocationRemot
 
 // Close closes all cached remote engines.
 func (r *RemoteFragmentExecutor) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var lastErr error
 	for key, engine := range r.engineCache {
 		if err := engine.Close(); err != nil {
@@ -61,16 +69,35 @@ func (r *RemoteFragmentExecutor) Close() error {
 }
 
 // cacheKey produces a unique key for engine caching.
-func cacheKey(loc *LocationRemote) string {
-	return loc.URI + "|" + loc.DBName + "|" + loc.AuthMode
+func cacheKey(loc *LocationRemote, authToken string) string {
+	mode := strings.TrimSpace(strings.ToLower(loc.AuthMode))
+	if mode == "" {
+		mode = "oidc_forwarding"
+	}
+
+	authIdentity := "none"
+	switch mode {
+	case "user_password":
+		authIdentity = strings.TrimSpace(loc.User) + ":" + strings.TrimSpace(loc.Password)
+	default:
+		// oidc_forwarding: include forwarded token context to prevent cross-caller reuse.
+		authIdentity = strings.TrimSpace(authToken)
+	}
+
+	sum := sha256.Sum256([]byte(authIdentity))
+	return loc.URI + "|" + loc.DBName + "|" + mode + "|" + hex.EncodeToString(sum[:])
 }
 
 // getOrCreateEngine returns a cached engine or creates a new one.
 func (r *RemoteFragmentExecutor) getOrCreateEngine(loc *LocationRemote, authToken string) (*storage.RemoteEngine, error) {
-	key := cacheKey(loc)
+	key := cacheKey(loc, authToken)
+
+	r.mu.RLock()
 	if engine, exists := r.engineCache[key]; exists {
+		r.mu.RUnlock()
 		return engine, nil
 	}
+	r.mu.RUnlock()
 
 	cfg := storage.RemoteEngineConfig{
 		URI:      loc.URI,
@@ -91,7 +118,14 @@ func (r *RemoteFragmentExecutor) getOrCreateEngine(loc *LocationRemote, authToke
 		return nil, err
 	}
 
+	r.mu.Lock()
+	if existing, exists := r.engineCache[key]; exists {
+		r.mu.Unlock()
+		_ = engine.Close()
+		return existing, nil
+	}
 	r.engineCache[key] = engine
+	r.mu.Unlock()
 	return engine, nil
 }
 

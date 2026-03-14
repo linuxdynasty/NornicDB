@@ -807,11 +807,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 		reader:     bufio.NewReaderSize(conn, s.config.ReadBufferSize),
 		writer:     bufio.NewWriterSize(conn, s.config.WriteBufferSize),
 		server:     s,
+		baseExec:   s.executor,
 		executor:   s.executor,
 		messageBuf: make([]byte, 0, 4096), // Pre-allocate 4KB message buffer
 	}
 	if factory, ok := s.executor.(SessionExecutorFactory); ok {
 		session.executor = factory.NewSessionExecutor()
+		session.baseExec = session.executor
 	}
 
 	// Enable deferred flush mode for Neo4j-style write batching
@@ -864,6 +866,7 @@ type Session struct {
 	reader   *bufio.Reader // Buffered reader for reduced syscalls
 	writer   *bufio.Writer // Buffered writer for reduced syscalls
 	server   *Server
+	baseExec QueryExecutor
 	executor QueryExecutor
 	version  uint32
 
@@ -880,6 +883,7 @@ type Session struct {
 	// Transaction state
 	inTransaction bool
 	txMetadata    map[string]any // Transaction metadata from BEGIN
+	txDatabase    string
 
 	// Query result state (for streaming with PULL)
 	lastResult  *QueryResult
@@ -1432,9 +1436,14 @@ func (s *Session) handleRun(data []byte) error {
 		}
 	}
 
-	// Get executor for the database (if multi-database is enabled)
+	// Keep explicit transactions pinned to the executor selected at BEGIN.
 	executor := s.executor
-	if s.server != nil && s.server.dbManager != nil {
+	if s.inTransaction {
+		if s.txDatabase != "" && !strings.EqualFold(dbName, s.txDatabase) {
+			return s.sendFailure("Neo.ClientError.Transaction.InvalidBookmark",
+				fmt.Sprintf("Explicit transaction is bound to database '%s', got '%s'", s.txDatabase, dbName))
+		}
+	} else if s.server != nil && s.server.dbManager != nil {
 		dbExecutor, err := s.getExecutorForDatabase(dbName)
 		if err != nil {
 			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
@@ -1736,10 +1745,25 @@ func (s *Session) handleDiscard(data []byte) error {
 
 // handleRoute handles the ROUTE message (for cluster routing).
 func (s *Session) handleRoute(data []byte) error {
+	address := "localhost:7687"
+	if s.conn != nil {
+		if tcp, ok := s.conn.LocalAddr().(*net.TCPAddr); ok {
+			host := tcp.IP.String()
+			if host == "" || host == "0.0.0.0" || host == "::" {
+				host = "localhost"
+			}
+			address = fmt.Sprintf("%s:%d", host, tcp.Port)
+		}
+	}
+
 	if err := s.sendSuccessNoFlush(map[string]any{
 		"rt": map[string]any{
-			"ttl":     300,
-			"servers": []map[string]any{},
+			"ttl": 300,
+			"servers": []map[string]any{
+				{"role": "ROUTE", "addresses": []string{address}},
+				{"role": "READ", "addresses": []string{address}},
+				{"role": "WRITE", "addresses": []string{address}},
+			},
 		},
 	}); err != nil {
 		return err
@@ -1760,6 +1784,10 @@ func (s *Session) handleReset(data []byte) error {
 
 	s.inTransaction = false
 	s.txMetadata = nil
+	s.txDatabase = ""
+	if s.baseExec != nil {
+		s.executor = s.baseExec
+	}
 	s.lastResult = nil
 	s.resultIndex = 0
 	if err := s.sendSuccessNoFlush(nil); err != nil {
@@ -1781,6 +1809,25 @@ func (s *Session) handleBegin(data []byte) error {
 		}
 	}
 	s.txMetadata = metadata
+
+	if s.server != nil && s.server.dbManager != nil {
+		dbName := s.database
+		if txDB, ok := databaseFromMetadata(metadata); ok {
+			dbName = txDB
+		}
+		if dbName == "" {
+			dbName = s.server.dbManager.DefaultDatabaseName()
+		}
+		txExec, err := s.getExecutorForDatabase(dbName)
+		if err != nil {
+			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
+				fmt.Sprintf("Database '%s' not found: %v", dbName, err))
+		}
+		s.executor = txExec
+		s.txDatabase = dbName
+	} else {
+		s.txDatabase = ""
+	}
 
 	// If executor supports transactions, start one
 	if txExec, ok := s.executor.(TransactionalExecutor); ok {
@@ -1811,12 +1858,20 @@ func (s *Session) handleCommit(data []byte) error {
 		if err := txExec.CommitTransaction(ctx); err != nil {
 			s.inTransaction = false
 			s.txMetadata = nil
+			s.txDatabase = ""
+			if s.baseExec != nil {
+				s.executor = s.baseExec
+			}
 			return s.sendFailure("Neo.ClientError.Transaction.TransactionCommitFailed", err.Error())
 		}
 	}
 
 	s.inTransaction = false
 	s.txMetadata = nil
+	s.txDatabase = ""
+	if s.baseExec != nil {
+		s.executor = s.baseExec
+	}
 
 	// Generate and store new bookmark for causal consistency
 	// This increments the server's transaction sequence and creates a bookmark
@@ -2006,6 +2061,10 @@ func (s *Session) handleRollback(data []byte) error {
 
 	s.inTransaction = false
 	s.txMetadata = nil
+	s.txDatabase = ""
+	if s.baseExec != nil {
+		s.executor = s.baseExec
+	}
 	if err := s.sendSuccessNoFlush(nil); err != nil {
 		return err
 	}
@@ -2225,14 +2284,25 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 		return nil, fmt.Errorf("database manager not available")
 	}
 
-	// Get namespaced storage for this database
-	storage, err := s.server.dbManager.GetStorage(dbName)
+	type authAwareStorageResolver interface {
+		GetStorageWithAuth(name string, authToken string) (storage.Engine, error)
+	}
+
+	var (
+		storageEngine storage.Engine
+		err           error
+	)
+	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && strings.TrimSpace(s.forwardedAuthHeader) != "" {
+		storageEngine, err = resolver.GetStorageWithAuth(dbName, s.forwardedAuthHeader)
+	} else {
+		storageEngine, err = s.server.dbManager.GetStorage(dbName)
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	// Create Cypher executor scoped to this database
-	executor := cypher.NewStorageExecutor(storage)
+	executor := cypher.NewStorageExecutor(storageEngine)
 
 	// Wire database manager support when the underlying manager is available so
 	// USE/SHOW/CREATE/ALTER/DROP database commands share the same semantics as

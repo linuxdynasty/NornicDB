@@ -20,6 +20,13 @@ func parseLeadingUseClause(cypher string) (database, remaining string, hasUse bo
 		return "", "", true, fmt.Errorf("USE clause requires a database name")
 	}
 
+	if graphRef, rem, ok, err := parseDynamicGraphReference(rest); ok {
+		if err != nil {
+			return "", "", true, fmt.Errorf("invalid USE clause: %w", err)
+		}
+		return graphRef, strings.TrimSpace(rem), true, nil
+	}
+
 	if strings.HasPrefix(rest, "`") {
 		// Backtick-quoted identifier. Support escaped backticks using ``.
 		var b strings.Builder
@@ -55,6 +62,131 @@ func parseLeadingUseClause(cypher string) (database, remaining string, hasUse bo
 	}
 
 	return database, remaining, true, nil
+}
+
+func parseDynamicGraphReference(rest string) (database, remaining string, ok bool, err error) {
+	trimmed := strings.TrimSpace(rest)
+	lower := strings.ToLower(trimmed)
+
+	for _, prefix := range []string{"graph.byname(", "graph.byelementid("} {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+
+		openIdx := strings.Index(trimmed, "(")
+		if openIdx < 0 {
+			return "", "", true, fmt.Errorf("invalid graph reference")
+		}
+		closeIdx, err := findMatchingParenInUse(trimmed, openIdx)
+		if err != nil {
+			return "", "", true, err
+		}
+
+		arg := strings.TrimSpace(trimmed[openIdx+1 : closeIdx])
+		if arg == "" {
+			return "", "", true, fmt.Errorf("graph reference requires an argument")
+		}
+
+		db, err := parseFirstGraphRefArg(arg)
+		if err != nil {
+			return "", "", true, err
+		}
+
+		return db, trimmed[closeIdx+1:], true, nil
+	}
+
+	return "", "", false, nil
+}
+
+func findMatchingParenInUse(s string, pos int) (int, error) {
+	if pos >= len(s) || s[pos] != '(' {
+		return -1, fmt.Errorf("expected '(' at position %d", pos)
+	}
+
+	depth := 1
+	inSingle := false
+	inDouble := false
+	for i := pos + 1; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' && !inDouble {
+			if inSingle {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+			} else {
+				inSingle = true
+			}
+			continue
+		}
+		if ch == '"' && !inSingle {
+			if inDouble {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i++
+					continue
+				}
+				inDouble = false
+			} else {
+				inDouble = true
+			}
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+			if depth == 0 {
+				return i, nil
+			}
+		}
+	}
+
+	return -1, fmt.Errorf("unterminated graph reference")
+}
+
+func parseFirstGraphRefArg(arg string) (string, error) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return "", fmt.Errorf("empty graph reference argument")
+	}
+
+	if arg[0] == '\'' || arg[0] == '"' {
+		quote := arg[0]
+		for i := 1; i < len(arg); i++ {
+			if arg[i] == quote {
+				if i+1 < len(arg) && arg[i+1] == quote {
+					i++
+					continue
+				}
+				return arg[1:i], nil
+			}
+		}
+		return "", fmt.Errorf("unterminated graph reference string")
+	}
+
+	if arg[0] == '`' {
+		for i := 1; i < len(arg); i++ {
+			if arg[i] == '`' {
+				if i+1 < len(arg) && arg[i+1] == '`' {
+					i++
+					continue
+				}
+				return strings.ReplaceAll(arg[1:i], "``", "`"), nil
+			}
+		}
+		return "", fmt.Errorf("unterminated backtick identifier")
+	}
+
+	fields := strings.Fields(arg)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("graph reference requires an argument")
+	}
+	return fields[0], nil
 }
 
 func (e *StorageExecutor) cloneForStorage(store storage.Engine) *StorageExecutor {
@@ -94,6 +226,10 @@ func (e *StorageExecutor) scopedExecutorForUse(db string, authToken string) (*St
 		if dotIdx := strings.IndexByte(targetDB, '.'); dotIdx > 0 {
 			compositeName := targetDB[:dotIdx]
 			if e.dbManager.IsCompositeDatabase(compositeName) {
+				currentDB := strings.TrimSpace(e.currentDatabaseName())
+				if currentDB != "" && e.dbManager.IsCompositeDatabase(currentDB) && !strings.EqualFold(currentDB, compositeName) {
+					return nil, "", fmt.Errorf("USE %s failed: constituent '%s' is not part of current composite '%s'", targetDB, compositeName, currentDB)
+				}
 				// Resolve the full composite.constituent via GetStorageForUse.
 				// The composite engine's getConstituent will resolve the alias.
 				return e.resolveCompositeConstituent(targetDB, compositeName, targetDB[dotIdx+1:], authToken)

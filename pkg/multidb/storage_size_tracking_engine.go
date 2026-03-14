@@ -24,6 +24,10 @@ func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbNa
 	}
 }
 
+func (t *sizeTrackingEngine) GetInnerEngine() storage.Engine {
+	return t.Engine
+}
+
 func (t *sizeTrackingEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
 	if err := t.manager.ensureStorageSizeInitialized(t.dbName, t.Engine); err != nil {
 		return "", err

@@ -2,6 +2,7 @@ package fabric
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -156,8 +157,9 @@ func (t *FabricTransaction) Commit(commitFn CommitCallback, rollbackFn RollbackC
 		return fmt.Errorf("cannot commit: transaction is %s", t.state)
 	}
 
-	// Commit all sub-transactions. On failure, rollback the rest.
-	var committed []*SubTransaction
+	// Commit all sub-transactions. On failure, attempt compensation rollback for
+	// every participant (including already-committed shards) to avoid exposing
+	// partial commit state.
 	var commitErr error
 
 	for _, sub := range t.subTxns {
@@ -169,20 +171,24 @@ func (t *FabricTransaction) Commit(commitFn CommitCallback, rollbackFn RollbackC
 			break
 		}
 		sub.State = "committed"
-		committed = append(committed, sub)
 	}
 
 	if commitErr != nil {
-		// Rollback uncommitted sub-transactions.
+		var compensationErrs []string
 		for _, sub := range t.subTxns {
-			if sub.State == "open" {
+			if sub.State == "committed" || sub.State == "open" {
 				if rollbackFn != nil {
-					_ = rollbackFn(sub)
+					if err := rollbackFn(sub); err != nil {
+						compensationErrs = append(compensationErrs, fmt.Sprintf("%s: %v", sub.ShardName, err))
+					}
 				}
 				sub.State = "rolledback"
 			}
 		}
 		t.state = "rolledback"
+		if len(compensationErrs) > 0 {
+			return fmt.Errorf("%w (compensation failed on: %s)", commitErr, strings.Join(compensationErrs, ", "))
+		}
 		return commitErr
 	}
 

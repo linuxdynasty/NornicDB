@@ -31,6 +31,7 @@ type mockDBManager struct {
 	stores    map[string]storage.Engine
 	defaultDB string
 	lastGetDB string
+	lastAuth  string
 }
 
 func (m *mockDBManager) GetStorage(name string) (storage.Engine, error) {
@@ -39,6 +40,12 @@ func (m *mockDBManager) GetStorage(name string) (storage.Engine, error) {
 		return s, nil
 	}
 	return nil, io.EOF
+}
+
+func (m *mockDBManager) GetStorageWithAuth(name string, authToken string) (storage.Engine, error) {
+	m.lastGetDB = name
+	m.lastAuth = authToken
+	return m.GetStorage(name)
 }
 
 func (m *mockDBManager) Exists(name string) bool {

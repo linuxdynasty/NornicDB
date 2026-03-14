@@ -13,7 +13,6 @@ func TestPlan_SimpleQueryNoUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	exec, ok := frag.(*FragmentExec)
 	if !ok {
 		t.Fatalf("expected FragmentExec, got %T", frag)
@@ -26,6 +25,100 @@ func TestPlan_SimpleQueryNoUse(t *testing.T) {
 	}
 	if exec.IsWrite {
 		t.Error("expected IsWrite=false for read query")
+	}
+}
+
+func TestPlan_PreservesOuterClausesAroundCallUseBlocks(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("nornic", &LocationLocal{DBName: "nornic"})
+	catalog.Register("nornic.tr", &LocationRemote{DBName: "tr", URI: "bolt://a:7687"})
+	p := NewFabricPlanner(catalog)
+
+	query := `USE nornic
+MATCH (seed:Seed) RETURN seed.id AS seedId
+CALL {
+  USE nornic.tr
+  WITH seedId
+  MATCH (t:Translation {id: seedId})
+  RETURN t.text AS translated
+}
+RETURN seedId, translated`
+
+	frag, err := p.Plan(query, "nornic")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rootApply, ok := frag.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected FragmentApply root, got %T", frag)
+	}
+
+	trailingExec, ok := rootApply.Inner.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected trailing FragmentExec, got %T", rootApply.Inner)
+	}
+	if trailingExec.GraphName != "nornic" {
+		t.Fatalf("expected trailing exec on nornic, got %s", trailingExec.GraphName)
+	}
+
+	callApply, ok := rootApply.Input.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected call apply, got %T", rootApply.Input)
+	}
+	callExec, ok := callApply.Inner.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected call exec, got %T", callApply.Inner)
+	}
+	if callExec.GraphName != "nornic.tr" {
+		t.Fatalf("expected call exec on nornic.tr, got %s", callExec.GraphName)
+	}
+
+	prefixApply, ok := callApply.Input.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected prefix apply before call block, got %T", callApply.Input)
+	}
+	prefixExec, ok := prefixApply.Inner.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected prefix exec, got %T", prefixApply.Inner)
+	}
+	if prefixExec.GraphName != "nornic" {
+		t.Fatalf("expected prefix exec on nornic, got %s", prefixExec.GraphName)
+	}
+	if prefixExec.Query == "" {
+		t.Fatalf("expected preserved prefix query")
+	}
+}
+
+func TestPlan_UnionPartUse(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("g1", &LocationLocal{DBName: "g1"})
+	catalog.Register("g2", &LocationLocal{DBName: "g2"})
+	p := NewFabricPlanner(catalog)
+
+	frag, err := p.Plan("USE g1 RETURN 1 AS x UNION ALL USE g2 RETURN 2 AS x", "nornic")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	u, ok := frag.(*FragmentUnion)
+	if !ok {
+		t.Fatalf("expected FragmentUnion, got %T", frag)
+	}
+	if u.Distinct {
+		t.Fatalf("expected UNION ALL to set Distinct=false")
+	}
+
+	lhs, ok := u.LHS.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected lhs FragmentExec, got %T", u.LHS)
+	}
+	rhs, ok := u.RHS.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected rhs FragmentExec, got %T", u.RHS)
+	}
+	if lhs.GraphName != "g1" || rhs.GraphName != "g2" {
+		t.Fatalf("unexpected union graph routing lhs=%s rhs=%s", lhs.GraphName, rhs.GraphName)
 	}
 }
 
@@ -312,6 +405,30 @@ func TestParseLeadingUse_DottedName(t *testing.T) {
 	}
 	if remaining != "MATCH (n)" {
 		t.Errorf("expected 'MATCH (n)', got %q", remaining)
+	}
+}
+
+func TestParseLeadingUse_DynamicGraphReference(t *testing.T) {
+	db, remaining, hasUse, err := parseLeadingUse("USE graph.byName('tenant_a') MATCH (n) RETURN n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasUse {
+		t.Fatal("expected hasUse=true")
+	}
+	if db != "tenant_a" {
+		t.Fatalf("expected tenant_a, got %q", db)
+	}
+	if remaining != "MATCH (n) RETURN n" {
+		t.Fatalf("unexpected remaining query: %q", remaining)
+	}
+
+	db, _, hasUse, err = parseLeadingUse("USE graph.byElementId('tenant_b') RETURN 1")
+	if err != nil {
+		t.Fatalf("unexpected byElementId error: %v", err)
+	}
+	if !hasUse || db != "tenant_b" {
+		t.Fatalf("expected tenant_b from byElementId, got hasUse=%v db=%q", hasUse, db)
 	}
 }
 

@@ -13,12 +13,16 @@ import (
 )
 
 var fabricCallUsePattern = regexp.MustCompile(`(?is)\bCALL\s*\{\s*USE\s+`)
+var fabricUsePattern = regexp.MustCompile(`(?is)\bUSE\s+`)
+var fabricDynamicGraphPattern = regexp.MustCompile(`(?is)\bgraph\.(byName|byElementId)\s*\(`)
 
 func (e *StorageExecutor) shouldUseFabricPlanner(cypher string) bool {
 	if e.dbManager == nil {
 		return false
 	}
-	return fabricCallUsePattern.MatchString(cypher)
+	return fabricCallUsePattern.MatchString(cypher) ||
+		fabricUsePattern.MatchString(cypher) ||
+		fabricDynamicGraphPattern.MatchString(cypher)
 }
 
 func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {

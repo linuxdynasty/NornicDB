@@ -15,6 +15,231 @@ type FabricPlanner struct {
 	catalog *Catalog
 }
 
+func extractGraphReference(s string) (string, string, bool, error) {
+	trimmed := strings.TrimSpace(s)
+	lower := strings.ToLower(trimmed)
+
+	for _, prefix := range []string{"graph.byname(", "graph.byelementid("} {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		openIdx := strings.Index(trimmed, "(")
+		if openIdx < 0 {
+			return "", "", true, fmt.Errorf("invalid graph reference")
+		}
+		closeIdx, err := findMatchingParen(trimmed, openIdx)
+		if err != nil {
+			return "", "", true, err
+		}
+		args := strings.TrimSpace(trimmed[openIdx+1 : closeIdx])
+		if args == "" {
+			return "", "", true, fmt.Errorf("graph reference requires an argument")
+		}
+		arg, err := extractFirstGraphRefArg(args)
+		if err != nil {
+			return "", "", true, err
+		}
+		return arg, trimmed[closeIdx+1:], true, nil
+	}
+
+	return "", "", false, nil
+}
+
+func findMatchingParen(s string, pos int) (int, error) {
+	if pos >= len(s) || s[pos] != '(' {
+		return -1, fmt.Errorf("expected '(' at position %d", pos)
+	}
+
+	depth := 1
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := pos + 1; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' && !inDoubleQuote {
+			if inSingleQuote {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			} else {
+				inSingleQuote = true
+			}
+			continue
+		}
+		if ch == '"' && !inSingleQuote {
+			if inDoubleQuote {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			} else {
+				inDoubleQuote = true
+			}
+			continue
+		}
+		if inSingleQuote || inDoubleQuote {
+			continue
+		}
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+			if depth == 0 {
+				return i, nil
+			}
+		}
+	}
+
+	return -1, fmt.Errorf("unmatched parenthesis")
+}
+
+func extractFirstGraphRefArg(args string) (string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "", fmt.Errorf("empty graph reference argument")
+	}
+
+	if args[0] == '\'' || args[0] == '"' {
+		quote := args[0]
+		for i := 1; i < len(args); i++ {
+			if args[i] == quote {
+				if i+1 < len(args) && args[i+1] == quote {
+					i++
+					continue
+				}
+				return args[1:i], nil
+			}
+		}
+		return "", fmt.Errorf("unterminated graph reference string")
+	}
+
+	if args[0] == '`' {
+		id, _, err := extractIdentifier(args)
+		if err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+
+	id, _, err := extractIdentifier(args)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func splitTopLevelUnion(query string) ([]string, []bool, bool, error) {
+	parts := make([]string, 0, 2)
+	ops := make([]bool, 0, 1)
+	start := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	braceDepth := 0
+	parenDepth := 0
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' && !inDoubleQuote {
+			if inSingleQuote {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			} else {
+				inSingleQuote = true
+			}
+			continue
+		}
+		if ch == '"' && !inSingleQuote {
+			if inDoubleQuote {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			} else {
+				inDoubleQuote = true
+			}
+			continue
+		}
+		if inSingleQuote || inDoubleQuote {
+			continue
+		}
+
+		switch ch {
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		}
+		if braceDepth != 0 || parenDepth != 0 {
+			continue
+		}
+
+		if !keywordAt(query, i, "UNION") {
+			continue
+		}
+
+		part := strings.TrimSpace(query[start:i])
+		if part == "" {
+			return nil, nil, false, fmt.Errorf("invalid UNION: empty branch")
+		}
+		parts = append(parts, part)
+
+		i += len("UNION")
+		for i < len(query) && isWhitespace(query[i]) {
+			i++
+		}
+		distinct := true
+		if keywordAt(query, i, "ALL") {
+			distinct = false
+			i += len("ALL")
+		}
+		ops = append(ops, distinct)
+		start = i
+		i--
+	}
+
+	if len(parts) == 0 {
+		return nil, nil, false, nil
+	}
+	last := strings.TrimSpace(query[start:])
+	if last == "" {
+		return nil, nil, false, fmt.Errorf("invalid UNION: empty trailing branch")
+	}
+	parts = append(parts, last)
+	return parts, ops, true, nil
+}
+
+func keywordAt(s string, idx int, keyword string) bool {
+	if idx < 0 || idx+len(keyword) > len(s) {
+		return false
+	}
+	if !strings.EqualFold(s[idx:idx+len(keyword)], keyword) {
+		return false
+	}
+	if idx > 0 && isIdentChar(s[idx-1]) {
+		return false
+	}
+	after := idx + len(keyword)
+	if after < len(s) && isIdentChar(s[after]) {
+		return false
+	}
+	return true
+}
+
 // NewFabricPlanner creates a planner backed by the given catalog.
 func NewFabricPlanner(catalog *Catalog) *FabricPlanner {
 	return &FabricPlanner{catalog: catalog}
@@ -32,6 +257,38 @@ func (p *FabricPlanner) Plan(query string, sessionDB string) (Fragment, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty query")
 	}
+
+	// Handle top-level UNION / UNION ALL by planning each branch independently.
+	parts, ops, hasUnion, err := splitTopLevelUnion(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if hasUnion {
+		lhs, err := p.planSingleQuery(parts[0], sessionDB)
+		if err != nil {
+			return nil, err
+		}
+		root := lhs
+		for i := 1; i < len(parts); i++ {
+			rhs, err := p.planSingleQuery(parts[i], sessionDB)
+			if err != nil {
+				return nil, err
+			}
+			root = &FragmentUnion{
+				Init:     &FragmentInit{Columns: nil},
+				LHS:      root,
+				RHS:      rhs,
+				Distinct: ops[i-1],
+				Columns:  nil,
+			}
+		}
+		return root, nil
+	}
+
+	return p.planSingleQuery(trimmed, sessionDB)
+}
+
+func (p *FabricPlanner) planSingleQuery(trimmed string, sessionDB string) (Fragment, error) {
 
 	// Extract leading USE clause if present.
 	topDB, remaining, hasTopUse, err := parseLeadingUse(trimmed)
@@ -80,13 +337,24 @@ func (p *FabricPlanner) Plan(query string, sessionDB string) (Fragment, error) {
 //
 //	Apply(outer=Exec(alias1), inner=Apply(outer=Exec(alias2), inner=...))
 func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []callUseBlock) (Fragment, error) {
-	// Build the chain from inside out.
-	// Start with the top-level init.
 	init := &FragmentInit{Columns: nil}
-
 	var currentInput Fragment = init
+	lastPos := 0
 
 	for _, block := range blocks {
+		// Preserve outer query segments before each CALL { USE ... } block.
+		prefix := strings.TrimSpace(fullQuery[lastPos:block.startPos])
+		if prefix != "" {
+			prefixExec := &FragmentExec{
+				Input:     &FragmentInit{Columns: nil},
+				Query:     prefix,
+				GraphName: topDB,
+				Columns:   nil,
+				IsWrite:   queryIsWrite(prefix),
+			}
+			currentInput = &FragmentApply{Input: currentInput, Inner: prefixExec, Columns: nil}
+		}
+
 		// Each CALL { USE graph ... } block becomes a FragmentExec
 		// wrapped in a FragmentApply so it receives input rows.
 		isWrite := queryIsWrite(block.body)
@@ -104,18 +372,18 @@ func (p *FabricPlanner) planMultiGraph(topDB string, fullQuery string, blocks []
 			Inner:   execFragment,
 			Columns: nil, // determined at execution time
 		}
+		lastPos = block.endPos
 	}
 
-	// If there's a trailing RETURN clause (or other clauses after all CALL blocks),
-	// add it as a final exec on the top-level database.
-	trailingQuery := extractTrailingClauses(fullQuery, blocks)
+	// Preserve trailing outer query clauses after the final CALL block.
+	trailingQuery := strings.TrimSpace(fullQuery[lastPos:])
 	if strings.TrimSpace(trailingQuery) != "" {
 		trailingExec := &FragmentExec{
 			Input:     &FragmentInit{Columns: nil},
 			Query:     trailingQuery,
 			GraphName: topDB,
 			Columns:   nil,
-			IsWrite:   false,
+			IsWrite:   queryIsWrite(trailingQuery),
 		}
 		currentInput = &FragmentApply{
 			Input:   currentInput,
@@ -161,6 +429,13 @@ func parseLeadingUse(query string) (string, string, bool, error) {
 	rest := strings.TrimSpace(trimmed[3:])
 	if rest == "" {
 		return "", "", true, fmt.Errorf("USE clause requires a database name")
+	}
+
+	if graphRef, rem, ok, err := extractGraphReference(rest); ok {
+		if err != nil {
+			return "", "", true, fmt.Errorf("invalid USE clause: %w", err)
+		}
+		return graphRef, strings.TrimSpace(rem), true, nil
 	}
 
 	// Extract the database name (simple identifier or backtick-quoted).
