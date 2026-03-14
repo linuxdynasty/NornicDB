@@ -321,6 +321,29 @@ func (e *StorageExecutor) parseValue(s string) interface{} {
 		return f
 	}
 
+	// Fabric correlated bindings: resolve bare identifier values from outer record context.
+	if len(e.fabricRecordBindings) > 0 {
+		isIdent := true
+		for i, ch := range s {
+			if i == 0 {
+				if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_') {
+					isIdent = false
+					break
+				}
+			} else {
+				if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_') {
+					isIdent = false
+					break
+				}
+			}
+		}
+		if isIdent {
+			if v, ok := e.fabricRecordBindings[s]; ok {
+				return v
+			}
+		}
+	}
+
 	return s
 }
 

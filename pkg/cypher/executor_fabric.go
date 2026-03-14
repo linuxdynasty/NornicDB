@@ -241,9 +241,17 @@ type cypherFabricExecutor struct {
 }
 
 func (c *cypherFabricExecutor) ExecuteQuery(ctx context.Context, dbName string, engine storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	return c.ExecuteQueryWithRecord(ctx, dbName, engine, query, params, nil)
+}
+
+func (c *cypherFabricExecutor) ExecuteQueryWithRecord(ctx context.Context, dbName string, engine storage.Engine, query string, params map[string]interface{}, recordBindings map[string]interface{}) ([]string, [][]interface{}, error) {
 	ctx = WithAuthToken(ctx, c.authToken)
 
 	exec := c.base.cloneForStorage(engine)
+	if len(recordBindings) > 0 {
+		exec.fabricRecordBindings = recordBindings
+		query = stripLeadingWithImportsForFabricRecord(query, recordBindings)
+	}
 	if !c.autoCommit {
 		if sub, ok := fabric.SubTransactionFromContext(ctx); ok {
 			txExec, err := c.ensureLocalShardTxExecutor(ctx, sub, dbName, engine)
@@ -251,6 +259,9 @@ func (c *cypherFabricExecutor) ExecuteQuery(ctx context.Context, dbName string, 
 				return nil, nil, err
 			}
 			exec = txExec
+			if len(recordBindings) > 0 {
+				exec.fabricRecordBindings = recordBindings
+			}
 		}
 	}
 
@@ -262,6 +273,167 @@ func (c *cypherFabricExecutor) ExecuteQuery(ctx context.Context, dbName string, 
 		return []string{}, [][]interface{}{}, nil
 	}
 	return result.Columns, result.Rows, nil
+}
+
+func stripLeadingWithImportsForFabricRecord(query string, recordBindings map[string]interface{}) string {
+	if len(recordBindings) == 0 {
+		return query
+	}
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
+		return query
+	}
+	withEnd := findLeadingWithEndLocal(trimmed)
+	if withEnd <= 0 || withEnd >= len(trimmed) {
+		return query
+	}
+	withClause := strings.TrimSpace(trimmed[len("WITH "):withEnd])
+	rest := strings.TrimSpace(trimmed[withEnd:])
+	if rest == "" {
+		return query
+	}
+	imports := splitCommaTopLevelLocal(withClause)
+	if len(imports) == 0 {
+		return query
+	}
+	for _, item := range imports {
+		name := strings.TrimSpace(item)
+		if name == "" || strings.Contains(name, " ") {
+			return query
+		}
+		if _, ok := recordBindings[name]; !ok {
+			return query
+		}
+	}
+	return rest
+}
+
+func findLeadingWithEndLocal(query string) int {
+	inSingle, inDouble, inBacktick := false, false, false
+	depth := 0
+	for i := len("WITH "); i < len(query); i++ {
+		ch := query[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth != 0 {
+			continue
+		}
+		if startsWithKeywordAtLocal(query, i, "MATCH") ||
+			startsWithKeywordAtLocal(query, i, "OPTIONAL MATCH") ||
+			startsWithKeywordAtLocal(query, i, "RETURN") ||
+			startsWithKeywordAtLocal(query, i, "WHERE") ||
+			startsWithKeywordAtLocal(query, i, "WITH") ||
+			startsWithKeywordAtLocal(query, i, "CALL") ||
+			startsWithKeywordAtLocal(query, i, "CREATE") ||
+			startsWithKeywordAtLocal(query, i, "MERGE") ||
+			startsWithKeywordAtLocal(query, i, "UNWIND") ||
+			startsWithKeywordAtLocal(query, i, "SET") ||
+			startsWithKeywordAtLocal(query, i, "DELETE") ||
+			startsWithKeywordAtLocal(query, i, "DETACH DELETE") {
+			return i
+		}
+	}
+	return -1
+}
+
+func startsWithKeywordAtLocal(s string, i int, kw string) bool {
+	if i < 0 || i+len(kw) > len(s) {
+		return false
+	}
+	if i > 0 {
+		prev := s[i-1]
+		if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
+			return false
+		}
+	}
+	if !strings.EqualFold(s[i:i+len(kw)], kw) {
+		return false
+	}
+	j := i + len(kw)
+	if j < len(s) {
+		next := s[j]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') || next == '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func splitCommaTopLevelLocal(s string) []string {
+	var parts []string
+	start := 0
+	depth := 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 func (c *cypherFabricExecutor) ensureLocalShardTxExecutor(ctx context.Context, sub *fabric.SubTransaction, dbName string, engine storage.Engine) (*StorageExecutor, error) {

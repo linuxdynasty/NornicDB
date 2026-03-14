@@ -2,8 +2,12 @@ package fabric
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -85,7 +89,8 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 		if e.local == nil {
 			return nil, fmt.Errorf("local executor not configured")
 		}
-		res, err := e.local.Execute(ctx, l, f.Query, params)
+		recordBindings, _ := RecordBindingsFromContext(ctx)
+		res, err := e.local.ExecuteWithRecord(ctx, l, f.Query, params, recordBindings)
 		if err != nil {
 			return nil, err
 		}
@@ -113,8 +118,7 @@ func (e *FabricExecutor) executeExec(ctx context.Context, tx *FabricTransaction,
 }
 
 func inferReturnColumnsFromQuery(query string) []string {
-	upper := strings.ToUpper(query)
-	returnIdx := strings.LastIndex(upper, "RETURN")
+	returnIdx := lastKeywordIndexFold(query, "RETURN")
 	if returnIdx < 0 {
 		return nil
 	}
@@ -189,8 +193,7 @@ func inferReturnColumnsFromQuery(query string) []string {
 		if item == "" {
 			continue
 		}
-		up := strings.ToUpper(item)
-		if as := strings.LastIndex(up, " AS "); as >= 0 {
+		if as := lastAsIndexFold(item); as >= 0 {
 			alias := strings.TrimSpace(item[as+4:])
 			if alias != "" {
 				cols = append(cols, strings.Trim(alias, "`"))
@@ -200,6 +203,30 @@ func inferReturnColumnsFromQuery(query string) []string {
 		cols = append(cols, item)
 	}
 	return cols
+}
+
+func lastKeywordIndexFold(s, keyword string) int {
+	if len(keyword) == 0 || len(s) < len(keyword) {
+		return -1
+	}
+	for i := len(s) - len(keyword); i >= 0; i-- {
+		if hasKeywordAt(s, i, keyword) {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastAsIndexFold(s string) int {
+	if len(s) < 4 {
+		return -1
+	}
+	for i := len(s) - 4; i >= 0; i-- {
+		if strings.EqualFold(s[i:i+4], " AS ") {
+			return i
+		}
+	}
+	return -1
 }
 
 func splitTopLevelCSV(s string) []string {
@@ -283,20 +310,13 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 	}
 
 	result := &ResultStream{Columns: append([]string(nil), f.Columns...)}
-	innerFragment := rewriteFragmentWithImports(f.Inner)
+	innerFragment := f.Inner
+	outerIdx := buildColumnIndex(inputResult.Columns)
 
 	// For each input row, execute the inner fragment with imported variables.
 	for _, inputRow := range inputResult.Rows {
-		innerForRow := innerFragment
-		if !fragmentHasStaticImports(innerFragment) {
-			innerForRow = rewriteFragmentWithRuntimeImports(innerFragment, inputResult.Columns)
-		}
-		// Build parameter map for the inner execution by merging input columns
-		// as parameters. This enables correlated subqueries where the inner
-		// query references variables from the outer scope.
-		innerParams := mergeRowParams(params, inputResult.Columns, inputRow)
-
-		innerResult, err := e.Execute(ctx, tx, innerForRow, innerParams, authToken)
+		innerCtx := WithRecordBindings(ctx, rowBindings(inputResult.Columns, inputRow))
+		innerResult, err := e.Execute(innerCtx, tx, innerFragment, params, authToken)
 		if err != nil {
 			return nil, fmt.Errorf("apply inner failed: %w", err)
 		}
@@ -312,14 +332,27 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		if len(innerResult.Rows) == 0 {
 			continue
 		}
-
+		innerIdx := buildColumnIndex(innerResult.Columns)
 		for _, innerRow := range innerResult.Rows {
-			combined := combineRowsByColumns(result.Columns, inputResult.Columns, inputRow, innerResult.Columns, innerRow)
+			combined := combineRowsByIndexes(result.Columns, outerIdx, inputRow, innerIdx, innerRow)
 			result.Rows = append(result.Rows, combined)
 		}
 	}
 
 	return result, nil
+}
+
+func rowBindings(columns []string, row []interface{}) map[string]interface{} {
+	if len(columns) == 0 || len(row) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(columns))
+	for i, col := range columns {
+		if i < len(row) && strings.TrimSpace(col) != "" {
+			out[col] = row[i]
+		}
+	}
+	return out
 }
 
 func importColumnsFromFragment(f Fragment) []string {
@@ -444,30 +477,62 @@ func rewriteLeadingWithImports(query string, importCols []string) string {
 		if col == "" {
 			continue
 		}
-		assignments = append(assignments, fmt.Sprintf("$%s AS %s", col, col))
+		assignments = append(assignments, "$"+col+" AS "+col)
 	}
 	if len(assignments) == 0 {
 		return query
 	}
 
 	trimmed := strings.TrimSpace(query)
-	if !strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
-		return "WITH " + strings.Join(assignments, ", ") + " " + trimmed
+	if !startsWithFold(trimmed, "WITH ") {
+		// For projection-only fragments produced by planner (e.g. trailing
+		// RETURN after APPLY), import outer variables explicitly.
+		if startsWithFold(trimmed, "RETURN ") {
+			return "WITH " + strings.Join(assignments, ", ") + " " + trimmed
+		}
+		return query
 	}
 
 	withEnd, ok := findLeadingWithClauseEnd(trimmed)
 	if !ok || withEnd <= 0 {
 		return query
 	}
+	withClause := strings.TrimSpace(trimmed[:withEnd])
 	rest := strings.TrimSpace(trimmed[withEnd:])
 	if rest == "" {
 		return "WITH " + strings.Join(assignments, ", ")
 	}
-	upperRest := strings.ToUpper(rest)
-	if strings.HasPrefix(upperRest, "MATCH ") || strings.HasPrefix(upperRest, "OPTIONAL MATCH ") {
+	// Keep correlated semantics for simple import-only WITH clauses by
+	// substituting imported vars directly into MATCH predicates.
+	if (startsWithFold(rest, "MATCH ") || startsWithFold(rest, "OPTIONAL MATCH ")) &&
+		isSimpleWithImportClause(withClause, importCols) {
 		return substituteVarsWithParams(rest, importCols)
 	}
 	return "WITH " + strings.Join(assignments, ", ") + " " + rest
+}
+
+func isSimpleWithImportClause(withClause string, importCols []string) bool {
+	if len(importCols) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(withClause)
+	if !startsWithFold(trimmed, "WITH ") {
+		return false
+	}
+	lhs := strings.TrimSpace(trimmed[len("WITH "):])
+	if lhs == "" {
+		return false
+	}
+	parts := splitTopLevelCSV(lhs)
+	if len(parts) != len(importCols) {
+		return false
+	}
+	for i, p := range parts {
+		if strings.TrimSpace(p) != strings.TrimSpace(importCols[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func substituteVarsWithParams(query string, vars []string) string {
@@ -622,33 +687,34 @@ func findLeadingWithClauseEnd(query string) (int, bool) {
 }
 
 func isCypherClauseStart(query string, idx int) bool {
-	keywords := []string{
-		"OPTIONAL MATCH",
-		"DETACH DELETE",
-		"ORDER BY",
-		"LOAD CSV",
-		"USE",
-		"MATCH",
-		"RETURN",
-		"CALL",
-		"CREATE",
-		"MERGE",
-		"UNWIND",
-		"WHERE",
-		"SET",
-		"DELETE",
-		"WITH",
-		"FOREACH",
-		"UNION",
-		"LIMIT",
-		"SKIP",
-	}
-	for _, kw := range keywords {
+	for _, kw := range clauseStartKeywords {
 		if hasKeywordAt(query, idx, kw) {
 			return true
 		}
 	}
 	return false
+}
+
+var clauseStartKeywords = [...]string{
+	"OPTIONAL MATCH",
+	"DETACH DELETE",
+	"ORDER BY",
+	"LOAD CSV",
+	"USE",
+	"MATCH",
+	"RETURN",
+	"CALL",
+	"CREATE",
+	"MERGE",
+	"UNWIND",
+	"WHERE",
+	"SET",
+	"DELETE",
+	"WITH",
+	"FOREACH",
+	"UNION",
+	"LIMIT",
+	"SKIP",
 }
 
 func hasKeywordAt(query string, idx int, keyword string) bool {
@@ -684,6 +750,15 @@ func skipLeadingSpace(s string, idx int) int {
 
 // executeUnion executes both branches and merges results.
 func (e *FabricExecutor) executeUnion(ctx context.Context, tx *FabricTransaction, f *FragmentUnion, params map[string]interface{}, authToken string) (*ResultStream, error) {
+	// Keep write branch execution sequential so shard write-routing remains deterministic.
+	// Read-only UNION branches can execute concurrently and then merge in LHS/RHS order.
+	if fragmentContainsWrite(f.LHS) || fragmentContainsWrite(f.RHS) {
+		return e.executeUnionSequential(ctx, tx, f, params, authToken)
+	}
+	return e.executeUnionParallel(ctx, tx, f, params, authToken)
+}
+
+func (e *FabricExecutor) executeUnionSequential(ctx context.Context, tx *FabricTransaction, f *FragmentUnion, params map[string]interface{}, authToken string) (*ResultStream, error) {
 	lhsResult, err := e.Execute(ctx, tx, f.LHS, params, authToken)
 	if err != nil {
 		return nil, fmt.Errorf("union LHS failed: %w", err)
@@ -712,19 +787,71 @@ func (e *FabricExecutor) executeUnion(ctx context.Context, tx *FabricTransaction
 	return result, nil
 }
 
-// mergeRowParams creates a parameter map that includes both the original params
-// and the column values from an input row (for correlated subqueries).
-func mergeRowParams(params map[string]interface{}, columns []string, row []interface{}) map[string]interface{} {
-	merged := make(map[string]interface{}, len(params)+len(columns))
-	for k, v := range params {
-		merged[k] = v
-	}
-	for i, col := range columns {
-		if i < len(row) {
-			merged[col] = row[i]
+func (e *FabricExecutor) executeUnionParallel(ctx context.Context, tx *FabricTransaction, f *FragmentUnion, params map[string]interface{}, authToken string) (*ResultStream, error) {
+	var (
+		wg  sync.WaitGroup
+		mu  sync.Mutex
+		lhs *ResultStream
+		rhs *ResultStream
+		err error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		res, runErr := e.Execute(ctx, tx, f.LHS, params, authToken)
+		mu.Lock()
+		defer mu.Unlock()
+		if runErr != nil {
+			err = fmt.Errorf("union LHS failed: %w", runErr)
+			return
 		}
+		lhs = res
+	}()
+	go func() {
+		defer wg.Done()
+		res, runErr := e.Execute(ctx, tx, f.RHS, params, authToken)
+		mu.Lock()
+		defer mu.Unlock()
+		if runErr != nil {
+			if err == nil {
+				err = fmt.Errorf("union RHS failed: %w", runErr)
+			}
+			return
+		}
+		rhs = res
+	}()
+	wg.Wait()
+	if err != nil {
+		return nil, err
 	}
-	return merged
+	result := &ResultStream{Columns: f.Columns}
+	if lhs != nil {
+		result.Rows = append(result.Rows, lhs.Rows...)
+	}
+	if rhs != nil {
+		result.Rows = append(result.Rows, rhs.Rows...)
+	}
+	if f.Distinct {
+		result.Rows = deduplicateRows(result.Rows)
+	}
+	return result, nil
+}
+
+func fragmentContainsWrite(fragment Fragment) bool {
+	switch f := fragment.(type) {
+	case *FragmentExec:
+		return f.IsWrite
+	case *FragmentApply:
+		return fragmentContainsWrite(f.Input) || fragmentContainsWrite(f.Inner)
+	case *FragmentUnion:
+		return fragmentContainsWrite(f.LHS) || fragmentContainsWrite(f.RHS)
+	case *FragmentLeaf:
+		return fragmentContainsWrite(f.Input)
+	case *FragmentInit:
+		return false
+	default:
+		return false
+	}
 }
 
 // combineColumns merges two column lists, deduplicating names.
@@ -744,36 +871,135 @@ func combineColumns(outer, inner []string) []string {
 }
 
 func combineRowsByColumns(resultCols, outerCols []string, outerRow []interface{}, innerCols []string, innerRow []interface{}) []interface{} {
-	valueByCol := make(map[string]interface{}, len(outerCols)+len(innerCols))
-	for i, col := range outerCols {
-		if i < len(outerRow) {
-			valueByCol[col] = outerRow[i]
-		}
-	}
-	for i, col := range innerCols {
-		if i < len(innerRow) {
-			// Inner values override on duplicate names, matching APPLY scoping behavior.
-			valueByCol[col] = innerRow[i]
-		}
-	}
+	return combineRowsByIndexes(resultCols, buildColumnIndex(outerCols), outerRow, buildColumnIndex(innerCols), innerRow)
+}
 
+func buildColumnIndex(cols []string) map[string]int {
+	idx := make(map[string]int, len(cols))
+	for i, col := range cols {
+		if strings.TrimSpace(col) == "" {
+			continue
+		}
+		idx[col] = i
+	}
+	return idx
+}
+
+func combineRowsByIndexes(resultCols []string, outerIdx map[string]int, outerRow []interface{}, innerIdx map[string]int, innerRow []interface{}) []interface{} {
 	combined := make([]interface{}, len(resultCols))
 	for i, col := range resultCols {
-		combined[i] = valueByCol[col]
+		if idx, ok := innerIdx[col]; ok && idx < len(innerRow) {
+			combined[i] = innerRow[idx]
+			continue
+		}
+		if idx, ok := outerIdx[col]; ok && idx < len(outerRow) {
+			combined[i] = outerRow[idx]
+		}
 	}
 	return combined
 }
 
 // deduplicateRows removes duplicate rows based on string representation.
 func deduplicateRows(rows [][]interface{}) [][]interface{} {
-	seen := make(map[string]bool, len(rows))
+	seen := make(map[uint64]struct{}, len(rows))
 	result := make([][]interface{}, 0, len(rows))
 	for _, row := range rows {
-		key := fmt.Sprintf("%v", row)
-		if !seen[key] {
-			seen[key] = true
+		key := hashRow(row)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
 			result = append(result, row)
 		}
 	}
 	return result
+}
+
+func hashRow(row []interface{}) uint64 {
+	h := newFNV64a()
+	for _, v := range row {
+		writeAnyHash(&h, v)
+		h.writeByte(0)
+	}
+	return h.sum64()
+}
+
+func writeAnyHash(h *fnv64a, v interface{}) {
+	switch t := v.(type) {
+	case nil:
+		h.writeByte('n')
+	case string:
+		h.writeByte('s')
+		h.writeString(t)
+	case bool:
+		h.writeByte('b')
+		if t {
+			h.writeByte(1)
+		} else {
+			h.writeByte(0)
+		}
+	case int:
+		writeUint64Hash(h, uint64(t), 'i')
+	case int64:
+		writeUint64Hash(h, uint64(t), 'I')
+	case float64:
+		writeUint64Hash(h, math.Float64bits(t), 'f')
+	case []interface{}:
+		h.writeByte('a')
+		for _, item := range t {
+			writeAnyHash(h, item)
+			h.writeByte(0)
+		}
+	case map[string]interface{}:
+		h.writeByte('m')
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			h.writeString(k)
+			h.writeByte('=')
+			writeAnyHash(h, t[k])
+			h.writeByte(0)
+		}
+	default:
+		h.writeByte('x')
+		h.writeString(fmt.Sprintf("%T:%v", t, t))
+	}
+}
+
+func writeUint64Hash(h *fnv64a, n uint64, marker byte) {
+	var b [9]byte
+	b[0] = marker
+	binary.LittleEndian.PutUint64(b[1:], n)
+	h.writeBytes(b[:])
+}
+
+type fnv64a struct {
+	sum uint64
+}
+
+func newFNV64a() fnv64a {
+	return fnv64a{sum: 14695981039346656037}
+}
+
+func (h *fnv64a) writeByte(b byte) {
+	const prime uint64 = 1099511628211
+	h.sum ^= uint64(b)
+	h.sum *= prime
+}
+
+func (h *fnv64a) writeBytes(bs []byte) {
+	for _, b := range bs {
+		h.writeByte(b)
+	}
+}
+
+func (h *fnv64a) writeString(s string) {
+	for i := 0; i < len(s); i++ {
+		h.writeByte(s[i])
+	}
+}
+
+func (h *fnv64a) sum64() uint64 {
+	return h.sum
 }

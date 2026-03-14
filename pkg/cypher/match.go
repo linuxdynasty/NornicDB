@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // isAggregateFunc checks if expression is an aggregate function (whitespace-tolerant)
@@ -464,16 +466,27 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		streamingLimit = skip + limit
 	}
 
-	// Get matching nodes using streaming optimization when possible
-	nodes, err := e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, streamingLimit)
-	if err != nil {
-		return nil, fmt.Errorf("storage error: %w", err)
+	// Get matching nodes, preferring property-index lookup for simple equality WHERE predicates.
+	var nodes []*storage.Node
+	var err error
+	wherePart := ""
+	usedPropertyIndex := false
+	if whereIdx > 0 {
+		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
+			nodes = candidates
+			usedPropertyIndex = true
+		}
+	}
+	if !usedPropertyIndex {
+		nodes, err = e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, streamingLimit)
+		if err != nil {
+			return nil, fmt.Errorf("storage error: %w", err)
+		}
 	}
 
 	// Apply WHERE filter if present
 	if whereIdx > 0 {
-		// Find end of WHERE clause (before RETURN)
-		wherePart := cypher[whereIdx+5 : returnIdx]
 		nodes = e.filterNodes(nodes, nodePattern.variable, strings.TrimSpace(wherePart))
 	}
 

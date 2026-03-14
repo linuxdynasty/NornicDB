@@ -236,6 +236,9 @@ type StorageExecutor struct {
 	// vectorRegistry maps Cypher vector index definitions to concrete vector spaces.
 	vectorRegistry    *vectorspace.IndexRegistry
 	vectorIndexSpaces map[string]vectorspace.VectorSpaceKey
+	// fabricRecordBindings carries correlated APPLY input bindings for Fabric execution.
+	// It is set only on per-query cloned executors.
+	fabricRecordBindings map[string]interface{}
 }
 
 // DatabaseManagerInterface is a minimal interface to avoid import cycles with multidb package.
@@ -2005,6 +2008,11 @@ func (e *StorageExecutor) executeReturn(ctx context.Context, cypher string) (*Ex
 	}
 
 	returnClause := strings.TrimSpace(cypher[returnIdx+6:])
+	// Strip trailing modifiers from RETURN projection (single-row RETURN path).
+	// This prevents "ORDER BY ..." from being treated as an additional projection item.
+	if cut := firstTopLevelModifierIndex(returnClause); cut >= 0 {
+		returnClause = strings.TrimSpace(returnClause[:cut])
+	}
 
 	// Handle simple literal returns like "RETURN 1" or "RETURN true"
 	parts := splitReturnExpressions(returnClause)
@@ -2063,6 +2071,16 @@ func (e *StorageExecutor) executeReturn(ctx context.Context, cypher string) (*Ex
 		Columns: columns,
 		Rows:    [][]interface{}{values},
 	}, nil
+}
+
+func firstTopLevelModifierIndex(clause string) int {
+	cut := -1
+	for _, kw := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := topLevelKeywordIndex(clause, kw); idx >= 0 && (cut == -1 || idx < cut) {
+			cut = idx
+		}
+	}
+	return cut
 }
 
 // splitReturnExpressions splits RETURN expressions by comma, respecting parentheses and brackets depth

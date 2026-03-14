@@ -3608,6 +3608,40 @@ func TestNeo4jConversionAndTxHelpers_AdditionalBranches(t *testing.T) {
 	require.Len(t, resp.Results[0].Columns, 0)
 }
 
+func TestRequestTimeoutMiddleware_TxRoute_UsesConfigAndOverride(t *testing.T) {
+	// By default tx timeout has a safety floor, so a short handler should not time out
+	// even when WriteTimeout is configured very small.
+	s := &Server{config: &Config{WriteTimeout: 10 * time.Millisecond}}
+	slowOK := s.requestTimeoutMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(25 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", nil)
+	rr := httptest.NewRecorder()
+	slowOK.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for tx route without override, got %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	// Env override should be honored for tx timeout, enabling short deterministic limits in tests.
+	t.Setenv("NORNICDB_HTTP_TX_TIMEOUT", "5ms")
+	s2 := &Server{config: &Config{WriteTimeout: 10 * time.Second}}
+	slowTimeout := s2.requestTimeoutMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req2 := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", nil)
+	rr2 := httptest.NewRecorder()
+	slowTimeout.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when tx timeout override expires, got %d", rr2.Code)
+	}
+	if !strings.Contains(rr2.Body.String(), "request timeout: transaction busy") {
+		t.Fatalf("expected tx timeout body, got %q", rr2.Body.String())
+	}
+}
+
 func TestTransactionHandlers_AdditionalErrorBranches(t *testing.T) {
 	server, _ := setupTestServer(t)
 	_ = server.dbManager.CreateDatabase("private")

@@ -67,6 +67,19 @@ func (c *Catalog) ListGraphs() []string {
 	return names
 }
 
+// HasGraphWithPrefix returns true when any registered graph name starts with prefix.
+// Names are stored lowercased; callers should pass a lowercased prefix.
+func (c *Catalog) HasGraphWithPrefix(prefix string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for name := range c.graphs {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // PopulateFromManager loads graph registrations from a DatabaseManager.
 // It registers:
 //   - each standard database as a LocationLocal

@@ -1611,24 +1611,16 @@ func isAlphaNum(ch rune) bool {
 func (e *StorageExecutor) parseReturnItems(returnPart string) []returnItem {
 	items := []returnItem{}
 
-	// Handle LIMIT clause
-	upper := strings.ToUpper(returnPart)
-	limitIdx := strings.Index(upper, "LIMIT")
-	if limitIdx > 0 {
-		returnPart = returnPart[:limitIdx]
-	}
-
-	// Handle ORDER BY clause - use whitespace-tolerant helper to avoid matching "order_id"
-	// This is a safety check; most callers should already strip ORDER BY before calling parseReturnItems
-	orderIdx := findKeywordIndex(returnPart, "ORDER")
-	if orderIdx >= 0 {
-		// Found "ORDER" - check if it's followed by "BY" (not part of "order_id")
-		afterOrder := strings.TrimSpace(returnPart[orderIdx+5:]) // Skip "ORDER"
-		if strings.HasPrefix(strings.ToUpper(afterOrder), "BY") {
-			// This is "ORDER BY" - strip it
-			returnPart = strings.TrimSpace(returnPart[:orderIdx])
+	// Strip top-level trailing clauses from RETURN projection.
+	// Use keyword scanning to avoid false matches in identifiers like "order_count".
+	end := len(returnPart)
+	for _, kw := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := topLevelKeywordIndex(returnPart, kw); idx >= 0 && idx < end {
+			end = idx
 		}
-		// If it's just "ORDER" without "BY", leave it (might be a variable name)
+	}
+	if end < len(returnPart) {
+		returnPart = strings.TrimSpace(returnPart[:end])
 	}
 
 	// Split by comma, but respect CASE/END boundaries and parentheses

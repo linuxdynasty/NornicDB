@@ -1297,21 +1297,13 @@ func (e *StorageExecutor) processCallSubqueryReturn(innerResult *ExecuteResult, 
 
 	returnClause := strings.TrimSpace(afterCall[returnIdx+6:])
 
-	// Check for ORDER BY, LIMIT, SKIP
-	orderByIdx := findKeywordIndex(returnClause, "ORDER BY")
-	limitIdx := findKeywordIndex(returnClause, "LIMIT")
-	skipIdx := findKeywordIndex(returnClause, "SKIP")
-
-	// Find the earliest modifier
+	// Check for ORDER BY, LIMIT, SKIP using top-level keyword scanning so
+	// multiline RETURN clauses are split deterministically.
 	modifierIdx := len(returnClause)
-	if orderByIdx != -1 && orderByIdx < modifierIdx {
-		modifierIdx = orderByIdx
-	}
-	if limitIdx != -1 && limitIdx < modifierIdx {
-		modifierIdx = limitIdx
-	}
-	if skipIdx != -1 && skipIdx < modifierIdx {
-		modifierIdx = skipIdx
+	for _, kw := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := topLevelKeywordIndex(returnClause, kw); idx >= 0 && idx < modifierIdx {
+			modifierIdx = idx
+		}
 	}
 
 	returnExprs := strings.TrimSpace(returnClause[:modifierIdx])

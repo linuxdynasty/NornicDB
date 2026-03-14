@@ -13,6 +13,8 @@ import (
 type CypherExecutor interface {
 	// ExecuteQuery runs a Cypher query against a storage engine and returns columns + rows.
 	ExecuteQuery(ctx context.Context, dbName string, engine storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error)
+	// ExecuteQueryWithRecord runs a Cypher query with correlated record bindings.
+	ExecuteQueryWithRecord(ctx context.Context, dbName string, engine storage.Engine, query string, params map[string]interface{}, recordBindings map[string]interface{}) ([]string, [][]interface{}, error)
 }
 
 // LocalFragmentExecutor executes fragments against a local storage engine
@@ -36,12 +38,17 @@ func NewLocalFragmentExecutor(cypherExec CypherExecutor, getEngine func(string) 
 
 // Execute runs a Cypher query against a local database.
 func (l *LocalFragmentExecutor) Execute(ctx context.Context, loc *LocationLocal, query string, params map[string]interface{}) (*ResultStream, error) {
+	return l.ExecuteWithRecord(ctx, loc, query, params, nil)
+}
+
+// ExecuteWithRecord runs a Cypher query against a local database with optional correlated bindings.
+func (l *LocalFragmentExecutor) ExecuteWithRecord(ctx context.Context, loc *LocationLocal, query string, params map[string]interface{}, recordBindings map[string]interface{}) (*ResultStream, error) {
 	engine, err := l.getEngine(loc.DBName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage for database '%s': %w", loc.DBName, err)
 	}
 
-	columns, rows, err := l.cypherExec.ExecuteQuery(ctx, loc.DBName, engine, query, params)
+	columns, rows, err := l.cypherExec.ExecuteQueryWithRecord(ctx, loc.DBName, engine, query, params, recordBindings)
 	if err != nil {
 		return nil, fmt.Errorf("local execution on '%s' failed: %w", loc.DBName, err)
 	}

@@ -275,7 +275,21 @@ func (s *Server) requestTimeoutMiddleware(next http.Handler) http.Handler {
 	statusTimeout := 5 * time.Second
 	embedStatsTimeout := 2 * time.Second
 	searchTimeout := 20 * time.Second
-	txTimeout := 30 * time.Second
+	txTimeout := s.config.WriteTimeout
+	if txTimeout <= 0 {
+		txTimeout = 300 * time.Second
+	}
+	// Tx commit routes can include multi-part Fabric fan-out and can legitimately
+	// take longer than default request timeouts under load. Keep a hard floor to
+	// avoid spurious 503 "transaction busy" failures.
+	if txTimeout < 5*time.Minute {
+		txTimeout = 5 * time.Minute
+	}
+	if v := strings.TrimSpace(os.Getenv("NORNICDB_HTTP_TX_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			txTimeout = d
+		}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path

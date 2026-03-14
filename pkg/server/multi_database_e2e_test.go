@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +24,50 @@ import (
 func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
+	ensureCompositeFixture := func(t *testing.T) {
+		t.Helper()
+		if !server.dbManager.Exists("test_db_a") {
+			require.NoError(t, server.dbManager.CreateDatabase("test_db_a"))
+		}
+		if !server.dbManager.Exists("test_db_b") {
+			require.NoError(t, server.dbManager.CreateDatabase("test_db_b"))
+		}
+
+		seedA := makeRequest(t, server, "POST", "/db/test_db_a/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "MERGE (alice:Person {id: 'a1'}) SET alice.name = 'Alice', alice.db = 'test_db_a'"},
+				{"statement": "MERGE (bob:Person {id: 'a2'}) SET bob.name = 'Bob', bob.db = 'test_db_a'"},
+				{"statement": "MERGE (company:Company {id: 'a3'}) SET company.name = 'Acme Corp', company.db = 'test_db_a'"},
+				{"statement": "MATCH (a:Person {id: 'a1'}), (c:Company {id: 'a3'}) MERGE (a)-[:WORKS_FOR]->(c)"},
+				{"statement": "MATCH (b:Person {id: 'a2'}), (c:Company {id: 'a3'}) MERGE (b)-[:WORKS_FOR]->(c)"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, seedA.Code)
+		var seedARes TransactionResponse
+		require.NoError(t, json.NewDecoder(seedA.Body).Decode(&seedARes))
+		require.Empty(t, seedARes.Errors)
+
+		seedB := makeRequest(t, server, "POST", "/db/test_db_b/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "MERGE (charlie:Person {id: 'b1'}) SET charlie.name = 'Charlie', charlie.db = 'test_db_b'"},
+				{"statement": "MERGE (diana:Person {id: 'b2'}) SET diana.name = 'Diana', diana.db = 'test_db_b'"},
+				{"statement": "MERGE (order:Order {order_id: 'ORD-001'}) SET order.owner_id = 'a1', order.amount = 1000, order.db = 'test_db_b'"},
+				{"statement": "MATCH (c:Person {id: 'b1'}), (o:Order {order_id: 'ORD-001'}) MERGE (c)-[:PLACED]->(o)"},
+				{"statement": "MATCH (d:Person {id: 'b2'}), (o:Order {order_id: 'ORD-001'}) MERGE (d)-[:PLACED]->(o)"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, seedB.Code)
+		var seedBRes TransactionResponse
+		require.NoError(t, json.NewDecoder(seedB.Body).Decode(&seedBRes))
+		require.Empty(t, seedBRes.Errors)
+
+		if !server.dbManager.IsCompositeDatabase("test_composite") {
+			require.NoError(t, server.dbManager.CreateCompositeDatabase("test_composite", []multidb.ConstituentRef{
+				{Alias: "db_a", DatabaseName: "test_db_a", Type: "local", AccessMode: "read_write"},
+				{Alias: "db_b", DatabaseName: "test_db_b", Type: "local", AccessMode: "read_write"},
+			}))
+		}
+	}
 
 	// Step 1: Verify default database exists and works
 	t.Run("Step1_VerifyDefaultDatabase", func(t *testing.T) {
@@ -207,7 +252,7 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			"statements": []map[string]interface{}{
 				{"statement": "CREATE (charlie:Person {name: 'Charlie', id: 'b1', db: 'test_db_b'})"},
 				{"statement": "CREATE (diana:Person {name: 'Diana', id: 'b2', db: 'test_db_b'})"},
-				{"statement": "CREATE (order:Order {order_id: 'ORD-001', amount: 1000, db: 'test_db_b'})"},
+				{"statement": "CREATE (order:Order {order_id: 'ORD-001', owner_id: 'a1', amount: 1000, db: 'test_db_b'})"},
 				{"statement": "MATCH (c:Person {name: 'Charlie'}), (o:Order {order_id: 'ORD-001'}) CREATE (c)-[:PLACED]->(o)"},
 				{"statement": "MATCH (d:Person {name: 'Diana'}), (o:Order {order_id: 'ORD-001'}) CREATE (d)-[:PLACED]->(o)"},
 			},
@@ -382,6 +427,8 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 
 	// Step 10: Query composite database
 	t.Run("Step10_QueryCompositeDatabase", func(t *testing.T) {
+		ensureCompositeFixture(t)
+
 		toInt64Value := func(v interface{}) int64 {
 			switch n := v.(type) {
 			case float64:
@@ -396,12 +443,7 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			}
 		}
 
-		// Verify composite database exists before querying
-		if !server.dbManager.Exists("test_composite") {
-			// Dump databases for debugging
-			dbs := server.dbManager.ListDatabases()
-			t.Fatalf("composite database should exist; current databases: %+v", dbs)
-		}
+		require.True(t, server.dbManager.Exists("test_composite"), "composite database should exist before querying")
 
 		// Plain root MATCH on composite should be rejected (strict Neo4j/Fabric semantics).
 		resp := makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
@@ -514,6 +556,119 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 		assert.True(t, labelsFound["Order"], "should have Order label")
 		assert.True(t, labelsFound["Person"], "should have Person label")
 		assert.Equal(t, int64(6), totalLabelCount, "total count across all labels should be 6")
+
+		t.Run("CorrelatedSubqueryJoin_WithParams_MultiRow", func(t *testing.T) {
+			resp := makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{
+						"statement": `USE test_composite
+CALL {
+  USE test_composite.db_a
+  MATCH (p:Person)
+  WHERE p.id IN $person_ids
+  RETURN p.id AS person_id, p.name AS person_name
+  ORDER BY person_id
+  LIMIT $outer_limit
+}
+CALL {
+  USE test_composite.db_b
+  OPTIONAL MATCH (o:Order)
+  WHERE o.owner_id = person_id AND o.amount >= $min_amount
+  RETURN collect(o.order_id) AS order_ids, count(o) AS order_count
+}
+RETURN person_id, person_name, order_ids, order_count`,
+						"parameters": map[string]interface{}{
+							"person_ids":  []string{"a1", "a2"},
+							"outer_limit": 2,
+							"min_amount":  100,
+						},
+					},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+			var result TransactionResponse
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Empty(t, result.Errors, "correlated composite join should not error")
+			require.Len(t, result.Results, 1)
+			require.Len(t, result.Results[0].Data, 2, "expected two joined rows for a1 and a2")
+
+			rowsByID := make(map[string][]interface{}, 2)
+			for _, row := range result.Results[0].Data {
+				require.Len(t, row.Row, 4)
+				id, ok := row.Row[0].(string)
+				require.True(t, ok)
+				rowsByID[id] = row.Row
+			}
+			require.Contains(t, rowsByID, "a1")
+			require.Contains(t, rowsByID, "a2")
+
+			rowA1 := rowsByID["a1"]
+			require.Equal(t, "Alice", rowA1[1])
+			orderIDs0, ok := rowA1[2].([]interface{})
+			require.True(t, ok, "order_ids should be a list")
+			require.Len(t, orderIDs0, 1)
+			require.Equal(t, "ORD-001", orderIDs0[0])
+			assert.Equal(t, int64(1), toInt64Value(rowA1[3]))
+
+			rowA2 := rowsByID["a2"]
+			require.Equal(t, "Bob", rowA2[1])
+			orderIDs1, ok := rowA2[2].([]interface{})
+			require.True(t, ok, "order_ids should be a list")
+			require.Len(t, orderIDs1, 0)
+			assert.Equal(t, int64(0), toInt64Value(rowA2[3]))
+		})
+
+		t.Run("CorrelatedSubqueryJoin_WithThenUse_CollectSemantics", func(t *testing.T) {
+			// Same clause ordering as user query shape: WITH import first, then USE in subquery.
+			resp := makeRequest(t, server, "POST", "/db/test_composite/tx/commit", map[string]interface{}{
+				"statements": []map[string]interface{}{
+					{
+						"statement": `USE test_composite
+CALL {
+  USE test_composite.db_a
+  MATCH (t:Person)
+  WHERE t.id IN ['a1', 'a2']
+  RETURN t.id AS textKey128
+  ORDER BY textKey128
+}
+CALL {
+  WITH textKey128
+  USE test_composite.db_b
+  MATCH (tt:Order)
+  WHERE tt.owner_id = textKey128
+  RETURN collect(tt.order_id) AS texts
+}
+RETURN textKey128, texts
+ORDER BY textKey128`,
+					},
+				},
+			}, "Bearer "+token)
+			require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+			var result TransactionResponse
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			require.Empty(t, result.Errors, "WITH ... USE ... collect() flow should not error")
+			require.Len(t, result.Results, 1)
+			require.Len(t, result.Results[0].Data, 2)
+
+			row0 := result.Results[0].Data[0].Row
+			row1 := result.Results[0].Data[1].Row
+			require.Len(t, row0, 2)
+			require.Len(t, row1, 2)
+
+			require.Equal(t, "a1", row0[0])
+			require.Equal(t, "a2", row1[0])
+
+			texts0, ok := row0[1].([]interface{})
+			require.True(t, ok, "texts should be a list")
+			require.Len(t, texts0, 1)
+			require.Equal(t, "ORD-001", texts0[0])
+
+			texts1, ok := row1[1].([]interface{})
+			require.True(t, ok, "texts should be a list")
+			require.Len(t, texts1, 0)
+		})
 	})
 
 	// Step 11: Verify composite database isolation

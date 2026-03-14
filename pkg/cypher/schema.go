@@ -562,6 +562,9 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
 			return nil, err
 		}
+		if err := e.backfillPropertyIndex(label, properties); err != nil {
+			return nil, err
+		}
 
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
@@ -585,6 +588,9 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
 			return nil, err
 		}
+		if err := e.backfillPropertyIndex(label, properties); err != nil {
+			return nil, err
+		}
 
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
@@ -602,6 +608,9 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
 		}
 		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
+			return nil, err
+		}
+		if err := e.backfillPropertyIndex(label, properties); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -624,6 +633,9 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 			indexName = fmt.Sprintf("index_%s_%s", strings.ToLower(label), strings.ToLower(propsJoined))
 		}
 		if err := e.storage.GetSchema().AddPropertyIndex(indexName, label, properties); err != nil {
+			return nil, err
+		}
+		if err := e.backfillPropertyIndex(label, properties); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -694,6 +706,36 @@ func (e *StorageExecutor) executeCreateRangeIndex(ctx context.Context, cypher st
 //   - "n.a, n.b, n.c"        -> ["a", "b", "c"]
 func (e *StorageExecutor) parseIndexProperties(propertiesStr string) []string {
 	return e.parseIndexPropertiesWithMode(propertiesStr, true)
+}
+
+func (e *StorageExecutor) backfillPropertyIndex(label string, properties []string) error {
+	// Current runtime lookup path uses single-property indexes.
+	if len(properties) != 1 {
+		return nil
+	}
+	property := properties[0]
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil
+	}
+
+	nodes, err := e.storage.GetNodesByLabel(label)
+	if err != nil {
+		return fmt.Errorf("failed to backfill index for label %s: %w", label, err)
+	}
+	for _, node := range nodes {
+		if node == nil || node.Properties == nil {
+			continue
+		}
+		value, ok := node.Properties[property]
+		if !ok {
+			continue
+		}
+		if err := schema.PropertyIndexInsert(label, property, node.ID, value); err != nil {
+			return fmt.Errorf("failed to backfill property index %s(%s): %w", label, property, err)
+		}
+	}
+	return nil
 }
 
 func (e *StorageExecutor) parseQualifiedIndexProperties(propertiesStr string) []string {

@@ -3,6 +3,7 @@ package fabric
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -15,6 +16,17 @@ type mockCypherExecutor struct {
 }
 
 func (m *mockCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage.Engine, query string, _ map[string]interface{}) ([]string, [][]interface{}, error) {
+	if m.err != nil {
+		return nil, nil, m.err
+	}
+	result, ok := m.results[query]
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected query: %s", query)
+	}
+	return result.Columns, result.Rows, nil
+}
+
+func (m *mockCypherExecutor) ExecuteQueryWithRecord(_ context.Context, _ string, _ storage.Engine, query string, _ map[string]interface{}, _ map[string]interface{}) ([]string, [][]interface{}, error) {
 	if m.err != nil {
 		return nil, nil, m.err
 	}
@@ -335,23 +347,6 @@ func TestFabricExecutor_NilRemoteExecutor(t *testing.T) {
 	}
 }
 
-func TestMergeRowParams(t *testing.T) {
-	params := map[string]interface{}{"existing": "val"}
-	columns := []string{"col1", "col2"}
-	row := []interface{}{"v1", "v2"}
-
-	merged := mergeRowParams(params, columns, row)
-	if merged["existing"] != "val" {
-		t.Error("expected existing param preserved")
-	}
-	if merged["col1"] != "v1" {
-		t.Errorf("expected col1=v1, got %v", merged["col1"])
-	}
-	if merged["col2"] != "v2" {
-		t.Errorf("expected col2=v2, got %v", merged["col2"])
-	}
-}
-
 func TestCombineColumns(t *testing.T) {
 	outer := []string{"a", "b"}
 	inner := []string{"b", "c"}
@@ -379,6 +374,68 @@ func TestDeduplicateRows(t *testing.T) {
 	}
 }
 
+func TestDeduplicateRows_MapValuesDeterministic(t *testing.T) {
+	rows := [][]interface{}{
+		{map[string]interface{}{"b": int64(2), "a": int64(1)}},
+		{map[string]interface{}{"a": int64(1), "b": int64(2)}},
+	}
+	deduped := deduplicateRows(rows)
+	if len(deduped) != 1 {
+		t.Fatalf("expected map rows to dedupe deterministically, got %d", len(deduped))
+	}
+}
+
+func TestCombineRowsByIndexes_InnerOverridesOuter(t *testing.T) {
+	resultCols := []string{"id", "outerOnly", "innerOnly", "shared"}
+	outerIdx := buildColumnIndex([]string{"id", "outerOnly", "shared"})
+	innerIdx := buildColumnIndex([]string{"innerOnly", "shared"})
+	out := combineRowsByIndexes(
+		resultCols,
+		outerIdx, []interface{}{"a1", "outer", "outerShared"},
+		innerIdx, []interface{}{"inner", "innerShared"},
+	)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 combined values, got %d", len(out))
+	}
+	if out[0] != "a1" || out[1] != "outer" || out[2] != "inner" || out[3] != "innerShared" {
+		t.Fatalf("unexpected combined row: %#v", out)
+	}
+}
+
+func TestFragmentContainsWrite(t *testing.T) {
+	t.Run("exec write", func(t *testing.T) {
+		if !fragmentContainsWrite(&FragmentExec{IsWrite: true}) {
+			t.Fatal("expected write fragment to be detected")
+		}
+	})
+	t.Run("exec read", func(t *testing.T) {
+		if fragmentContainsWrite(&FragmentExec{IsWrite: false}) {
+			t.Fatal("expected read fragment to be non-write")
+		}
+	})
+	t.Run("nested apply", func(t *testing.T) {
+		f := &FragmentApply{
+			Input: &FragmentExec{IsWrite: false},
+			Inner: &FragmentExec{IsWrite: true},
+		}
+		if !fragmentContainsWrite(f) {
+			t.Fatal("expected nested write to be detected")
+		}
+	})
+	t.Run("nested union", func(t *testing.T) {
+		f := &FragmentUnion{
+			LHS: &FragmentExec{IsWrite: false},
+			RHS: &FragmentApply{
+				Input: &FragmentInit{},
+				Inner: &FragmentExec{IsWrite: true},
+			},
+		}
+		if !fragmentContainsWrite(f) {
+			t.Fatal("expected nested union write to be detected")
+		}
+	})
+}
+
 func TestRewriteLeadingWithImports_DeterministicClauseBoundary(t *testing.T) {
 	query := "WITH id, size([x IN [1,2,3] WHERE x > 1]) AS c MATCH (n) WHERE n.id = id RETURN n"
 	rewritten := rewriteLeadingWithImports(query, []string{"id"})
@@ -402,5 +459,42 @@ func TestRewriteLeadingWithImports_NoLeadingWith(t *testing.T) {
 	rewritten := rewriteLeadingWithImports(query, []string{"id"})
 	if rewritten != query {
 		t.Fatalf("expected query unchanged, got %q", rewritten)
+	}
+}
+
+func TestRewriteLeadingWithImports_NoLeadingWithReturn(t *testing.T) {
+	query := "RETURN id, name"
+	rewritten := rewriteLeadingWithImports(query, []string{"id", "name"})
+	expected := "WITH $id AS id, $name AS name RETURN id, name"
+	if rewritten != expected {
+		t.Fatalf("expected %q, got %q", expected, rewritten)
+	}
+}
+
+func BenchmarkDeduplicateRows(b *testing.B) {
+	rows := make([][]interface{}, 0, 10000)
+	for i := 0; i < 5000; i++ {
+		row := []interface{}{int64(i), "v-" + strconv.Itoa(i), map[string]interface{}{"k": int64(i)}}
+		rows = append(rows, row, row)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = deduplicateRows(rows)
+	}
+}
+
+func BenchmarkCombineRowsByIndexes(b *testing.B) {
+	resultCols := []string{"a", "b", "c", "d", "e", "f"}
+	outerCols := []string{"a", "b", "c", "d"}
+	innerCols := []string{"c", "e", "f"}
+	outerIdx := buildColumnIndex(outerCols)
+	innerIdx := buildColumnIndex(innerCols)
+	outerRow := []interface{}{1, 2, 3, 4}
+	innerRow := []interface{}{30, 50, 60}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = combineRowsByIndexes(resultCols, outerIdx, outerRow, innerIdx, innerRow)
 	}
 }

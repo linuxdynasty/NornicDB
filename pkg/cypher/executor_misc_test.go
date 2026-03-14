@@ -1961,6 +1961,77 @@ func TestPropertyAccessInMatch(t *testing.T) {
 	}
 }
 
+func TestParseReturnItems_OrderByAfterAliasWithOrderPrefix(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+
+	items := exec.parseReturnItems("person_id, person_name, order_ids, order_count ORDER BY person_id")
+	require.Len(t, items, 4)
+	assert.Equal(t, "person_id", items[0].expr)
+	assert.Equal(t, "person_name", items[1].expr)
+	assert.Equal(t, "order_ids", items[2].expr)
+	assert.Equal(t, "order_count", items[3].expr)
+}
+
+func TestParseReturnItems_OrderByOnNewline(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+
+	items := exec.parseReturnItems("textKey128, texts\nORDER BY textKey128")
+	require.Len(t, items, 2)
+	assert.Equal(t, "textKey128", items[0].expr)
+	assert.Equal(t, "texts", items[1].expr)
+}
+
+func TestProcessCallSubqueryReturn_OrderByOnNewline(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+
+	inner := &ExecuteResult{
+		Columns: []string{"textKey128", "texts"},
+		Rows: [][]interface{}{
+			{"a1", []interface{}{"ORD-001"}},
+			{"a2", []interface{}{}},
+		},
+	}
+
+	out, err := exec.processCallSubqueryReturn(inner, "RETURN textKey128, texts\nORDER BY textKey128")
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.Len(t, out.Columns, 2)
+	require.Equal(t, "textKey128", out.Columns[0])
+	require.Equal(t, "texts", out.Columns[1])
+	require.Len(t, out.Rows, 2)
+	require.Len(t, out.Rows[0], 2)
+	require.Len(t, out.Rows[1], 2)
+}
+
+func TestExecuteReturn_IgnoresOrderByInProjection(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+	exec.fabricRecordBindings = map[string]interface{}{
+		"textKey128": "a1",
+		"texts":      []interface{}{"ORD-001"},
+	}
+
+	res, err := exec.executeReturn(context.Background(), "RETURN textKey128, texts\nORDER BY textKey128")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.Columns, 2)
+	require.Equal(t, []string{"textKey128", "texts"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 2)
+	require.Equal(t, "a1", res.Rows[0][0])
+}
+
 // TestMultipleCreatesPropertyAccess verifies that properties are correctly accessible after multiple CREATE statements
 func TestMultipleCreatesPropertyAccess(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)

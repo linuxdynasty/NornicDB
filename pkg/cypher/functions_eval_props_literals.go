@@ -60,6 +60,26 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 			}
 			return nil
 		}
+		if val, ok := e.fabricRecordBindings[varName]; ok {
+			switch v := val.(type) {
+			case map[string]interface{}:
+				if pv, exists := v[propName]; exists {
+					return pv
+				}
+				return nil
+			case *storage.Node:
+				if propName == "embedding" {
+					if ev, ok := v.Properties["embedding"]; ok {
+						return ev
+					}
+					return nil
+				}
+				if pv, exists := v.Properties[propName]; exists {
+					return pv
+				}
+				return nil
+			}
+		}
 	}
 
 	// ========================================
@@ -85,6 +105,9 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 		// Return *storage.Edge so Bolt encodes it as a proper Relationship (0x52);
 		// returning a map caused drivers to receive a generic map and display null for r.
 		return rel
+	}
+	if val, ok := e.fabricRecordBindings[expr]; ok {
+		return val
 	}
 	// Check if this is a path variable - return the PathResult as a map
 	// This allows path functions like length(path), relationships(path) to work after WITH

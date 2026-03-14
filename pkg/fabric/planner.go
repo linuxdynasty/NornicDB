@@ -497,12 +497,7 @@ func (p *FabricPlanner) inCompositeScope(sessionDB string) bool {
 		return false
 	}
 	prefix := strings.ToLower(db) + "."
-	for _, graph := range p.catalog.ListGraphs() {
-		if strings.HasPrefix(strings.ToLower(graph), prefix) {
-			return true
-		}
-	}
-	return false
+	return p.catalog.HasGraphWithPrefix(prefix)
 }
 
 func compositeScopeRoot(graph string) string {
@@ -844,20 +839,12 @@ func extractWithImports(body string) []string {
 		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 	})
 
-	keywords := map[string]bool{
-		"MATCH": true, "OPTIONAL": true, "CREATE": true, "MERGE": true,
-		"DELETE": true, "DETACH": true, "SET": true, "REMOVE": true,
-		"RETURN": true, "WITH": true, "WHERE": true, "ORDER": true,
-		"SKIP": true, "LIMIT": true, "UNWIND": true, "CALL": true,
-		"FOREACH": true, "LOAD": true, "USE": true,
-	}
-
 	for _, part := range parts {
 		cleaned := strings.TrimSpace(part)
 		if cleaned == "" {
 			continue
 		}
-		if keywords[strings.ToUpper(cleaned)] {
+		if isWithImportStopKeyword(cleaned) {
 			break
 		}
 		// Strip AS alias if present.
@@ -870,12 +857,42 @@ func extractWithImports(body string) []string {
 	return imports
 }
 
+func isWithImportStopKeyword(token string) bool {
+	switch {
+	case strings.EqualFold(token, "MATCH"),
+		strings.EqualFold(token, "OPTIONAL"),
+		strings.EqualFold(token, "CREATE"),
+		strings.EqualFold(token, "MERGE"),
+		strings.EqualFold(token, "DELETE"),
+		strings.EqualFold(token, "DETACH"),
+		strings.EqualFold(token, "SET"),
+		strings.EqualFold(token, "REMOVE"),
+		strings.EqualFold(token, "RETURN"),
+		strings.EqualFold(token, "WITH"),
+		strings.EqualFold(token, "WHERE"),
+		strings.EqualFold(token, "ORDER"),
+		strings.EqualFold(token, "SKIP"),
+		strings.EqualFold(token, "LIMIT"),
+		strings.EqualFold(token, "UNWIND"),
+		strings.EqualFold(token, "CALL"),
+		strings.EqualFold(token, "FOREACH"),
+		strings.EqualFold(token, "LOAD"),
+		strings.EqualFold(token, "USE"):
+		return true
+	default:
+		return false
+	}
+}
+
 // queryIsWrite performs a simple heuristic check for write operations.
 func queryIsWrite(query string) bool {
-	upper := strings.ToUpper(query)
-	writeKeywords := []string{"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET ", "REMOVE "}
-	for _, kw := range writeKeywords {
-		if strings.Contains(upper, kw) {
+	for i := 0; i < len(query); i++ {
+		if hasKeywordAt(query, i, "CREATE") ||
+			hasKeywordAt(query, i, "MERGE") ||
+			hasKeywordAt(query, i, "DETACH DELETE") ||
+			hasKeywordAt(query, i, "DELETE") ||
+			hasKeywordAt(query, i, "SET") ||
+			hasKeywordAt(query, i, "REMOVE") {
 			return true
 		}
 	}

@@ -672,6 +672,7 @@ func TestExtractWithImports(t *testing.T) {
 	}{
 		{"WITH translationId MATCH (n)", []string{"translationId"}},
 		{"WITH a, b MATCH (n)", []string{"a", "b"}},
+		{"with a, b match (n)", []string{"a", "b"}},
 		{"MATCH (n) RETURN n", nil},
 		{"WITH x RETURN x", []string{"x"}},
 		{"WITHOUT something", nil},

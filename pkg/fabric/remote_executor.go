@@ -2,9 +2,8 @@ package fabric
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -77,9 +76,12 @@ func (r *RemoteFragmentExecutor) Close() error {
 
 // cacheKey produces a unique key for engine caching.
 func cacheKey(loc *LocationRemote, authToken string) string {
-	mode := strings.TrimSpace(strings.ToLower(loc.AuthMode))
-	if mode == "" {
+	modeRaw := strings.TrimSpace(loc.AuthMode)
+	mode := modeRaw
+	if mode == "" || strings.EqualFold(mode, "oidc_forwarding") {
 		mode = "oidc_forwarding"
+	} else if strings.EqualFold(mode, "user_password") {
+		mode = "user_password"
 	}
 
 	authIdentity := "none"
@@ -91,8 +93,28 @@ func cacheKey(loc *LocationRemote, authToken string) string {
 		authIdentity = strings.TrimSpace(authToken)
 	}
 
-	sum := sha256.Sum256([]byte(authIdentity))
-	return loc.URI + "|" + loc.DBName + "|" + mode + "|" + hex.EncodeToString(sum[:])
+	sum := fnv64aString(authIdentity)
+	var b strings.Builder
+	// uri|db|mode|authhash
+	b.Grow(len(loc.URI) + len(loc.DBName) + len(mode) + 20)
+	b.WriteString(loc.URI)
+	b.WriteByte('|')
+	b.WriteString(loc.DBName)
+	b.WriteByte('|')
+	b.WriteString(mode)
+	b.WriteByte('|')
+	b.WriteString(strconv.FormatUint(sum, 16))
+	return b.String()
+}
+
+func fnv64aString(s string) uint64 {
+	var h uint64 = 14695981039346656037
+	const prime uint64 = 1099511628211
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime
+	}
+	return h
 }
 
 // getOrCreateEngine returns a cached engine or creates a new one.

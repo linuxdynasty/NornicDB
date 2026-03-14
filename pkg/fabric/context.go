@@ -4,6 +4,7 @@ import "context"
 
 type subTransactionContextKey struct{}
 type fabricTransactionContextKey struct{}
+type recordBindingsContextKey struct{}
 
 // WithSubTransaction returns a context carrying the active fabric sub-transaction.
 func WithSubTransaction(ctx context.Context, sub *SubTransaction) context.Context {
@@ -37,4 +38,21 @@ func FabricTransactionFromContext(ctx context.Context) (*FabricTransaction, bool
 	}
 	tx, ok := ctx.Value(fabricTransactionContextKey{}).(*FabricTransaction)
 	return tx, ok && tx != nil
+}
+
+// WithRecordBindings stores correlated outer-row bindings for Fabric APPLY execution.
+func WithRecordBindings(ctx context.Context, bindings map[string]interface{}) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, recordBindingsContextKey{}, bindings)
+}
+
+// RecordBindingsFromContext returns correlated outer-row bindings if present.
+func RecordBindingsFromContext(ctx context.Context) (map[string]interface{}, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	v, ok := ctx.Value(recordBindingsContextKey{}).(map[string]interface{})
+	return v, ok && v != nil
 }
