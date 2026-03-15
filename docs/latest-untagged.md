@@ -1,52 +1,53 @@
 # Latest (Untagged) Changelog
 
-This document tracks the currently untagged changes on `main`. These changes are the release-candidate notes for the planned `v1.0.16` maintenance release.
+This document tracks the currently untagged changes on `main`. These changes are the release-candidate notes for the planned `v1.0.17-preview` release.
 
 ---
 
-## Planned `v1.0.16`
+## Planned `v1.0.17-preview`
 
 ### Release Summary
 
-`v1.0.16` is a Cypher correctness and compatibility maintenance release focused on strict openCypher semantics, schema/index compatibility with Neo4j tooling, and deterministic regression coverage expansion.
+`v1.0.17-preview` is a composite-database preview release focused on the new Fabric execution stack, remote constituent routing, cross-protocol transaction parity, and multidatabase observability improvements.
 
 ### Changed
 
-- **Cypher strictness hardening**:
-  - Tightened `SET +=` map-literal parsing and invalid syntax rejection.
-  - Tightened permissive `CREATE/RETURN` and mutation parser paths.
-  - Corrected `UNWIND ... SET n = row` map-literal handling.
-- **Cypher execution correctness**:
-  - Preserved property update semantics across `SET ... WITH ... RETURN` pipelines.
-  - Added non-progress loop protection for `CALL ... IN TRANSACTIONS`.
-  - Hardened malformed relationship pattern handling in traversal/match paths.
-- **Schema/index compatibility work**:
-  - Restored Neo4j-compatible index parsing for parenthesized node patterns.
-  - Added compatibility support for additional `CREATE INDEX` and `CREATE FULLTEXT INDEX` command variants.
-  - Added qualified `SHOW FULLTEXT/RANGE/VECTOR INDEXES` routing with filtered results.
-- **UI routing compatibility**: Browser path handling now preserves/enforces trailing slash for reverse-proxy compatibility.
-- **Heimdall image robustness**: Updated Docker Qwen model source path for more reliable model hydration.
+- **Fabric composite execution stack**:
+  - Added the initial planner, executor, transaction, catalog, and gateway layers under `pkg/fabric` for Neo4j-style composite database execution.
+  - Added remote engine and remote credential plumbing so composite graphs can route queries to remote constituents.
+  - Added auth-aware Fabric routing across HTTP/Bolt database-manager paths.
+- **Cypher composite execution support**:
+  - Added transaction keywords and shell command preprocessing for scripted Cypher workflows.
+  - Added `USE`-aware subquery execution plus recursive `CALL { USE ... }` decomposition for nested composite subqueries.
+  - Added simple equality index-seek support in Cypher execution to improve some routed query paths.
+- **Multi-database observability**:
+  - Added cached per-database node and embedding byte statistics in `/databases`.
+  - Surfaced the new size metrics in the Web UI databases page.
+- **Performance hardening**:
+  - Removed multiple Fabric planner/executor allocation hotspots.
+  - Benchmarks in the range show `deduplicateRows` improving from `1.91ms` to `1.22ms` and `combineRows` from `246ns` to `74ns`.
 
 ### Fixed
 
-- **Index parser label-token bug**: Fixed `CREATE INDEX FOR (n:Label) ON (n.prop)` edge case that could capture `)` in label parsing.
-- **Index persistence no-op bug**: Fixed compatibility syntax paths that returned success without persisting schema indexes.
-- **SHOW command compatibility gap**: Fixed `SHOW FULLTEXT INDEXES` unsupported-command behavior and added qualified SHOW index variants.
-- **Pre-commit workflow stability**: Hardened local pre-commit behavior to reduce merge-conflict side effects during staged updates.
+- **Correlated `WITH` + `USE` execution**: Fixed APPLY shaping and record propagation bugs in correlated composite subqueries.
+- **Bolt/HTTP routing parity**: Fixed Bolt database-manager routing so it matches HTTP behavior for composite execution and correlated import handling.
+- **Empty Fabric result handling**: Fixed empty-result and null-column response shapes that could destabilize server responses and crash UI query rendering.
+- **Composite parity edge cases**: Fixed remaining gaps around composite schema commands, remote existence checks, auth forwarding, and transaction manager behavior.
 
 ### Test and Hardening Work
 
-- **Large Cypher coverage expansion** across parser, schema, transaction, dispatch, subquery, mutation, traversal, and APOC compatibility branches.
-- **Deterministic regression tests** added for async schema routing, Neo4j index syntax variants, and qualified SHOW index command families.
-- **Assertion hardening** to reduce permissive/non-deterministic branches in existing tests.
+- **Broad Fabric regression coverage** across planner, executor, transaction, gateway, remote executor, and correlated subquery execution paths.
+- **Composite parity integration tests** for schema commands, transaction routing, remote constituents, auth forwarding, and Bolt/HTTP db-manager behavior.
+- **Performance audit artifacts** and targeted Cypher regression tests for Fabric hot paths and index-seek execution.
 
 ### Documentation
 
-- Updated `CHANGELOG.md` with a dedicated `v1.0.16` release section and release-range metadata.
+- Expanded the multi-database guide and added Fabric gap-analysis, delivery-plan, and performance-audit notes.
+- Refreshed `CHANGELOG.md` with a dedicated `v1.0.17-preview` release section and release-range metadata.
 
 ### Technical Details
 
-- **Range**: `v1.0.15..main`
-- **Statistics**: 19 commits (non-merge), 57 files changed, +5,185 / -165 lines
-- **Non-test surface**: 20 files
-- **Primary focus areas**: Cypher semantics/compatibility, schema/index correctness, deterministic test hardening, UI trailing-slash routing compatibility.
+- **Range**: `v1.0.16..main`
+- **Statistics**: 21 commits (non-merge), 230 files changed, +25,221 / -5,323 lines
+- **Non-test surface**: 67 files
+- **Primary focus areas**: Fabric/composite execution, remote constituent routing, transaction/protocol parity, multidatabase stats/UI, planner/executor performance.

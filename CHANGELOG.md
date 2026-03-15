@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.17-preview] - 2026-03-14
+
+### Added
+
+- **Fabric composite execution framework**: Added the initial `pkg/fabric` planner, executor, transaction, catalog, and gateway stack for Neo4j-style composite database execution across local and remote constituents.
+- **Remote constituent connectivity**: Added remote engine and credential plumbing for multidatabase/composite graphs so routed queries can execute against remote databases.
+- **Cypher transaction-script and shell preprocessing support**: Added transaction keywords, shell command preprocessing, and `USE`-aware subquery execution to improve scripted Cypher workflows.
+- **Per-database storage size reporting**: Added cached node and embedding byte statistics surfaced through `/databases` and the Web UI.
+
+### Changed
+
+- **Composite transaction routing parity**: Completed Fabric-aware database-manager routing across HTTP and Bolt so composite transactions preserve Neo4j-compatible error semantics and database targeting behavior.
+- **Nested `CALL { USE ... }` planning**: Replaced flat/regex-style handling with recursive subquery decomposition that validates `USE` scope boundaries and preserves import bindings through correlated execution paths.
+- **Composite Neo4j semantics hardening**: Expanded parity behavior for composite schema/existence flows, auth-aware routing, remote constituent execution, and empty-result handling across server and storage adapters.
+- **Fabric hot-path performance**: Removed multiple allocation hotspots in planner/executor paths and added simple equality index-seek support in Cypher execution. Benchmarks in the range show notable wins including `deduplicateRows` improving from `1.91ms` to `1.22ms` and `combineRows` from `246ns` to `74ns`.
+
+### Fixed
+
+- **Correlated `WITH` + `USE` execution bugs**: Fixed correlated subquery planning/execution cases that previously produced incorrect APPLY shaping or unstable record propagation.
+- **Bolt vs HTTP routing drift**: Fixed Bolt database-manager routing so it matches HTTP behavior for composite/Fabric execution and correlated import handling.
+- **Empty Fabric result UI crash**: Fixed empty-result and null-column handling that could surface unstable response shapes and crash query result rendering in the UI.
+- **Composite schema and remote edge cases**: Fixed remaining parity gaps around composite schema commands, remote existence checks, auth forwarding, and transaction manager behavior.
+
+### Tests
+
+- Added broad regression and integration coverage across Fabric planner/executor/gateway/transaction paths, composite schema and transaction flows, Bolt db-manager routing, remote engine behavior, and auth forwarding.
+- Added performance audit artifacts and benchmark coverage for Fabric hot paths plus targeted regression tests for Cypher index-seek execution.
+
+### Documentation
+
+- Expanded the multi-database guide and added Fabric gap-analysis, delivery-plan, and performance-audit notes to document the new composite execution model and remaining follow-up items.
+- Refreshed README badges/community links during the release range.
+
+### Technical Details
+
+- **Range covered**: `v1.0.16..main`
+- **Commits in range**: 21 (non-merge)
+- **Repository delta**: 230 files changed, +25,221 / -5,323 lines
+- **Non-test surface changed**: 67 files
+- **Primary focus areas**: Fabric/composite execution, remote constituent routing, transaction/protocol parity, multidatabase stats/UI, planner/executor performance.
+
 ## [1.0.16] - 2026-03-12
 
 ### Changed
