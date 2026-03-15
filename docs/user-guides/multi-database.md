@@ -408,6 +408,8 @@ CREATE (n:Document {content: "..."})  -- Fails if this would exceed 1GB
 
 Composite databases (similar to Neo4j Fabric) allow you to create a virtual database that spans multiple physical databases. Queries against a composite database transparently access data from all constituent databases, providing a unified view without explicit database references.
 
+If you want to use composite databases as a Neo4j-style distributed graph or "infinigraph" topology, see `docs/user-guides/infinigraph-topology.md` for topology design guidance, remote-auth choices, and cross-constituent modeling patterns.
+
 ### Creating Composite Databases
 
 ```cypher
@@ -576,6 +578,8 @@ programmatic access. This merged view is read-only metadata:
 ### Remote Constituents
 
 Composite databases support remote constituents directly in Cypher. A remote constituent points at another NornicDB server and is queried as part of the same composite route.
+
+For a full coordinator-plus-shards design guide, including proxy-ID joins and recommended topology patterns, see `docs/user-guides/infinigraph-topology.md`.
 
 #### Remote Constituent Fields
 

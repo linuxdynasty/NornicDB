@@ -132,10 +132,11 @@ All composite database features have been fully implemented, tested, and documen
 
 ## ⚠️ Known Limitations (By Design)
 
-### 1. Local Constituents Only
-- **Status**: By design
-- **Reason**: Remote constituents require network layer
-- **Future**: Planned enhancement
+### 1. Remote Constituents Are Supported
+- **Status**: Implemented
+- **Current Behavior**: Composite databases can include remote constituents addressed by URI, with either forwarded caller auth (`oidc_forwarding`) or explicit service credentials (`user_password`).
+- **Execution Model**: Remote constituents participate in routed Fabric execution and explicit remote transaction-handle lifecycles, subject to the same many-read/one-write transaction boundary as local constituents.
+- **Design Constraint**: This is still a logical distributed graph topology, not a physically merged graph.
 
 ### 2. No Cross-Constituent Relationships
 - **Status**: By design

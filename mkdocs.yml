@@ -91,6 +91,7 @@ nav:
       - Overview: user-guides/README.md
       - Vector Search: user-guides/vector-search.md
       - Hybrid Search: user-guides/hybrid-search.md
+      - Neo4j-Style Infinigraph Topology: user-guides/infinigraph-topology.md
       - Cypher Queries: user-guides/cypher-queries.md
       - Graph Traversal: user-guides/graph-traversal.md
       - Transactions: user-guides/transactions.md

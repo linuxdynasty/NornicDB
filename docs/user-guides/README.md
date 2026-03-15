@@ -7,6 +7,7 @@
 ### Core Features
 - **[Vector Search](vector-search.md)** - Semantic search with embeddings
 - **[Hybrid Search (RRF)](hybrid-search.md)** - Combine vector + BM25 search
+- **[Neo4j-Style Infinigraph Topology](infinigraph-topology.md)** - Build a logical distributed graph with local and remote composite constituents
 - **[Canonical Graph + Mutation Log](canonical-graph-ledger.md)** - Build a canonical truth store with constraints, temporal validity, receipts, and a WAL-backed mutation log
 - **[Qdrant gRPC Endpoint](qdrant-grpc.md)** - Use Qdrant SDKs against NornicDB
 - **[NornicSearch gRPC (Additive Client)](nornic-search-grpc.md)** - Add Nornic `SearchText` alongside Qdrant drivers
@@ -52,6 +53,9 @@
 
 **Ensure data consistency**
 → [Transactions Guide](transactions.md)
+
+**Build a distributed logical graph across local and remote databases**
+→ [Neo4j-Style Infinigraph Topology](infinigraph-topology.md)
 
 **Build a canonical truth store**
 → [Canonical Graph + Mutation Log Guide](canonical-graph-ledger.md)
