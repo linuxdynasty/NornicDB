@@ -327,6 +327,12 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 		if streamRes, handled := executeApplyInMemoryProjection(inputResult, execFrag.Query); handled {
 			return streamRes, nil
 		}
+		if batched, handled, err := e.tryExecuteApplyBatchedCollectLookup(ctx, tx, inputResult, execFrag, params, authToken); handled {
+			if err != nil {
+				return nil, fmt.Errorf("apply inner failed: %w", err)
+			}
+			return batched, nil
+		}
 		if piped, handled, err := e.executeApplyAsPipeline(ctx, tx, inputResult, execFrag, params, authToken); handled {
 			if err != nil {
 				return nil, fmt.Errorf("apply inner failed: %w", err)
@@ -388,6 +394,441 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 	}
 
 	return result, nil
+}
+
+var reApplyCollectLookup = regexp.MustCompile(`(?is)^WITH\s+([A-Za-z_][A-Za-z0-9_]*)\s+((?:USE\s+[A-Za-z0-9_.` + "`" + `]+\s+)?)MATCH\s+(.+?)\s+WHERE\s+(.+?)\s+RETURN\s+collect\((.+)\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$`)
+
+// tryExecuteApplyBatchedCollectLookup optimizes a common correlated-subquery pattern:
+//
+//	WITH key USE ... MATCH (...) WHERE n.prop = key RETURN collect(...) AS texts
+//
+// by executing a single batched IN lookup and remapping results per outer row.
+func (e *FabricExecutor) tryExecuteApplyBatchedCollectLookup(
+	ctx context.Context,
+	tx *FabricTransaction,
+	inputResult *ResultStream,
+	inner *FragmentExec,
+	params map[string]interface{},
+	authToken string,
+) (*ResultStream, bool, error) {
+	if inputResult == nil || len(inputResult.Rows) == 0 || len(inputResult.Columns) == 0 || inner == nil {
+		return nil, false, nil
+	}
+
+	trimmed := strings.TrimSpace(inner.Query)
+	if !startsWithFold(trimmed, "WITH ") || !containsFold(trimmed, "RETURN collect(") {
+		return nil, false, nil
+	}
+
+	var (
+		importCol  string
+		useClause  string
+		matchPart  string
+		wherePart  string
+		matchVar   string
+		matchProp  string
+		otherWhere string
+		collectExp string
+		outAlias   string
+		ok         bool
+	)
+	if m := reApplyCollectLookup.FindStringSubmatch(trimmed); len(m) == 7 {
+		importCol = strings.TrimSpace(m[1])
+		useClause = strings.TrimSpace(m[2])
+		matchPart = strings.TrimSpace(m[3])
+		wherePart = strings.TrimSpace(m[4])
+		collectExp = strings.TrimSpace(m[5])
+		outAlias = strings.TrimSpace(m[6])
+		ok = true
+	}
+	if !ok || importCol == "" || outAlias == "" || wherePart == "" {
+		return nil, false, nil
+	}
+	matchVar, matchProp, otherWhere, ok = extractApplyCorrelationWhere(wherePart, importCol)
+	if !ok {
+		return nil, false, nil
+	}
+	if otherWhere != "" && containsStandaloneIdentifier(otherWhere, importCol) {
+		return nil, false, nil
+	}
+
+	outerIdx := buildColumnIndex(inputResult.Columns)
+	keyIdx, exists := outerIdx[importCol]
+	if !exists {
+		return nil, false, nil
+	}
+
+	distinctKeys := make([]interface{}, 0, len(inputResult.Rows))
+	seen := make(map[string]struct{}, len(inputResult.Rows))
+	for _, row := range inputResult.Rows {
+		if keyIdx >= len(row) {
+			continue
+		}
+		key := row[keyIdx]
+		if key == nil {
+			continue
+		}
+		k := applyLookupKeyString(key)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		distinctKeys = append(distinctKeys, key)
+	}
+	if len(distinctKeys) == 0 {
+		result := &ResultStream{
+			Columns: combineColumns(inputResult.Columns, []string{outAlias}),
+			Rows:    make([][]interface{}, 0, len(inputResult.Rows)),
+		}
+		innerCols := []string{outAlias}
+		innerIdx := buildColumnIndex(innerCols)
+		for _, outerRow := range inputResult.Rows {
+			innerRow := []interface{}{[]interface{}{}}
+			result.Rows = append(result.Rows, combineRowsByIndexes(result.Columns, outerIdx, outerRow, innerIdx, innerRow))
+		}
+		return result, true, nil
+	}
+
+	var rewritten strings.Builder
+	if useClause != "" {
+		rewritten.WriteString(useClause)
+		rewritten.WriteByte(' ')
+	}
+	rewritten.WriteString("MATCH ")
+	rewritten.WriteString(matchPart)
+	rewritten.WriteString(" WHERE ")
+	rewritten.WriteString(matchVar)
+	rewritten.WriteByte('.')
+	rewritten.WriteString(matchProp)
+	rewritten.WriteString(" IN $__fabric_apply_keys")
+	if otherWhere != "" {
+		rewritten.WriteString(" AND ")
+		rewritten.WriteString(otherWhere)
+	}
+	rewritten.WriteString(" RETURN ")
+	rewritten.WriteString(matchVar)
+	rewritten.WriteByte('.')
+	rewritten.WriteString(matchProp)
+	rewritten.WriteString(" AS __fabric_apply_key, collect(")
+	rewritten.WriteString(collectExp)
+	rewritten.WriteString(") AS ")
+	rewritten.WriteString(outAlias)
+
+	batchParams := make(map[string]interface{}, len(params)+1)
+	for k, v := range params {
+		batchParams[k] = v
+	}
+	batchParams["__fabric_apply_keys"] = distinctKeys
+
+	batchFrag := *inner
+	batchFrag.Query = rewritten.String()
+	batchResult, err := e.Execute(ctx, tx, &batchFrag, batchParams, authToken)
+	if err != nil {
+		return nil, true, err
+	}
+
+	batchIdx := buildColumnIndex(batchResult.Columns)
+	keyColIdx, okKey := batchIdx["__fabric_apply_key"]
+	valColIdx, okVal := batchIdx[outAlias]
+	if !okKey || !okVal {
+		return nil, true, fmt.Errorf("batched APPLY lookup produced unexpected columns: %v", batchResult.Columns)
+	}
+
+	grouped := make(map[string]interface{}, len(batchResult.Rows))
+	for _, row := range batchResult.Rows {
+		if keyColIdx >= len(row) || valColIdx >= len(row) {
+			continue
+		}
+		grouped[applyLookupKeyString(row[keyColIdx])] = row[valColIdx]
+	}
+
+	result := &ResultStream{
+		Columns: combineColumns(inputResult.Columns, []string{outAlias}),
+		Rows:    make([][]interface{}, 0, len(inputResult.Rows)),
+	}
+	innerCols := []string{outAlias}
+	innerIdx := buildColumnIndex(innerCols)
+	for _, outerRow := range inputResult.Rows {
+		var key interface{}
+		if keyIdx < len(outerRow) {
+			key = outerRow[keyIdx]
+		}
+		val, exists := grouped[applyLookupKeyString(key)]
+		if !exists || val == nil {
+			val = []interface{}{}
+		}
+		innerRow := []interface{}{val}
+		result.Rows = append(result.Rows, combineRowsByIndexes(result.Columns, outerIdx, outerRow, innerIdx, innerRow))
+	}
+
+	return result, true, nil
+}
+
+func applyLookupKeyString(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return "<nil>"
+	case string:
+		return "s:" + x
+	case int:
+		return fmt.Sprintf("i:%d", x)
+	case int64:
+		return fmt.Sprintf("i64:%d", x)
+	case float64:
+		return fmt.Sprintf("f:%g", x)
+	case bool:
+		if x {
+			return "b:1"
+		}
+		return "b:0"
+	default:
+		return fmt.Sprintf("%T:%v", v, v)
+	}
+}
+
+func extractApplyCorrelationWhere(whereClause string, importCol string) (matchVar string, matchProp string, otherWhere string, ok bool) {
+	terms := splitTopLevelAnd(whereClause)
+	if len(terms) == 0 {
+		return "", "", "", false
+	}
+	correlationIdx := -1
+	for i, term := range terms {
+		lhs, rhs, isEq := splitTopLevelEquality(term)
+		if !isEq {
+			continue
+		}
+		leftVar, leftProp, leftOK := parseFabricVarProp(lhs)
+		rightVar, rightProp, rightOK := parseFabricVarProp(rhs)
+		switch {
+		case leftOK && isSimpleIdentifier(strings.TrimSpace(rhs)) && strings.EqualFold(strings.TrimSpace(rhs), importCol):
+			matchVar, matchProp = leftVar, leftProp
+			correlationIdx = i
+		case rightOK && isSimpleIdentifier(strings.TrimSpace(lhs)) && strings.EqualFold(strings.TrimSpace(lhs), importCol):
+			matchVar, matchProp = rightVar, rightProp
+			correlationIdx = i
+		}
+		if correlationIdx >= 0 {
+			break
+		}
+	}
+	if correlationIdx < 0 || matchVar == "" || matchProp == "" {
+		return "", "", "", false
+	}
+	remaining := make([]string, 0, len(terms)-1)
+	for i, term := range terms {
+		if i == correlationIdx {
+			continue
+		}
+		t := strings.TrimSpace(term)
+		if t != "" {
+			remaining = append(remaining, t)
+		}
+	}
+	return matchVar, matchProp, strings.Join(remaining, " AND "), true
+}
+
+func splitTopLevelAnd(whereClause string) []string {
+	parts := make([]string, 0, 4)
+	start := 0
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(whereClause); i++ {
+		ch := whereClause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if hasKeywordAt(whereClause, i, "AND") {
+			parts = append(parts, strings.TrimSpace(whereClause[start:i]))
+			i += len("AND") - 1
+			start = i + 1
+		}
+	}
+	parts = append(parts, strings.TrimSpace(whereClause[start:]))
+	return parts
+}
+
+func splitTopLevelEquality(expr string) (lhs, rhs string, ok bool) {
+	inSingle, inDouble, inBacktick := false, false, false
+	paren, bracket, brace := 0, 0, 0
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			paren++
+			continue
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+			continue
+		case '[':
+			bracket++
+			continue
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+			continue
+		case '{':
+			brace++
+			continue
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+			continue
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if ch == '=' {
+			if i > 0 {
+				prev := expr[i-1]
+				if prev == '<' || prev == '>' || prev == '!' {
+					continue
+				}
+			}
+			if i+1 < len(expr) {
+				next := expr[i+1]
+				if next == '=' {
+					continue
+				}
+			}
+			return strings.TrimSpace(expr[:i]), strings.TrimSpace(expr[i+1:]), true
+		}
+	}
+	return "", "", false
+}
+
+func parseFabricVarProp(expr string) (varName, prop string, ok bool) {
+	dot := strings.IndexByte(expr, '.')
+	if dot <= 0 || dot >= len(expr)-1 {
+		return "", "", false
+	}
+	lhs := strings.TrimSpace(expr[:dot])
+	rhs := strings.TrimSpace(expr[dot+1:])
+	if !isSimpleIdentifier(lhs) || !isSimpleIdentifier(rhs) {
+		return "", "", false
+	}
+	return lhs, rhs, true
+}
+
+func containsStandaloneIdentifier(s, ident string) bool {
+	if ident == "" || len(s) < len(ident) {
+		return false
+	}
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i+len(ident) <= len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		if ch == '\'' {
+			inSingle = true
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
+			continue
+		}
+		if s[i:i+len(ident)] != ident {
+			continue
+		}
+		prevOK := i == 0 || !isIdentChar(s[i-1])
+		next := i + len(ident)
+		nextOK := next >= len(s) || !isIdentChar(s[next])
+		if prevOK && nextOK {
+			return true
+		}
+	}
+	return false
 }
 
 func synthesizeEmptyCollectOnlyReturn(query string) ([]string, []interface{}, bool) {

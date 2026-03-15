@@ -13,11 +13,15 @@ import (
 type mockCypherExecutor struct {
 	results map[string]*ResultStream // query -> result
 	err     error
+	calls   map[string]int
 }
 
 func (m *mockCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage.Engine, query string, _ map[string]interface{}) ([]string, [][]interface{}, error) {
 	if m.err != nil {
 		return nil, nil, m.err
+	}
+	if m.calls != nil {
+		m.calls[query]++
 	}
 	result, ok := m.results[query]
 	if !ok {
@@ -29,6 +33,9 @@ func (m *mockCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage
 func (m *mockCypherExecutor) ExecuteQueryWithRecord(_ context.Context, _ string, _ storage.Engine, query string, _ map[string]interface{}, _ map[string]interface{}) ([]string, [][]interface{}, error) {
 	if m.err != nil {
 		return nil, nil, m.err
+	}
+	if m.calls != nil {
+		m.calls[query]++
 	}
 	result, ok := m.results[query]
 	if !ok {
@@ -210,6 +217,165 @@ func TestFabricExecutor_Apply(t *testing.T) {
 	// 2 outer rows x 1 inner row each = 2 combined rows
 	if result.RowCount() != 2 {
 		t.Errorf("expected 2 rows, got %d", result.RowCount())
+	}
+}
+
+func TestFabricExecutor_ApplyBatchesCorrelatedCollectLookup(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	outerQuery := "MATCH (n) RETURN n.textKey128 AS textKey128"
+	batchedInnerQuery := "MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys RETURN tt.translationId AS __fabric_apply_key, collect(tt) AS texts"
+
+	mock := &mockCypherExecutor{
+		calls: map[string]int{},
+		results: map[string]*ResultStream{
+			outerQuery: {
+				Columns: []string{"textKey128"},
+				Rows:    [][]interface{}{{"k1"}, {"k2"}},
+			},
+			batchedInnerQuery: {
+				Columns: []string{"__fabric_apply_key", "texts"},
+				Rows:    [][]interface{}{{"k1", []interface{}{"hit-1", "hit-2"}}},
+			},
+		},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	ctx := context.Background()
+
+	outer := &FragmentExec{
+		Input:     &FragmentInit{},
+		Query:     outerQuery,
+		GraphName: "db1",
+		Columns:   []string{"textKey128"},
+	}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"textKey128"}, ImportColumns: []string{"textKey128"}},
+		Query:     "WITH textKey128 MATCH (tt:MongoDocument) WHERE tt.translationId = textKey128 RETURN collect(tt) AS texts",
+		GraphName: "db1",
+		Columns:   []string{"texts"},
+	}
+	apply := &FragmentApply{
+		Input:   outer,
+		Inner:   inner,
+		Columns: []string{"textKey128", "texts"},
+	}
+
+	result, err := exec.Execute(ctx, nil, apply, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RowCount() != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.RowCount())
+	}
+	if got := mock.calls[batchedInnerQuery]; got != 1 {
+		t.Fatalf("expected single batched inner lookup, got %d calls", got)
+	}
+	if got := mock.calls["WITH textKey128 MATCH (tt:MongoDocument) WHERE tt.translationId = textKey128 RETURN collect(tt) AS texts"]; got != 0 {
+		t.Fatalf("expected no per-row correlated inner calls, got %d", got)
+	}
+	// Row 1 matched.
+	if v, ok := result.Rows[0][1].([]interface{}); !ok || len(v) != 2 {
+		t.Fatalf("expected first row texts to contain 2 items, got %#v", result.Rows[0][1])
+	}
+	// Row 2 unmatched -> deterministic empty list.
+	if v, ok := result.Rows[1][1].([]interface{}); !ok || len(v) != 0 {
+		t.Fatalf("expected second row texts to be empty list, got %#v", result.Rows[1][1])
+	}
+}
+
+func TestFabricExecutor_ApplyBatchesCorrelatedCollectLookup_WithUseAndExtraPredicate(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	outerQuery := "MATCH (n) RETURN n.textKey128 AS textKey128"
+	batchedInnerQuery := "USE translations.txr MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys AND tt.language = 'es' RETURN tt.translationId AS __fabric_apply_key, collect(tt) AS texts"
+
+	mock := &mockCypherExecutor{
+		calls: map[string]int{},
+		results: map[string]*ResultStream{
+			outerQuery: {
+				Columns: []string{"textKey128"},
+				Rows:    [][]interface{}{{"k1"}, {"k2"}},
+			},
+			batchedInnerQuery: {
+				Columns: []string{"__fabric_apply_key", "texts"},
+				Rows:    [][]interface{}{{"k2", []interface{}{"es-hit"}}},
+			},
+		},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	ctx := context.Background()
+
+	outer := &FragmentExec{Input: &FragmentInit{}, Query: outerQuery, GraphName: "db1", Columns: []string{"textKey128"}}
+	innerQuery := "WITH textKey128 USE translations.txr MATCH (tt:MongoDocument) WHERE tt.language = 'es' AND tt.translationId = textKey128 RETURN collect(tt) AS texts"
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"textKey128"}, ImportColumns: []string{"textKey128"}},
+		Query:     innerQuery,
+		GraphName: "db1",
+		Columns:   []string{"texts"},
+	}
+	apply := &FragmentApply{Input: outer, Inner: inner, Columns: []string{"textKey128", "texts"}}
+
+	result, err := exec.Execute(ctx, nil, apply, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := mock.calls[batchedInnerQuery]; got != 1 {
+		t.Fatalf("expected single batched inner lookup, got %d calls", got)
+	}
+	if v, ok := result.Rows[0][1].([]interface{}); !ok || len(v) != 0 {
+		t.Fatalf("expected first row empty list, got %#v", result.Rows[0][1])
+	}
+	if v, ok := result.Rows[1][1].([]interface{}); !ok || len(v) != 1 {
+		t.Fatalf("expected second row one hit, got %#v", result.Rows[1][1])
+	}
+}
+
+func TestFabricExecutor_ApplyBatchesCorrelatedCollectLookup_ReversedEquality(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	outerQuery := "MATCH (n) RETURN n.textKey128 AS textKey128"
+	batchedInnerQuery := "MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys RETURN tt.translationId AS __fabric_apply_key, collect(tt) AS texts"
+
+	mock := &mockCypherExecutor{
+		calls: map[string]int{},
+		results: map[string]*ResultStream{
+			outerQuery: {
+				Columns: []string{"textKey128"},
+				Rows:    [][]interface{}{{"k1"}},
+			},
+			batchedInnerQuery: {
+				Columns: []string{"__fabric_apply_key", "texts"},
+				Rows:    [][]interface{}{{"k1", []interface{}{"hit"}}},
+			},
+		},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	ctx := context.Background()
+
+	outer := &FragmentExec{Input: &FragmentInit{}, Query: outerQuery, GraphName: "db1", Columns: []string{"textKey128"}}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"textKey128"}, ImportColumns: []string{"textKey128"}},
+		Query:     "WITH textKey128 MATCH (tt:MongoDocument) WHERE textKey128 = tt.translationId RETURN collect(tt) AS texts",
+		GraphName: "db1",
+		Columns:   []string{"texts"},
+	}
+	apply := &FragmentApply{Input: outer, Inner: inner, Columns: []string{"textKey128", "texts"}}
+
+	result, err := exec.Execute(ctx, nil, apply, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := mock.calls[batchedInnerQuery]; got != 1 {
+		t.Fatalf("expected single batched inner lookup, got %d calls", got)
+	}
+	if v, ok := result.Rows[0][1].([]interface{}); !ok || len(v) != 1 {
+		t.Fatalf("expected one hit, got %#v", result.Rows[0][1])
 	}
 }
 
