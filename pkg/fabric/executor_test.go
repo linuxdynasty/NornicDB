@@ -658,6 +658,35 @@ func TestExecuteApplyInMemoryProjection_WithCollectMapReturnAlias(t *testing.T) 
 	}
 }
 
+func TestExecuteApplyInMemoryProjection_ReturnOrderBySkipLimit(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"textKey128", "texts"},
+		Rows: [][]interface{}{
+			{"a2", []interface{}{}},
+			{"a1", []interface{}{"ORD-001"}},
+			{"a3", []interface{}{"ORD-003"}},
+		},
+	}
+	query := "RETURN textKey128, texts ORDER BY textKey128 SKIP 1 LIMIT 1"
+	res, handled := executeApplyInMemoryProjection(input, query)
+	if !handled {
+		t.Fatal("expected ordered projection to be handled")
+	}
+	if res == nil {
+		t.Fatal("expected non-nil projection result")
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected one row after SKIP/LIMIT, got %d", len(res.Rows))
+	}
+	if got := res.Rows[0][0]; got != "a2" {
+		t.Fatalf("expected middle ordered row a2, got %#v", got)
+	}
+	texts, ok := res.Rows[0][1].([]interface{})
+	if !ok || len(texts) != 0 {
+		t.Fatalf("expected empty texts slice for a2, got %#v", res.Rows[0][1])
+	}
+}
+
 func TestMergeBindings(t *testing.T) {
 	parent := map[string]interface{}{"rows": []interface{}{1, 2}, "x": "parent"}
 	row := map[string]interface{}{"x": "row", "k": "v"}

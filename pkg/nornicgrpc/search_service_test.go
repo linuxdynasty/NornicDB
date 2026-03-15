@@ -320,7 +320,7 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 
 	// Load a real large document as the base query text to validate chunking
 	// behavior on natural content instead of synthetic repeated characters.
-	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	path := filepath.Join("..", "..", "docs", "features", "gpu-acceleration.md")
 	data, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)
 	base := string(data)

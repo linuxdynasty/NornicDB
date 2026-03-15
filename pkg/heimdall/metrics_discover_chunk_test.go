@@ -96,7 +96,7 @@ func (s *testSearcher) GetNode(ctx context.Context, nodeID string) (*NodeData, e
 
 func loadLargeDocQuery(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	path := filepath.Join("..", "..", "docs", "features", "gpu-acceleration.md")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	query := string(data)

@@ -950,7 +950,8 @@ func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*R
 
 	if startsWithFold(trimmed, "RETURN ") {
 		clause := strings.TrimSpace(trimmed[len("RETURN "):])
-		items := splitTopLevelCSV(clause)
+		projectionClause, modifierClause := splitTopLevelResultModifiers(clause)
+		items := splitTopLevelCSV(projectionClause)
 		if len(items) > 0 {
 			type retItem struct {
 				src   string
@@ -986,6 +987,13 @@ func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*R
 			for i, p := range parsed {
 				out.Columns[i] = p.alias
 			}
+			aliasToCol := make(map[string]string, len(parsed))
+			for _, p := range parsed {
+				aliasToCol[p.alias] = p.alias
+				if _, exists := aliasToCol[p.src]; !exists {
+					aliasToCol[p.src] = p.alias
+				}
+			}
 			for _, in := range inputResult.Rows {
 				row := make([]interface{}, len(parsed))
 				for i, p := range parsed {
@@ -995,6 +1003,7 @@ func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*R
 				}
 				out.Rows = append(out.Rows, row)
 			}
+			applySimpleResultModifiers(out, modifierClause, aliasToCol)
 			return out, true
 		}
 	}
@@ -1065,6 +1074,293 @@ func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*R
 	}
 
 	return nil, false
+}
+
+type simpleOrderSpec struct {
+	column string
+	desc   bool
+}
+
+func splitTopLevelResultModifiers(clause string) (projection string, modifiers string) {
+	projection = strings.TrimSpace(clause)
+	modifiers = ""
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(clause); i++ {
+		ch := clause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if hasKeywordAt(clause, i, "ORDER BY") || hasKeywordAt(clause, i, "SKIP") || hasKeywordAt(clause, i, "LIMIT") {
+			projection = strings.TrimSpace(clause[:i])
+			modifiers = strings.TrimSpace(clause[i:])
+			return projection, modifiers
+		}
+	}
+	return projection, modifiers
+}
+
+func applySimpleResultModifiers(result *ResultStream, modifiers string, aliasToCol map[string]string) {
+	if result == nil || len(result.Rows) == 0 {
+		return
+	}
+	orderSpecs, skip, limit := parseSimpleResultModifiers(modifiers, aliasToCol)
+	if len(orderSpecs) > 0 {
+		colIdx := buildColumnIndex(result.Columns)
+		sort.SliceStable(result.Rows, func(i, j int) bool {
+			left := result.Rows[i]
+			right := result.Rows[j]
+			for _, spec := range orderSpecs {
+				idx, ok := colIdx[spec.column]
+				if !ok {
+					continue
+				}
+				cmp := compareSimpleOrderValues(valueAtRowIndex(left, idx), valueAtRowIndex(right, idx))
+				if cmp == 0 {
+					continue
+				}
+				if spec.desc {
+					return cmp > 0
+				}
+				return cmp < 0
+			}
+			return false
+		})
+	}
+	if skip > 0 {
+		if skip >= len(result.Rows) {
+			result.Rows = result.Rows[:0]
+			return
+		}
+		result.Rows = result.Rows[skip:]
+	}
+	if limit >= 0 && limit < len(result.Rows) {
+		result.Rows = result.Rows[:limit]
+	}
+}
+
+func parseSimpleResultModifiers(modifiers string, aliasToCol map[string]string) ([]simpleOrderSpec, int, int) {
+	if strings.TrimSpace(modifiers) == "" {
+		return nil, 0, -1
+	}
+	orderSpecs := []simpleOrderSpec{}
+	skip := 0
+	limit := -1
+	remaining := strings.TrimSpace(modifiers)
+	for remaining != "" {
+		switch {
+		case startsWithFold(remaining, "ORDER BY"):
+			orderClause, rest := splitLeadingModifierClause(remaining, "ORDER BY")
+			orderSpecs = parseSimpleOrderByClause(strings.TrimSpace(orderClause[len("ORDER BY"):]), aliasToCol)
+			remaining = strings.TrimSpace(rest)
+		case startsWithFold(remaining, "SKIP"):
+			skipClause, rest := splitLeadingModifierClause(remaining, "SKIP")
+			if n, ok := parseSimplePositiveInt(strings.TrimSpace(skipClause[len("SKIP"):])); ok {
+				skip = n
+			}
+			remaining = strings.TrimSpace(rest)
+		case startsWithFold(remaining, "LIMIT"):
+			limitClause, rest := splitLeadingModifierClause(remaining, "LIMIT")
+			if n, ok := parseSimplePositiveInt(strings.TrimSpace(limitClause[len("LIMIT"):])); ok {
+				limit = n
+			}
+			remaining = strings.TrimSpace(rest)
+		default:
+			remaining = ""
+		}
+	}
+	return orderSpecs, skip, limit
+}
+
+func splitLeadingModifierClause(s string, keyword string) (clause string, rest string) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return "", ""
+	}
+	end := len(trimmed)
+	if strings.EqualFold(keyword, "ORDER BY") {
+		for i := len(keyword); i < len(trimmed); i++ {
+			if hasKeywordAt(trimmed, i, "SKIP") || hasKeywordAt(trimmed, i, "LIMIT") {
+				end = i
+				break
+			}
+		}
+	} else {
+		for i := len(keyword); i < len(trimmed); i++ {
+			if hasKeywordAt(trimmed, i, "ORDER BY") || hasKeywordAt(trimmed, i, "SKIP") || hasKeywordAt(trimmed, i, "LIMIT") {
+				end = i
+				break
+			}
+		}
+	}
+	return strings.TrimSpace(trimmed[:end]), strings.TrimSpace(trimmed[end:])
+}
+
+func parseSimpleOrderByClause(clause string, aliasToCol map[string]string) []simpleOrderSpec {
+	parts := splitTopLevelCSV(clause)
+	specs := make([]simpleOrderSpec, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		desc := false
+		if len(item) > 5 && strings.EqualFold(strings.TrimSpace(item[len(item)-5:]), " DESC") {
+			desc = true
+			item = strings.TrimSpace(item[:len(item)-5])
+		} else if len(item) > 4 && strings.EqualFold(strings.TrimSpace(item[len(item)-4:]), " ASC") {
+			item = strings.TrimSpace(item[:len(item)-4])
+		}
+		if mapped, ok := aliasToCol[item]; ok {
+			item = mapped
+		}
+		if !isSimpleIdentifier(item) {
+			continue
+		}
+		specs = append(specs, simpleOrderSpec{column: item, desc: desc})
+	}
+	return specs
+}
+
+func parseSimplePositiveInt(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	value := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		value = value*10 + int(s[i]-'0')
+	}
+	return value, true
+}
+
+func valueAtRowIndex(row []interface{}, idx int) interface{} {
+	if idx < 0 || idx >= len(row) {
+		return nil
+	}
+	return row[idx]
+}
+
+func compareSimpleOrderValues(left interface{}, right interface{}) int {
+	if left == nil && right == nil {
+		return 0
+	}
+	if left == nil {
+		return -1
+	}
+	if right == nil {
+		return 1
+	}
+	if lf, ok := asComparableFloat(left); ok {
+		if rf, ok := asComparableFloat(right); ok {
+			switch {
+			case lf < rf:
+				return -1
+			case lf > rf:
+				return 1
+			default:
+				return 0
+			}
+		}
+	}
+	if lb, ok := left.(bool); ok {
+		if rb, ok := right.(bool); ok {
+			switch {
+			case lb == rb:
+				return 0
+			case !lb && rb:
+				return -1
+			default:
+				return 1
+			}
+		}
+	}
+	ls := fmt.Sprint(left)
+	rs := fmt.Sprint(right)
+	switch {
+	case ls < rs:
+		return -1
+	case ls > rs:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func asComparableFloat(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case int:
+		return float64(x), true
+	case int8:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case float32:
+		return float64(x), true
+	case float64:
+		return x, true
+	default:
+		return 0, false
+	}
 }
 
 func projectInputRowsAsMaps(input *ResultStream, mapSpec string) ([]map[string]interface{}, bool) {
