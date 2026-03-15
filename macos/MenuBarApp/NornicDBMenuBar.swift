@@ -859,6 +859,7 @@ class ConfigManager: ObservableObject {
     @Published var embeddingsEnabled: Bool = false
     @Published var kmeansEnabled: Bool = false
     @Published var searchRerankEnabled: Bool = false
+    @Published var memoryDecayEnabled: Bool = true
     @Published var autoTLPEnabled: Bool = false
     @Published var heimdallEnabled: Bool = false
     @Published var autoStartEnabled: Bool = true
@@ -1079,6 +1080,10 @@ class ConfigManager: ObservableObject {
         searchRerank["model"] = yamlString(searchRerank["model"]) ?? ConfigManager.defaultSearchRerankModel
         normalized["search_rerank"] = searchRerank
 
+        var memory = yamlSection(normalized, "memory")
+        memory["decay_enabled"] = yamlBool(memory["decay_enabled"]) ?? true
+        normalized["memory"] = memory
+
         var autoTLP = yamlSection(normalized, "auto_tlp")
         autoTLP["enabled"] = yamlBool(autoTLP["enabled"]) ?? false
         normalized["auto_tlp"] = autoTLP
@@ -1193,6 +1198,13 @@ class ConfigManager: ObservableObject {
         if let model = yamlString(searchRerankSection["model"]) {
             searchRerankModel = normalizeModelName(model, fallback: ConfigManager.defaultSearchRerankModel)
             print("✅ Loaded search_rerank model: \(searchRerankModel)")
+        }
+
+        // Load memory section
+        let memorySection = yamlSection(root, "memory")
+        if let enabled = yamlBool(memorySection["decay_enabled"]) {
+            memoryDecayEnabled = enabled
+            print("✅ Loaded memory decay enabled: \(memoryDecayEnabled)")
         }
 
         // Load auto_tlp section
@@ -1339,6 +1351,7 @@ class ConfigManager: ObservableObject {
         var embeddingWorkerSection = yamlSection(root, "embedding_worker")
         var kmeansSection = yamlSection(root, "kmeans")
         var searchRerankSection = yamlSection(root, "search_rerank")
+        var memorySection = yamlSection(root, "memory")
         var autoTLPSection = yamlSection(root, "auto_tlp")
         var heimdallSection = yamlSection(root, "heimdall")
         var serverSection = yamlSection(root, "server")
@@ -1348,6 +1361,7 @@ class ConfigManager: ObservableObject {
         searchRerankSection["enabled"] = searchRerankEnabled
         searchRerankSection["provider"] = "local"
         searchRerankSection["model"] = normalizeModelName(searchRerankModel, fallback: ConfigManager.defaultSearchRerankModel)
+        memorySection["decay_enabled"] = memoryDecayEnabled
         autoTLPSection["enabled"] = autoTLPEnabled
         heimdallSection["enabled"] = heimdallEnabled
 
@@ -1437,10 +1451,10 @@ class ConfigManager: ObservableObject {
         root["embedding_worker"] = embeddingWorkerSection
         root["kmeans"] = kmeansSection
         root["search_rerank"] = searchRerankSection
+        root["memory"] = memorySection
         root["auto_tlp"] = autoTLPSection
         root["heimdall"] = heimdallSection
         root["server"] = serverSection
-        
         // Write back
         do {
             let normalizedRoot = normalizeConfigRootForGoSchema(root)
@@ -1482,6 +1496,73 @@ class ConfigManager: ObservableObject {
     }
 }
 
+private func launchAgentEnvironmentVariables(config: ConfigManager, homeDir: String) -> [String: String] {
+    let jwtSecretEnv = KeychainHelper.shared.getJWTSecret() ?? config.jwtSecret
+    let encryptionPasswordEnv = config.encryptionEnabled ? (KeychainHelper.shared.getEncryptionPassword() ?? config.encryptionPassword) : ""
+
+    var envVars: [String: String] = [
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": homeDir,
+        "NORNICDB_SERVER_BOLT_PORT": config.boltPortNumber,
+        "NORNICDB_HTTP_PORT": config.httpPortNumber,
+        "NORNICDB_SERVER_HOST": config.hostAddress,
+        "NORNICDB_EMBEDDING_ENABLED": config.embeddingsEnabled ? "true" : "false",
+        "NORNICDB_EMBEDDING_PROVIDER": config.useAppleIntelligence ? "openai" : "local",
+        "NORNICDB_EMBEDDING_API_URL": config.useAppleIntelligence ? "http://localhost:\(ConfigManager.appleEmbeddingPort)" : "",
+        "NORNICDB_EMBEDDING_MODEL": config.useAppleIntelligence ? "apple-ml-embeddings" : config.embeddingModel,
+        "NORNICDB_EMBEDDING_DIMENSIONS": config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)",
+        "NORNICDB_EMBEDDING_API_KEY": config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "",
+        "NORNICDB_EMBED_CHUNK_SIZE": "\(config.effectiveEmbeddingChunkSize())",
+        "NORNICDB_SEARCH_MIN_SIMILARITY": config.useAppleIntelligence ? "0" : "0.5",
+        "NORNICDB_KMEANS_CLUSTERING_ENABLED": config.kmeansEnabled ? "true" : "false",
+        "NORNICDB_SEARCH_RERANK_ENABLED": config.searchRerankEnabled ? "true" : "false",
+        "NORNICDB_SEARCH_RERANK_PROVIDER": "local",
+        "NORNICDB_SEARCH_RERANK_MODEL": config.searchRerankModel,
+        "NORNICDB_MEMORY_DECAY_ENABLED": config.memoryDecayEnabled ? "true" : "false",
+        "NORNICDB_AUTO_TLP_ENABLED": config.autoTLPEnabled ? "true" : "false",
+        "NORNICDB_MODELS_DIR": "/usr/local/var/nornicdb/models",
+        "NORNICDB_PLUGINS_DIR": "/usr/local/share/nornicdb/plugins",
+        "NORNICDB_HEIMDALL_PLUGINS_DIR": "/usr/local/share/nornicdb/plugins/heimdall",
+    ]
+
+    if !jwtSecretEnv.isEmpty {
+        envVars["NORNICDB_AUTH_JWT_SECRET"] = jwtSecretEnv
+    }
+
+    if config.encryptionEnabled && !encryptionPasswordEnv.isEmpty {
+        envVars["NORNICDB_ENCRYPTION_ENABLED"] = "true"
+        envVars["NORNICDB_ENCRYPTION_PASSWORD"] = encryptionPasswordEnv
+    }
+
+    return envVars
+}
+
+private func launchAgentPropertyList(config: ConfigManager, homeDir: String) -> [String: Any] {
+    return [
+        "Label": "com.nornicdb.server",
+        "ProgramArguments": ["/usr/local/bin/nornicdb", "serve"],
+        "WorkingDirectory": "/usr/local/var/nornicdb",
+        "RunAtLoad": true,
+        "KeepAlive": [
+            "SuccessfulExit": false,
+            "Crashed": true,
+        ],
+        "ThrottleInterval": 30,
+        "StandardOutPath": "/usr/local/var/log/nornicdb/stdout.log",
+        "StandardErrorPath": "/usr/local/var/log/nornicdb/stderr.log",
+        "EnvironmentVariables": launchAgentEnvironmentVariables(config: config, homeDir: homeDir),
+        "ProcessType": "Interactive",
+        "Nice": 0,
+    ]
+}
+
+private func writeLaunchAgentPlist(config: ConfigManager, to launchAgentPath: String) throws {
+    let homeDir = NSString(string: "~").expandingTildeInPath
+    let plist = launchAgentPropertyList(config: config, homeDir: homeDir)
+    let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+    try plistData.write(to: URL(fileURLWithPath: launchAgentPath), options: .atomic)
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
@@ -1496,6 +1577,7 @@ struct SettingsView: View {
     @State private var originalUseAppleIntelligence: Bool = false
     @State private var originalKmeansEnabled: Bool = false
     @State private var originalSearchRerankEnabled: Bool = false
+    @State private var originalMemoryDecayEnabled: Bool = true
     @State private var originalAutoTLPEnabled: Bool = false
     @State private var originalHeimdallEnabled: Bool = false
     @State private var originalAutoStartEnabled: Bool = true
@@ -1526,6 +1608,7 @@ struct SettingsView: View {
                config.useAppleIntelligence != originalUseAppleIntelligence ||
                config.kmeansEnabled != originalKmeansEnabled ||
                config.searchRerankEnabled != originalSearchRerankEnabled ||
+             config.memoryDecayEnabled != originalMemoryDecayEnabled ||
                config.autoTLPEnabled != originalAutoTLPEnabled ||
                config.heimdallEnabled != originalHeimdallEnabled ||
                config.autoStartEnabled != originalAutoStartEnabled ||
@@ -1631,6 +1714,7 @@ struct SettingsView: View {
         originalUseAppleIntelligence = config.useAppleIntelligence
         originalKmeansEnabled = config.kmeansEnabled
         originalSearchRerankEnabled = config.searchRerankEnabled
+        originalMemoryDecayEnabled = config.memoryDecayEnabled
         originalAutoTLPEnabled = config.autoTLPEnabled
         originalHeimdallEnabled = config.heimdallEnabled
         originalAutoStartEnabled = config.autoStartEnabled
@@ -1740,123 +1824,8 @@ struct SettingsView: View {
     /// Updates the LaunchAgent plist with current configuration including secrets from Keychain
     private func updateServerPlist() {
         let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
-        let homeDir = NSString(string: "~").expandingTildeInPath
-        
-        // Get secrets from Keychain for environment variables
-        let jwtSecretEnv = KeychainHelper.shared.getJWTSecret() ?? config.jwtSecret
-        let encryptionPasswordEnv = config.encryptionEnabled ? (KeychainHelper.shared.getEncryptionPassword() ?? config.encryptionPassword) : ""
-        
-        // Build environment variables section with all settings
-        // Using env vars instead of CLI args allows config file to be the source of truth
-        var envVars = """
-                <key>PATH</key>
-                <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-                <key>HOME</key>
-                <string>\(homeDir)</string>
-                <key>NORNICDB_SERVER_BOLT_PORT</key>
-                <string>\(config.boltPortNumber)</string>
-                <key>NORNICDB_HTTP_PORT</key>
-                <string>\(config.httpPortNumber)</string>
-                <key>NORNICDB_SERVER_HOST</key>
-                <string>\(config.hostAddress)</string>
-                <key>NORNICDB_EMBEDDING_ENABLED</key>
-                <string>\(config.embeddingsEnabled ? "true" : "false")</string>
-                <key>NORNICDB_EMBEDDING_PROVIDER</key>
-                <string>\(config.useAppleIntelligence ? "openai" : "local")</string>
-                <key>NORNICDB_EMBEDDING_API_URL</key>
-                <string>\(config.useAppleIntelligence ? "http://localhost:\(ConfigManager.appleEmbeddingPort)" : "")</string>
-                <key>NORNICDB_EMBEDDING_MODEL</key>
-                <string>\(config.useAppleIntelligence ? "apple-ml-embeddings" : config.embeddingModel)</string>
-                <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
-                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
-                <key>NORNICDB_EMBEDDING_API_KEY</key>
-                <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
-                <key>NORNICDB_EMBED_CHUNK_SIZE</key>
-                <string>\(config.effectiveEmbeddingChunkSize())</string>
-                <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
-                <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
-                <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
-                <string>\(config.kmeansEnabled ? "true" : "false")</string>
-                <key>NORNICDB_SEARCH_RERANK_ENABLED</key>
-                <string>\(config.searchRerankEnabled ? "true" : "false")</string>
-                <key>NORNICDB_SEARCH_RERANK_PROVIDER</key>
-                <string>local</string>
-                <key>NORNICDB_SEARCH_RERANK_MODEL</key>
-                <string>\(config.searchRerankModel)</string>
-                <key>NORNICDB_AUTO_TLP_ENABLED</key>
-                <string>\(config.autoTLPEnabled ? "true" : "false")</string>
-                <key>NORNICDB_MODELS_DIR</key>
-                <string>/usr/local/var/nornicdb/models</string>
-                <key>NORNICDB_PLUGINS_DIR</key>
-                <string>/usr/local/share/nornicdb/plugins</string>
-                <key>NORNICDB_HEIMDALL_PLUGINS_DIR</key>
-                <string>/usr/local/share/nornicdb/plugins/heimdall</string>
-        """
-        
-        // Add JWT secret if available (from Keychain)
-        if !jwtSecretEnv.isEmpty {
-            envVars += """
-            
-                    <key>NORNICDB_AUTH_JWT_SECRET</key>
-                    <string>\(jwtSecretEnv)</string>
-            """
-        }
-        
-        // Add encryption settings if encryption is enabled
-        if config.encryptionEnabled && !encryptionPasswordEnv.isEmpty {
-            envVars += """
-            
-                    <key>NORNICDB_ENCRYPTION_ENABLED</key>
-                    <string>true</string>
-                    <key>NORNICDB_ENCRYPTION_PASSWORD</key>
-                    <string>\(encryptionPasswordEnv)</string>
-            """
-        }
-        
-        // Create the plist content
-        let plistContent = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>com.nornicdb.server</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>/usr/local/bin/nornicdb</string>
-                <string>serve</string>
-            </array>
-            <key>WorkingDirectory</key>
-            <string>/usr/local/var/nornicdb</string>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <dict>
-                <key>SuccessfulExit</key>
-                <false/>
-                <key>Crashed</key>
-                <true/>
-            </dict>
-            <key>ThrottleInterval</key>
-            <integer>30</integer>
-            <key>StandardOutPath</key>
-            <string>/usr/local/var/log/nornicdb/stdout.log</string>
-            <key>StandardErrorPath</key>
-            <string>/usr/local/var/log/nornicdb/stderr.log</string>
-            <key>EnvironmentVariables</key>
-            <dict>
-        \(envVars)
-            </dict>
-            <key>ProcessType</key>
-            <string>Interactive</string>
-            <key>Nice</key>
-            <integer>0</integer>
-        </dict>
-        </plist>
-        """
-        
         do {
-            try plistContent.write(toFile: launchAgentPath, atomically: true, encoding: .utf8)
+            try writeLaunchAgentPlist(config: config, to: launchAgentPath)
             print("✅ Updated server plist with secrets from Keychain")
         } catch {
             print("❌ Failed to update server plist: \(error)")
@@ -1977,6 +1946,13 @@ struct SettingsView: View {
                     description: "Stage-2 reranking for improved result relevance",
                     isEnabled: $config.searchRerankEnabled,
                     icon: "line.3.horizontal.decrease.circle.fill"
+                )
+
+                FeatureToggle(
+                    title: "Memory Decay",
+                    description: "Natural episodic, semantic, and procedural memory decay",
+                    isEnabled: $config.memoryDecayEnabled,
+                    icon: "brain.filled.head.profile"
                 )
                 
                 FeatureToggle(
@@ -2749,124 +2725,9 @@ struct FirstRunWizard: View {
                         saveProgress = "Creating service configuration..."
                         
                         let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
-                        let homeDir = NSString(string: "~").expandingTildeInPath
-                        
-                        // Get secrets from Keychain for environment variables
-                        let jwtSecretEnv = KeychainHelper.shared.getJWTSecret() ?? config.jwtSecret
-                        let encryptionPasswordEnv = config.encryptionEnabled ? (KeychainHelper.shared.getEncryptionPassword() ?? config.encryptionPassword) : ""
-                        
-                        // Build environment variables section with all settings
-                        // Using env vars instead of CLI args allows config file to be the source of truth
-                        var envVars = """
-                                <key>PATH</key>
-                                <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-                                <key>HOME</key>
-                                <string>\(homeDir)</string>
-                                <key>NORNICDB_SERVER_BOLT_PORT</key>
-                                <string>\(config.boltPortNumber)</string>
-                                <key>NORNICDB_HTTP_PORT</key>
-                                <string>\(config.httpPortNumber)</string>
-                                <key>NORNICDB_SERVER_HOST</key>
-                                <string>\(config.hostAddress)</string>
-                                <key>NORNICDB_EMBEDDING_ENABLED</key>
-                                <string>\(config.embeddingsEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_EMBEDDING_PROVIDER</key>
-                                <string>\(config.useAppleIntelligence ? "openai" : "local")</string>
-                                <key>NORNICDB_EMBEDDING_API_URL</key>
-                                <string>\(config.useAppleIntelligence ? "http://localhost:\(ConfigManager.appleEmbeddingPort)" : "")</string>
-                                <key>NORNICDB_EMBEDDING_MODEL</key>
-                                <string>\(config.useAppleIntelligence ? "apple-ml-embeddings" : config.embeddingModel)</string>
-                                <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
-                                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
-                                <key>NORNICDB_EMBEDDING_API_KEY</key>
-                                <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
-                                <key>NORNICDB_EMBED_CHUNK_SIZE</key>
-                                <string>\(config.effectiveEmbeddingChunkSize())</string>
-                                <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
-                                <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
-                                <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
-                                <string>\(config.kmeansEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_SEARCH_RERANK_ENABLED</key>
-                                <string>\(config.searchRerankEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_SEARCH_RERANK_PROVIDER</key>
-                                <string>local</string>
-                                <key>NORNICDB_SEARCH_RERANK_MODEL</key>
-                                <string>\(config.searchRerankModel)</string>
-                                <key>NORNICDB_AUTO_TLP_ENABLED</key>
-                                <string>\(config.autoTLPEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_MODELS_DIR</key>
-                                <string>/usr/local/var/nornicdb/models</string>
-                                <key>NORNICDB_PLUGINS_DIR</key>
-                                <string>/usr/local/share/nornicdb/plugins</string>
-                                <key>NORNICDB_HEIMDALL_PLUGINS_DIR</key>
-                                <string>/usr/local/share/nornicdb/plugins/heimdall</string>
-                        """
-                        
-                        // Add JWT secret if available (from Keychain)
-                        if !jwtSecretEnv.isEmpty {
-                            envVars += """
-                            
-                                    <key>NORNICDB_AUTH_JWT_SECRET</key>
-                                    <string>\(jwtSecretEnv)</string>
-                            """
-                        }
-                        
-                        // Add encryption settings if encryption is enabled
-                        if config.encryptionEnabled && !encryptionPasswordEnv.isEmpty {
-                            envVars += """
-                            
-                                    <key>NORNICDB_ENCRYPTION_ENABLED</key>
-                                    <string>true</string>
-                                    <key>NORNICDB_ENCRYPTION_PASSWORD</key>
-                                    <string>\(encryptionPasswordEnv)</string>
-                            """
-                        }
-                        
-                        // Create the plist content with secrets as environment variables
-                        let plistContent = """
-                        <?xml version="1.0" encoding="UTF-8"?>
-                        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-                        <plist version="1.0">
-                        <dict>
-                            <key>Label</key>
-                            <string>com.nornicdb.server</string>
-                            <key>ProgramArguments</key>
-                            <array>
-                                <string>/usr/local/bin/nornicdb</string>
-                                <string>serve</string>
-                            </array>
-                            <key>WorkingDirectory</key>
-                            <string>/usr/local/var/nornicdb</string>
-                            <key>RunAtLoad</key>
-                            <true/>
-                            <key>KeepAlive</key>
-                            <dict>
-                                <key>SuccessfulExit</key>
-                                <false/>
-                                <key>Crashed</key>
-                                <true/>
-                            </dict>
-                            <key>ThrottleInterval</key>
-                            <integer>30</integer>
-                            <key>StandardOutPath</key>
-                            <string>/usr/local/var/log/nornicdb/stdout.log</string>
-                            <key>StandardErrorPath</key>
-                            <string>/usr/local/var/log/nornicdb/stderr.log</string>
-                            <key>EnvironmentVariables</key>
-                            <dict>
-                        \(envVars)
-                            </dict>
-                            <key>ProcessType</key>
-                            <string>Interactive</string>
-                            <key>Nice</key>
-                            <integer>0</integer>
-                        </dict>
-                        </plist>
-                        """
-                        
                         // Write the plist file
                         do {
-                            try plistContent.write(toFile: launchAgentPath, atomically: true, encoding: .utf8)
+                            try writeLaunchAgentPlist(config: config, to: launchAgentPath)
                             print("Created server plist at: \(launchAgentPath)")
                         } catch {
                             print("Failed to create server plist: \(error)")
