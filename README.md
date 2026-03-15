@@ -367,6 +367,17 @@ memory:
 | [Docker Guide](docker/README.md)                                           | Build & deployment             |
 | [Development](docs/development/README.md)                                  | Contributing & development     |
 
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=orneryd%2FNornicDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## Comparison
 
 | Platform | Category | Query Language Support (and protocol) | Native Vector Search | Canonical Graph + Temporal Ledger Pattern | Queryable Mutation Log + Receipts | Embedded/Self-Hosted Focus |
