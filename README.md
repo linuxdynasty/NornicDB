@@ -462,13 +462,12 @@ make cross-all             # All platforms
 - [x] Metadata/Property Indexing
 - [x] SIMD Implementation
 - [x] Clustering support
+- [x] Sharding (Composite DB + Remote Constituents) 
 
 ### Planned (from `docs/plans`)
 
 - [ ] Hybrid retrieval Phase 1: adaptive vector/BM25 execution order, cost-aware switching, and query telemetry (`docs/plans/scaling-search.md`)
-- [ ] Distributed fabric Phase 1-2: QueryGateway, remote transport, shard routing, and distributed dispatch (`docs/plans/sharding.md`)
-- [ ] Distributed transactions and vector search across shards (Fabric Phases 3-4) (`docs/plans/sharding.md`)
-- [ ] Cluster admin APIs + UI/protocol integration for shard management (Fabric Phases 5-6) (`docs/plans/sharding.md`)
+- [ ] Data Explorer UI
 - [ ] GDPR compliance hardening: user-data detection, relationship export/delete/anonymization, and audit-log coverage (`docs/plans/gdpr-compliance-fixes.md`)
 
 ## Contributors
