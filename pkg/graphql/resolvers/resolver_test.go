@@ -1640,6 +1640,534 @@ func TestCoerceResultNodeID(t *testing.T) {
 	assert.Equal(t, "", coerceResultNodeID(42))
 }
 
+// ---------------------------------------------------------------------------
+// database_manager_adapter – delegate methods
+// ---------------------------------------------------------------------------
+
+func TestGraphqlDatabaseManagerAdapter(t *testing.T) {
+	db := testDB(t)
+	manager := testDBManager(t, db)
+	adapter := &graphqlDatabaseManagerAdapter{manager: manager}
+
+	t.Run("Exists", func(t *testing.T) {
+		assert.True(t, adapter.Exists("nornic"))
+		assert.False(t, adapter.Exists("nonexistent"))
+	})
+
+	t.Run("CreateDatabase and DropDatabase", func(t *testing.T) {
+		err := adapter.CreateDatabase("adapter-test-db")
+		require.NoError(t, err)
+		assert.True(t, adapter.Exists("adapter-test-db"))
+
+		err = adapter.DropDatabase("adapter-test-db")
+		require.NoError(t, err)
+		assert.False(t, adapter.Exists("adapter-test-db"))
+	})
+
+	t.Run("CreateAlias DropAlias ListAliases ResolveDatabase", func(t *testing.T) {
+		err := adapter.CreateAlias("myalias", "nornic")
+		require.NoError(t, err)
+
+		aliases := adapter.ListAliases("nornic")
+		assert.Contains(t, aliases, "myalias")
+
+		resolved, err := adapter.ResolveDatabase("myalias")
+		require.NoError(t, err)
+		assert.Equal(t, "nornic", resolved)
+
+		err = adapter.DropAlias("myalias")
+		require.NoError(t, err)
+	})
+
+	t.Run("ListDatabases", func(t *testing.T) {
+		dbs := adapter.ListDatabases()
+		assert.NotEmpty(t, dbs)
+		found := false
+		for _, d := range dbs {
+			if d.Name() == "nornic" {
+				found = true
+				assert.Equal(t, "standard", d.Type())
+				assert.Equal(t, "online", d.Status())
+				assert.True(t, d.IsDefault())
+				// CreatedAt may be zero for in-memory, just call it
+				_ = d.CreatedAt()
+			}
+		}
+		assert.True(t, found, "nornic database should be in list")
+	})
+
+	t.Run("ListCompositeDatabases", func(t *testing.T) {
+		composites := adapter.ListCompositeDatabases()
+		// No composites created, should be empty
+		assert.Empty(t, composites)
+	})
+
+	t.Run("IsCompositeDatabase", func(t *testing.T) {
+		assert.False(t, adapter.IsCompositeDatabase("nornic"))
+	})
+
+	t.Run("SetDatabaseLimits and GetDatabaseLimits", func(t *testing.T) {
+		limits := &multidb.Limits{
+			Storage: multidb.StorageLimits{MaxNodes: 1000},
+		}
+		err := adapter.SetDatabaseLimits("nornic", limits)
+		require.NoError(t, err)
+
+		got, err := adapter.GetDatabaseLimits("nornic")
+		require.NoError(t, err)
+		assert.NotNil(t, got)
+	})
+
+	t.Run("SetDatabaseLimits invalid type", func(t *testing.T) {
+		err := adapter.SetDatabaseLimits("nornic", "not-a-limits-struct")
+		assert.Error(t, err)
+	})
+
+	t.Run("GetStorageForUse", func(t *testing.T) {
+		store, err := adapter.GetStorageForUse("nornic", "")
+		require.NoError(t, err)
+		assert.NotNil(t, store)
+	})
+
+	t.Run("GetCompositeConstituents non-composite", func(t *testing.T) {
+		_, err := adapter.GetCompositeConstituents("nornic")
+		assert.Error(t, err)
+	})
+
+	t.Run("CreateCompositeDatabase with map constituents", func(t *testing.T) {
+		constituents := []interface{}{
+			map[string]interface{}{
+				"alias":         "local",
+				"database_name": "nornic",
+				"type":          "local",
+				"access_mode":   "read_write",
+			},
+		}
+		err := adapter.CreateCompositeDatabase("comp1", constituents)
+		require.NoError(t, err)
+
+		cons, err := adapter.GetCompositeConstituents("comp1")
+		require.NoError(t, err)
+		assert.Len(t, cons, 1)
+
+		err = adapter.DropCompositeDatabase("comp1")
+		require.NoError(t, err)
+	})
+
+	t.Run("CreateCompositeDatabase with ConstituentRef", func(t *testing.T) {
+		constituents := []interface{}{
+			multidb.ConstituentRef{
+				Alias:        "local",
+				DatabaseName: "nornic",
+				Type:         "local",
+				AccessMode:   "read_write",
+			},
+		}
+		err := adapter.CreateCompositeDatabase("comp2", constituents)
+		require.NoError(t, err)
+		err = adapter.DropCompositeDatabase("comp2")
+		require.NoError(t, err)
+	})
+
+	t.Run("CreateCompositeDatabase invalid constituent type", func(t *testing.T) {
+		err := adapter.CreateCompositeDatabase("comp3", []interface{}{42})
+		assert.Error(t, err)
+	})
+
+	t.Run("AddConstituent with map", func(t *testing.T) {
+		err := adapter.CreateCompositeDatabase("comp4", []interface{}{
+			multidb.ConstituentRef{Alias: "first", DatabaseName: "nornic", Type: "local", AccessMode: "read_write"},
+		})
+		require.NoError(t, err)
+
+		err = adapter.AddConstituent("comp4", map[string]interface{}{
+			"alias":         "second",
+			"database_name": "nornic",
+			"type":          "local",
+			"access_mode":   "read",
+		})
+		require.NoError(t, err)
+		_ = adapter.DropCompositeDatabase("comp4")
+	})
+
+	t.Run("AddConstituent with ConstituentRef", func(t *testing.T) {
+		err := adapter.CreateCompositeDatabase("comp5", []interface{}{
+			multidb.ConstituentRef{Alias: "first", DatabaseName: "nornic", Type: "local", AccessMode: "read_write"},
+		})
+		require.NoError(t, err)
+
+		err = adapter.AddConstituent("comp5", multidb.ConstituentRef{
+			Alias: "second", DatabaseName: "nornic", Type: "local", AccessMode: "read",
+		})
+		require.NoError(t, err)
+		_ = adapter.DropCompositeDatabase("comp5")
+	})
+
+	t.Run("AddConstituent invalid type", func(t *testing.T) {
+		err := adapter.AddConstituent("nornic", 42)
+		assert.Error(t, err)
+	})
+
+	t.Run("RemoveConstituent", func(t *testing.T) {
+		err := adapter.CreateCompositeDatabase("comp6", []interface{}{
+			multidb.ConstituentRef{Alias: "first", DatabaseName: "nornic", Type: "local", AccessMode: "read_write"},
+			multidb.ConstituentRef{Alias: "second", DatabaseName: "nornic", Type: "local", AccessMode: "read"},
+		})
+		require.NoError(t, err)
+
+		err = adapter.RemoveConstituent("comp6", "second")
+		require.NoError(t, err)
+		_ = adapter.DropCompositeDatabase("comp6")
+	})
+}
+
+func TestAdapterString(t *testing.T) {
+	m := map[string]interface{}{"key": "val", "num": 42}
+	assert.Equal(t, "val", adapterString(m, "key"))
+	assert.Equal(t, "", adapterString(m, "num"))  // not a string
+	assert.Equal(t, "", adapterString(m, "miss")) // missing key
+}
+
+// ---------------------------------------------------------------------------
+// helpers.go – storageNodeToModel / storageEdgeToModel edge cases
+// ---------------------------------------------------------------------------
+
+func TestStorageNodeToModel_Nil(t *testing.T) {
+	assert.Nil(t, storageNodeToModel(nil))
+}
+
+func TestStorageNodeToModel_WithTimestamps(t *testing.T) {
+	now := time.Now()
+	node := &storage.Node{
+		ID:              "n1",
+		Labels:          []string{"Person"},
+		Properties:      map[string]interface{}{"name": "Alice"},
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		LastAccessed:    now,
+		AccessCount:     5,
+		DecayScore:      0.95,
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
+	}
+	m := storageNodeToModel(node)
+	require.NotNil(t, m)
+	assert.Equal(t, "n1", m.ID)
+	assert.NotNil(t, m.CreatedAt)
+	assert.NotNil(t, m.UpdatedAt)
+	assert.NotNil(t, m.LastAccessed)
+	assert.Equal(t, 5, *m.AccessCount)
+	assert.InDelta(t, 0.95, *m.DecayScore, 0.01)
+	assert.True(t, m.HasEmbedding)
+	assert.Equal(t, 3, m.EmbeddingDimensions)
+}
+
+func TestStorageNodeToModel_NoTimestamps(t *testing.T) {
+	node := &storage.Node{
+		ID:     "n2",
+		Labels: []string{"Thing"},
+	}
+	m := storageNodeToModel(node)
+	assert.Nil(t, m.CreatedAt)
+	assert.Nil(t, m.UpdatedAt)
+	assert.Nil(t, m.LastAccessed)
+	assert.False(t, m.HasEmbedding)
+	assert.Equal(t, 0, m.EmbeddingDimensions)
+}
+
+func TestStorageEdgeToModel_Nil(t *testing.T) {
+	assert.Nil(t, storageEdgeToModel(nil))
+}
+
+func TestStorageEdgeToModel_WithTimestamps(t *testing.T) {
+	now := time.Now()
+	edge := &storage.Edge{
+		ID:            "e1",
+		StartNode:     "n1",
+		EndNode:       "n2",
+		Type:          "KNOWS",
+		Properties:    map[string]interface{}{"since": 2020},
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Confidence:    0.85,
+		AutoGenerated: true,
+	}
+	m := storageEdgeToModel(edge)
+	require.NotNil(t, m)
+	assert.Equal(t, "e1", m.ID)
+	assert.Equal(t, "n1", m.StartNodeID)
+	assert.Equal(t, "n2", m.EndNodeID)
+	assert.Equal(t, "KNOWS", m.Type)
+	assert.NotNil(t, m.CreatedAt)
+	assert.NotNil(t, m.UpdatedAt)
+	assert.InDelta(t, 0.85, *m.Confidence, 0.01)
+	assert.True(t, m.AutoGenerated)
+}
+
+func TestStorageEdgeToModel_NoTimestamps(t *testing.T) {
+	edge := &storage.Edge{
+		ID:        "e2",
+		StartNode: "n1",
+		EndNode:   "n2",
+		Type:      "LIKES",
+	}
+	m := storageEdgeToModel(edge)
+	assert.Nil(t, m.CreatedAt)
+	assert.Nil(t, m.UpdatedAt)
+}
+
+// ---------------------------------------------------------------------------
+// helpers_namespaced.go – buildLabelsString
+// ---------------------------------------------------------------------------
+
+func TestBuildLabelsString(t *testing.T) {
+	assert.Equal(t, "", buildLabelsString(nil))
+	assert.Equal(t, "", buildLabelsString([]string{}))
+	assert.Equal(t, ":Person", buildLabelsString([]string{"Person"}))
+	assert.Equal(t, ":Person:Employee", buildLabelsString([]string{"Person", "Employee"}))
+}
+
+// ---------------------------------------------------------------------------
+// helpers_namespaced.go – extractNodeFromResult
+// ---------------------------------------------------------------------------
+
+func TestExtractNodeFromResult_MapWithNodeId(t *testing.T) {
+	val := map[string]interface{}{
+		"_nodeId":    "n-123",
+		"labels":     []interface{}{"Person"},
+		"properties": map[string]interface{}{"name": "Alice"},
+	}
+	node, err := extractNodeFromResult(val)
+	require.NoError(t, err)
+	assert.Equal(t, "n-123", node.ID)
+	assert.Equal(t, []string{"Person"}, node.Labels)
+	assert.Equal(t, "Alice", node.Properties["name"])
+}
+
+func TestExtractNodeFromResult_MapWithElementId(t *testing.T) {
+	// Neo4j 5 elementId format: "4:nornicdb:uuid-here"
+	val := map[string]interface{}{
+		"elementId": "4:nornicdb:actual-uuid",
+		"labels":    []string{"Company"},
+	}
+	node, err := extractNodeFromResult(val)
+	require.NoError(t, err)
+	assert.Equal(t, "actual-uuid", node.ID)
+}
+
+func TestExtractNodeFromResult_MapWithTopLevelProps(t *testing.T) {
+	// When no "properties" key exists, top-level keys become properties
+	val := map[string]interface{}{
+		"id":   "n-456",
+		"name": "Bob",
+		"age":  30,
+	}
+	node, err := extractNodeFromResult(val)
+	require.NoError(t, err)
+	assert.Equal(t, "Bob", node.Properties["name"])
+	assert.Equal(t, 30, node.Properties["age"])
+	// "id" should not be in properties
+	_, hasID := node.Properties["id"]
+	assert.False(t, hasID)
+}
+
+func TestExtractNodeFromResult_StorageNode(t *testing.T) {
+	val := &storage.Node{
+		ID:         "sn-1",
+		Labels:     []string{"Device"},
+		Properties: map[string]interface{}{"serial": "ABC"},
+	}
+	node, err := extractNodeFromResult(val)
+	require.NoError(t, err)
+	assert.Equal(t, "sn-1", node.ID)
+	assert.Equal(t, []string{"Device"}, node.Labels)
+}
+
+func TestExtractNodeFromResult_MissingID(t *testing.T) {
+	val := map[string]interface{}{"labels": []string{"Ghost"}}
+	_, err := extractNodeFromResult(val)
+	assert.Error(t, err)
+}
+
+func TestExtractNodeFromResult_UnsupportedType(t *testing.T) {
+	_, err := extractNodeFromResult(42)
+	assert.Error(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// helpers_namespaced.go – extractEdgeFromResult
+// ---------------------------------------------------------------------------
+
+func TestExtractEdgeFromResult_StorageEdge(t *testing.T) {
+	edge := &storage.Edge{
+		ID:         "e-1",
+		Type:       "KNOWS",
+		StartNode:  "n-a",
+		EndNode:    "n-b",
+		Properties: map[string]interface{}{"since": 2020},
+	}
+	// Row with 3 elements: edge, source ID, target ID
+	row := []interface{}{edge, "n-a", "n-b"}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "e-1", result.ID)
+	assert.Equal(t, "KNOWS", result.Type)
+	assert.Equal(t, "n-a", result.Source)
+	assert.Equal(t, "n-b", result.Target)
+	assert.Equal(t, 2020, result.Properties["since"])
+}
+
+func TestExtractEdgeFromResult_StorageEdgeFallbackEndpoints(t *testing.T) {
+	// When row has only the edge (no source/target), fallback to StartNode/EndNode
+	edge := &storage.Edge{
+		ID:        "e-2",
+		Type:      "LIKES",
+		StartNode: "n-x",
+		EndNode:   "n-y",
+	}
+	row := []interface{}{edge}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "n-x", result.Source)
+	assert.Equal(t, "n-y", result.Target)
+}
+
+func TestExtractEdgeFromResult_StorageEdgeWithNodeMaps(t *testing.T) {
+	edge := &storage.Edge{ID: "e-3", Type: "WORKS_AT", StartNode: "n-1", EndNode: "n-2"}
+	row := []interface{}{
+		edge,
+		map[string]interface{}{"_nodeId": "n-1"},
+		map[string]interface{}{"id": "n-2"},
+	}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "n-1", result.Source)
+	assert.Equal(t, "n-2", result.Target)
+}
+
+func TestExtractEdgeFromResult_StorageEdgeWithStorageNodes(t *testing.T) {
+	edge := &storage.Edge{ID: "e-4", Type: "KNOWS", StartNode: "n-1", EndNode: "n-2"}
+	row := []interface{}{
+		edge,
+		&storage.Node{ID: "n-1"},
+		&storage.Node{ID: "n-2"},
+	}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "n-1", result.Source)
+	assert.Equal(t, "n-2", result.Target)
+}
+
+func TestExtractEdgeFromResult_MapFormat(t *testing.T) {
+	edgeMap := map[string]interface{}{
+		"_edgeId":    "e-5",
+		"type":       "KNOWS",
+		"properties": map[string]interface{}{"weight": 0.9},
+	}
+	row := []interface{}{edgeMap, "src-1", "tgt-1"}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "e-5", result.ID)
+	assert.Equal(t, "KNOWS", result.Type)
+	assert.Equal(t, "src-1", result.Source)
+	assert.Equal(t, "tgt-1", result.Target)
+	assert.Equal(t, 0.9, result.Properties["weight"])
+}
+
+func TestExtractEdgeFromResult_MapWithElementId(t *testing.T) {
+	edgeMap := map[string]interface{}{
+		"elementId": "5:nornicdb:edge-uuid",
+		"type":      "REVIEWED",
+	}
+	row := []interface{}{edgeMap}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "edge-uuid", result.ID)
+}
+
+func TestExtractEdgeFromResult_MapFallbackEndpoints(t *testing.T) {
+	edgeMap := map[string]interface{}{
+		"id":        "e-6",
+		"type":      "CONTAINS",
+		"startNode": "n-start",
+		"endNode":   "n-end",
+	}
+	row := []interface{}{edgeMap}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "n-start", result.Source)
+	assert.Equal(t, "n-end", result.Target)
+}
+
+func TestExtractEdgeFromResult_MapWithNodeMapEndpoints(t *testing.T) {
+	edgeMap := map[string]interface{}{"id": "e-7", "type": "OWNS"}
+	row := []interface{}{
+		edgeMap,
+		map[string]interface{}{"_nodeId": "owner"},
+		map[string]interface{}{"id": "asset"},
+	}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "owner", result.Source)
+	assert.Equal(t, "asset", result.Target)
+}
+
+func TestExtractEdgeFromResult_MapWithStorageNodeEndpoints(t *testing.T) {
+	edgeMap := map[string]interface{}{"id": "e-8", "type": "MANAGES"}
+	row := []interface{}{
+		edgeMap,
+		&storage.Node{ID: "mgr"},
+		&storage.Node{ID: "report"},
+	}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.Equal(t, "mgr", result.Source)
+	assert.Equal(t, "report", result.Target)
+}
+
+func TestExtractEdgeFromResult_MapMissingID(t *testing.T) {
+	edgeMap := map[string]interface{}{"type": "UNKNOWN"}
+	row := []interface{}{edgeMap}
+	_, err := extractEdgeFromResult(row)
+	assert.Error(t, err)
+}
+
+func TestExtractEdgeFromResult_MapNoProperties(t *testing.T) {
+	edgeMap := map[string]interface{}{"id": "e-9", "type": "PLAIN"}
+	row := []interface{}{edgeMap}
+	result, err := extractEdgeFromResult(row)
+	require.NoError(t, err)
+	assert.NotNil(t, result.Properties)
+	assert.Empty(t, result.Properties)
+}
+
+func TestExtractEdgeFromResult_EmptyRow(t *testing.T) {
+	_, err := extractEdgeFromResult([]interface{}{})
+	assert.Error(t, err)
+}
+
+func TestExtractEdgeFromResult_UnsupportedType(t *testing.T) {
+	_, err := extractEdgeFromResult([]interface{}{42})
+	assert.Error(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// helpers_namespaced.go – buildPropertiesString
+// ---------------------------------------------------------------------------
+
+func TestBuildPropertiesString(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		str, params := buildPropertiesString(nil)
+		assert.Equal(t, "{}", str)
+		assert.Empty(t, params)
+	})
+
+	t.Run("single property", func(t *testing.T) {
+		str, params := buildPropertiesString(map[string]interface{}{"name": "Alice"})
+		assert.Contains(t, str, "name: $p0")
+		assert.Equal(t, "Alice", params["p0"])
+	})
+}
+
 func TestEventBrokerCloseAdditionalCoverage(t *testing.T) {
 	broker := NewEventBroker()
 	nodeCreated := broker.SubscribeNodeCreated(context.Background(), nil)

@@ -9,6 +9,7 @@
 - **[Docker](docker.md)** - Docker and Kubernetes
 - **[Low Memory Mode](low-memory-mode.md)** - Run NornicDB with minimal RAM (Docker, Pi, VMs)
 - **[Monitoring](monitoring.md)** - Metrics and alerting
+- **[Environment Variables](environment-variables.md)** - Canonical `NORNICDB_*` inventory
 - **[Backup & Restore](backup-restore.md)** - Data protection
 - **[WAL Compaction](wal-compaction.md)** - Automatic disk space management
 - **[Durability Configuration](durability.md)** - Data safety vs performance tuning

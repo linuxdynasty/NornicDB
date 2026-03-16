@@ -12,6 +12,8 @@ NornicDB uses a YAML configuration file (typically `nornicdb.yaml`) that can be 
 
 Or via environment variables (see Environment Variables section).
 
+Canonical inventory (all runtime-referenced names): [Environment Variables Reference](environment-variables.md)
+
 ### Config file discovery (when `--config` is not provided)
 
 NornicDB searches for a config file in this order:

@@ -28,6 +28,7 @@ make macos-all
 ### Usage
 
 The menu bar app provides:
+
 - **Status Indicator**: Green (running), Red (stopped), Gray (unknown)
 - **Quick Actions**:
   - Open Web UI
@@ -91,6 +92,7 @@ make macos-uninstall
 6. **Logs** (`/usr/local/var/nornicdb/`)
    - `stdout.log` - Standard output
    - `stderr.log` - Error logs
+   - Auto-compacted by the server to prevent unbounded growth (default 20480 KB limit, checked every 3600s)
 
 ### File Locations
 
@@ -151,6 +153,10 @@ curl http://localhost:7687/health
 # View logs
 tail -f /usr/local/var/log/nornicdb/stdout.log
 tail -f /usr/local/var/log/nornicdb/stderr.log
+
+# Optional: tune automatic stdio log compaction
+export NORNICDB_STDIO_LOG_MAX_KB=20480
+export NORNICDB_STDIO_LOG_COMPACT_SECONDS=3600
 ```
 
 ## Building from Source
@@ -178,7 +184,7 @@ make macos-all
 
 # This will:
 # 1. Build the NornicDB binary
-# 2. Build the menu bar app  
+# 2. Build the menu bar app
 # 3. Run the installation script
 ```
 
@@ -273,6 +279,7 @@ To modify service behavior, edit `macos/LaunchAgents/com.nornicdb.server.plist`:
 ```
 
 After changes:
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.nornicdb.server.plist
 launchctl load ~/Library/LaunchAgents/com.nornicdb.server.plist
