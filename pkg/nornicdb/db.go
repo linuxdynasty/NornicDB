@@ -457,8 +457,9 @@ func embedConfigKey(cfg *embed.Config) string {
 // DatabaseAndStorage pairs a database name with its storage engine.
 // Used by SetAllDatabasesProvider so EmbeddingCount() can aggregate across all databases.
 type DatabaseAndStorage struct {
-	Name    string
-	Storage storage.Engine
+	Name        string
+	Storage     storage.Engine
+	IsComposite bool
 }
 
 // Open opens or creates a NornicDB database at the specified directory.
@@ -1752,7 +1753,7 @@ func (db *DB) EmbeddingCount() int {
 	if db.allDatabasesProvider != nil {
 		var total int
 		for _, d := range db.allDatabasesProvider() {
-			if d.Name == "system" {
+			if d.Name == "system" || d.IsComposite {
 				continue
 			}
 			svc, err := db.GetOrCreateSearchService(d.Name, d.Storage)

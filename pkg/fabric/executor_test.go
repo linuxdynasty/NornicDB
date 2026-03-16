@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -42,6 +45,61 @@ func (m *mockCypherExecutor) ExecuteQueryWithRecord(_ context.Context, _ string,
 		return nil, nil, fmt.Errorf("unexpected query: %s", query)
 	}
 	return result.Columns, result.Rows, nil
+}
+
+type slowBatchingCypherExecutor struct {
+	outerQuery string
+	outerRows  [][]interface{}
+	active     atomic.Int32
+	maxActive  atomic.Int32
+	batchCalls atomic.Int32
+}
+
+func (s *slowBatchingCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	if query == s.outerQuery {
+		return []string{"textKey128", "textKey", "originalText"}, s.outerRows, nil
+	}
+	if strings.Contains(query, "IN $__fabric_apply_keys") && strings.Contains(query, "__fabric_apply_key") {
+		now := s.active.Add(1)
+		for {
+			max := s.maxActive.Load()
+			if now <= max {
+				break
+			}
+			if s.maxActive.CompareAndSwap(max, now) {
+				break
+			}
+		}
+		s.batchCalls.Add(1)
+		time.Sleep(35 * time.Millisecond)
+		keysAny, _ := params["__fabric_apply_keys"].([]interface{})
+		rows := make([][]interface{}, 0, len(keysAny))
+		for _, k := range keysAny {
+			rows = append(rows, []interface{}{k, "es", fmt.Sprintf("t-%v", k)})
+		}
+		s.active.Add(-1)
+		return []string{"__fabric_apply_key", "language", "translatedText"}, rows, nil
+	}
+	return nil, nil, fmt.Errorf("unexpected query: %s", query)
+}
+
+func (s *slowBatchingCypherExecutor) ExecuteQueryWithRecord(ctx context.Context, dbName string, eng storage.Engine, query string, params map[string]interface{}, _ map[string]interface{}) ([]string, [][]interface{}, error) {
+	return s.ExecuteQuery(ctx, dbName, eng, query, params)
+}
+
+type pipelineCaptureCypherExecutor struct {
+	lastQuery  string
+	lastParams map[string]interface{}
+}
+
+func (p *pipelineCaptureCypherExecutor) ExecuteQuery(_ context.Context, _ string, _ storage.Engine, query string, params map[string]interface{}) ([]string, [][]interface{}, error) {
+	p.lastQuery = query
+	p.lastParams = params
+	return []string{"k", "v"}, [][]interface{}{{"x", "y"}}, nil
+}
+
+func (p *pipelineCaptureCypherExecutor) ExecuteQueryWithRecord(ctx context.Context, dbName string, eng storage.Engine, query string, params map[string]interface{}, _ map[string]interface{}) ([]string, [][]interface{}, error) {
+	return p.ExecuteQuery(ctx, dbName, eng, query, params)
 }
 
 // mockEngine is a minimal storage.Engine for testing.
@@ -496,6 +554,200 @@ func TestFabricExecutor_NilLocalExecutor(t *testing.T) {
 	}
 }
 
+func TestLocalFragmentExecutor_Execute_WrapperPath(t *testing.T) {
+	mock := &mockCypherExecutor{
+		results: map[string]*ResultStream{
+			"RETURN 1 AS one": {
+				Columns: []string{"one"},
+				Rows:    [][]interface{}{{int64(1)}},
+			},
+		},
+	}
+	local := newTestLocalExecutor(mock)
+	res, err := local.Execute(context.Background(), &LocationLocal{DBName: "db1"}, "RETURN 1 AS one", nil)
+	if err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	if len(res.Columns) != 1 || res.Columns[0] != "one" {
+		t.Fatalf("unexpected columns: %#v", res.Columns)
+	}
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 || res.Rows[0][0] != int64(1) {
+		t.Fatalf("unexpected rows: %#v", res.Rows)
+	}
+}
+
+func TestSplitTopLevelEquality_AndApplyLookupKeyString(t *testing.T) {
+	lhs, rhs, ok := splitTopLevelEquality(`tt.translationId = textKey128`)
+	if !ok || lhs != "tt.translationId" || rhs != "textKey128" {
+		t.Fatalf("unexpected equality parse: ok=%v lhs=%q rhs=%q", ok, lhs, rhs)
+	}
+	// Must ignore non-equality operators.
+	if _, _, ok := splitTopLevelEquality(`tt.translationId >= textKey128`); ok {
+		t.Fatalf("expected non-equality operator to be ignored")
+	}
+	// Must ignore nested equals inside string literal.
+	if _, _, ok := splitTopLevelEquality(`tt.expr = "a=b"`); !ok {
+		t.Fatalf("expected top-level equality to be detected")
+	}
+
+	if got := applyLookupKeyString([]byte(`"abc"`)); got != "s:abc" {
+		t.Fatalf("expected byte-slice quoted key normalized to s:abc, got %q", got)
+	}
+	if got := applyLookupKeyString(`"xyz"`); got != "s:xyz" {
+		t.Fatalf("expected quoted key normalized to s:xyz, got %q", got)
+	}
+	if got := applyLookupKeyString(int64(42)); got != "i64:42" {
+		t.Fatalf("expected numeric key stringified to i64:42, got %q", got)
+	}
+}
+
+func TestProjectSimpleReturnFromRow(t *testing.T) {
+	cols, row, ok := projectSimpleReturnFromRow(
+		"RETURN textKey AS key, textKey128 AS key128",
+		[]string{"textKey", "textKey128"},
+		[]interface{}{"k1", "h1"},
+	)
+	if !ok {
+		t.Fatalf("expected simple return projection to be supported")
+	}
+	if len(cols) != 2 || cols[0] != "key" || cols[1] != "key128" {
+		t.Fatalf("unexpected projected columns: %#v", cols)
+	}
+	if len(row) != 2 || row[0] != "k1" || row[1] != "h1" {
+		t.Fatalf("unexpected projected row: %#v", row)
+	}
+
+	// Non-simple expression is intentionally rejected by this fast-path helper.
+	if _, _, ok := projectSimpleReturnFromRow("RETURN coalesce(textKey, textKey128) AS key", []string{"textKey"}, []interface{}{"k"}); ok {
+		t.Fatalf("expected non-simple return expression to bypass helper")
+	}
+}
+
+func TestExecuteUnionSequential_Direct(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	mock := &mockCypherExecutor{
+		results: map[string]*ResultStream{
+			"CREATE (n:Row)": {
+				Columns: []string{"n"},
+				Rows:    [][]interface{}{{"lhs"}},
+			},
+			"RETURN 1 AS one": {
+				Columns: []string{"one"},
+				Rows:    [][]interface{}{{int64(1)}},
+			},
+		},
+	}
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+
+	union := &FragmentUnion{
+		LHS: &FragmentExec{
+			Input:     &FragmentInit{},
+			Query:     "CREATE (n:Row)",
+			GraphName: "db1",
+			Columns:   []string{"n"},
+			IsWrite:   true,
+		},
+		RHS: &FragmentExec{
+			Input:     &FragmentInit{},
+			Query:     "RETURN 1 AS one",
+			GraphName: "db1",
+			Columns:   []string{"one"},
+		},
+		Columns: []string{"v"},
+	}
+
+	res, err := exec.executeUnionSequential(context.Background(), nil, union, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected sequential union error: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows from sequential union, got %d", len(res.Rows))
+	}
+}
+
+func TestExecuteApplyInMemoryProjection_Shapes(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"textKey", "textKey128"},
+		Rows: [][]interface{}{
+			{"k1", "h1"},
+			{"k2", "h2"},
+		},
+	}
+
+	ret, ok := executeApplyInMemoryProjection(input, "RETURN textKey AS key, textKey128 AS hash")
+	if !ok {
+		t.Fatalf("expected simple RETURN projection to hit in-memory path")
+	}
+	if len(ret.Columns) != 2 || ret.Columns[0] != "key" || ret.Columns[1] != "hash" {
+		t.Fatalf("unexpected columns: %#v", ret.Columns)
+	}
+
+	collectOnly, ok := executeApplyInMemoryProjection(
+		input,
+		"WITH collect({textKey: textKey, textKey128: textKey128}) AS rows RETURN rows",
+	)
+	if !ok || len(collectOnly.Rows) != 1 {
+		t.Fatalf("expected collect-map-only projection result, got ok=%v rows=%#v", ok, collectOnly.Rows)
+	}
+
+	distinctKeys, ok := executeApplyInMemoryProjection(
+		input,
+		"WITH collect({textKey128: textKey128}) AS rows UNWIND rows AS r WITH collect(DISTINCT r.textKey128) AS keys RETURN keys",
+	)
+	if !ok || len(distinctKeys.Rows) != 1 {
+		t.Fatalf("expected distinct-keys projection result, got ok=%v rows=%#v", ok, distinctKeys.Rows)
+	}
+}
+
+func TestExecuteApplyAsPipeline_RewritesAndExecutes(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	capture := &pipelineCaptureCypherExecutor{}
+	local := NewLocalFragmentExecutor(capture, func(name string) (storage.Engine, error) {
+		if name != "db1" {
+			return nil, fmt.Errorf("unexpected db %s", name)
+		}
+		return &mockEngine{}, nil
+	})
+	exec := NewFabricExecutor(catalog, local, nil)
+
+	input := &ResultStream{
+		Columns: []string{"textKey128", "textKey", "originalText"},
+		Rows: [][]interface{}{
+			{"h1", "k1", "o1"},
+			{"h2", "k2", "o2"},
+		},
+	}
+
+	inner := &FragmentExec{
+		Input:     &FragmentInit{},
+		Query:     "WITH textKey128 AS hash MATCH (tt) WHERE tt.translationId = hash RETURN tt.language AS language, tt.translatedText AS translatedText",
+		GraphName: "db1",
+		Columns:   []string{"language", "translatedText"},
+	}
+
+	res, used, err := exec.executeApplyAsPipeline(context.Background(), nil, input, inner, map[string]interface{}{"p": 1}, "")
+	if err != nil {
+		t.Fatalf("unexpected pipeline error: %v", err)
+	}
+	if !used {
+		t.Fatalf("expected pipeline path to be used")
+	}
+	if res == nil || len(res.Rows) != 1 {
+		t.Fatalf("expected mocked execution result, got %#v", res)
+	}
+	if !strings.Contains(capture.lastQuery, "UNWIND $__fabric_apply_rows AS __fabric_row") {
+		t.Fatalf("expected query rewrite to UNWIND apply rows, got %q", capture.lastQuery)
+	}
+	rowsParam, ok := capture.lastParams["__fabric_apply_rows"].([]map[string]interface{})
+	if !ok || len(rowsParam) != 2 {
+		t.Fatalf("expected __fabric_apply_rows param with 2 rows, got %#v", capture.lastParams["__fabric_apply_rows"])
+	}
+}
+
 func TestFabricExecutor_NilRemoteExecutor(t *testing.T) {
 	catalog := NewCatalog()
 	catalog.Register("remote.shard", &LocationRemote{DBName: "shard", URI: "bolt://r:7687"})
@@ -707,6 +959,146 @@ func TestSynthesizeEmptyCollectOnlyReturn(t *testing.T) {
 	values, ok := row[0].([]interface{})
 	if !ok || len(values) != 0 {
 		t.Fatalf("expected empty list value, got %#v", row[0])
+	}
+}
+
+func TestInferReturnColumnsFromQuery(t *testing.T) {
+	query := `CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+}
+RETURN coalesce(textKey, textKey128) AS textKey, textKey128, count(*) AS c
+ORDER BY textKey128
+LIMIT 25`
+	got := inferReturnColumnsFromQuery(query)
+	if len(got) != 3 || got[0] != "textKey" || got[1] != "textKey128" || got[2] != "c" {
+		t.Fatalf("unexpected inferred columns: %#v", got)
+	}
+}
+
+func TestExecuteRowsGroupedJoinProjection_CoversShapes(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"rows", "k", "texts"},
+		Rows: [][]interface{}{
+			{
+				[]interface{}{
+					map[string]interface{}{"textKey": "k1", "textKey128": "h1"},
+					map[string]interface{}{"textKey": "k2", "textKey128": "h2"},
+				},
+				"h1",
+				[]interface{}{"t1"},
+			},
+			{
+				[]interface{}{},
+				"h2",
+				nil,
+			},
+		},
+	}
+	got := executeRowsGroupedJoinProjection(input)
+	if len(got.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(got.Rows))
+	}
+	if got.Rows[0][0] != "k1" || got.Rows[0][1] != "h1" {
+		t.Fatalf("unexpected first row: %#v", got.Rows[0])
+	}
+	if texts, ok := got.Rows[0][2].([]interface{}); !ok || len(texts) != 1 {
+		t.Fatalf("expected one grouped text in first row, got %#v", got.Rows[0][2])
+	}
+	if got.Rows[1][0] != "k2" || got.Rows[1][1] != "h2" {
+		t.Fatalf("unexpected second row: %#v", got.Rows[1])
+	}
+	if texts, ok := got.Rows[1][2].([]interface{}); !ok || len(texts) != 0 {
+		t.Fatalf("expected empty texts fallback for second row, got %#v", got.Rows[1][2])
+	}
+}
+
+func TestExecuteRowsGroupedJoinProjection_InvalidInput(t *testing.T) {
+	got := executeRowsGroupedJoinProjection(&ResultStream{
+		Columns: []string{"rows"},
+		Rows:    [][]interface{}{{[]interface{}{}}},
+	})
+	if len(got.Rows) != 0 {
+		t.Fatalf("expected empty projection rows, got %#v", got.Rows)
+	}
+}
+
+func TestFabricImportRewriteHelpers(t *testing.T) {
+	init := &FragmentInit{Columns: []string{"a"}, ImportColumns: []string{"a"}}
+	execFrag := &FragmentExec{
+		Input:   init,
+		Query:   "WITH a MATCH (n) WHERE n.id = a RETURN n.id AS id",
+		Columns: []string{"id"},
+	}
+	union := &FragmentUnion{
+		LHS:     execFrag,
+		RHS:     &FragmentExec{Input: &FragmentInit{}, Query: "RETURN 1 AS one", Columns: []string{"one"}},
+		Columns: []string{"id"},
+	}
+	apply := &FragmentApply{Input: &FragmentInit{}, Inner: union, Columns: []string{"id"}}
+
+	if cols := importColumnsFromFragment(init); len(cols) != 1 || cols[0] != "a" {
+		t.Fatalf("unexpected import columns: %#v", cols)
+	}
+	if !fragmentHasStaticImports(apply) {
+		t.Fatal("expected fragmentHasStaticImports to detect static imports")
+	}
+	rewritten := rewriteFragmentWithImports(apply)
+	rewrittenApply, ok := rewritten.(*FragmentApply)
+	if !ok {
+		t.Fatalf("expected rewritten apply, got %T", rewritten)
+	}
+	innerUnion, ok := rewrittenApply.Inner.(*FragmentUnion)
+	if !ok {
+		t.Fatalf("expected rewritten union, got %T", rewrittenApply.Inner)
+	}
+	lhsExec, ok := innerUnion.LHS.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected rewritten lhs exec, got %T", innerUnion.LHS)
+	}
+	if !strings.Contains(lhsExec.Query, "$a") {
+		t.Fatalf("expected rewritten query to contain parameterized import, got %q", lhsExec.Query)
+	}
+
+	rewrittenRuntime := rewriteFragmentWithRuntimeImports(&FragmentExec{
+		Input:   &FragmentInit{ImportColumns: []string{"a"}},
+		Query:   "RETURN a, b",
+		Columns: []string{"a", "b"},
+	}, []string{"b", "a", "b"})
+	rExec, ok := rewrittenRuntime.(*FragmentExec)
+	if !ok {
+		t.Fatalf("expected rewritten runtime exec, got %T", rewrittenRuntime)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(rExec.Query), "WITH ") {
+		t.Fatalf("expected runtime rewrite to prepend WITH imports, got %q", rExec.Query)
+	}
+	merged := mergeImportColumns([]string{"a", "b"}, []string{"b", "c"})
+	if len(merged) != 3 || merged[0] != "a" || merged[1] != "b" || merged[2] != "c" {
+		t.Fatalf("unexpected merged import columns: %#v", merged)
+	}
+}
+
+func TestSubstituteAndReplaceStandaloneVar(t *testing.T) {
+	query := `MATCH (tt) WHERE tt.translationId = textKey128 AND tt.note = "textKey128" RETURN textKey128, tt.translationId`
+	sub := substituteVarsWithParams(query, []string{"textKey128"})
+	if !strings.Contains(sub, "tt.translationId = $textKey128") {
+		t.Fatalf("expected identifier substitution in predicate, got %q", sub)
+	}
+	if !strings.Contains(sub, `"textKey128"`) {
+		t.Fatalf("expected string literal untouched, got %q", sub)
+	}
+}
+
+func TestCombineRowsByColumnsWrapper(t *testing.T) {
+	resultCols := []string{"a", "b", "c"}
+	outerCols := []string{"a", "b"}
+	innerCols := []string{"c"}
+	outerRow := []interface{}{1, 2}
+	innerRow := []interface{}{3}
+	got := combineRowsByColumns(resultCols, outerCols, outerRow, innerCols, innerRow)
+	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("unexpected combined row: %#v", got)
 	}
 }
 

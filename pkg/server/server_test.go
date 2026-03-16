@@ -1409,6 +1409,35 @@ func TestStartupSearchReconcile_InitializesMetadataOnlyDatabase(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
+func TestStartupSearchReconcile_SkipsCompositeDatabases(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	require.NoError(t, server.dbManager.CreateDatabase("animals_cov"))
+	require.NoError(t, server.dbManager.CreateCompositeDatabase("animals_cmp_cov", []multidb.ConstituentRef{
+		{
+			Alias:        "a",
+			DatabaseName: "animals_cov",
+			Type:         "local",
+			AccessMode:   "read_write",
+		},
+	}))
+	t.Cleanup(func() {
+		_ = server.dbManager.DropCompositeDatabase("animals_cmp_cov")
+	})
+
+	server.ensureSearchBuildStartedForKnownDatabases()
+
+	require.Eventually(t, func() bool {
+		st := server.db.GetDatabaseSearchStatus("animals_cov")
+		return st.Initialized
+	}, 3*time.Second, 50*time.Millisecond)
+
+	// Composite DB should not receive its own search-service startup.
+	cmpStatus := server.db.GetDatabaseSearchStatus("animals_cmp_cov")
+	require.False(t, cmpStatus.Initialized)
+	require.False(t, cmpStatus.Ready)
+}
+
 func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")

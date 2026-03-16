@@ -105,3 +105,12 @@ func TestFragmentInterface(t *testing.T) {
 	var _ Fragment = (*FragmentApply)(nil)
 	var _ Fragment = (*FragmentUnion)(nil)
 }
+
+func TestFragmentMarkerMethods(t *testing.T) {
+	// Call marker methods directly so coverage includes those implementations.
+	(&FragmentInit{}).fragment()
+	(&FragmentLeaf{}).fragment()
+	(&FragmentExec{}).fragment()
+	(&FragmentApply{}).fragment()
+	(&FragmentUnion{}).fragment()
+}

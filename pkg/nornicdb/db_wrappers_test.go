@@ -169,10 +169,18 @@ func TestDBWrapperHelpers_EmbeddingAndPendingCounts(t *testing.T) {
 		Properties:      map[string]interface{}{"content": "beta"},
 		ChunkEmbeddings: [][]float32{{0.3, 0.2, 0.1}},
 	}))
+	compositeSvc, err := db.GetOrCreateSearchService("cmp_cov", nil)
+	require.NoError(t, err)
+	require.NoError(t, compositeSvc.IndexNode(&storage.Node{
+		ID:              "n3",
+		Properties:      map[string]interface{}{"content": "gamma"},
+		ChunkEmbeddings: [][]float32{{0.5, 0.1, 0.9}},
+	}))
 	db.SetAllDatabasesProvider(func() []DatabaseAndStorage {
 		return []DatabaseAndStorage{
 			{Name: db.defaultDatabaseName(), Storage: db.storage},
 			{Name: "tenant_cov", Storage: nil},
+			{Name: "cmp_cov", Storage: nil, IsComposite: true},
 			{Name: "system", Storage: nil},
 		}
 	})

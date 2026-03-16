@@ -451,3 +451,86 @@ RETURN keys
 		require.Len(t, texts, 1, "expected exactly one matching collected row per key")
 	}
 }
+
+func TestExecute_FabricCorrelatedCallUseChain_CoalesceReturn_NoInternalColumns(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-1", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey":    "k1",
+		"textKey128": "h1",
+	}})
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{ID: "tr-2", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"textKey128": "h2",
+	}})
+	require.NoError(t, err)
+
+	txrStore, err := mgr.GetStorage("nornic_txt")
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-1", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"translationId":  "h1",
+		"translatedText": "one",
+	}})
+	require.NoError(t, err)
+	_, err = txrStore.CreateNode(&storage.Node{ID: "txr-2", Labels: []string{"MongoDocument"}, Properties: map[string]interface{}{
+		"translationId":  "h2",
+		"translatedText": "two",
+	}})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.textKey128 IS NOT NULL
+  RETURN t.textKey AS textKey, t.textKey128 AS textKey128
+  ORDER BY t.textKey128
+  LIMIT 25
+}
+CALL {
+  WITH textKey128
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  WHERE tt.translationId = textKey128
+  RETURN collect(tt) AS texts
+}
+RETURN
+  coalesce(textKey, textKey128) AS textKey,
+  textKey128,
+  coalesce(texts, []) AS texts
+ORDER BY textKey128
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"textKey", "textKey128", "texts"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	for _, row := range res.Rows {
+		require.Len(t, row, 3)
+		require.NotEqual(t, "__fabric_row", row[0])
+		require.NotEqual(t, "coalesce(textKey, textKey128)", row[0])
+		require.NotEqual(t, "textKey128", row[1])
+		require.NotEmpty(t, row[1])
+		texts, ok := row[2].([]interface{})
+		require.True(t, ok, "unexpected texts type=%T value=%#v", row[2], row[2])
+		require.Len(t, texts, 1)
+	}
+}

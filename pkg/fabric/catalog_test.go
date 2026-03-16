@@ -3,6 +3,9 @@ package fabric
 import (
 	"sort"
 	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 func TestCatalog_RegisterAndResolve(t *testing.T) {
@@ -166,5 +169,97 @@ func TestCatalog_DottedCompositeConstituent(t *testing.T) {
 	}
 	if remote2.User != "svc" {
 		t.Errorf("expected svc, got %s", remote2.User)
+	}
+}
+
+func TestCatalog_PopulateFromManager_WithCompositeAndRemote(t *testing.T) {
+	inner := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(inner, multidb.DefaultConfig())
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	if err := mgr.CreateDatabase("tr_local"); err != nil {
+		t.Fatalf("failed to create local db: %v", err)
+	}
+	if err := mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{
+			Alias:        "tr",
+			DatabaseName: "tr_local",
+			Type:         "local",
+			AccessMode:   "read_write",
+		},
+		{
+			Alias:        "txr",
+			DatabaseName: "remote_txr",
+			Type:         "remote",
+			AccessMode:   "read_write",
+			URI:          "bolt://remote:7687",
+		},
+	}); err != nil {
+		t.Fatalf("failed to create composite db: %v", err)
+	}
+
+	c := NewCatalog()
+	if err := c.PopulateFromManager(mgr); err != nil {
+		t.Fatalf("populate failed: %v", err)
+	}
+
+	loc, err := c.Resolve("translations")
+	if err != nil {
+		t.Fatalf("expected composite root in catalog: %v", err)
+	}
+	if _, ok := loc.(*LocationLocal); !ok {
+		t.Fatalf("expected local location for composite root, got %T", loc)
+	}
+
+	localLoc, err := c.Resolve("translations.tr")
+	if err != nil {
+		t.Fatalf("expected local constituent in catalog: %v", err)
+	}
+	local, ok := localLoc.(*LocationLocal)
+	if !ok {
+		t.Fatalf("expected local location for translations.tr, got %T", localLoc)
+	}
+	if local.DBName != "tr_local" {
+		t.Fatalf("expected local constituent db tr_local, got %q", local.DBName)
+	}
+
+	remoteLoc, err := c.Resolve("translations.txr")
+	if err != nil {
+		t.Fatalf("expected remote constituent in catalog: %v", err)
+	}
+	remote, ok := remoteLoc.(*LocationRemote)
+	if !ok {
+		t.Fatalf("expected remote location for translations.txr, got %T", remoteLoc)
+	}
+	if remote.DBName != "remote_txr" {
+		t.Fatalf("expected remote constituent db remote_txr, got %q", remote.DBName)
+	}
+	if remote.URI != "bolt://remote:7687" {
+		t.Fatalf("expected remote uri bolt://remote:7687, got %q", remote.URI)
+	}
+	// Empty auth mode in metadata defaults to oidc_forwarding.
+	if remote.AuthMode != "oidc_forwarding" {
+		t.Fatalf("expected default auth mode oidc_forwarding, got %q", remote.AuthMode)
+	}
+}
+
+func TestEffectiveAuthMode(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty defaults to oidc", in: "", want: "oidc_forwarding"},
+		{name: "trim and lowercase", in: "  USER_PASSWORD  ", want: "user_password"},
+		{name: "already normalized", in: "oidc_forwarding", want: "oidc_forwarding"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectiveAuthMode(tt.in)
+			if got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
 	}
 }

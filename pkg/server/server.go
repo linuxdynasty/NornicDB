@@ -513,7 +513,7 @@ func DefaultConfig() *Config {
 		//   NORNICDB_EMBEDDING_MODEL=...         - Model name
 		//   NORNICDB_EMBEDDING_DIM=1024          - Vector dimensions
 		EmbeddingEnabled:    true,
-		EmbeddingProvider:   "openai", // llama.cpp uses OpenAI-compatible format
+		EmbeddingProvider:   "ollama", // default URL targets Ollama (port 11434)
 		EmbeddingAPIURL:     "http://localhost:11434",
 		EmbeddingModel:      "bge-m3",
 		EmbeddingDimensions: 1024,
@@ -662,6 +662,9 @@ func (s *Server) ensureSearchBuildStartedForKnownDatabases() {
 	}
 	for _, info := range s.dbManager.ListDatabases() {
 		if info == nil || info.Name == "" || info.Name == "system" {
+			continue
+		}
+		if s.dbManager.IsCompositeDatabase(info.Name) {
 			continue
 		}
 		status := s.db.GetDatabaseSearchStatus(info.Name)
@@ -1329,11 +1332,19 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			if info.Name == "system" {
 				continue
 			}
+			isComposite := s.dbManager.IsCompositeDatabase(info.Name)
+			if isComposite {
+				continue
+			}
 			storageEngine, err := s.dbManager.GetStorage(info.Name)
 			if err != nil {
 				continue
 			}
-			out = append(out, nornicdb.DatabaseAndStorage{Name: info.Name, Storage: storageEngine})
+			out = append(out, nornicdb.DatabaseAndStorage{
+				Name:        info.Name,
+				Storage:     storageEngine,
+				IsComposite: isComposite,
+			})
 		}
 		return out
 	})

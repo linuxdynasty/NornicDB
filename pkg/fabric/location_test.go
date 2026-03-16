@@ -46,3 +46,8 @@ func TestLocationInterface(t *testing.T) {
 	var _ Location = (*LocationLocal)(nil)
 	var _ Location = (*LocationRemote)(nil)
 }
+
+func TestLocationMarkerMethods(t *testing.T) {
+	(&LocationLocal{}).location()
+	(&LocationRemote{}).location()
+}

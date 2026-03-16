@@ -257,6 +257,46 @@ RETURN translationId, textKey, texts`
 	}
 }
 
+func TestPlannerHelpers_ReturnClauseAndWithAliases(t *testing.T) {
+	if !hasTopLevelReturnClause("MATCH (n) RETURN n") {
+		t.Fatalf("expected RETURN clause to be detected")
+	}
+	if hasTopLevelReturnClause("MATCH (n {x: 'RETURN literal'})") {
+		t.Fatalf("did not expect RETURN inside string literal to count")
+	}
+
+	aliases := trailingWithAliases("MATCH (n) WITH n.id AS id, n.name AS name")
+	if len(aliases) != 2 || aliases[0] != "id" || aliases[1] != "name" {
+		t.Fatalf("unexpected trailing WITH aliases: %#v", aliases)
+	}
+}
+
+func TestPlannerHelpers_ParseAndSplit(t *testing.T) {
+	paren, err := findMatchingParen("graph.byName('translations.tr')", strings.Index("graph.byName('translations.tr')", "("))
+	if err != nil {
+		t.Fatalf("unexpected paren matching error: %v", err)
+	}
+	if paren <= 0 {
+		t.Fatalf("expected positive matching paren index, got %d", paren)
+	}
+
+	graph, err := extractFirstGraphRefArg("'translations.tr', 'ignored'")
+	if err != nil {
+		t.Fatalf("unexpected graph ref arg parse error: %v", err)
+	}
+	if graph != "translations.tr" {
+		t.Fatalf("expected translations.tr, got %q", graph)
+	}
+
+	prefix, suffix, ok := splitAtTopLevelUse("MATCH (n) WITH n USE translations.tr RETURN n")
+	if !ok {
+		t.Fatalf("expected top-level USE split")
+	}
+	if strings.TrimSpace(prefix) == "" || !strings.Contains(strings.ToUpper(suffix), "USE") {
+		t.Fatalf("unexpected split parts: prefix=%q suffix=%q", prefix, suffix)
+	}
+}
+
 func TestPlan_CallWithThenUseSubquery(t *testing.T) {
 	catalog := NewCatalog()
 	catalog.Register("translations", &LocationLocal{DBName: "translations"})
