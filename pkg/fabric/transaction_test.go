@@ -366,3 +366,105 @@ func TestFabricTransaction_GetOrOpenOnClosedTx(t *testing.T) {
 		t.Fatal("expected error for GetOrOpen on committed tx")
 	}
 }
+
+func TestFabricTransaction_CommitWithBoundRollbackOnFailure(t *testing.T) {
+	tx := NewFabricTransaction("tx-016")
+	_, _ = tx.GetOrOpen("shard_a", false)
+	_, _ = tx.GetOrOpen("shard_b", false)
+
+	boundRolledBack := false
+	_ = tx.BindParticipantCallbacks("shard_b",
+		func(_ *SubTransaction) error { return fmt.Errorf("shard_b commit fail") },
+		func(_ *SubTransaction) error {
+			boundRolledBack = true
+			return nil
+		},
+	)
+
+	err := tx.Commit(nil, nil) // nil global callbacks → uses bound.
+	if err == nil {
+		t.Fatal("expected commit error")
+	}
+	if tx.State() != "rolledback" {
+		t.Fatalf("expected rolledback, got %s", tx.State())
+	}
+	// Bound rollback should have run.
+	if !boundRolledBack {
+		t.Fatal("expected bound rollback callback to run on commit failure")
+	}
+}
+
+func TestFabricTransaction_RollbackOnClosedTx(t *testing.T) {
+	tx := NewFabricTransaction("tx-017")
+	_ = tx.Commit(nil, nil) // Committed (no subs).
+
+	err := tx.Rollback(nil)
+	if err == nil {
+		t.Fatal("expected error for rollback on committed tx")
+	}
+}
+
+func TestFabricTransaction_ReadThenWriteUpgrade_SecondShardFail(t *testing.T) {
+	tx := NewFabricTransaction("tx-018")
+	_, _ = tx.GetOrOpen("shard_a", false)
+	_, _ = tx.GetOrOpen("shard_b", true) // shard_b is write shard.
+
+	// Now upgrade shard_a to write → should fail.
+	_, err := tx.GetOrOpen("shard_a", true)
+	if err != ErrSecondWriteShard {
+		t.Fatalf("expected ErrSecondWriteShard, got: %v", err)
+	}
+}
+
+func TestFabricTransaction_Commit_SkipsAlreadyCommitted(t *testing.T) {
+	tx := NewFabricTransaction("tx-019")
+	sub, _ := tx.GetOrOpen("shard_a", false)
+	sub.State = "committed" // Pre-mark as committed.
+
+	commitCount := 0
+	err := tx.Commit(func(_ *SubTransaction) error {
+		commitCount++
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if commitCount != 0 {
+		t.Fatalf("expected 0 commits (sub already committed), got %d", commitCount)
+	}
+}
+
+func TestFabricTransaction_Rollback_SkipsAlreadyRolledBack(t *testing.T) {
+	tx := NewFabricTransaction("tx-020")
+	sub, _ := tx.GetOrOpen("shard_a", false)
+	sub.State = "rolledback" // Pre-mark.
+
+	rollbackCount := 0
+	err := tx.Rollback(func(_ *SubTransaction) error {
+		rollbackCount++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rollbackCount != 0 {
+		t.Fatalf("expected 0 rollbacks, got %d", rollbackCount)
+	}
+}
+
+func TestFabricTransaction_Commit_NilGlobalUseBoundRollbackOnFail(t *testing.T) {
+	tx := NewFabricTransaction("tx-021")
+	_, _ = tx.GetOrOpen("shard_a", false)
+
+	_ = tx.BindParticipantCallbacks("shard_a",
+		func(_ *SubTransaction) error { return nil },
+		nil,
+	)
+
+	// shard_a commits successfully with bound callback, then rolls back
+	// with nil rollback → no panic.
+	err := tx.Commit(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

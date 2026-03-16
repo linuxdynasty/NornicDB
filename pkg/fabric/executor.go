@@ -1569,10 +1569,10 @@ func parseSimpleOrderByClause(clause string, aliasToCol map[string]string) []sim
 			continue
 		}
 		desc := false
-		if len(item) > 5 && strings.EqualFold(strings.TrimSpace(item[len(item)-5:]), " DESC") {
+		if len(item) > 5 && strings.EqualFold(item[len(item)-5:], " DESC") {
 			desc = true
 			item = strings.TrimSpace(item[:len(item)-5])
-		} else if len(item) > 4 && strings.EqualFold(strings.TrimSpace(item[len(item)-4:]), " ASC") {
+		} else if len(item) > 4 && strings.EqualFold(item[len(item)-4:], " ASC") {
 			item = strings.TrimSpace(item[:len(item)-4])
 		}
 		if mapped, ok := aliasToCol[item]; ok {
