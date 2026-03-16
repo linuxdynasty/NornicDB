@@ -201,7 +201,14 @@ func truncateContentToTokenEstimate(content string, maxTokens int) string {
 		return content
 	}
 	trunc := content[:maxChars]
-	for len(trunc) > 0 && !utf8.RuneStart(trunc[len(trunc)-1]) {
+	// Ensure we never return invalid UTF-8 after byte-length truncation.
+	// DecodeLastRuneInString returns (RuneError, 1) for invalid trailing bytes,
+	// so we trim until the suffix is a complete rune boundary.
+	for len(trunc) > 0 {
+		r, size := utf8.DecodeLastRuneInString(trunc)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
 		trunc = trunc[:len(trunc)-1]
 	}
 	return trunc + "\n\n[Truncated for context limit.]"

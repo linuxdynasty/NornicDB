@@ -137,3 +137,217 @@ func TestFulltextIndexV2_MinIntHelper(t *testing.T) {
 	require.Equal(t, -5, minInt(-5, 3))
 	require.Equal(t, 7, minInt(7, 7))
 }
+
+// ---------------------------------------------------------------------------
+// BM25 IDF calculation – Okapi BM25 formula: log(1 + (N - df + 0.5)/(df + 0.5))
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_CalculateIDFLocked(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	// Zero df or zero docCount → 0
+	require.Equal(t, float64(0), idx.calculateIDFLocked(0))
+	require.Equal(t, float64(0), idx.calculateIDFLocked(-1))
+
+	idx.docCount = 0
+	require.Equal(t, float64(0), idx.calculateIDFLocked(1))
+
+	// Standard BM25 IDF: 10 docs, term appears in 3 → log(1 + (10-3+0.5)/(3+0.5))
+	idx.docCount = 10
+	idf := idx.calculateIDFLocked(3)
+	require.Greater(t, idf, float64(0))
+	// With N=10, df=3: log(1 + 7.5/3.5) ≈ log(1 + 2.1428) ≈ log(3.1428) ≈ 1.145
+	require.InDelta(t, 1.145, idf, 0.01)
+
+	// Rare term (df=1) should have higher IDF than common term (df=9)
+	rare := idx.calculateIDFLocked(1)
+	common := idx.calculateIDFLocked(9)
+	require.Greater(t, rare, common, "rare terms must have higher IDF per BM25")
+}
+
+// ---------------------------------------------------------------------------
+// Lexicon insert/remove – sorted slice maintenance
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_LexiconInsertRemove(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	// Insert in non-sorted order — lexicon must stay sorted
+	idx.insertLexiconTermLocked("banana")
+	idx.insertLexiconTermLocked("apple")
+	idx.insertLexiconTermLocked("cherry")
+
+	require.Equal(t, []string{"apple", "banana", "cherry"}, idx.lexicon)
+
+	// Duplicate insert should be a no-op
+	idx.insertLexiconTermLocked("banana")
+	require.Equal(t, []string{"apple", "banana", "cherry"}, idx.lexicon)
+
+	// Remove middle element
+	idx.removeLexiconTermLocked("banana")
+	require.Equal(t, []string{"apple", "cherry"}, idx.lexicon)
+
+	// Remove non-existent term should be a no-op
+	idx.removeLexiconTermLocked("banana")
+	require.Equal(t, []string{"apple", "cherry"}, idx.lexicon)
+
+	// Remove from edges
+	idx.removeLexiconTermLocked("apple")
+	require.Equal(t, []string{"cherry"}, idx.lexicon)
+
+	idx.removeLexiconTermLocked("cherry")
+	require.Empty(t, idx.lexicon)
+
+	// Remove from empty lexicon should not panic
+	idx.removeLexiconTermLocked("nothing")
+	require.Empty(t, idx.lexicon)
+}
+
+// ---------------------------------------------------------------------------
+// topKMinScore – min-heap threshold for top-K scoring
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_TopKMinScore(t *testing.T) {
+	// k <= 0 → 0
+	require.Equal(t, float64(0), topKMinScore(map[uint32]float64{1: 5.0}, 0))
+
+	// Fewer items than k → 0
+	require.Equal(t, float64(0), topKMinScore(map[uint32]float64{1: 5.0}, 2))
+
+	// Exactly k items → returns the minimum score
+	scores := map[uint32]float64{1: 3.0, 2: 1.0, 3: 5.0}
+	minScore := topKMinScore(scores, 3)
+	require.InDelta(t, 1.0, minScore, 0.001)
+
+	// More items than k → returns the k-th highest score threshold
+	scores = map[uint32]float64{1: 10.0, 2: 20.0, 3: 30.0, 4: 5.0, 5: 15.0}
+	threshold := topKMinScore(scores, 3)
+	// Top-3 are 30, 20, 15 → min of top-3 is 15
+	require.InDelta(t, 15.0, threshold, 0.001)
+}
+
+// ---------------------------------------------------------------------------
+// topKFromScores – deterministic top-K extraction
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_TopKFromScores(t *testing.T) {
+	// k <= 0 → nil
+	require.Nil(t, topKFromScores(map[uint32]float64{1: 5.0}, 0))
+
+	// Empty scores → nil
+	require.Nil(t, topKFromScores(map[uint32]float64{}, 5))
+
+	// Normal case: extract top 2 from 4 items
+	scores := map[uint32]float64{1: 10.0, 2: 5.0, 3: 20.0, 4: 15.0}
+	top2 := topKFromScores(scores, 2)
+	require.Len(t, top2, 2)
+	// Results should be in descending score order
+	require.InDelta(t, 20.0, top2[0].score, 0.001)
+	require.InDelta(t, 15.0, top2[1].score, 0.001)
+}
+
+// ---------------------------------------------------------------------------
+// BM25 V2 – LexicalSeedDocIDs returns deterministic seed candidates
+// LexicalSeedDocIDs(maxTerms, docsPerTerm int) → []string (doc IDs)
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_LexicalSeedDocIDs(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	idx.Index("doc1", "graph database nornicdb")
+	idx.Index("doc2", "relational database postgres")
+	idx.Index("doc3", "graph embeddings neural")
+
+	seeds := idx.LexicalSeedDocIDs(10, 10)
+	require.NotEmpty(t, seeds)
+
+	// Deterministic: second call should produce identical results
+	seeds2 := idx.LexicalSeedDocIDs(10, 10)
+	require.Equal(t, len(seeds), len(seeds2))
+	for i := range seeds {
+		require.Equal(t, seeds[i], seeds2[i])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BM25 V2 – PhraseSearch determinism
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_PhraseSearchDeterministic(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	idx.Index("doc1", "the quick brown fox jumps over lazy dog")
+	idx.Index("doc2", "quick brown bread is delicious")
+	idx.Index("doc3", "the lazy brown cat sleeps")
+
+	// "quick brown" appears as exact phrase in doc1 and doc2
+	r1 := idx.PhraseSearch("quick brown", 10)
+	r2 := idx.PhraseSearch("quick brown", 10)
+	require.Equal(t, len(r1), len(r2))
+	for i := range r1 {
+		require.Equal(t, r1[i].ID, r2[i].ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BM25 V2 – IndexBatch and Remove
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_IndexBatchAndRemove(t *testing.T) {
+	idx := NewFulltextIndexV2()
+
+	batch := []FulltextBatchEntry{
+		{ID: "b1", Text: "hello world"},
+		{ID: "b2", Text: "hello nornicdb"},
+		{ID: "b3", Text: "world of graphs"},
+	}
+	idx.IndexBatch(batch)
+	require.Equal(t, 3, idx.Count())
+
+	// Re-indexing same ID should update, not duplicate
+	idx.Index("b1", "hello updated world")
+	require.Equal(t, 3, idx.Count())
+
+	// Remove should decrease count
+	idx.Remove("b2")
+	require.Equal(t, 2, idx.Count())
+
+	// Remove non-existent should be a no-op
+	idx.Remove("nonexistent")
+	require.Equal(t, 2, idx.Count())
+
+	// Search should still find remaining docs
+	results := idx.Search("hello", 10)
+	require.NotEmpty(t, results)
+}
+
+// ---------------------------------------------------------------------------
+// BM25 V2 – Search with no matching terms
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_SearchNoMatch(t *testing.T) {
+	idx := NewFulltextIndexV2()
+	idx.Index("doc1", "graph database")
+
+	results := idx.Search("zzzzunknownterm", 10)
+	require.Empty(t, results)
+}
+
+// ---------------------------------------------------------------------------
+// BM25 V2 – Empty index edge cases
+// ---------------------------------------------------------------------------
+
+func TestFulltextIndexV2_EmptyIndexOperations(t *testing.T) {
+	idx := NewFulltextIndexV2()
+
+	require.Equal(t, 0, idx.Count())
+	require.Empty(t, idx.Search("anything", 10))
+	require.Empty(t, idx.PhraseSearch("any phrase", 10))
+	require.Empty(t, idx.LexicalSeedDocIDs(10, 10))
+
+	// Remove from empty should not panic
+	idx.Remove("nonexistent")
+	require.Equal(t, 0, idx.Count())
+}

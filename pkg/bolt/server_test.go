@@ -4,6 +4,7 @@ package bolt
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -2131,6 +2132,90 @@ func TestSendRecord(t *testing.T) {
 			t.Errorf("sendRecord failed: %v", err)
 		}
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// =============================================================================
+// Tests for mapBoltQueryError – Neo4j error code extraction
+// =============================================================================
+
+func TestMapBoltQueryError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode string
+		wantMsg  string
+	}{
+		{
+			name:     "nil error returns syntax error code with empty message",
+			err:      nil,
+			wantCode: "Neo.ClientError.Statement.SyntaxError",
+			wantMsg:  "",
+		},
+		{
+			name:     "Neo4j prefixed error with colon splits correctly",
+			err:      fmt.Errorf("Neo.ClientError.Schema.ConstraintViolation: Node already exists"),
+			wantCode: "Neo.ClientError.Schema.ConstraintViolation",
+			wantMsg:  "Node already exists",
+		},
+		{
+			name:     "Neo4j prefixed error without colon returns full message",
+			err:      fmt.Errorf("Neo.ClientError.Statement.SyntaxError"),
+			wantCode: "Neo.ClientError.Statement.SyntaxError",
+			wantMsg:  "Neo.ClientError.Statement.SyntaxError",
+		},
+		{
+			name:     "embedded Neo4j code extracted from middle of message",
+			err:      fmt.Errorf("query failed: Neo.ClientError.Statement.TypeError: invalid type"),
+			wantCode: "Neo.ClientError.Statement.TypeError",
+			wantMsg:  "invalid type",
+		},
+		{
+			name:     "plain error gets default syntax error code",
+			err:      fmt.Errorf("unexpected token at position 5"),
+			wantCode: "Neo.ClientError.Statement.SyntaxError",
+			wantMsg:  "unexpected token at position 5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, msg := mapBoltQueryError(tt.err)
+			if code != tt.wantCode {
+				t.Errorf("code = %q, want %q", code, tt.wantCode)
+			}
+			if msg != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", msg, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Tests for isShowDatabasesQuery – case/whitespace normalization
+// =============================================================================
+
+func TestIsShowDatabasesQuery(t *testing.T) {
+	tests := []struct {
+		query string
+		want  bool
+	}{
+		{"SHOW DATABASES", true},
+		{"show databases", true},
+		{"  SHOW   DATABASES  ", true},
+		{"Show Databases", true},
+		{"SHOW DATABASE", false},
+		{"SHOW DATABASES YIELD name", false},
+		{"MATCH (n) RETURN n", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			if got := isShowDatabasesQuery(tt.query); got != tt.want {
+				t.Errorf("isShowDatabasesQuery(%q) = %v, want %v", tt.query, got, tt.want)
+			}
+		})
 	}
 }
 

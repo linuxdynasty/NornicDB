@@ -42,6 +42,59 @@ func TestTrimMessagesForContext(t *testing.T) {
 	assert.Equal(t, "user", out[1].Role)
 }
 
+func TestLooksLikeLocalModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"", true},           // empty is treated as local (no model to send)
+		{"  ", true},         // whitespace-only
+		{"model.gguf", true}, // GGUF file
+		{"path/to/model.GGUF", true},
+		{"gpt-4o-mini", false},
+		{"claude-3-opus", false},
+		{"llama-3.1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			assert.Equal(t, tt.want, looksLikeLocalModel(tt.model))
+		})
+	}
+}
+
+func TestTruncateContentToTokenEstimate(t *testing.T) {
+	t.Run("maxTokens zero returns empty", func(t *testing.T) {
+		assert.Equal(t, "", truncateContentToTokenEstimate("some content", 0))
+	})
+
+	t.Run("maxTokens negative returns empty", func(t *testing.T) {
+		assert.Equal(t, "", truncateContentToTokenEstimate("some content", -1))
+	})
+
+	t.Run("content within limit is unchanged", func(t *testing.T) {
+		content := "short text"
+		assert.Equal(t, content, truncateContentToTokenEstimate(content, 1000))
+	})
+
+	t.Run("content exceeding limit is truncated", func(t *testing.T) {
+		content := strings.Repeat("a", 1000)
+		result := truncateContentToTokenEstimate(content, 10) // 10 tokens ≈ 40 chars
+		assert.Less(t, len(result), len(content))
+		assert.Contains(t, result, "[Truncated for context limit.]")
+		assert.True(t, utf8.ValidString(result))
+	})
+
+	t.Run("truncation invokes rune boundary backup path", func(t *testing.T) {
+		// Exercise mid-rune cut handling.
+		// "é" is 2 bytes (0xC3 0xA9). With maxTokens=1 -> maxChars=4, and
+		// content is 6 bytes (3 runes), content[:4] ends mid-rune.
+		content := "ééé"                                     // 6 bytes
+		result := truncateContentToTokenEstimate(content, 1) // maxChars=4
+		assert.Contains(t, result, "[Truncated for context limit.]")
+		assert.True(t, utf8.ValidString(result), "truncated content must remain valid UTF-8")
+	})
+}
+
 func TestTruncateForOpenAI(t *testing.T) {
 	// Under limit: unchanged
 	short := "hello"
