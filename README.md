@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.17-success" alt="Version 1.0.17">
+  <img src="https://img.shields.io/badge/version-1.0.18-success" alt="Version 1.0.18">
   <a href="https://coveralls.io/github/orneryd/NornicDB?branch=main"><img src="https://coveralls.io/repos/github/orneryd/NornicDB/badge.svg?branch=main" alt="Coveralls Report"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
@@ -36,6 +36,7 @@
 </p>
 
 ---
+
 ## What Problem Does This Solve?
 
 NornicDB is a high-performance graph database designed for AI agents and knowledge systems. It speaks Neo4j's language (Bolt protocol + Cypher) so you can switch with zero code changes, while adding intelligent features that traditional databases lack.
@@ -59,6 +60,7 @@ NornicDB automatically discovers and manages relationships in your data, weaving
 - **Shared seed strategy across indexing stages**: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.
 
 Read more:
+
 - [Cypher parser modes and execution trade-offs](docs/architecture/cypher-parser-modes.md)
 - [How we sped up HNSW construction 2.7x](https://dev.to/orneryd/how-i-sped-up-hnsw-construction-27x-2jhn)
 
@@ -91,6 +93,7 @@ docker run -d --name nornicdb \
 Open [http://localhost:7474](http://localhost:7474) for the admin UI.
 
 Need a different image/profile (Heimdall, BYOM, CPU-only, Vulkan, headless)?
+
 - [Docker image quick reference](docs/getting-started/image-quick-reference.md)
 - [Docker images section](#docker-images)
 
@@ -134,6 +137,7 @@ with driver.session() as session:
 ## Build It Yourself
 
 Detailed local build, cross-compile, and packaging instructions:
+
 - [DIY instructions](DIY.md)
 - [Building section](#building)
 
@@ -196,6 +200,7 @@ curl -X POST http://localhost:7474/nornicdb/search \
 ```
 
 More API entry points:
+
 - **GraphQL** hybrid search: `POST /graphql` with `search(query, options)`
 - **gRPC** (Qdrant-compatible): `Points.Search` / `Points.Query(Document.text)`
 - **Nornic native gRPC**: `NornicSearch/SearchText` (additive client)
@@ -211,11 +216,13 @@ NORNICDB_HEIMDALL_ENABLED=true ./nornicdb serve
 ```
 
 **Natural Language Queries:**
+
 - "Get the database status"
 - "Show me system metrics"
 - "Run health check"
 
 **Plugin System:**
+
 - Create custom actions the AI can execute
 - Lifecycle hooks (PrePrompt, PreExecute, PostExecute)
 - Database event monitoring for autonomous actions
@@ -248,22 +255,22 @@ All images available at [Docker Hub](https://hub.docker.com/u/timothyswt).
 
 ### ARM64 (Apple Silicon)
 
-| Image | Size | Description |
-|-------|------|-------------|
-| `timothyswt/nornicdb-arm64-metal-bge-heimdall` | 1.1 GB | **Full** - Embeddings + AI Assistant |
-| `timothyswt/nornicdb-arm64-metal-bge` | 586 MB | **Standard** - With BGE-M3 embeddings |
-| `timothyswt/nornicdb-arm64-metal` | 148 MB | **Minimal** - Core database, BYOM |
-| `timothyswt/nornicdb-arm64-metal-headless` | 148 MB | **Headless** - API only, no UI |
+| Image                                          | Size   | Description                           |
+| ---------------------------------------------- | ------ | ------------------------------------- |
+| `timothyswt/nornicdb-arm64-metal-bge-heimdall` | 1.1 GB | **Full** - Embeddings + AI Assistant  |
+| `timothyswt/nornicdb-arm64-metal-bge`          | 586 MB | **Standard** - With BGE-M3 embeddings |
+| `timothyswt/nornicdb-arm64-metal`              | 148 MB | **Minimal** - Core database, BYOM     |
+| `timothyswt/nornicdb-arm64-metal-headless`     | 148 MB | **Headless** - API only, no UI        |
 
 ### AMD64 (Linux/Intel)
 
-| Image | Size | Description |
-|-------|------|-------------|
-| `timothyswt/nornicdb-amd64-cuda-bge` | ~4.5 GB | **GPU + Embeddings** - CUDA + BGE-M3 |
-| `timothyswt/nornicdb-amd64-cuda` | ~3 GB | **GPU** - CUDA acceleration, BYOM |
-| `timothyswt/nornicdb-amd64-cuda-headless` | ~2.9 GB | **GPU Headless** - API only |
-| `timothyswt/nornicdb-amd64-cpu` | ~500 MB | **CPU** - No GPU required |
-| `timothyswt/nornicdb-amd64-cpu-headless` | ~500 MB | **CPU Headless** - API only |
+| Image                                     | Size    | Description                          |
+| ----------------------------------------- | ------- | ------------------------------------ |
+| `timothyswt/nornicdb-amd64-cuda-bge`      | ~4.5 GB | **GPU + Embeddings** - CUDA + BGE-M3 |
+| `timothyswt/nornicdb-amd64-cuda`          | ~3 GB   | **GPU** - CUDA acceleration, BYOM    |
+| `timothyswt/nornicdb-amd64-cuda-headless` | ~2.9 GB | **GPU Headless** - API only          |
+| `timothyswt/nornicdb-amd64-cpu`           | ~500 MB | **CPU** - No GPU required            |
+| `timothyswt/nornicdb-amd64-cpu-headless`  | ~500 MB | **CPU Headless** - API only          |
 
 **BYOM** = Bring Your Own Model (mount at `/app/models`)
 
@@ -355,18 +362,17 @@ memory:
 
 ## Documentation
 
-| Guide                                                                      | Description                    |
-| -------------------------------------------------------------------------- | ------------------------------ |
-| [Getting Started](docs/getting-started/README.md)                          | Installation & quick start     |
-| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix   |
-| [API Reference](docs/api-reference/README.md)                              | Cypher functions & procedures  |
-| [User Guides](docs/user-guides/README.md)                                  | Complete examples & patterns   |
-| [Performance](docs/performance/README.md)                                  | Benchmarks vs Neo4j            |
-| [Neo4j Migration](docs/neo4j-migration/README.md)                          | Compatibility & feature parity |
-| [Architecture](docs/architecture/README.md)                                | System design & internals      |
-| [Docker Guide](docker/README.md)                                           | Build & deployment             |
-| [Development](docs/development/README.md)                                  | Contributing & development     |
-
+| Guide                                                                         | Description                    |
+| ----------------------------------------------------------------------------- | ------------------------------ |
+| [Getting Started](docs/getting-started/README.md)                             | Installation & quick start     |
+| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix      |
+| [API Reference](docs/api-reference/README.md)                                 | Cypher functions & procedures  |
+| [User Guides](docs/user-guides/README.md)                                     | Complete examples & patterns   |
+| [Performance](docs/performance/README.md)                                     | Benchmarks vs Neo4j            |
+| [Neo4j Migration](docs/neo4j-migration/README.md)                             | Compatibility & feature parity |
+| [Architecture](docs/architecture/README.md)                                   | System design & internals      |
+| [Docker Guide](docker/README.md)                                              | Build & deployment             |
+| [Development](docs/development/README.md)                                     | Contributing & development     |
 
 ## Star History
 
@@ -380,15 +386,15 @@ memory:
 
 ## Comparison
 
-| Platform | Category | Query Language Support (and protocol) | Native Vector Search | Canonical Graph + Temporal Ledger Pattern | Queryable Mutation Log + Receipts | Embedded/Self-Hosted Focus |
-| -------- | -------- | -------------------------------------- | -------------------- | ------------------------------------------ | ------------------------------- | -------------------------- |
-| **NornicDB** | Graph + Vector + Canonical Ledger | **Cypher via Bolt**; also HTTP/GraphQL and gRPC (Qdrant-compatible + NornicSearch) | **Yes** | **Yes** | **Yes** | **Yes** |
-| Neo4j | Graph DB | Cypher via Bolt/HTTP | Yes | Partial (manual modeling) | Partial (logs exist, not first-class receipts model) | Server-first |
-| Memgraph | Graph DB | openCypher via Bolt/HTTP | Partial/varies by setup | Partial (manual) | Partial (manual/integration) | Server-first |
-| TigerGraph | Graph analytics DB | GSQL via REST++/native endpoints | Partial/extension-driven | Partial (manual) | Partial (manual/integration) | Server-first |
-| Qdrant | Vector DB | Qdrant query/filter API via gRPC/REST | Yes | No (not graph-native) | No | Server-first |
-| Weaviate | Vector DB | GraphQL + REST APIs | Yes | Partial (knowledge graph features, not Cypher property graph) | No | Server-first |
-| Amazon QLDB | Ledger DB | PartiQL via AWS API/SDK | No | Partial (ledger + temporal history, not graph-native) | Yes (ledger-native) | Managed service |
+| Platform     | Category                          | Query Language Support (and protocol)                                              | Native Vector Search     | Canonical Graph + Temporal Ledger Pattern                     | Queryable Mutation Log + Receipts                    | Embedded/Self-Hosted Focus |
+| ------------ | --------------------------------- | ---------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------- | ---------------------------------------------------- | -------------------------- |
+| **NornicDB** | Graph + Vector + Canonical Ledger | **Cypher via Bolt**; also HTTP/GraphQL and gRPC (Qdrant-compatible + NornicSearch) | **Yes**                  | **Yes**                                                       | **Yes**                                              | **Yes**                    |
+| Neo4j        | Graph DB                          | Cypher via Bolt/HTTP                                                               | Yes                      | Partial (manual modeling)                                     | Partial (logs exist, not first-class receipts model) | Server-first               |
+| Memgraph     | Graph DB                          | openCypher via Bolt/HTTP                                                           | Partial/varies by setup  | Partial (manual)                                              | Partial (manual/integration)                         | Server-first               |
+| TigerGraph   | Graph analytics DB                | GSQL via REST++/native endpoints                                                   | Partial/extension-driven | Partial (manual)                                              | Partial (manual/integration)                         | Server-first               |
+| Qdrant       | Vector DB                         | Qdrant query/filter API via gRPC/REST                                              | Yes                      | No (not graph-native)                                         | No                                                   | Server-first               |
+| Weaviate     | Vector DB                         | GraphQL + REST APIs                                                                | Yes                      | Partial (knowledge graph features, not Cypher property graph) | No                                                   | Server-first               |
+| Amazon QLDB  | Ledger DB                         | PartiQL via AWS API/SDK                                                            | No                       | Partial (ledger + temporal history, not graph-native)         | Yes (ledger-native)                                  | Managed service            |
 
 > Snapshot is capability-oriented and high-level; exact behavior depends on edition/configuration and workload design.
 
@@ -462,7 +468,7 @@ make cross-all             # All platforms
 - [x] Metadata/Property Indexing
 - [x] SIMD Implementation
 - [x] Clustering support
-- [x] Sharding (Composite DB + Remote Constituents) 
+- [x] Sharding (Composite DB + Remote Constituents)
 
 ### Planned (from `docs/plans`)
 
