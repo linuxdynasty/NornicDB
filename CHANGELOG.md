@@ -9,7 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [1.0.17-preview] - 2026-03-14
+## [1.0.18] - 2026-03-16
+
+### Added
+
+- **Canonical environment variable reference**: Added and expanded the operations environment-variable inventory with runtime-referenced `NORNICDB_*` keys, defaults, and usage notes in `docs/operations/environment-variables.md`.
+- **Operations/user documentation additions**: Added Infinigraph topology user guide and linked operations docs/navigation updates.
+
+### Changed
+
+- **STDIO log growth controls**: Added automatic stdout/stderr compaction limits and scheduling controls in `cmd/nornicdb` with defaults tuned for hourly compaction and KB-based sizing.
+- **Config/docs alignment**: Updated operations configuration docs and resolver coverage to better align documented behavior with runtime config resolution.
+- **README/community metadata refresh**: Updated release badges and repository metadata links.
+
+### Fixed
+
+- **UTF-8 truncation correctness**: Fixed OpenAI Heimdall truncation behavior to avoid returning invalid UTF-8 when truncating near rune boundaries.
+- **Repository path compatibility**: Fixed checked-in path issues affecting cross-platform repository handling (including Windows-unfriendly path forms).
+- **Auto-TLP + memory decay settings persistence**: Fixed settings-save behavior for these configuration paths.
+
+### Tests
+
+- Expanded deterministic coverage in Fabric/Cypher/Server execution paths, including planner/executor/transaction and `USE`/composite branches.
+- Added regression coverage for OpenAI truncation handling and fulltext index behavior.
+- Added CLI log-compaction tests and additional resolver/config test coverage.
+
+### Documentation
+
+- Updated operations docs index and configuration references.
+- Added/updated planning docs for UI enhancements and topology guidance.
+
+### Technical Details
+
+- **Range covered**: `v1.0.17..main`
+- **Commits in range**: 12 (non-merge)
+- **Repository delta**: 41 files changed, +9,255 / -392 lines
+- **Non-test surface changed**: 9 files
+- **Primary focus areas**: env-var documentation, log lifecycle controls, Fabric/Cypher deterministic test expansion, truncation correctness, and release/readme metadata refresh.
+
+## [1.0.17] - 2026-03-14
 
 ### Added
 
@@ -231,9 +269,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Write Forwarding**: Follower nodes in replication deployments automatically forward write requests to the leader, removing the need for clients to route writes explicitly.
 - **macOS File Browser View**: New file browser tab in the macOS menu bar app for browsing and tagging indexed files directly from the UI.
 - **macOS Folder-Level Tag Inheritance**: Tags applied to a folder node propagate automatically as labels to all descendant file nodes.
-- **BM25 Lexical Index Persistence** *(experimental, gated by `NORNICDB_PERSIST_SEARCH_INDEXES`)*: BM25 index is saved to disk alongside the HNSW and vector indexes to eliminate rebuild time on restart.
-- **VectorFileStore** *(experimental)*: File-backed append-only vector storage keeps only an id→offset map in RAM, reducing in-process memory for large embedding corpora. Only the id→offset map (~80 bytes/vector) lives in RAM; all 4 KB vectors are paged from disk on demand.
-- **HNSW & IVF-HNSW Index Persistence** *(experimental)*: Debounced, non-blocking background saves of both HNSW and IVF-HNSW indexes. Configurable via `NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC`.
+- **BM25 Lexical Index Persistence** _(experimental, gated by `NORNICDB_PERSIST_SEARCH_INDEXES`)_: BM25 index is saved to disk alongside the HNSW and vector indexes to eliminate rebuild time on restart.
+- **VectorFileStore** _(experimental)_: File-backed append-only vector storage keeps only an id→offset map in RAM, reducing in-process memory for large embedding corpora. Only the id→offset map (~80 bytes/vector) lives in RAM; all 4 KB vectors are paged from disk on demand.
+- **HNSW & IVF-HNSW Index Persistence** _(experimental)_: Debounced, non-blocking background saves of both HNSW and IVF-HNSW indexes. Configurable via `NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC`.
 - **ANTLR Parser: REDUCE and FOREACH**: ANTLR parser now supports `REDUCE()` accumulator expressions and `FOREACH` iteration clauses.
 - **Orphan Detection Improvement**: Stale vector index entries for deleted nodes are identified and removed during index rebuild, preventing phantom candidates in search results.
 - **`scripts/seed_and_search.py`**: End-to-end benchmark script for seeding a corpus and measuring search latency at scale.
@@ -720,7 +758,6 @@ Docs:
 ### Fixed
 
 - **Critical: Node/Edge Count Returns 0 After Delete+Recreate Cycles** - `MATCH (n) RETURN count(n)` returned 0 even when nodes existed in the database
-
   - Atomic counters (`nodeCount`, `edgeCount`) in `BadgerEngine` became out of sync during delete+recreate cycles
   - Root cause: Nodes created via implicit transactions (MERGE, CREATE) bypass `CreateNode()` and use `UpdateNode()`
   - `UpdateNode()` checks if key exists to determine `wasInsert=true/false`, only incrementing counter when `wasInsert=true`
@@ -777,7 +814,6 @@ Docs:
 ### Fixed
 
 - **Critical: Node/Edge Count Tracking During DETACH DELETE** - Edge counts became incorrect (negative, double-counted, or stale) during `DETACH DELETE` operations
-
   - `deleteEdgesWithPrefix()` was deleting edges but not returning count of edges actually deleted
   - `deleteNodeInTxn()` wasn't tracking edges deleted along with the node
   - `BulkDeleteNodes()` only decremented node count, not edge count for cascade-deleted edges
@@ -789,7 +825,6 @@ Docs:
   - **Impact**: `/admin/stats` and Cypher `count()` queries now remain accurate during bulk delete operations
 
 - **Critical: ORDER BY Ignored for Relationship Patterns** - `ORDER BY`, `SKIP`, and `LIMIT` clauses were completely ignored for queries with relationship patterns
-
   - Queries like `MATCH (p:Person)-[:WORKS_IN]->(a:Area) RETURN p.name ORDER BY p.name` returned unordered results
   - `executeMatchWithRelationships()` was returning immediately without applying post-processing clauses
   - Fixed by capturing result, applying ORDER BY/SKIP/LIMIT, then returning
@@ -797,7 +832,6 @@ Docs:
   - **Impact**: Fixes data integrity issues where clients relied on sorted results
 
 - **Critical: Cartesian Product MATCH Returns Zero Rows** - Comma-separated node patterns returned empty results instead of cartesian product
-
   - `MATCH (p:Person), (a:Area) RETURN p.name, a.code` returned 0 rows (should return N×M combinations)
   - `executeMatch()` only parsed first pattern, ignoring subsequent comma-separated patterns
   - Fixed by detecting multiple patterns via `splitNodePatterns()` and routing to new `executeCartesianProductMatch()`
@@ -806,7 +840,6 @@ Docs:
   - **Impact**: Critical for Northwind-style bulk insert patterns like `MATCH (s), (c) CREATE (p)-[:REL]->(c)`
 
 - **Critical: Cartesian Product CREATE Only Creates One Relationship** - `MATCH` with multiple patterns followed by `CREATE` only created relationships for first match
-
   - `MATCH (p:Person), (a:Area) CREATE (p)-[:WORKS_IN]->(a)` created 1 relationship (should create 3 for 3 persons × 1 area)
   - `executeMatchCreateBlock()` was collecting only first matching node per pattern variable
   - Fixed by collecting ALL matching nodes and iterating through cartesian product combinations
