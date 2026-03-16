@@ -1072,6 +1072,306 @@ func TestConnectionTracker_Concurrent(t *testing.T) {
 	assert.Equal(t, 100, count, "should not exceed connection limit")
 }
 
+// ============================================================================
+// sizeTrackingEngine – CRUD with incremental size tracking
+// ============================================================================
+
+func TestSizeTrackingEngine_CreateNode(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	node := &storage.Node{
+		ID:         storage.NodeID("st-node-1"),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	id, err := store.CreateNode(node)
+	require.NoError(t, err)
+	assert.NotEmpty(t, id)
+
+	got, err := store.GetNode(id)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice", got.Properties["name"])
+}
+
+func TestSizeTrackingEngine_UpdateNode(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	node := &storage.Node{
+		ID:         storage.NodeID("st-upd-1"),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	id, err := store.CreateNode(node)
+	require.NoError(t, err)
+
+	node.ID = id
+	node.Properties["name"] = "Alice Updated"
+	node.Properties["age"] = 30
+	err = store.UpdateNode(node)
+	require.NoError(t, err)
+
+	got, err := store.GetNode(id)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Updated", got.Properties["name"])
+	assert.Equal(t, 30, got.Properties["age"])
+}
+
+func TestSizeTrackingEngine_DeleteNode(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	node := &storage.Node{
+		ID:         storage.NodeID("st-del-1"),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	id, err := store.CreateNode(node)
+	require.NoError(t, err)
+
+	err = store.DeleteNode(id)
+	require.NoError(t, err)
+
+	_, err = store.GetNode(id)
+	assert.Error(t, err)
+}
+
+func TestSizeTrackingEngine_CreateEdge(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-ce-a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-ce-b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	edge := &storage.Edge{
+		ID:         storage.EdgeID("st-edge-1"),
+		StartNode:  idA,
+		EndNode:    idB,
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{"since": 2020},
+	}
+	err = store.CreateEdge(edge)
+	require.NoError(t, err)
+}
+
+func TestSizeTrackingEngine_UpdateEdge(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-ue-a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-ue-b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	edge := &storage.Edge{
+		ID:         storage.EdgeID("st-ue-edge-1"),
+		StartNode:  idA,
+		EndNode:    idB,
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{"since": 2020},
+	}
+	err = store.CreateEdge(edge)
+	require.NoError(t, err)
+
+	outgoing, err := store.GetOutgoingEdges(idA)
+	require.NoError(t, err)
+	require.NotEmpty(t, outgoing)
+
+	outgoing[0].Properties["since"] = 2021
+	err = store.UpdateEdge(outgoing[0])
+	require.NoError(t, err)
+}
+
+func TestSizeTrackingEngine_DeleteEdge(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-de-a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-de-b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	edge := &storage.Edge{ID: "st-de-edge-1", StartNode: idA, EndNode: idB, Type: "KNOWS"}
+	err = store.CreateEdge(edge)
+	require.NoError(t, err)
+
+	outgoing, err := store.GetOutgoingEdges(idA)
+	require.NoError(t, err)
+	require.NotEmpty(t, outgoing)
+
+	err = store.DeleteEdge(outgoing[0].ID)
+	require.NoError(t, err)
+
+	outgoing, err = store.GetOutgoingEdges(idA)
+	require.NoError(t, err)
+	assert.Empty(t, outgoing)
+}
+
+func TestSizeTrackingEngine_BulkCreateNodes(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	nodes := []*storage.Node{
+		{ID: "st-bulk-n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}},
+		{ID: "st-bulk-n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}},
+		{ID: "st-bulk-n3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Carol"}},
+	}
+	err = store.BulkCreateNodes(nodes)
+	require.NoError(t, err)
+
+	allNodes, err := store.AllNodes()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(allNodes), 3)
+}
+
+func TestSizeTrackingEngine_BulkCreateEdges(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-bce-a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-bce-b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idC, err := store.CreateNode(&storage.Node{ID: "st-bce-c", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	edges := []*storage.Edge{
+		{ID: "st-bce-e1", StartNode: idA, EndNode: idB, Type: "KNOWS"},
+		{ID: "st-bce-e2", StartNode: idB, EndNode: idC, Type: "KNOWS"},
+	}
+	err = store.BulkCreateEdges(edges)
+	require.NoError(t, err)
+}
+
+func TestSizeTrackingEngine_BulkDeleteNodes(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	id1, err := store.CreateNode(&storage.Node{ID: "st-bdn-1", Labels: []string{"Temp"}})
+	require.NoError(t, err)
+	id2, err := store.CreateNode(&storage.Node{ID: "st-bdn-2", Labels: []string{"Temp"}})
+	require.NoError(t, err)
+
+	err = store.BulkDeleteNodes([]storage.NodeID{id1, id2})
+	require.NoError(t, err)
+
+	_, err = store.GetNode(id1)
+	assert.Error(t, err)
+	_, err = store.GetNode(id2)
+	assert.Error(t, err)
+}
+
+func TestSizeTrackingEngine_BulkDeleteEdges(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-bde-a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-bde-b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	err = store.CreateEdge(&storage.Edge{ID: "st-bde-e1", StartNode: idA, EndNode: idB, Type: "KNOWS"})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "st-bde-e2", StartNode: idB, EndNode: idA, Type: "LIKES"})
+	require.NoError(t, err)
+
+	outgoing, err := store.GetOutgoingEdges(idA)
+	require.NoError(t, err)
+	incoming, err := store.GetIncomingEdges(idA)
+	require.NoError(t, err)
+
+	var edgeIDs []storage.EdgeID
+	for _, e := range outgoing {
+		edgeIDs = append(edgeIDs, e.ID)
+	}
+	for _, e := range incoming {
+		edgeIDs = append(edgeIDs, e.ID)
+	}
+
+	err = store.BulkDeleteEdges(edgeIDs)
+	require.NoError(t, err)
+}
+
+func TestSizeTrackingEngine_DeleteNodeWithEdges(t *testing.T) {
+	// Deleting a node should account for connected edge bytes in the size delta
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	idA, err := store.CreateNode(&storage.Node{ID: "st-dne-a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+	idB, err := store.CreateNode(&storage.Node{ID: "st-dne-b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
+	require.NoError(t, err)
+
+	err = store.CreateEdge(&storage.Edge{ID: "st-dne-e1", StartNode: idA, EndNode: idB, Type: "KNOWS", Properties: map[string]interface{}{"since": 2020}})
+	require.NoError(t, err)
+
+	err = store.DeleteNode(idA)
+	require.NoError(t, err)
+
+	_, err = store.GetNode(idA)
+	assert.Error(t, err)
+}
+
+func TestSizeTrackingEngine_GetInnerEngine(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	if ste, ok := store.(*sizeTrackingEngine); ok {
+		inner := ste.GetInnerEngine()
+		assert.NotNil(t, inner)
+	}
+}
+
+// ============================================================================
+// calculateCurrentStorageSize
+// ============================================================================
+
+func TestCalculateCurrentStorageSize(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	id1, err := store.CreateNode(&storage.Node{ID: "css-1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+	id2, err := store.CreateNode(&storage.Node{ID: "css-2", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "css-e1", StartNode: id1, EndNode: id2, Type: "KNOWS"})
+	require.NoError(t, err)
+
+	checker := &databaseLimitChecker{}
+	nodeSize, edgeSize, calcErr := checker.calculateCurrentStorageSize(store)
+	require.NoError(t, calcErr)
+	assert.Greater(t, nodeSize, int64(0), "node size must be > 0")
+	assert.Greater(t, edgeSize, int64(0), "edge size must be > 0")
+}
+
+func TestCalculateCurrentStorageSize_Empty(t *testing.T) {
+	manager, dbName := setupTestManager(t)
+	store, err := manager.GetStorage(dbName)
+	require.NoError(t, err)
+
+	checker := &databaseLimitChecker{}
+	nodeSize, edgeSize, calcErr := checker.calculateCurrentStorageSize(store)
+	require.NoError(t, calcErr)
+	assert.Equal(t, int64(0), nodeSize)
+	assert.Equal(t, int64(0), edgeSize)
+}
+
 func TestConnectionTracker_CheckConnectionLimit_AfterDecrement(t *testing.T) {
 	limits := &Limits{
 		Connection: ConnectionLimits{

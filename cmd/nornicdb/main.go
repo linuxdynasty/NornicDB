@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -108,6 +109,8 @@ Features:
 	serveCmd.Flags().String("query-cache-ttl", "5m", "Query plan cache TTL")
 	// Logging flags
 	serveCmd.Flags().Bool("log-queries", getEnvBool("NORNICDB_LOG_QUERIES", false), "Log all Bolt queries to stdout (for debugging)")
+	serveCmd.Flags().Int("stdio-log-max-kb", getEnvInt("NORNICDB_STDIO_LOG_MAX_KB", 20480), "Max size of stdout/stderr log files in KB before automatic truncation (0 disables)")
+	serveCmd.Flags().Int("stdio-log-compact-seconds", getEnvInt("NORNICDB_STDIO_LOG_COMPACT_SECONDS", 3600), "Interval in seconds for automatic stdout/stderr log size checks")
 	// Headless mode
 	serveCmd.Flags().Bool("headless", getEnvBool("NORNICDB_HEADLESS", false), "Disable web UI and browser-related endpoints")
 	// Base path for reverse proxy deployment
@@ -219,6 +222,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	queryCacheSize, _ := cmd.Flags().GetInt("query-cache-size")
 	queryCacheTTL, _ := cmd.Flags().GetString("query-cache-ttl")
 	logQueries, _ := cmd.Flags().GetBool("log-queries")
+	stdioLogMaxKB, _ := cmd.Flags().GetInt("stdio-log-max-kb")
+	stdioLogCompactSeconds, _ := cmd.Flags().GetInt("stdio-log-compact-seconds")
 	headless, _ := cmd.Flags().GetBool("headless")
 	basePath, _ := cmd.Flags().GetString("base-path")
 	// enablePprof, _ := cmd.Flags().GetBool("enable-pprof") // Commented out - can be enabled for profiling
@@ -255,6 +260,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	setEnvIfChanged("cluster-ha-peer-addr", "NORNICDB_CLUSTER_HA_PEER_ADDR", clusterHAPeerAddr)
 	setEnvIfChangedBool("cluster-raft-bootstrap", "NORNICDB_CLUSTER_RAFT_BOOTSTRAP", clusterRaftBootstrap)
 	setEnvIfChanged("cluster-raft-peers", "NORNICDB_CLUSTER_RAFT_PEERS", clusterRaftPeers)
+
+	if stdioLogCompactSeconds < 0 {
+		return fmt.Errorf("invalid stdio-log-compact-seconds %d: must be >= 0", stdioLogCompactSeconds)
+	}
+	stopStdioCompactor := startStdioLogCompactor(stdioLogMaxKB, time.Duration(stdioLogCompactSeconds)*time.Second)
+	defer stopStdioCompactor()
 
 	// Apply memory configuration FIRST (before heavy allocations)
 	// First, try to load from config file, then fall back to environment variables
@@ -687,6 +698,66 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("✅ Server stopped gracefully")
 	return nil
+}
+
+func startStdioLogCompactor(maxKB int, interval time.Duration) func() {
+	if maxKB <= 0 {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	maxBytes := int64(maxKB) * 1024
+
+	compact := func() {
+		compactStreamIfOversized("stdout", os.Stdout, maxBytes)
+		compactStreamIfOversized("stderr", os.Stderr, maxBytes)
+	}
+
+	// Automatic startup pass handles existing oversized log files.
+	compact()
+
+	stopCh := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				compact()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+
+	return func() { close(stopCh) }
+}
+
+func compactStreamIfOversized(name string, stream *os.File, maxBytes int64) {
+	if stream == nil {
+		return
+	}
+	info, err := stream.Stat()
+	if err != nil {
+		return
+	}
+	// Only manage file-backed streams (for example launchd StandardOutPath/StandardErrorPath).
+	if !info.Mode().IsRegular() || info.Size() <= maxBytes {
+		return
+	}
+
+	prevSize := info.Size()
+	if err := stream.Truncate(0); err != nil {
+		log.Printf("⚠️ stdio log compaction failed for %s: truncate: %v", name, err)
+		return
+	}
+	// Keep writes in the truncated file instead of previous offset.
+	if _, err := stream.Seek(0, io.SeekStart); err != nil {
+		log.Printf("⚠️ stdio log compaction for %s truncated but seek failed: %v", name, err)
+		return
+	}
+	log.Printf("🧹 compacted %s stream log from %d bytes to 0 bytes (limit=%d bytes)", name, prevSize, maxBytes)
 }
 
 // DBQueryExecutor adapts nornicdb.DB to bolt.QueryExecutor interface.

@@ -1772,3 +1772,616 @@ func TestANTLRExpressionEvaluator_ArithmeticAndConversionEdges(t *testing.T) {
 		t.Fatal("toNumericOk(int) should succeed")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – standalone CALL routing and db-procedure classification
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_StandaloneCallDbProc(t *testing.T) {
+	// Per openCypher/Neo4j: standalone CALL db.labels() is a read-only
+	// metadata procedure invocation.
+	analyzer := NewQueryAnalyzer()
+	query := "CALL db.labels()"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasCall {
+		t.Fatal("standalone CALL must set HasCall")
+	}
+	if info.FirstClause != ClauseCall {
+		t.Fatalf("FirstClause = %v, want ClauseCall", info.FirstClause)
+	}
+	if !info.CallIsDbProcedure {
+		t.Fatal("CALL db.labels() must set CallIsDbProcedure")
+	}
+	if !info.IsReadOnly {
+		t.Fatal("CALL db.labels() must be read-only per Neo4j semantics")
+	}
+	if info.IsWriteQuery {
+		t.Fatal("CALL db.labels() must not be a write query")
+	}
+}
+
+func TestANTLRQueryAnalyzer_StandaloneCallNonDbProc(t *testing.T) {
+	// Non-db.* procedures are not guaranteed read-only and must not be cached.
+	analyzer := NewQueryAnalyzer()
+	query := "CALL apoc.help('match')"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasCall {
+		t.Fatal("standalone CALL must set HasCall")
+	}
+	if info.CallIsDbProcedure {
+		t.Fatal("apoc.help is not a db.* procedure")
+	}
+	if info.IsReadOnly {
+		t.Fatal("standalone CALL to non-db.* procedure must not be read-only")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – PROFILE prefix (distinct from EXPLAIN)
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_ProfilePrefix(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	query := "PROFILE MATCH (n:Person) RETURN n"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasProfile {
+		t.Fatal("PROFILE prefix must set HasProfile")
+	}
+	if info.HasExplain {
+		t.Fatal("PROFILE prefix must not set HasExplain")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – OPTIONAL MATCH first-clause routing
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_OptionalMatchAsFirstClause(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	query := "OPTIONAL MATCH (n:Person)-[:KNOWS]->(m) RETURN n, m"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasOptionalMatch {
+		t.Fatal("OPTIONAL MATCH must set HasOptionalMatch")
+	}
+	if info.FirstClause != ClauseOptionalMatch {
+		t.Fatalf("FirstClause = %v, want ClauseOptionalMatch", info.FirstClause)
+	}
+	if !info.IsReadOnly {
+		t.Fatal("OPTIONAL MATCH + RETURN is read-only")
+	}
+}
+
+func TestANTLRQueryAnalyzer_OptionalMatchFollowedByMatch(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	query := "OPTIONAL MATCH (n:Person) WITH n MATCH (n)-[:KNOWS]->(m) RETURN m"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasOptionalMatch {
+		t.Fatal("expected HasOptionalMatch")
+	}
+	if !info.HasMatch {
+		t.Fatal("expected HasMatch for the regular MATCH clause")
+	}
+	if info.FirstClause != ClauseOptionalMatch {
+		t.Fatalf("FirstClause = %v, want ClauseOptionalMatch", info.FirstClause)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – multiple MERGE compound detection
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_MultipleMerge(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	query := "MERGE (a:Person {id: 1}) MERGE (b:Person {id: 2}) MERGE (a)-[:KNOWS]->(b)"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if info.MergeCount != 3 {
+		t.Fatalf("MergeCount = %d, want 3", info.MergeCount)
+	}
+	if !info.IsCompoundQuery {
+		t.Fatal("multiple MERGEs must set IsCompoundQuery")
+	}
+	if !info.IsWriteQuery {
+		t.Fatal("MERGE is a write query")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – nil/empty parse result defensive paths
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_NilParseResult(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	info := analyzer.Analyze("RETURN 1", nil)
+	if info.IsWriteQuery || info.IsReadOnly || info.IsSchemaQuery {
+		t.Fatal("nil parse result should leave all flags false")
+	}
+	// Must return cached value on second call
+	if analyzer.Analyze("RETURN 1", nil) != info {
+		t.Fatal("analyzer must cache by query string")
+	}
+}
+
+func TestANTLRQueryAnalyzer_NilTree(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	info := analyzer.Analyze("RETURN 1", &ParseResult{Tree: nil})
+	if info.IsWriteQuery || info.IsReadOnly || info.IsSchemaQuery {
+		t.Fatal("nil tree should leave all flags false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer – CREATE CONSTRAINT schema routing
+// ---------------------------------------------------------------------------
+
+func TestANTLRQueryAnalyzer_CreateConstraint(t *testing.T) {
+	analyzer := NewQueryAnalyzer()
+	query := "CREATE CONSTRAINT person_id IF NOT EXISTS FOR (n:Person) REQUIRE n.id IS UNIQUE"
+	info := analyzer.Analyze(query, parseScriptForTest(t, query))
+
+	if !info.HasSchema || !info.IsSchemaQuery {
+		t.Fatal("CREATE CONSTRAINT must be a schema query")
+	}
+	if info.FirstClause != ClauseCreate {
+		t.Fatalf("FirstClause = %v, want ClauseCreate", info.FirstClause)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// convertToType – numeric conversion branches
+// ---------------------------------------------------------------------------
+
+func TestConvertToType_Branches(t *testing.T) {
+	tests := []struct {
+		name   string
+		val    interface{}
+		target reflect.Type
+		want   interface{}
+	}{
+		{"int→float64", int(7), reflect.TypeOf(float64(0)), float64(7)},
+		{"float32→float64", float32(2.5), reflect.TypeOf(float64(0)), float64(2.5)},
+		{"int→int64", int(9), reflect.TypeOf(int64(0)), int64(9)},
+		{"float64→int", float64(3.7), reflect.TypeOf(int(0)), int(3)},
+		{"int64→int", int64(42), reflect.TypeOf(int(0)), int(42)},
+		{"int→int (identity)", int(5), reflect.TypeOf(int(0)), int(5)},
+		{"unconvertible→zero", []int{1, 2}, reflect.TypeOf(""), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertToType(tt.val, tt.target).Interface()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("convertToType(%T, %v) = %#v, want %#v", tt.val, tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// findAtomInExpression – path coverage
+// ---------------------------------------------------------------------------
+
+func TestFindAtomInExpression(t *testing.T) {
+	t.Run("simple variable", func(t *testing.T) {
+		atom := findAtomInExpression(parseExpressionForTest(t, "n"))
+		if atom == nil || atom.Symbol() == nil || atom.Symbol().GetText() != "n" {
+			t.Fatal("should find atom 'n' in simple variable expression")
+		}
+	})
+
+	t.Run("nil expression", func(t *testing.T) {
+		if findAtomInExpression(nil) != nil {
+			t.Fatal("nil expression must return nil")
+		}
+	})
+
+	t.Run("compound OR expression", func(t *testing.T) {
+		// Multiple XorExpression children → early return nil
+		if findAtomInExpression(parseExpressionForTest(t, "a OR b")) != nil {
+			t.Fatal("compound expression must return nil")
+		}
+	})
+
+	t.Run("arithmetic expression", func(t *testing.T) {
+		// "1 + 2" has multiple AddSub children → early nil
+		if findAtomInExpression(parseExpressionForTest(t, "1 + 2")) != nil {
+			t.Fatal("arithmetic expression must return nil")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateWhere – OR branch evaluation per openCypher
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_OrBranches(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	e.SetRow(map[string]interface{}{
+		"n": map[string]interface{}{"age": int64(10), "city": "LA"},
+	})
+
+	t.Run("all OR branches false", func(t *testing.T) {
+		expr := parseExpressionForTest(t, "n.age > 100 OR n.city = 'NYC'")
+		if e.EvaluateWhere(expr) {
+			t.Fatal("both OR branches false → EvaluateWhere must return false")
+		}
+	})
+
+	t.Run("second OR branch true", func(t *testing.T) {
+		e.SetRow(map[string]interface{}{
+			"n": map[string]interface{}{"age": int64(10), "city": "NYC"},
+		})
+		expr := parseExpressionForTest(t, "n.age > 100 OR n.city = 'NYC'")
+		if !e.EvaluateWhere(expr) {
+			t.Fatal("second OR branch true → EvaluateWhere must return true")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateWhere – XOR chaining per openCypher
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_XorChained(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	e.SetRow(map[string]interface{}{
+		"a": true, "b": false, "c": true,
+	})
+	// openCypher: true XOR false XOR true = (true XOR false) XOR true = true XOR true = false
+	expr := parseExpressionForTest(t, "a XOR b XOR c")
+	if e.EvaluateWhere(expr) {
+		t.Fatal("true XOR false XOR true = false per openCypher")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Comparison operators – <= >= <> per openCypher
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_ComparisonOperators(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	tests := []struct {
+		expr string
+		want bool
+	}{
+		{"1 <= 1", true},
+		{"1 <= 2", true},
+		{"2 <= 1", false},
+		{"2 >= 1", true},
+		{"1 >= 1", true},
+		{"1 >= 2", false},
+		{"1 <> 2", true},
+		{"1 <> 1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.expr, func(t *testing.T) {
+			if got := e.EvaluateWhere(parseExpressionForTest(t, tt.expr)); got != tt.want {
+				t.Fatalf("%s = %v, want %v per openCypher", tt.expr, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// String predicates – false cases per openCypher
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_StringPredicateFalsePaths(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	tests := []struct {
+		name string
+		row  map[string]interface{}
+		expr string
+	}{
+		{"STARTS WITH false", map[string]interface{}{"n": map[string]interface{}{"name": "Bob"}}, "n.name STARTS WITH 'Al'"},
+		{"ENDS WITH false", map[string]interface{}{"n": map[string]interface{}{"name": "Alice"}}, "n.name ENDS WITH 'ob'"},
+		{"CONTAINS false", map[string]interface{}{"n": map[string]interface{}{"name": "Alice"}}, "n.name CONTAINS 'xyz'"},
+		{"IN false", map[string]interface{}{"n": map[string]interface{}{"city": "Chicago"}}, "n.city IN ['NYC', 'LA', 'SF']"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e.SetRow(tt.row)
+			if e.EvaluateWhere(parseExpressionForTest(t, tt.expr)) {
+				t.Fatalf("%s must be false per openCypher", tt.expr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Numeric helpers – uncovered type branches
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_NumericHelperEdges(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	// toInt64
+	if e.toInt64(int(99)) != 99 {
+		t.Fatal("toInt64(int) should convert")
+	}
+	if e.toInt64(true) != 0 {
+		t.Fatal("toInt64(bool) should return 0")
+	}
+
+	// toBool
+	if e.toBool(int64(0)) {
+		t.Fatal("toBool(int64(0)) must be false per Neo4j")
+	}
+	if e.toBool(float64(0)) {
+		t.Fatal("toBool(float64(0)) must be false per Neo4j")
+	}
+	if e.toBool("FALSE") {
+		t.Fatal("toBool('FALSE') must be false (case-insensitive)")
+	}
+
+	// toFloat64
+	if e.toFloat64("3.14") != 3.14 {
+		t.Fatal("toFloat64 should parse valid numeric string")
+	}
+	if e.toFloat64("abc") != 0 {
+		t.Fatal("toFloat64 of non-numeric string should return 0")
+	}
+	if e.toFloat64(int(7)) != 7.0 {
+		t.Fatal("toFloat64(int) should convert")
+	}
+	if e.toFloat64(nil) != 0 {
+		t.Fatal("toFloat64(nil) should return 0")
+	}
+
+	// compareValues
+	if e.compareValues("abc", "abc") != 0 {
+		t.Fatal("compareValues equal strings must return 0")
+	}
+	if e.compareValues("a", "b") >= 0 {
+		t.Fatal("compareValues 'a' < 'b'")
+	}
+
+	// isTruthy – lists and maps fall through to return true
+	if !e.isTruthy([]interface{}{}) {
+		t.Fatal("empty list falls through to truthy in current implementation")
+	}
+	if !e.isTruthy(map[string]interface{}{"a": 1}) {
+		t.Fatal("non-empty map is truthy")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Power expression evaluation – evaluatePower only evaluates first operand
+// (exponentiation not yet implemented; this covers the len(unarys)==0 guard)
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_PowerExpression(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	// evaluatePower currently returns the first operand only
+	got := e.Evaluate(parseExpressionForTest(t, "2 ^ 3"))
+	if got != int64(2) {
+		t.Fatalf("2 ^ 3 (power not implemented) should return first operand 2, got %#v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Builtin function edge cases
+// ---------------------------------------------------------------------------
+
+func TestANTLRExpressionEvaluator_BuiltinFunctionEdges(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+
+	t.Run("range default step", func(t *testing.T) {
+		got := e.Evaluate(parseExpressionForTest(t, "range(1, 5)"))
+		want := []interface{}{int64(1), int64(2), int64(3), int64(4), int64(5)}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("range(1,5) = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("substring no length", func(t *testing.T) {
+		got := e.Evaluate(parseExpressionForTest(t, "substring('abcdef', 3)"))
+		if got != "def" {
+			t.Fatalf("substring('abcdef', 3) = %#v, want 'def'", got)
+		}
+	})
+
+	t.Run("head empty list returns nil", func(t *testing.T) {
+		if got := e.evaluateBuiltInFunction("head", []interface{}{[]interface{}{}}); got != nil {
+			t.Fatalf("head([]) must return nil per Neo4j, got %#v", got)
+		}
+	})
+
+	t.Run("last empty list returns nil", func(t *testing.T) {
+		if got := e.evaluateBuiltInFunction("last", []interface{}{[]interface{}{}}); got != nil {
+			t.Fatalf("last([]) must return nil per Neo4j, got %#v", got)
+		}
+	})
+
+	t.Run("tail empty list returns nil", func(t *testing.T) {
+		// Implementation returns nil when list has <2 elements
+		if got := e.evaluateBuiltInFunction("tail", []interface{}{[]interface{}{}}); got != nil {
+			t.Fatalf("tail([]) = %#v, want nil", got)
+		}
+	})
+
+	t.Run("coalesce all nil returns nil", func(t *testing.T) {
+		if got := e.evaluateBuiltInFunction("coalesce", []interface{}{nil, nil}); got != nil {
+			t.Fatalf("coalesce(null, null) must return nil per Neo4j, got %#v", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// ExtractProjectionItem – non-aggregation, alias fallback
+// ---------------------------------------------------------------------------
+
+func TestANTLRExtractProjectionItem_NonAggregation(t *testing.T) {
+	proj := ExtractProjectionItem(parseProjectionItemForTest(t, "n.name AS personName"))
+	if proj.IsAggregation {
+		t.Fatal("n.name is not an aggregation")
+	}
+	if proj.Alias != "personName" {
+		t.Fatalf("Alias = %q, want 'personName'", proj.Alias)
+	}
+}
+
+func TestANTLRExtractProjectionItem_NoExplicitAlias(t *testing.T) {
+	// When no AS alias is given, the expression text is used as alias
+	proj := ExtractProjectionItem(parseProjectionItemForTest(t, "n.name"))
+	if proj.Alias != "n.name" {
+		t.Fatalf("Alias = %q, want 'n.name' (expression text fallback)", proj.Alias)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ExtractProcedureName – namespace extraction
+// ---------------------------------------------------------------------------
+
+func TestANTLRExtractProcedureName_NestedNamespace(t *testing.T) {
+	proc := ExtractProcedureName(parseInvocationNameForTest(t, "apoc.coll.sum"))
+	if proc.Name != "apoc.coll.sum" {
+		t.Fatalf("Name = %q, want 'apoc.coll.sum'", proc.Name)
+	}
+	// Namespace is only set for db.* procedures
+	if proc.IsDbProc {
+		t.Fatal("apoc.coll.sum is not a db.* procedure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ExtractRelationshipPattern – direction semantics
+// ---------------------------------------------------------------------------
+
+func TestANTLRExtractRelationshipPattern_ForwardWithProps(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	rel := ExtractRelationshipPattern(parseRelationshipPatternForTest(t, "-[r:LIKES {weight: 0.5}]->"), e)
+	if !rel.IsForward {
+		t.Fatal("forward pattern (-[]->) must be IsForward")
+	}
+	if rel.Type != "LIKES" {
+		t.Fatalf("Type = %q, want 'LIKES'", rel.Type)
+	}
+	if rel.Properties["weight"] != float64(0.5) {
+		t.Fatalf("weight = %v, want 0.5", rel.Properties["weight"])
+	}
+}
+
+func TestANTLRExtractRelationshipPattern_Undirected(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	// Undirected -[r:KNOWS]- has no < token, so IsForward defaults to true
+	rel := ExtractRelationshipPattern(parseRelationshipPatternForTest(t, "-[r:KNOWS]-"), e)
+	if !rel.IsForward {
+		t.Fatal("undirected pattern defaults to IsForward=true in implementation")
+	}
+	if rel.Type != "KNOWS" {
+		t.Fatalf("Type = %q, want 'KNOWS'", rel.Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ExtractNodePattern – bare variable
+// ---------------------------------------------------------------------------
+
+func TestANTLRExtractNodePattern_VariableOnly(t *testing.T) {
+	e := NewExpressionEvaluator(nil, nil)
+	node := ExtractNodePattern(parseNodePatternForTest(t, "(n)"), e)
+	if node.Variable != "n" {
+		t.Fatalf("Variable = %q, want 'n'", node.Variable)
+	}
+	if len(node.Labels) != 0 {
+		t.Fatalf("expected no labels, got %v", node.Labels)
+	}
+	if len(node.Properties) != 0 {
+		t.Fatalf("expected no properties, got %v", node.Properties)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// collectVariablesFromTree – deeper expression structures
+// ---------------------------------------------------------------------------
+
+func TestANTLRCollectVariablesFromTree_Nested(t *testing.T) {
+	chainVars := ExtractVariablesFromExpressionChain(parseExpressionChainForTest(t, "count(a), sum(b)"))
+	sort.Strings(chainVars)
+	if !reflect.DeepEqual(chainVars, []string{"a", "b"}) {
+		t.Fatalf("got %v, want [a b]", chainVars)
+	}
+}
+
+func TestANTLRCollectVariablesFromTree_StringExpression(t *testing.T) {
+	chainVars := ExtractVariablesFromExpressionChain(parseExpressionChainForTest(t, "n.name STARTS WITH prefix"))
+	if len(chainVars) < 2 {
+		t.Fatalf("expected at least variables n and prefix, got %v", chainVars)
+	}
+}
+
+func TestANTLRCollectVariablesFromTree_Nil(t *testing.T) {
+	if ExtractVariablesFromExpressionChain(nil) != nil {
+		t.Fatal("nil chain must return nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Validate – SLL→LL fallback and error paths
+// ---------------------------------------------------------------------------
+
+func TestANTLRValidate_ComplexQuery(t *testing.T) {
+	query := "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age > 21 AND EXISTS { MATCH (b)-[:WORKS_AT]->(c:Company) WHERE c.name = 'CVS' } RETURN a, b"
+	if err := Validate(query); err != nil {
+		t.Fatalf("valid complex query must pass: %v", err)
+	}
+}
+
+func TestANTLRValidate_RejectsGarbage(t *testing.T) {
+	if err := Validate("!!!! not cypher at all !!!!"); err == nil {
+		t.Fatal("garbage input must be rejected")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Parse – error reporting
+// ---------------------------------------------------------------------------
+
+func TestANTLRParse_ErrorIncludesDetails(t *testing.T) {
+	_, err := Parse("MATCH (n RETURN")
+	if err == nil {
+		t.Fatal("malformed query must return error")
+	}
+	if len(err.Error()) == 0 {
+		t.Fatal("error string should not be empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// asciiCharStream – edge cases
+// ---------------------------------------------------------------------------
+
+func TestANTLRASCIICharStream_Edges(t *testing.T) {
+	t.Run("GetText stop before start", func(t *testing.T) {
+		s := newASCIICharStream("MATCH")
+		if got := s.GetText(3, 1); got != "" {
+			t.Fatalf("GetText(3,1) = %q, want empty", got)
+		}
+	})
+
+	t.Run("LA past end is EOF", func(t *testing.T) {
+		s := newASCIICharStream("M")
+		if s.LA(2) != -1 {
+			t.Fatalf("LA(2) on 1-char stream = %d, want TokenEOF(-1)", s.LA(2))
+		}
+	})
+
+	t.Run("LA negative offsets", func(t *testing.T) {
+		s := newASCIICharStream("ABC")
+		s.Consume()
+		s.Consume()
+		if s.LA(-1) != int('B') {
+			t.Fatalf("LA(-1) from pos 2 = %d, want 'B'", s.LA(-1))
+		}
+		if s.LA(-2) != int('A') {
+			t.Fatalf("LA(-2) from pos 2 = %d, want 'A'", s.LA(-2))
+		}
+	})
+}
