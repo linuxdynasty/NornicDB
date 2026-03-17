@@ -1012,6 +1012,51 @@ func TestSearchService_BuildIndexes_ForcedRebuildOnSettingsMismatch(t *testing.T
 	require.NotEqual(t, "old-strategy-fingerprint", gotSettings.Strategy)
 }
 
+func TestSearchService_BuildIndexes_DoesNotReuseDiskIndexesWhenStorageEmpty(t *testing.T) {
+	root := storage.NewMemoryEngine()
+	t.Cleanup(func() { root.Close() })
+	base := storage.NewNamespacedEngine(root, "test")
+	_, err := base.CreateNode(&storage.Node{
+		ID:              "stale-1",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0}},
+		Properties:      map[string]any{"content": "stale"},
+	})
+	require.NoError(t, err)
+
+	tmp := t.TempDir()
+	bm25Path := filepath.Join(tmp, "bm25")
+	vectorPath := filepath.Join(tmp, "vectors")
+	hnswPath := filepath.Join(tmp, "hnsw.idx")
+
+	// Seed persisted artifacts from non-empty storage.
+	svc1 := NewServiceWithDimensions(base, 3)
+	svc1.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc1.SetPersistenceEnabled(false) })
+	svc1.SetFulltextIndexPath(bm25Path)
+	svc1.SetVectorIndexPath(vectorPath)
+	svc1.SetHNSWIndexPath(hnswPath)
+	require.NoError(t, svc1.BuildIndexes(context.Background()))
+	require.GreaterOrEqual(t, svc1.EmbeddingCount(), 1)
+
+	// Drop all storage data, leaving only persisted on-disk indexes.
+	nodesDeleted, edgesDeleted, err := root.DeleteByPrefix("test:")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, nodesDeleted, int64(1))
+	require.Equal(t, int64(0), edgesDeleted)
+
+	// Rebuild should detect empty storage and clear stale on-disk index state.
+	svc2 := NewServiceWithDimensions(base, 3)
+	svc2.SetPersistenceEnabled(true)
+	t.Cleanup(func() { svc2.SetPersistenceEnabled(false) })
+	svc2.SetFulltextIndexPath(bm25Path)
+	svc2.SetVectorIndexPath(vectorPath)
+	svc2.SetHNSWIndexPath(hnswPath)
+	require.NoError(t, svc2.BuildIndexes(context.Background()))
+	require.Equal(t, 0, svc2.EmbeddingCount())
+	require.Equal(t, 0, svc2.fulltextIndex.Count())
+}
+
 func TestSearchService_BuildIndexes_RestartsVectorStoreWhenStorageIsNewer(t *testing.T) {
 	base := storage.NewNamespacedEngine(newNamespacedEngine(t), "test")
 	_, err := base.CreateNode(&storage.Node{

@@ -2308,8 +2308,12 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		vectorPath = ""
 		hnswPath = ""
 	}
-	if n, err := s.engine.NodeCount(); err == nil && n > 0 {
-		s.buildTotalNodes.Store(n)
+	var storageNodeCount int64
+	if n, err := s.engine.NodeCount(); err == nil {
+		storageNodeCount = n
+		if n > 0 {
+			s.buildTotalNodes.Store(n)
+		}
 	}
 
 	skipIteration := false
@@ -2408,6 +2412,30 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	// When both paths are set and both indexes have content, skip the full iteration.
 	vectorCount := s.EmbeddingCount()
+	if storageNodeCount == 0 && (s.fulltextIndex.Count() > 0 || vectorCount > 0) {
+		log.Printf("📇 BuildIndexes: storage is empty but on-disk indexes are non-empty; clearing stale search artifacts")
+		s.fulltextIndex.Clear()
+		vectorCount = 0
+		restartVectorStore = true
+		forceHNSWRebuild = true
+		forceRoutingRebuild = true
+		forceStrategyRebuild = true
+		s.mu.Lock()
+		if s.vectorFileStore != nil {
+			_ = s.vectorFileStore.Close()
+			s.vectorFileStore = nil
+		}
+		s.mu.Unlock()
+		if s.vectorIndex != nil {
+			s.vectorIndex.Clear()
+		}
+		s.hnswMu.Lock()
+		if s.hnswIndex != nil {
+			s.hnswIndex.Clear()
+			s.hnswIndex = nil
+		}
+		s.hnswMu.Unlock()
+	}
 	if fulltextPath != "" && vectorPath != "" && s.fulltextIndex.Count() > 0 && vectorCount > 0 {
 		skipIteration = true
 		log.Printf("📇 Search indexes loaded from disk (BM25: %d docs, vector: %d); skipping node-iteration rebuild",

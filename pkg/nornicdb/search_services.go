@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -318,8 +319,26 @@ func (db *DB) ResetSearchService(dbName string) {
 		dbName = db.defaultDatabaseName()
 	}
 	db.searchServicesMu.Lock()
+	if entry, ok := db.searchServices[dbName]; ok && entry != nil && entry.svc != nil {
+		// Stop pending persist timers and close file-backed vector store
+		// so removed databases cannot later re-persist stale index state.
+		entry.svc.SetPersistenceEnabled(false)
+	}
 	delete(db.searchServices, dbName)
 	db.searchServicesMu.Unlock()
+}
+
+// DropSearchServiceState removes cached search service state and best-effort purges
+// on-disk persisted index artifacts for the database.
+func (db *DB) DropSearchServiceState(dbName string) {
+	if dbName == "" {
+		dbName = db.defaultDatabaseName()
+	}
+	db.ResetSearchService(dbName)
+	if db.config == nil || db.config.Database.DataDir == "" {
+		return
+	}
+	_ = os.RemoveAll(filepath.Join(db.config.Database.DataDir, "search", dbName))
 }
 
 // GetDatabaseSearchStatus returns readiness and progress for the database search service.

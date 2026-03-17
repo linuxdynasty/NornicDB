@@ -387,7 +387,7 @@ func (a *databaseManagerAdapter) DropDatabase(name string) error {
 		return err
 	}
 	if a.db != nil {
-		a.db.ResetSearchService(name)
+		a.db.DropSearchServiceState(name)
 		a.db.ResetInferenceService(name)
 	}
 	// Invalidate cached executor for dropped database

@@ -223,6 +223,34 @@ func TestSearchServices_ResetDropsCache(t *testing.T) {
 	require.False(t, exists)
 }
 
+func TestSearchServices_DropSearchServiceState_RemovesPersistedArtifacts(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Memory.EmbeddingDimensions = 3
+	cfg.Database.DataDir = t.TempDir()
+	cfg.Database.PersistSearchIndexes = true
+	db, err := Open(cfg.Database.DataDir, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc, err := db.GetOrCreateSearchService("db_drop_cov", nil)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+
+	persistDir := filepath.Join(cfg.Database.DataDir, "search", "db_drop_cov")
+	require.NoError(t, os.MkdirAll(persistDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(persistDir, "bm25"), []byte("stale"), 0o644))
+
+	db.DropSearchServiceState("db_drop_cov")
+
+	db.searchServicesMu.RLock()
+	_, exists := db.searchServices["db_drop_cov"]
+	db.searchServicesMu.RUnlock()
+	require.False(t, exists)
+
+	_, statErr := os.Stat(persistDir)
+	require.True(t, os.IsNotExist(statErr), "expected persisted search directory to be removed")
+}
+
 func TestSearchServices_ClusteringRunnerInitializesKnownNamespaces(t *testing.T) {
 	cleanup := featureflags.WithGPUClusteringEnabled()
 	t.Cleanup(cleanup)
