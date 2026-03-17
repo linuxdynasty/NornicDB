@@ -469,12 +469,14 @@ make cross-all             # All platforms
 - [x] SIMD Implementation
 - [x] Clustering support
 - [x] Sharding (Composite DB + Remote Constituents)
+- [x] Data Explorer UI (Browser query editor, semantic search, node details)
 
 ### Planned (from `docs/plans`)
 
-- [ ] Hybrid retrieval Phase 1: adaptive vector/BM25 execution order, cost-aware switching, and query telemetry (`docs/plans/scaling-search.md`)
-- [ ] Data Explorer UI
+- [ ] GPU-assisted HNSW construction with CPU-serving persistence parity (`docs/plans/gpu-hnsw-construction-plan.md`)
+- [ ] Neo4j-compatible end-to-end streaming execution + wrapper driver/ORM (`docs/plans/neo4j-compatible-streaming-driver-and-server-plan.md`)
 - [ ] GDPR compliance hardening: user-data detection, relationship export/delete/anonymization, and audit-log coverage (`docs/plans/gdpr-compliance-fixes.md`)
+- [ ] UI enhancement backlog (search/config/admin UX improvements) (`docs/plans/ui-enhancements.md`)
 
 ## Contributors
 
