@@ -178,6 +178,15 @@ export function Databases() {
         if (v !== '') overrides[k.key] = v;
       }
       await api.putDatabaseConfig(configDbName, overrides);
+      await loadDatabases();
+      if (selectedDatabase?.name === configDbName) {
+        try {
+          const refreshed = await api.getDatabaseInfo(configDbName);
+          setSelectedDatabase(refreshed);
+        } catch {
+          // Ignore modal refresh errors; list refresh above already applied.
+        }
+      }
       setConfigDbName(null);
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : 'Failed to save config');
@@ -251,6 +260,7 @@ export function Databases() {
               const isComposite = db.type === 'composite';
               const ready = db.searchReady === true;
               const searchLabel = ready ? 'ready' : (db.searchBuilding ? 'warming' : 'pending');
+              const strategyLabel = db.searchStrategy && db.searchStrategy !== 'unknown' ? ` (${db.searchStrategy})` : '';
               return (
               <div
                 key={db.name}
@@ -284,7 +294,7 @@ export function Databases() {
                                 : 'bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.9)] animate-pulse'
                             }`}
                           />
-                          search {searchLabel}
+                          search {searchLabel}{strategyLabel}
                         </span>
                       )}
                       {db.default && (
@@ -490,6 +500,10 @@ export function Databases() {
                   <span className={`font-medium ${selectedDatabase.searchReady ? 'text-green-300' : 'text-yellow-300'}`}>
                     {selectedDatabase.searchReady ? 'ready' : (selectedDatabase.searchBuilding ? 'warming' : 'pending')}
                   </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-norse-silver">Search Strategy:</span>
+                  <span className="text-white font-medium">{selectedDatabase.searchStrategy || 'unknown'}</span>
                 </div>
                 {!selectedDatabase.searchReady && (
                   <div className="flex justify-between">

@@ -97,9 +97,25 @@ func (s *Server) handlePutDbConfig(w http.ResponseWriter, r *http.Request, dbNam
 	if err := s.dbConfigStore.Load(r.Context()); err != nil {
 		log.Printf("⚠️  Failed to reload db config store after PUT: %v", err)
 	}
+	rebuildTriggered := false
+	// Per-db overrides must apply via fresh search service initialization,
+	// not runtime in-place strategy transitions.
+	if !s.dbManager.IsCompositeDatabase(dbName) {
+		s.db.ResetSearchService(dbName)
+		if storageEngine, err := s.dbManager.GetStorage(dbName); err != nil {
+			log.Printf("⚠️ Failed to resolve storage for db config rebuild (%s): %v", dbName, err)
+		} else if _, err := s.db.EnsureSearchIndexesBuildStarted(dbName, storageEngine); err != nil {
+			log.Printf("⚠️ Failed to start search service rebuild after db config update (%s): %v", dbName, err)
+		} else {
+			rebuildTriggered = true
+		}
+	}
 	overrides := s.dbConfigStore.GetOverrides(dbName)
 	if overrides == nil {
 		overrides = make(map[string]string)
 	}
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{"overrides": overrides})
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"overrides":        overrides,
+		"rebuildTriggered": rebuildTriggered,
+	})
 }

@@ -736,6 +736,12 @@ func (s *Service) GetBuildProgress() BuildProgress {
 	}
 }
 
+// CurrentStrategy returns the currently active vector search strategy label.
+// Returns "unknown" until a vector pipeline has been initialized.
+func (s *Service) CurrentStrategy() string {
+	return s.currentPipelineStrategy().String()
+}
+
 func (s *Service) setBuildPhase(phase string) {
 	s.buildPhase.Store(phase)
 	s.buildPhaseUnix.Store(time.Now().Unix())

@@ -75,6 +75,7 @@ export interface DatabaseInfo {
   searchReady?: boolean;
   searchBuilding?: boolean;
   searchInitialized?: boolean;
+  searchStrategy?: string;
   searchPhase?: string;
   searchProcessed?: number;
   searchTotal?: number;
@@ -570,7 +571,7 @@ class NornicDBClient {
   }
 
   /** Save per-database config overrides (admin only). */
-  async putDatabaseConfig(dbName: string, overrides: Record<string, string>): Promise<{ overrides: Record<string, string> }> {
+  async putDatabaseConfig(dbName: string, overrides: Record<string, string>): Promise<{ overrides: Record<string, string>; rebuildTriggered?: boolean }> {
     const res = await fetch(`${BASE_PATH}/admin/databases/${encodeURIComponent(dbName)}/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

@@ -1326,6 +1326,10 @@ func TestDBConfigHandlers(t *testing.T) {
 		"overrides": map[string]string{},
 	}, "Bearer "+token)
 	assert.Equal(t, http.StatusOK, rec.Code)
+	var putResp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &putResp))
+	_, hasRebuild := putResp["rebuildTriggered"]
+	assert.True(t, hasRebuild)
 }
 
 func TestHeimdallRouterAndHelpers(t *testing.T) {

@@ -1014,6 +1014,114 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		featuresConfig = &globalConfig.Features
 		config.Features = featuresConfig
 	}
+	var rerankerResolverMu sync.RWMutex
+	var globalRerankerResolver func(string) search.Reranker
+	perDBRerankerCache := make(map[string]search.Reranker)
+	setGlobalRerankerResolver := func(fn func(string) search.Reranker) {
+		rerankerResolverMu.Lock()
+		globalRerankerResolver = fn
+		rerankerResolverMu.Unlock()
+	}
+	getGlobalRerankerResolver := func() func(string) search.Reranker {
+		rerankerResolverMu.RLock()
+		defer rerankerResolverMu.RUnlock()
+		return globalRerankerResolver
+	}
+	resolveDBRerankConfig := func(dbName string) (enabled bool, provider, model, apiURL, apiKey string) {
+		enabled = featuresConfig.SearchRerankEnabled
+		provider = strings.TrimSpace(strings.ToLower(featuresConfig.SearchRerankProvider))
+		model = featuresConfig.SearchRerankModel
+		apiURL = strings.TrimSpace(featuresConfig.SearchRerankAPIURL)
+		apiKey = featuresConfig.SearchRerankAPIKey
+		if provider == "" {
+			provider = "local"
+		}
+		if provider == "ollama" && apiURL == "" {
+			apiURL = "http://localhost:11434/rerank"
+		}
+		if s.dbConfigStore == nil {
+			return enabled, provider, model, apiURL, apiKey
+		}
+		overrides := s.dbConfigStore.GetOverrides(dbName)
+		resolved := dbconfig.Resolve(globalConfig, overrides)
+		if resolved == nil || resolved.Effective == nil {
+			return enabled, provider, model, apiURL, apiKey
+		}
+		eff := resolved.Effective
+		if raw := strings.TrimSpace(strings.ToLower(eff["NORNICDB_SEARCH_RERANK_ENABLED"])); raw != "" {
+			switch raw {
+			case "1", "true", "yes", "on":
+				enabled = true
+			case "0", "false", "no", "off":
+				enabled = false
+			}
+		}
+		if v := strings.TrimSpace(strings.ToLower(eff["NORNICDB_SEARCH_RERANK_PROVIDER"])); v != "" {
+			provider = v
+		}
+		if v := eff["NORNICDB_SEARCH_RERANK_MODEL"]; strings.TrimSpace(v) != "" {
+			model = strings.TrimSpace(v)
+		}
+		if v := eff["NORNICDB_SEARCH_RERANK_API_URL"]; strings.TrimSpace(v) != "" {
+			apiURL = strings.TrimSpace(v)
+		}
+		if v := eff["NORNICDB_SEARCH_RERANK_API_KEY"]; strings.TrimSpace(v) != "" {
+			apiKey = v
+		}
+		if provider == "ollama" && apiURL == "" {
+			apiURL = "http://localhost:11434/rerank"
+		}
+		return enabled, provider, model, apiURL, apiKey
+	}
+	getOrCreateExternalReranker := func(provider, model, apiURL, apiKey string) search.Reranker {
+		key := strings.Join([]string{provider, model, apiURL, apiKey}, "|")
+		rerankerResolverMu.RLock()
+		if cached, ok := perDBRerankerCache[key]; ok {
+			rerankerResolverMu.RUnlock()
+			return cached
+		}
+		rerankerResolverMu.RUnlock()
+		if apiURL == "" {
+			return nil
+		}
+		ceConfig := &search.CrossEncoderConfig{
+			Enabled:  true,
+			APIURL:   apiURL,
+			APIKey:   apiKey,
+			Model:    model,
+			TopK:     100,
+			Timeout:  30 * time.Second,
+			MinScore: 0.0,
+		}
+		if ceConfig.Model == "" && provider == "ollama" {
+			ceConfig.Model = "reranker"
+		}
+		ce := search.NewCrossEncoder(ceConfig)
+		rerankerResolverMu.Lock()
+		perDBRerankerCache[key] = ce
+		rerankerResolverMu.Unlock()
+		return ce
+	}
+	// Install per-DB reranker resolver. It respects DB overrides and falls back to global resolver.
+	db.SetRerankerResolver(func(dbName string) search.Reranker {
+		enabled, provider, model, apiURL, apiKey := resolveDBRerankConfig(dbName)
+		if !enabled {
+			return nil
+		}
+		if provider == "local" {
+			if resolver := getGlobalRerankerResolver(); resolver != nil {
+				return resolver(dbName)
+			}
+			return nil
+		}
+		if r := getOrCreateExternalReranker(provider, model, apiURL, apiKey); r != nil {
+			return r
+		}
+		if resolver := getGlobalRerankerResolver(); resolver != nil {
+			return resolver(dbName)
+		}
+		return nil
+	})
 	if featuresConfig.HeimdallEnabled {
 		log.Println("🛡️  Heimdall AI Assistant initializing asynchronously...")
 		go func() {
@@ -1158,7 +1266,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				cfg.Enabled = true
 				r := search.NewLocalReranker(rerankerModel, cfg)
 				db.SetSearchReranker(r)
-				db.SetRerankerResolver(func(string) search.Reranker { return r })
+				setGlobalRerankerResolver(func(string) search.Reranker { return r })
 				log.Printf("✅ Search reranker ready: %s (Stage-2 reranking enabled)", modelName)
 			}()
 		} else {
@@ -1186,7 +1294,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				}
 				ce := search.NewCrossEncoder(ceConfig)
 				db.SetSearchReranker(ce)
-				db.SetRerankerResolver(func(string) search.Reranker { return ce })
+				setGlobalRerankerResolver(func(string) search.Reranker { return ce })
 				log.Printf("✅ Search reranker ready: provider=%s, url=%s (Stage-2 reranking enabled)", provider, apiURL)
 			}
 		}

@@ -670,10 +670,12 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		aggReady := len(stats) > 0 && !partial
 		aggBuilding := false
 		aggInitialized := len(stats) > 0 && !partial
+		aggStrategy := "unknown"
 		var aggProcessed int64
 		var aggTotal int64
 		var aggRate float64
 		aggETA := int64(-1)
+		strategySet := make(map[string]struct{}, len(stats))
 		for i, item := range stats {
 			totalNodes += item["nodeCount"].(int64)
 			totalEdges += item["edgeCount"].(int64)
@@ -688,9 +690,22 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 			aggProcessed += item["searchProcessed"].(int64)
 			aggTotal += item["searchTotal"].(int64)
 			aggRate += item["searchRate"].(float64)
+			if stg, ok := item["searchStrategy"].(string); ok && stg != "" && stg != "unknown" {
+				strategySet[stg] = struct{}{}
+			}
 			if i == 0 || item["searchEtaSeconds"].(int64) > aggETA {
 				aggETA = item["searchEtaSeconds"].(int64)
 			}
+		}
+		switch len(strategySet) {
+		case 0:
+			aggStrategy = "unknown"
+		case 1:
+			for k := range strategySet {
+				aggStrategy = k
+			}
+		default:
+			aggStrategy = "mixed"
 		}
 		response := map[string]interface{}{
 			"name":                  dbName,
@@ -705,6 +720,7 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 			"searchReady":           aggReady,
 			"searchBuilding":        aggBuilding,
 			"searchInitialized":     aggInitialized,
+			"searchStrategy":        aggStrategy,
 			"searchPhase":           "constituent_aggregate",
 			"searchProcessed":       aggProcessed,
 			"searchTotal":           aggTotal,
@@ -751,6 +767,7 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		"searchReady":           searchStatus.Ready,
 		"searchBuilding":        searchStatus.Building,
 		"searchInitialized":     searchStatus.Initialized,
+		"searchStrategy":        searchStatus.Strategy,
 		"searchPhase":           searchStatus.Phase,
 		"searchProcessed":       searchStatus.ProcessedNodes,
 		"searchTotal":           searchStatus.TotalNodes,
@@ -785,6 +802,7 @@ func (s *Server) compositeConstituentStats(r *http.Request, compositeName string
 			"searchReady":           false,
 			"searchBuilding":        false,
 			"searchInitialized":     false,
+			"searchStrategy":        "unknown",
 			"searchPhase":           "not_initialized",
 			"searchProcessed":       int64(0),
 			"searchTotal":           int64(0),
@@ -823,6 +841,7 @@ func (s *Server) compositeConstituentStats(r *http.Request, compositeName string
 		row["searchReady"] = searchStatus.Ready
 		row["searchBuilding"] = searchStatus.Building
 		row["searchInitialized"] = searchStatus.Initialized
+		row["searchStrategy"] = searchStatus.Strategy
 		row["searchPhase"] = searchStatus.Phase
 		row["searchProcessed"] = searchStatus.ProcessedNodes
 		row["searchTotal"] = searchStatus.TotalNodes

@@ -416,9 +416,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if len(req.Labels) > 0 {
 			opts.Types = req.Labels
 		}
-		if s.config != nil && s.config.Features != nil {
-			opts.RerankEnabled = s.config.Features.SearchRerankEnabled
-		}
+		opts.RerankEnabled = searchSvc.RerankerAvailable(ctx)
 		return opts
 	}
 	// Bound embedding latency even if the embedder ignores context cancellation.

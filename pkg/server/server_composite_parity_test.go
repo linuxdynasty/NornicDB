@@ -165,6 +165,7 @@ func TestDatabaseInfoCompositeStatsProvenanceDeterministic(t *testing.T) {
 	require.Equal(t, "constituent_sum", anyString(payload["statsAggregation"]))
 	require.Equal(t, false, payload["statsPartial"])
 	require.Equal(t, float64(2), payload["nodeCount"])
+	require.Contains(t, payload, "searchStrategy")
 
 	rawStats, ok := payload["statsProvenance"].([]any)
 	require.True(t, ok)
@@ -182,6 +183,7 @@ func TestDatabaseInfoCompositeStatsProvenanceDeterministic(t *testing.T) {
 		require.Contains(t, m, "searchReady")
 		require.Contains(t, m, "searchBuilding")
 		require.Contains(t, m, "searchInitialized")
+		require.Contains(t, m, "searchStrategy")
 	}
 	sorted := append([]string(nil), aliases...)
 	sort.Strings(sorted)

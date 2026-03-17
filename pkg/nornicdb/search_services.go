@@ -81,6 +81,7 @@ type DatabaseSearchStatus struct {
 	Ready           bool    `json:"ready"`
 	Building        bool    `json:"building"`
 	Initialized     bool    `json:"initialized"`
+	Strategy        string  `json:"strategy,omitempty"`
 	Phase           string  `json:"phase,omitempty"`
 	ProcessedNodes  int64   `json:"processed_nodes,omitempty"`
 	TotalNodes      int64   `json:"total_nodes,omitempty"`
@@ -331,13 +332,14 @@ func (db *DB) GetDatabaseSearchStatus(dbName string) DatabaseSearchStatus {
 	entry, ok := db.searchServices[dbName]
 	db.searchServicesMu.RUnlock()
 	if !ok || entry == nil || entry.svc == nil {
-		return DatabaseSearchStatus{Ready: false, Building: false, Initialized: false, Phase: "not_initialized", ETASeconds: -1}
+		return DatabaseSearchStatus{Ready: false, Building: false, Initialized: false, Strategy: "unknown", Phase: "not_initialized", ETASeconds: -1}
 	}
 	p := entry.svc.GetBuildProgress()
 	return DatabaseSearchStatus{
 		Ready:           p.Ready,
 		Building:        p.Building,
 		Initialized:     true,
+		Strategy:        entry.svc.CurrentStrategy(),
 		Phase:           p.Phase,
 		ProcessedNodes:  p.ProcessedNodes,
 		TotalNodes:      p.TotalNodes,
