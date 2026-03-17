@@ -1,378 +1,388 @@
-# Implementing a Neo4j-Style Infinigraph Topology
+# Re-Implementing Neo4j Infinigraph Topology on NornicDB
 
-Neo4j sometimes describes large distributed graph layouts as an "infinigraph": one logical graph entry point backed by multiple databases, shards, or regions.
+This guide is **not** a generic Fabric/federation guide.
+It is a blueprint for implementing the capabilities associated with Neo4j Infinigraph-style managed scale-out behavior on NornicDB.
 
-In NornicDB, the equivalent pattern is a **composite database** with a mix of **local** and **remote constituents**.
+Assumptions:
+- you already know basic composite DB creation
+- you already run NornicDB in multi-database mode
+- you want to build a managed-service-style, horizontally scalable graph platform
 
-This works today.
+## What Infinigraph Adds (Beyond Basic Fabric)
 
-What you get is a **logical distributed graph topology**:
+Based on Neo4j’s public Infinigraph messaging/docs, the core differentiators are:
 
-- one coordinator entry point
-- multiple constituent databases
-- explicit query routing with `USE <composite>.<alias>`
-- support for local and remote constituents in the same topology
-- forwarded caller identity or fixed service credentials for remote access
+1. automatic horizontal sharding
+2. one logical graph at very large scale (not fragmented operationally)
+3. unified operational + analytical workloads in one platform
+4. ACID transactional guarantees at distributed scale
+5. managed operations model (elasticity, rebalancing, observability)
 
-What you do **not** get is a single physically merged graph:
+References:
+- https://neo4j.com/press-releases/neo4j-launches-infinigraph/
+- https://neo4j.com/blog/graph-database/infinigraph-scalable-architecture/
+- https://neo4j.com/docs/operations-manual/current/introduction/
 
-- no direct relationships across constituents
-- no automatic repartitioning or global graph reshaping
-- no distributed multi-write ACID transaction across multiple shards
+## NornicDB Target Architecture (Infinigraph-Oriented)
 
-If you already know Neo4j Fabric, this is the same mental model to use in NornicDB.
+To emulate those capabilities in NornicDB, implement these layers together:
 
-## When To Use This Pattern
+- **Data Plane**: constituent shard databases (local and remote)
+- **Routing Plane**: deterministic shard routing by `shard_key`
+- **Query Plane**: composite + routed subqueries with strict key contracts
+- **Transaction Plane**: explicit distributed tx session model (many-read/one-write rule)
+- **Control Plane**: shard registry, health, rebalance, per-shard telemetry, policy-driven autoscaling
 
-Use this topology when one logical application graph needs to be split across boundaries that you still want to query through one coordinator:
+Without all five, you only have basic federation, not an Infinigraph-style offering.
 
-- **regional partitioning**: `company.us`, `company.eu`, `company.apac`
-- **tenant partitioning**: `tenant_a`, `tenant_b`, `tenant_c`
-- **domain partitioning**: `users`, `orders`, `search`, `billing`
-- **migration bridges**: keep one graph local while another moves to a remote NornicDB cluster
+## Prime Example: Global Payments Risk Graph
 
-This is especially useful when the application already understands graph boundaries and can issue explicit `USE` targets inside subqueries.
+This is a high-scale use case where Infinigraph-style design is critical.
 
-## Topology Model
+Logical graph: `riskgraph`
 
-The standard layout is:
+Constituents:
+- `riskgraph.tx_us_0`, `riskgraph.tx_us_1`, ... (transaction shards)
+- `riskgraph.identity` (accounts, KYC)
+- `riskgraph.device` (fingerprints, session/device graph)
+- `riskgraph.merchant` (merchant risk graph)
+- `riskgraph.alerts` (detections and case workflow)
 
-- one **coordinator** NornicDB instance that owns the composite database definition
-- zero or more **local constituents** on the coordinator
-- zero or more **remote constituents** hosted by other NornicDB instances
+This is intentionally not a translation example. It models the 100TB+ class graph pattern (high write rate + deep analytical traversals).
 
-Example:
 
-- `company.users` on the coordinator
-- `company.orders` on the coordinator
-- `company.search` on a remote search-focused instance
-- `company.eu` on a remote Europe region instance
+## Visual Implementation Steps
 
-The coordinator does not physically merge those databases. It routes query fragments to them and merges the results according to the query plan.
+### Step 1: Control Plane + Data Plane Topology
 
-## What Maps To Neo4j "Infinigraph"
+```mermaid
+flowchart TB
+    subgraph CP[Control Plane]
+        SR[Shard Registry]
+        HR[Health + Telemetry]
+        RB[Rebalance Engine]
+        RP[Routing Policy]
+    end
 
-If you are translating from Neo4j terminology, treat the mapping like this:
+    subgraph COORD[Coordinator]
+        QP[Query Planner / Router]
+        TX[Distributed Tx Session Manager]
+        API[HTTP + Bolt APIs]
+    end
 
-- Neo4j composite database / Fabric topology -> NornicDB composite database
-- Neo4j local alias -> NornicDB local constituent alias
-- Neo4j remote alias -> NornicDB remote constituent alias
-- Fabric subquery routing -> `CALL { USE <composite>.<alias> ... }`
-- Federated graph join pattern -> proxy IDs and correlated subqueries
+    subgraph DP[Data Plane Constituents]
+        TX0[riskgraph.tx_us_0]
+        TX1[riskgraph.tx_us_1]
+        ID[riskgraph.identity]
+        DV[riskgraph.device]
+        AL[riskgraph.alerts]
+    end
 
-The important caveat is the same in both systems: **relationships stay local to a constituent database**.
+    API --> QP
+    QP --> TX
+    QP --> TX0
+    QP --> TX1
+    QP --> ID
+    QP --> DV
+    QP --> AL
 
-## Step 1: Design The Shard Boundaries
-
-Before writing Cypher, choose what each constituent owns.
-
-Good boundaries:
-
-- a region
-- a tenant
-- a bounded business domain
-- a workload specialization such as search or analytics
-
-Avoid boundaries that require direct cross-database relationships for every query. A distributed topology works best when joins can be expressed through application identifiers such as `userId`, `tenantId`, `orderId`, or `documentId`.
-
-## Step 2: Create The Composite Database
-
-Local-only example:
-
-```cypher
-CREATE COMPOSITE DATABASE company
-  ALIAS users FOR DATABASE users_db
-  ALIAS orders FOR DATABASE orders_db
-  ALIAS search FOR DATABASE search_db
+    SR --> QP
+    RP --> QP
+    HR --> RB
+    RB --> SR
 ```
 
-Mixed local and remote example:
+### Step 2: Property Contract Across Constituents
 
-```cypher
-CREATE COMPOSITE DATABASE company
-  ALIAS users FOR DATABASE users_db
-  ALIAS orders FOR DATABASE orders_db
-  ALIAS eu FOR DATABASE europe_db
-    AT "https://eu-db.example.internal/nornic-db"
-    OIDC CREDENTIAL FORWARDING
-    TYPE remote
-    ACCESS read_write
-  ALIAS search FOR DATABASE search_db
-    AT "https://search.example.internal/nornic-db"
-    USER "svc-search"
-    PASSWORD "strong-password"
-    TYPE remote
-    ACCESS read
+```mermaid
+flowchart LR
+    A[Transaction Node
+txn_id, account_id, device_id, shard_key] -->|join key: account_id| B[Account Node
+account_id, risk_tier, tenant_id]
+    A -->|join key: device_id| C[Device Node
+device_id, fingerprint_hash]
+    A -->|write key: txn_id| D[Alert Node
+alert_id, txn_id, severity]
+
+    E[Global Contract]
+    E --- F[global_id]
+    E --- G[tenant_id]
+    E --- H[region_id]
+    E --- I[shard_key]
+    E --- J[event_ts_ms/updated_at_ms]
 ```
 
-Inspect the topology:
+### Step 3: Bounded Cross-Constituent Query Flow
 
-```cypher
-SHOW CONSTITUENTS FOR COMPOSITE DATABASE company
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Coord as Coordinator
+    participant TxShard as tx_us_0
+    participant Identity as identity
+    participant Device as device
+
+    Client->>Coord: Query logical graph riskgraph
+    Coord->>TxShard: Phase 1: bounded candidate extraction (LIMIT N)
+    TxShard-->>Coord: [txnId, accountId, deviceId, eventTs]
+
+    par account enrichment
+        Coord->>Identity: lookup by accountId (indexed)
+        Identity-->>Coord: [risk_tier, kyc_level]
+    and device enrichment
+        Coord->>Device: lookup by deviceId (indexed)
+        Device-->>Coord: [ip_hash, fingerprint_hash]
+    end
+
+    Coord-->>Client: joined logical rows
 ```
 
-Use `TYPE remote` when the target database lives on another NornicDB instance. Use `ACCESS read`, `write`, or `read_write` to document the intended access mode for that constituent.
+### Step 4: Online Shard Split / Rebalance
 
-## Step 3: Choose The Remote Auth Model
+```mermaid
+sequenceDiagram
+    participant CP as Control Plane
+    participant C as Coordinator
+    participant S0 as tx_us_0
+    participant S2 as tx_us_2 (new)
 
-NornicDB supports two remote auth modes.
+    CP->>CP: detect hot shard tx_us_0
+    CP->>S2: provision new shard
+    CP->>C: update routing policy (dual-write window)
 
-### Option A: Forward The Caller Identity
+    C->>S0: continue writes
+    C->>S2: dual-writes for new key range
+    CP->>S0: migrate historical range -> S2
 
-Use this when the remote database should evaluate the same principal that authenticated to the coordinator.
-
-Explicit form:
-
-```cypher
-CREATE COMPOSITE DATABASE company
-  ALIAS eu FOR DATABASE europe_db
-    AT "https://eu-db.example.internal/nornic-db"
-    OIDC CREDENTIAL FORWARDING
-    TYPE remote
-    ACCESS read
+    CP->>C: cutover routes to S2
+    CP->>C: end dual-write window
 ```
 
-Implicit default form:
+## Property Contract (Mandatory)
+
+To keep one logical graph behavior across shards, every cross-domain entity must carry canonical keys.
+
+Required properties on participating nodes:
+
+- `global_id` (string, immutable)
+- `tenant_id` (string)
+- `region_id` (string)
+- `shard_key` (string, deterministic routing key)
+- `event_ts_ms` (int64)
+- `updated_at_ms` (int64)
+- `source_system` (string)
+
+Cross-constituent FK keys (examples):
+
+- `account_id`
+- `txn_id`
+- `device_id`
+- `card_hash`
+- `merchant_id`
+
+Hard rules:
+- never join across constituents using internal node IDs
+- never use mutable fields for joins
+- never allow mixed datatype for same key across shards
+
+## Concrete Node Structures
+
+### `riskgraph.identity` -> `:Account`
 
 ```cypher
-CREATE COMPOSITE DATABASE company
-  ALIAS eu FOR DATABASE europe_db
-    AT "https://eu-db.example.internal/nornic-db"
-    TYPE remote
-    ACCESS read
-```
-
-Behavior:
-
-- the coordinator reads the incoming `Authorization` header
-- that header is forwarded to the remote constituent
-- the remote server applies auth and RBAC for that same caller context
-
-Use this when you want end-to-end user or service-principal identity propagation.
-
-### Option B: Use Fixed Service Credentials
-
-Use this when the coordinator should always connect to the remote database as a specific service account.
-
-```cypher
-CREATE COMPOSITE DATABASE company
-  ALIAS search FOR DATABASE search_db
-    AT "https://search.example.internal/nornic-db"
-    USER "svc-search"
-    PASSWORD "strong-password"
-    TYPE remote
-    ACCESS read
-```
-
-Behavior:
-
-- outbound remote requests use the configured username and password
-- the remote server authorizes that fixed account, not the original caller
-- remote passwords are encrypted before composite metadata is persisted
-
-Use this when the remote shard should be accessed through a stable integration identity.
-
-### Auth Rules
-
-- `AT "<url>" OIDC CREDENTIAL FORWARDING` forwards caller auth
-- `AT "<url>"` with no auth clause also defaults to forwarding caller auth
-- `AT "<url>" USER "..." PASSWORD "..."` uses explicit service credentials
-- `USER` and `PASSWORD` must be provided together
-- `USER` / `PASSWORD` cannot be combined with `OIDC CREDENTIAL FORWARDING`
-
-## Step 4: Query Constituents Explicitly
-
-Composite roots are routing contexts, not implicit merged graph targets.
-
-Query a single constituent directly:
-
-```cypher
-USE company.users
-MATCH (u:User)
-WHERE u.email = 'alice@example.com'
-RETURN u.id, u.email, u.name
-```
-
-Query a remote constituent the same way:
-
-```cypher
-USE company.eu
-MATCH (c:Customer)
-WHERE c.country = 'DE'
-RETURN c.id, c.name, c.tier
-LIMIT 25
-```
-
-The client-side query shape is the same for local and remote constituents. The routing difference is handled by the composite catalog and Fabric executor.
-
-## Step 5: Model Cross-Constituent Navigation With Proxy IDs
-
-Do not model cross-constituent access as direct relationships. Model it as shared identifiers and explicit subquery routing.
-
-Example:
-
-- `company.users` owns `User` nodes with `u.id`
-- `company.orders` owns `Order` nodes with `o.user_id`
-
-Query pattern:
-
-```cypher
-USE company
-
-CALL {
-  USE company.users
-  MATCH (u:User)
-  WHERE u.region = 'eu'
-  RETURN u.id AS userId, u.email AS email
+{
+  global_id: "acct:8f07f5ad9b",
+  account_id: "8f07f5ad9b",
+  tenant_id: "bank_a",
+  region_id: "us",
+  shard_key: "bank_a|8f07f5ad9b",
+  kyc_level: "high",
+  risk_tier: "medium",
+  updated_at_ms: 1773400100000,
+  source_system: "kyc-service"
 }
-
-CALL {
-  USE company.orders
-  WITH userId
-  MATCH (o:Order {user_id: userId})
-  RETURN collect({
-    id: o.id,
-    total: o.total,
-    status: o.status
-  }) AS orders
-}
-
-RETURN userId, email, orders
-LIMIT 20
 ```
 
-This is the core pattern for Neo4j-style federated graph design in NornicDB:
-
-- fetch identifiers from one constituent
-- pass them forward with `WITH`
-- route the next subquery to another constituent
-- merge results in the outer query
-
-## Step 6: Use Nested `CALL { USE ... }` For Multi-Shard Workflows
-
-Nested or sequential routed subqueries are the normal way to orchestrate work across constituents.
+### `riskgraph.tx_us_*` -> `:Transaction`
 
 ```cypher
-USE company
-
-CALL {
-  USE company.users
-  MATCH (u:User)
-  WHERE u.active = true
-  RETURN u.id AS userId, u.segment AS segment
+{
+  global_id: "txn:2f2be7db8f3a",
+  txn_id: "2f2be7db8f3a",
+  account_id: "8f07f5ad9b",
+  device_id: "dev:4fd2a1",
+  card_hash: "card:sha256:...",
+  merchant_id: "m_9021",
+  amount_minor: 129900,
+  currency: "USD",
+  tenant_id: "bank_a",
+  region_id: "us",
+  shard_key: "bank_a|us|2f2be7db8f3a",
+  event_ts_ms: 1773410000123,
+  updated_at_ms: 1773410000200,
+  source_system: "payments-gateway"
 }
-
-CALL {
-  USE company.search
-  WITH userId, segment
-  MATCH (d:Document)
-  WHERE d.owner_id = userId AND d.segment = segment
-  RETURN count(d) AS docCount
-}
-
-RETURN userId, segment, docCount
-ORDER BY docCount DESC
-LIMIT 10
 ```
 
-This is the NornicDB form of a logical graph workflow spanning multiple databases.
+### `riskgraph.device` -> `:DeviceIdentity`
 
-## Step 7: Understand Transaction Boundaries
+```cypher
+{
+  global_id: "dev:4fd2a1",
+  device_id: "dev:4fd2a1",
+  account_id: "8f07f5ad9b",
+  fingerprint_hash: "fp:sha256:...",
+  ip_hash: "ip:sha256:...",
+  tenant_id: "bank_a",
+  region_id: "us",
+  shard_key: "bank_a|dev:4fd2a1",
+  updated_at_ms: 1773410000050,
+  source_system: "fraud-sensor"
+}
+```
 
-NornicDB supports explicit composite transactions for local and remote constituents, but the write model is intentionally constrained.
+## Index Policy (Per Constituent, Not Composite Root)
 
-Current behavior:
+```cypher
+USE riskgraph.identity
+CREATE INDEX acct_account_id_idx FOR (n:Account) ON (n.account_id)
 
-- reads can span multiple constituents in one transaction
-- a transaction may write to only one constituent shard
-- attempting a write on a second shard returns a deterministic transaction error
-- remote participants use real remote transaction handles during explicit transactions
+USE riskgraph.tx_us_0
+CREATE INDEX tx0_txn_id_idx FOR (n:Transaction) ON (n.txn_id)
+CREATE INDEX tx0_account_id_idx FOR (n:Transaction) ON (n.account_id)
+CREATE INDEX tx0_device_id_idx FOR (n:Transaction) ON (n.device_id)
+CREATE INDEX tx0_event_ts_idx FOR (n:Transaction) ON (n.event_ts_ms)
 
-This means the topology supports **many-read/one-write** flows, not distributed multi-write ACID.
+USE riskgraph.device
+CREATE INDEX dev_device_id_idx FOR (n:DeviceIdentity) ON (n.device_id)
+CREATE INDEX dev_account_id_idx FOR (n:DeviceIdentity) ON (n.account_id)
+```
 
-Practical guidance:
+## Query Shape for Infinigraph-Style Scale
 
-- keep writes localized to one constituent per transaction
-- perform cross-constituent enrichment as reads around that write boundary
-- use idempotent application workflows when multiple shards must be updated over time
+Pattern:
+1. bounded candidate extraction from sharded transaction domain
+2. key-based enrichment on identity/device/merchant domains
+3. optional write to alerts domain in separate write transaction
 
-## Step 8: Operate The Topology Safely
+```cypher
+USE riskgraph
+CALL {
+  USE riskgraph.tx_us_0
+  MATCH (t:Transaction)
+  WHERE t.event_ts_ms >= $windowStartMs
+    AND t.amount_minor >= $minAmount
+  RETURN t.txn_id AS txnId,
+         t.account_id AS accountId,
+         t.device_id AS deviceId,
+         t.card_hash AS cardHash,
+         t.event_ts_ms AS eventTs
+  ORDER BY t.event_ts_ms DESC
+  LIMIT 1000
+}
+CALL {
+  WITH accountId
+  USE riskgraph.identity
+  MATCH (a:Account)
+  WHERE a.account_id = accountId
+  RETURN a.risk_tier AS accountRisk, a.kyc_level AS kycLevel
+}
+CALL {
+  WITH deviceId
+  USE riskgraph.device
+  MATCH (d:DeviceIdentity)
+  WHERE d.device_id = deviceId
+  RETURN d.ip_hash AS ipHash, d.fingerprint_hash AS fingerprint
+}
+RETURN txnId, accountId, deviceId, cardHash, eventTs, accountRisk, kycLevel, ipHash, fingerprint
+ORDER BY eventTs DESC
+```
 
-### Recommended Coordinator Practices
+Why this aligns with Infinigraph goals:
+- avoids global scans
+- avoids data copy pipelines
+- preserves full-fidelity entity correlation through canonical keys
+- supports real-time transactional reads with analytical enrichment
 
-- define composites on a stable coordinator instance
-- choose shard aliases that reflect ownership clearly
-- document which constituents are local vs remote
-- standardize whether each remote uses forwarded auth or service credentials
+## Managed-Service Capability Checklist (Infinigraph Parity Targets)
 
-### Recommended Data Modeling Practices
+Implement these as product capabilities, not ad hoc scripts:
 
-- use globally meaningful business identifiers
-- keep each edge local to one constituent
-- store foreign keys for cross-constituent lookup
-- avoid designs that require recursive hopping between many shards in one request path
+1. **Automatic shard assignment**
+   - deterministic `shard_key` hash ring
+   - online shard map updates
+2. **Shard auto-split / rebalance**
+   - threshold-based split policies
+   - live move + dual-write cutover during migration window
+3. **Global query routing**
+   - route by key when possible
+   - bounded fan-out when key unknown
+4. **Unified OLTP + analytics**
+   - same logical graph, same source-of-truth data
+   - no ETL shadow graph for analytics path
+5. **Distributed transaction semantics**
+   - explicit tx across participants
+   - documented guarantees and failure handling
+6. **Operational control plane**
+   - shard registry, health, lag, skew, hot-shard detection
+   - policy-driven scale-out recommendations
+7. **Tenant/region isolation policies**
+   - routing constraints by `tenant_id`/`region_id`
+   - auth propagation and RBAC boundaries across remote constituents
 
-### Remote Credential Considerations
+If your system lacks these, it is federation; if it has these, it behaves like an Infinigraph-style managed platform.
 
-If you use `USER` / `PASSWORD`, the coordinator needs remote credential encryption configured. Prefer a dedicated `NORNICDB_REMOTE_CREDENTIALS_KEY` rather than falling back to broader encryption or JWT secrets.
+## Anti-Patterns (Will Break Scale)
 
-## Example Topologies
+- cross-constituent joins on mutable attributes
+- joining on unindexed keys
+- relationship-heavy designs that require physical cross-shard edges
+- uncontrolled fan-out queries without bounded candidate phase
+- per-shard schema drift for shared keys
 
-### Regional Topology
+## Operational Validation Queries
 
-- `company.us`
-- `company.eu`
-- `company.apac`
+### Missing required keys
 
-Use when data residency or latency drives regional partitioning.
+```cypher
+USE riskgraph.tx_us_0
+MATCH (t:Transaction)
+WHERE t.txn_id IS NULL OR t.account_id IS NULL OR t.device_id IS NULL
+RETURN count(t) AS missingKeys
+```
 
-### Tenant Topology
+### Orphan device references
 
-- `saas.tenant_a`
-- `saas.tenant_b`
-- `saas.tenant_c`
+```cypher
+USE riskgraph
+CALL {
+  USE riskgraph.tx_us_0
+  MATCH (t:Transaction)
+  WHERE t.device_id IS NOT NULL
+  RETURN DISTINCT t.device_id AS deviceId
+  LIMIT 10000
+}
+CALL {
+  WITH deviceId
+  USE riskgraph.device
+  MATCH (d:DeviceIdentity)
+  WHERE d.device_id = deviceId
+  RETURN count(d) AS c
+}
+WITH deviceId, c
+WHERE c = 0
+RETURN deviceId
+LIMIT 100
+```
 
-Use when each tenant needs strong isolation but operations still need coordinator-driven reporting workflows.
+## Final Guidance
 
-### Domain Topology
+To reverse-engineer Infinigraph capabilities on NornicDB, treat composites as only one component.
+The differentiator is the combination of:
+- strict cross-shard property contracts
+- deterministic shard routing
+- rebalance automation
+- query planning that preserves one logical graph behavior
+- operational control-plane maturity
 
-- `company.users`
-- `company.orders`
-- `company.search`
-- `company.analytics`
-
-Use when different workloads need different infrastructure or operational policies.
-
-## Current Constraints
-
-These are the constraints to design around today:
-
-- no direct relationships across constituents
-- no plain `MATCH` or `CREATE` on the composite root without explicit `USE` targeting
-- no composite-root search execution; search endpoints target a constituent database instead
-- no multi-write distributed ACID across multiple constituent shards in one transaction
-
-These are design constraints, not temporary documentation omissions. Build the topology around them.
-
-## Troubleshooting
-
-### Remote auth works locally but fails remotely
-
-Check which auth mode the constituent uses:
-
-- `OIDC CREDENTIAL FORWARDING` means the remote shard authorizes the original caller
-- `USER` / `PASSWORD` means the remote shard authorizes the configured service account
-
-### Remote writes fail in a transaction after another write succeeded
-
-This usually means the transaction has already opened a write participant on another constituent. Split the workflow so each transaction writes to only one shard.
-
-### A query needs relationships across shards
-
-That topology is not supported directly. Remodel the interaction around shared identifiers and routed subqueries.
-
-## See Also
-
-- [Multi-Database Support](multi-database.md)
-- [Transactions](transactions.md)
-- [Clustering](clustering.md)
+That combination is what turns a Fabric-style federation into an Infinigraph-style managed graph service.
