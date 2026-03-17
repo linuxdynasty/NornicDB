@@ -3,7 +3,6 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,17 +12,85 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-var fabricCallUsePattern = regexp.MustCompile(`(?is)\bCALL\s*\{\s*USE\s+`)
-var fabricUsePattern = regexp.MustCompile(`(?is)\bUSE\s+`)
-var fabricDynamicGraphPattern = regexp.MustCompile(`(?is)\bgraph\.(byName|byElementId)\s*\(`)
+type fabricStatsAccumulatorKey struct{}
+
+type fabricStatsAccumulator struct {
+	mu    sync.Mutex
+	stats QueryStats
+}
+
+func (a *fabricStatsAccumulator) add(in *QueryStats) {
+	if a == nil || in == nil {
+		return
+	}
+	a.mu.Lock()
+	a.stats.NodesCreated += in.NodesCreated
+	a.stats.NodesDeleted += in.NodesDeleted
+	a.stats.RelationshipsCreated += in.RelationshipsCreated
+	a.stats.RelationshipsDeleted += in.RelationshipsDeleted
+	a.stats.PropertiesSet += in.PropertiesSet
+	a.stats.LabelsAdded += in.LabelsAdded
+	a.mu.Unlock()
+}
+
+func (a *fabricStatsAccumulator) snapshot() QueryStats {
+	if a == nil {
+		return QueryStats{}
+	}
+	a.mu.Lock()
+	out := a.stats
+	a.mu.Unlock()
+	return out
+}
+
+func fabricStatsAccumulatorFromContext(ctx context.Context) *fabricStatsAccumulator {
+	v := ctx.Value(fabricStatsAccumulatorKey{})
+	if v == nil {
+		return nil
+	}
+	acc, _ := v.(*fabricStatsAccumulator)
+	return acc
+}
 
 func (e *StorageExecutor) shouldUseFabricPlanner(cypher string) bool {
 	if e.dbManager == nil {
 		return false
 	}
-	return fabricCallUsePattern.MatchString(cypher) ||
-		fabricUsePattern.MatchString(cypher) ||
-		fabricDynamicGraphPattern.MatchString(cypher)
+	// Engage Fabric only when a parsed USE target references a composite scope:
+	//   - USE <composite>
+	//   - USE <composite>.<constituent>
+	// Word presence alone is insufficient (e.g., "USE" inside string payloads).
+	opts := defaultKeywordScanOpts()
+	searchFrom := 0
+	for {
+		useIdx := keywordIndexFrom(cypher, "USE", searchFrom, opts)
+		if useIdx < 0 {
+			break
+		}
+		target, _, hasUse, err := parseLeadingUseClause(cypher[useIdx:])
+		if hasUse && err == nil && e.useTargetRequiresFabric(target) {
+			return true
+		}
+		searchFrom = useIdx + len("USE")
+	}
+	return false
+}
+
+func (e *StorageExecutor) useTargetRequiresFabric(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" || e.dbManager == nil {
+		return false
+	}
+	if e.dbManager.IsCompositeDatabase(target) {
+		return true
+	}
+	if dot := strings.IndexByte(target, '.'); dot > 0 {
+		base := strings.TrimSpace(target[:dot])
+		if base != "" && e.dbManager.IsCompositeDatabase(base) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
@@ -76,6 +143,8 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 	if dbFromCtx := GetUseDatabaseFromContext(ctx); strings.TrimSpace(dbFromCtx) != "" {
 		sessionDB = dbFromCtx
 	}
+	statsAcc := &fabricStatsAccumulator{}
+	ctx = context.WithValue(ctx, fabricStatsAccumulatorKey{}, statsAcc)
 	gateway := fabric.NewQueryGateway(planner, fabric.NewFabricExecutor(catalog, localExec, remoteExec))
 	stream, err := gateway.Execute(ctx, tx, cypher, sessionDB, params, authToken)
 	if err != nil {
@@ -99,7 +168,12 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 			stream.Columns = inferred
 		}
 	}
-	return &ExecuteResult{Columns: stream.Columns, Rows: stream.Rows}, nil
+	s := statsAcc.snapshot()
+	return &ExecuteResult{
+		Columns: stream.Columns,
+		Rows:    stream.Rows,
+		Stats:   &s,
+	}, nil
 }
 
 func (e *StorageExecutor) currentDatabaseName() string {
@@ -271,6 +345,9 @@ func (c *cypherFabricExecutor) ExecuteQueryWithRecord(ctx context.Context, dbNam
 	}
 	if result == nil {
 		return []string{}, [][]interface{}{}, nil
+	}
+	if acc := fabricStatsAccumulatorFromContext(ctx); acc != nil {
+		acc.add(result.Stats)
 	}
 	return result.Columns, result.Rows, nil
 }

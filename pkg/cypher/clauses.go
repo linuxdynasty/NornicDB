@@ -477,12 +477,15 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				return nil, fmt.Errorf("UNWIND CREATE failed: %w", err)
 			}
 
-			// Accumulate stats
-			result.Stats.NodesCreated += createResult.Stats.NodesCreated
-			result.Stats.RelationshipsCreated += createResult.Stats.RelationshipsCreated
+			// Accumulate stats when available. Some execution paths can return a
+			// nil Stats pointer even when the CREATE side-effect succeeded.
+			if createResult != nil && createResult.Stats != nil {
+				result.Stats.NodesCreated += createResult.Stats.NodesCreated
+				result.Stats.RelationshipsCreated += createResult.Stats.RelationshipsCreated
+			}
 
 			// If there's a RETURN clause, collect the result rows
-			if returnPart != "" && len(createResult.Rows) > 0 {
+			if createResult != nil && returnPart != "" && len(createResult.Rows) > 0 {
 				// First iteration: set columns
 				if len(result.Columns) == 0 {
 					result.Columns = createResult.Columns

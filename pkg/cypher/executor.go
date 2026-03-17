@@ -554,6 +554,7 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	// Normalize query: trim BOM (some clients send it) then whitespace
 	cypher = trimBOM(cypher)
 	cypher = strings.TrimSpace(cypher)
+	cypher = trimTrailingStatementDelimiters(cypher)
 	if cypher == "" {
 		return nil, fmt.Errorf("empty query")
 	}
@@ -785,6 +786,19 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	}
 
 	return result, err
+}
+
+// trimTrailingStatementDelimiters removes trailing Cypher statement delimiters
+// (';') and surrounding whitespace, while leaving internal semicolons untouched.
+// This mirrors Neo4j-compatible client behavior where a final semicolon is optional.
+func trimTrailingStatementDelimiters(query string) string {
+	s := strings.TrimSpace(query)
+	for {
+		if !strings.HasSuffix(s, ";") {
+			return s
+		}
+		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
+	}
 }
 
 // TransactionCapableEngine is an engine that supports ACID transactions.

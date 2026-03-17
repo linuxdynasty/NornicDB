@@ -2828,6 +2828,16 @@ func TestCypherHelpers_ExecuteUnwind_Branches(t *testing.T) {
 	require.Len(t, createRes.Rows, 2)
 	assert.Equal(t, int64(1), createRes.Rows[0][0])
 	assert.Equal(t, int64(2), createRes.Rows[1][0])
+
+	// Regression: UNWIND row-map + CREATE ... SET n = row must never panic when
+	// downstream execution returns a nil Stats pointer.
+	mapCreateRes, err := exec.executeUnwind(ctx, "UNWIND [{a: 1, b: 'x'}, {a: 2, b: 'y'}] AS row CREATE (n:UnwindSetNode) SET n = row RETURN n.a AS a, n.b AS b")
+	require.NoError(t, err)
+	require.Len(t, mapCreateRes.Rows, 2)
+	assert.Equal(t, int64(1), mapCreateRes.Rows[0][0])
+	assert.Equal(t, "x", mapCreateRes.Rows[0][1])
+	assert.Equal(t, int64(2), mapCreateRes.Rows[1][0])
+	assert.Equal(t, "y", mapCreateRes.Rows[1][1])
 }
 
 func TestCypherHelpers_ExecuteMatchWithPipelineToRows_Branches(t *testing.T) {
