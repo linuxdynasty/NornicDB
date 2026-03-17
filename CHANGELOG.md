@@ -42,10 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical Details
 
-- **Range covered**: post-`v1.0.18` release marker commit `02973e2..main` (no `v1.0.18` git tag present in this repository state).
-- **Commits in range**: 6 (non-merge)
-- **Repository delta**: 40 files changed, +3,865 / -357 lines
-- **Non-test surface changed**: 20 files
+- **Range covered**: `v1.0.18..main`
+- **Commits in range**: 8 (non-merge)
+- **Repository delta**: 42 files changed, +3,946 / -393 lines
+- **Non-test surface changed**: 22 files
 - **Primary focus areas**: per-DB rerank correctness, Browser multi-statement UX, Cypher/Fabric hardening, storage regression coverage, and Infinigraph implementation documentation.
 
 ## [1.0.18] - 2026-03-16
