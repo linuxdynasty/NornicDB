@@ -10,9 +10,7 @@ import { SearchPanel } from "../components/browser/SearchPanel";
 import { NodeDetailsPanel } from "../components/browser/NodeDetailsPanel";
 import { DeleteConfirmModal } from "../components/modals/DeleteConfirmModal";
 import { RegenerateConfirmModal } from "../components/modals/RegenerateConfirmModal";
-
-// Base path from environment variable (set at build time)
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || "";
+import { BASE_PATH, joinBasePath } from "../utils/basePath";
 
 interface EmbedStats {
   running: boolean;
@@ -83,7 +81,7 @@ export function Browser() {
   useEffect(() => {
     const fetchEmbedStats = async () => {
       try {
-        const res = await fetch(`${BASE_PATH}/nornicdb/embed/stats`);
+        const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/embed/stats"));
         if (res.ok) {
           const data = await res.json();
           setEmbedData({
@@ -106,7 +104,7 @@ export function Browser() {
     setEmbedTriggering(true);
     setEmbedMessage(null);
     try {
-      const res = await fetch(`${BASE_PATH}/nornicdb/embed/trigger?regenerate=true`, {
+      const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/embed/trigger?regenerate=true"), {
         method: "POST",
       });
       const data = await res.json();

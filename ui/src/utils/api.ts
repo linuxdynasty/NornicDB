@@ -1,7 +1,6 @@
 // NornicDB API Client
 
-// Base path from environment variable (set at build time)
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+import { BASE_PATH, joinBasePath } from './basePath';
 
 export interface AuthConfig {
   devLoginEnabled: boolean;
@@ -157,7 +156,7 @@ class NornicDBClient {
     timeoutMs: number = NornicDBClient.TX_COMMIT_TIMEOUT_MS,
   ): Promise<CypherResponse> {
     const res = await this.fetchWithTimeout(
-      `${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`,
+      joinBasePath(BASE_PATH, `/db/${encodeURIComponent(dbName)}/tx/commit`),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -179,7 +178,7 @@ class NornicDBClient {
     }
 
     try {
-      const res = await fetch(`${BASE_PATH}/`, { credentials: 'include' });
+      const res = await fetch(joinBasePath(BASE_PATH, '/'), { credentials: 'include' });
       if (res.ok) {
         const discovery: DiscoveryResponse = await res.json();
         // Cache the default database name
@@ -197,7 +196,7 @@ class NornicDBClient {
 
   async getAuthConfig(): Promise<AuthConfig> {
     try {
-      const res = await fetch(`${BASE_PATH}/auth/config`, { credentials: 'include' });
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/config'), { credentials: 'include' });
       if (res.ok) {
         return await res.json();
       }
@@ -219,7 +218,7 @@ class NornicDBClient {
 
   async checkAuth(): Promise<{ authenticated: boolean; user?: string }> {
     try {
-      const res = await fetch(`${BASE_PATH}/auth/me`, { credentials: 'include' });
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/me'), { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         return { authenticated: true, user: data.username };
@@ -232,7 +231,7 @@ class NornicDBClient {
 
   async login(username: string, password: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const res = await fetch(`${BASE_PATH}/auth/token`, {
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -251,19 +250,19 @@ class NornicDBClient {
   }
 
   async logout(): Promise<void> {
-    await fetch(`${BASE_PATH}/auth/logout`, {
+    await fetch(joinBasePath(BASE_PATH, '/auth/logout'), {
       method: 'POST',
       credentials: 'include',
     });
   }
 
   async getHealth(): Promise<{ status: string; time: string }> {
-    const res = await fetch(`${BASE_PATH}/health`);
+    const res = await fetch(joinBasePath(BASE_PATH, '/health'));
     return await res.json();
   }
 
   async getStatus(): Promise<DatabaseStats> {
-    const res = await fetch(`${BASE_PATH}/status`);
+    const res = await fetch(joinBasePath(BASE_PATH, '/status'));
     return await res.json();
   }
 
@@ -281,7 +280,7 @@ class NornicDBClient {
     if (database != null && database !== "") {
       body.database = database;
     }
-    const res = await fetch(`${BASE_PATH}/nornicdb/search`, {
+    const res = await fetch(joinBasePath(BASE_PATH, '/nornicdb/search'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -309,7 +308,7 @@ class NornicDBClient {
     if (database != null && database !== "") {
       body.database = database;
     }
-    const res = await fetch(`${BASE_PATH}/nornicdb/similar`, {
+    const res = await fetch(joinBasePath(BASE_PATH, '/nornicdb/similar'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -332,7 +331,7 @@ class NornicDBClient {
   }
 
   async getDatabaseInfo(name: string): Promise<DatabaseInfo> {
-    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(name)}`, {
+    const res = await fetch(joinBasePath(BASE_PATH, `/db/${encodeURIComponent(name)}`), {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -562,7 +561,7 @@ class NornicDBClient {
 
   /** Per-database config: overrides and effective (admin only). */
   async getDatabaseConfig(dbName: string): Promise<{ overrides: Record<string, string>; effective: Record<string, string> }> {
-    const res = await fetch(`${BASE_PATH}/admin/databases/${encodeURIComponent(dbName)}/config`, { credentials: 'include' });
+    const res = await fetch(joinBasePath(BASE_PATH, `/admin/databases/${encodeURIComponent(dbName)}/config`), { credentials: 'include' });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.message ?? `Failed to load config: ${res.status}`);
@@ -572,7 +571,7 @@ class NornicDBClient {
 
   /** Save per-database config overrides (admin only). */
   async putDatabaseConfig(dbName: string, overrides: Record<string, string>): Promise<{ overrides: Record<string, string>; rebuildTriggered?: boolean }> {
-    const res = await fetch(`${BASE_PATH}/admin/databases/${encodeURIComponent(dbName)}/config`, {
+    const res = await fetch(joinBasePath(BASE_PATH, `/admin/databases/${encodeURIComponent(dbName)}/config`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -587,7 +586,7 @@ class NornicDBClient {
 
   /** Allowed per-DB config keys with type and category (admin only). */
   async getDatabaseConfigKeys(): Promise<Array<{ key: string; type: string; category: string }>> {
-    const res = await fetch(`${BASE_PATH}/admin/databases/config/keys`, { credentials: 'include' });
+    const res = await fetch(joinBasePath(BASE_PATH, '/admin/databases/config/keys'), { credentials: 'include' });
     if (!res.ok) throw new Error('Failed to load config keys');
     return res.json();
   }

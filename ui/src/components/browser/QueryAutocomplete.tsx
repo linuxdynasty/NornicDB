@@ -5,9 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Sparkles, Loader2 } from "lucide-react";
-
-// Base path from environment variable
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || "";
+import { BASE_PATH, joinBasePath } from "../../utils/basePath";
 
 interface QueryAutocompleteProps {
   query: string;
@@ -54,7 +52,7 @@ export function QueryAutocomplete({
 
       try {
         // Use the new autocomplete endpoint which provides database-aware suggestions
-        const response = await fetch(`${BASE_PATH}/api/bifrost/autocomplete`, {
+        const response = await fetch(joinBasePath(BASE_PATH, "/api/bifrost/autocomplete"), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -264,5 +262,4 @@ export function QueryAutocomplete({
     </div>
   );
 }
-
 

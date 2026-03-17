@@ -7,13 +7,11 @@ import { AdminUsers } from './pages/AdminUsers';
 import { DatabaseAccess } from './pages/DatabaseAccess';
 import { Databases } from './pages/Databases';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { BASE_PATH } from './utils/basePath';
 
 // Base path from environment variable (set at build time)
 // Env: VITE_BASE_PATH (same as NORNICDB_BASE_PATH on server)
-const rawBasename = import.meta.env.VITE_BASE_PATH || '';
-const basename = rawBasename.length > 1 && rawBasename.endsWith('/')
-  ? rawBasename.slice(0, -1)
-  : rawBasename;
+const basename = BASE_PATH;
 
 function TrailingSlashCanonicalizer() {
   const location = useLocation();

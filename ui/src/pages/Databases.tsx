@@ -8,6 +8,7 @@ import { FormInput } from '../components/common/FormInput';
 import { Modal } from '../components/common/Modal';
 import { PageHeader } from '../components/common/PageHeader';
 import { PageLayout } from '../components/common/PageLayout';
+import { BASE_PATH, joinBasePath } from '../utils/basePath';
 
 export function Databases() {
   const [databases, setDatabases] = useState<DatabaseInfo[]>([]);
@@ -82,7 +83,7 @@ export function Databases() {
   }, [loadDatabases]);
 
   useEffect(() => {
-    fetch(`${import.meta.env.VITE_BASE_PATH || ''}/auth/me`, { credentials: 'include' })
+    fetch(joinBasePath(BASE_PATH, '/auth/me'), { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
       .then((me: { roles?: string[] } | null) => {
         setIsAdmin(Array.isArray(me?.roles) && me.roles.includes('admin'));

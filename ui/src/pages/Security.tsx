@@ -6,9 +6,7 @@ import { FormInput } from '../components/common/FormInput';
 import { Button } from '../components/common/Button';
 import { Alert } from '../components/common/Alert';
 import { Copy, Check } from 'lucide-react';
-
-// Base path from environment variable (set at build time)
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+import { BASE_PATH, joinBasePath } from '../utils/basePath';
 
 interface GeneratedToken {
   token: string;
@@ -62,7 +60,7 @@ export function Security() {
 
   useEffect(() => {
     // Check if user is admin and get user info
-    fetch(`${BASE_PATH}/auth/me`, {
+    fetch(joinBasePath(BASE_PATH, '/auth/me'), {
       credentials: 'include'
     })
       .then(res => res.json())
@@ -87,7 +85,7 @@ export function Security() {
     const expiry = expiresIn === 'custom' ? customExpiry : expiresIn;
 
     try {
-      const response = await fetch(`${BASE_PATH}/auth/api-token`, {
+      const response = await fetch(joinBasePath(BASE_PATH, '/auth/api-token'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -207,7 +205,7 @@ export function Security() {
                   setUpdatingProfile(true);
                   
                   try {
-                    const response = await fetch(`${BASE_PATH}/auth/profile`, {
+                    const response = await fetch(joinBasePath(BASE_PATH, '/auth/profile'), {
                       method: 'PUT',
                       headers: {
                         'Content-Type': 'application/json',
@@ -225,7 +223,7 @@ export function Security() {
                     setTimeout(() => setProfileSuccess(false), 3000);
                     
                     // Refresh user info
-                    const meResponse = await fetch(`${BASE_PATH}/auth/me`, {
+                    const meResponse = await fetch(joinBasePath(BASE_PATH, '/auth/me'), {
                       credentials: 'include'
                     });
                     const meData = await meResponse.json();
@@ -297,7 +295,7 @@ export function Security() {
                   setChangingPassword(true);
                   
                   try {
-                    const response = await fetch(`${BASE_PATH}/auth/password`, {
+                    const response = await fetch(joinBasePath(BASE_PATH, '/auth/password'), {
                       method: 'POST',
                       headers: {
                         'Content-Type': 'application/json',

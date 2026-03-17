@@ -7,9 +7,7 @@ import { Button } from '../components/common/Button';
 import { Alert } from '../components/common/Alert';
 import { Modal } from '../components/common/Modal';
 import { Plus, Edit, Trash2 } from 'lucide-react';
-
-// Base path from environment variable (set at build time)
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+import { BASE_PATH, joinBasePath } from '../utils/basePath';
 
 interface User {
   username: string;
@@ -52,7 +50,7 @@ export function AdminUsers() {
 
   const loadUsers = useCallback(async () => {
     try {
-      const response = await fetch(`${BASE_PATH}/auth/users`, {
+      const response = await fetch(joinBasePath(BASE_PATH, '/auth/users'), {
         credentials: 'include'
       });
       
@@ -71,7 +69,7 @@ export function AdminUsers() {
 
   const loadRoles = useCallback(async () => {
     try {
-      const response = await fetch(`${BASE_PATH}/auth/roles`, { credentials: 'include' });
+      const response = await fetch(joinBasePath(BASE_PATH, '/auth/roles'), { credentials: 'include' });
       if (response.ok) {
         const names = await response.json();
         if (Array.isArray(names) && names.length > 0) {
@@ -85,7 +83,7 @@ export function AdminUsers() {
 
   useEffect(() => {
     // Check if user is admin
-    fetch(`${BASE_PATH}/auth/me`, {
+    fetch(joinBasePath(BASE_PATH, '/auth/me'), {
       credentials: 'include'
     })
       .then(res => res.json())
@@ -110,7 +108,7 @@ export function AdminUsers() {
     setCreating(true);
 
     try {
-      const response = await fetch(`${BASE_PATH}/auth/users`, {
+      const response = await fetch(joinBasePath(BASE_PATH, '/auth/users'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -158,7 +156,7 @@ export function AdminUsers() {
     setUpdating(true);
 
     try {
-      const response = await fetch(`${BASE_PATH}/auth/users/${editingUser.username}`, {
+      const response = await fetch(joinBasePath(BASE_PATH, `/auth/users/${editingUser.username}`), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -190,7 +188,7 @@ export function AdminUsers() {
     }
 
     try {
-      const response = await fetch(`${BASE_PATH}/auth/users/${username}`, {
+      const response = await fetch(joinBasePath(BASE_PATH, `/auth/users/${username}`), {
         method: 'DELETE',
         credentials: 'include',
       });

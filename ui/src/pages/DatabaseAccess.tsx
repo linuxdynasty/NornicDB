@@ -8,8 +8,7 @@ import { FormInput } from '../components/common/FormInput';
 import { Modal } from '../components/common/Modal';
 import { api } from '../utils/api';
 import { Database, Plus, Save, Trash2, Edit2, Shield } from 'lucide-react';
-
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+import { BASE_PATH, joinBasePath } from '../utils/basePath';
 
 const BUILTIN_ROLES = ['admin', 'editor', 'viewer'];
 const SYSTEM_DB = 'system';
@@ -94,12 +93,12 @@ export function DatabaseAccess() {
     setLoading(true);
     try {
       const [rolesRes, allowlistRes, privilegesRes, dbs, entitlementsRes, roleEntRes] = await Promise.all([
-        fetch(`${BASE_PATH}/auth/roles`, { credentials: 'include' }),
-        fetch(`${BASE_PATH}/auth/access/databases`, { credentials: 'include' }),
-        fetch(`${BASE_PATH}/auth/access/privileges`, { credentials: 'include' }).catch(() => null),
+        fetch(joinBasePath(BASE_PATH, '/auth/roles'), { credentials: 'include' }),
+        fetch(joinBasePath(BASE_PATH, '/auth/access/databases'), { credentials: 'include' }),
+        fetch(joinBasePath(BASE_PATH, '/auth/access/privileges'), { credentials: 'include' }).catch(() => null),
         api.listDatabases().catch(() => []),
-        fetch(`${BASE_PATH}/auth/entitlements`, { credentials: 'include' }).catch(() => null),
-        fetch(`${BASE_PATH}/auth/role-entitlements`, { credentials: 'include' }).catch(() => null),
+        fetch(joinBasePath(BASE_PATH, '/auth/entitlements'), { credentials: 'include' }).catch(() => null),
+        fetch(joinBasePath(BASE_PATH, '/auth/role-entitlements'), { credentials: 'include' }).catch(() => null),
       ]);
 
       if (!rolesRes.ok) throw new Error('Failed to load roles');
@@ -144,7 +143,7 @@ export function DatabaseAccess() {
   }, []);
 
   useEffect(() => {
-    fetch(`${BASE_PATH}/auth/me`, { credentials: 'include' })
+    fetch(joinBasePath(BASE_PATH, '/auth/me'), { credentials: 'include' })
       .then((res) => res.json())
       .then((data) => {
         const r = data.roles || [];
@@ -212,7 +211,7 @@ export function DatabaseAccess() {
         role,
         entitlements: getEntitlementsForRole(role),
       }));
-      const res = await fetch(`${BASE_PATH}/auth/role-entitlements`, {
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/role-entitlements'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -241,7 +240,7 @@ export function DatabaseAccess() {
         role,
         databases: getDatabasesForRole(role),
       }));
-      const res = await fetch(`${BASE_PATH}/auth/access/databases`, {
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/access/databases'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -267,7 +266,7 @@ export function DatabaseAccess() {
     if (!newRoleName.trim()) return;
     setCreatingRole(true);
     try {
-      const res = await fetch(`${BASE_PATH}/auth/roles`, {
+      const res = await fetch(joinBasePath(BASE_PATH, '/auth/roles'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -291,7 +290,7 @@ export function DatabaseAccess() {
     if (!confirm(`Delete role "${role}"? This will fail if any user has this role.`)) return;
     setDeletingRole(role);
     try {
-      const res = await fetch(`${BASE_PATH}/auth/roles/${encodeURIComponent(role)}`, {
+      const res = await fetch(joinBasePath(BASE_PATH, `/auth/roles/${encodeURIComponent(role)}`), {
         method: 'DELETE',
         credentials: 'include',
       });
@@ -311,7 +310,7 @@ export function DatabaseAccess() {
     if (!renameTarget || !renameTarget.new.trim()) return;
     setRenaming(true);
     try {
-      const res = await fetch(`${BASE_PATH}/auth/roles/${encodeURIComponent(renameTarget.old)}`, {
+      const res = await fetch(joinBasePath(BASE_PATH, `/auth/roles/${encodeURIComponent(renameTarget.old)}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
