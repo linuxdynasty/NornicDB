@@ -2379,13 +2379,28 @@ func (e *StorageExecutor) applySetMergeToCreated(ctx context.Context, setPart st
 			return err
 		}
 		props = propsMap
-	} else {
+	} else if strings.HasPrefix(propsStr, "{") {
 		// Inline map literal: {key: value, ...}
 		parsedProps, err := e.parseSetMergeMapLiteralStrict(propsStr)
 		if err != nil {
 			return fmt.Errorf("failed to parse properties in SET +=: %w", err)
 		}
 		props = parsedProps
+	} else {
+		if propsStr == "" {
+			return fmt.Errorf("failed to parse properties in SET +=: map literal must be enclosed in { ... }")
+		}
+		// Map variable source in scope (e.g. SET n += row or SET n += row.properties).
+		// CREATE...SET execution does not carry row-scope columns, so resolve from params context.
+		sourceVal, found := resolveSetMergeSourceFromParams(getParamsFromContext(ctx), propsStr)
+		if !found {
+			return fmt.Errorf("SET += map variable %q not found in scope", propsStr)
+		}
+		propsMap, err := normalizePropsMap(sourceVal, fmt.Sprintf("variable %s", propsStr))
+		if err != nil {
+			return err
+		}
+		props = propsMap
 	}
 
 	// Apply to node or edge
@@ -2411,6 +2426,53 @@ func (e *StorageExecutor) applySetMergeToCreated(ctx context.Context, setPart st
 	}
 
 	return nil
+}
+
+// resolveSetMergeSourceFromParams resolves identifier or dotted-path map sources from params.
+// Supported forms:
+//   - row
+//   - row.properties
+func resolveSetMergeSourceFromParams(params map[string]interface{}, source string) (interface{}, bool) {
+	if params == nil {
+		return nil, false
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil, false
+	}
+	parts := strings.Split(source, ".")
+	if len(parts) == 0 {
+		return nil, false
+	}
+	for _, part := range parts {
+		if !isValidIdentifier(strings.TrimSpace(part)) {
+			return nil, false
+		}
+	}
+
+	current, ok := params[parts[0]]
+	if !ok {
+		return nil, false
+	}
+	for _, part := range parts[1:] {
+		switch m := current.(type) {
+		case map[string]interface{}:
+			next, exists := m[part]
+			if !exists {
+				return nil, false
+			}
+			current = next
+		case map[interface{}]interface{}:
+			next, exists := m[part]
+			if !exists {
+				return nil, false
+			}
+			current = next
+		default:
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 // executeMultipleCreates handles queries with multiple CREATE statements.

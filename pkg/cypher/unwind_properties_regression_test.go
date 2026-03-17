@@ -114,6 +114,140 @@ RETURN n._mongo_collection, n._mongo_database, n._mongo_id
 	}
 }
 
+func TestUnwindCreateSetMergeFromParameterMap(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoRecord)
+SET n += row
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"mongo_id":         "merge-1",
+				"mongo_collection": "nornic_translation",
+				"page":             "https://example.org/path?a=1",
+				"active":           true,
+			},
+			{
+				"mongo_id":         "merge-2",
+				"mongo_collection": "nornic_translation_text",
+				"active":           false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UNWIND CREATE SET += row failed: %v", err)
+	}
+
+	result, err := exec.Execute(ctx, `
+MATCH (n:MongoRecord)
+WHERE n.mongo_id IN ['merge-1', 'merge-2']
+RETURN n.mongo_id, n.mongo_collection, n.active, n.page
+ORDER BY n.mongo_id
+`, nil)
+	if err != nil {
+		t.Fatalf("verification MATCH failed: %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(result.Rows))
+	}
+}
+
+func TestUnwindCreateSetMergeFromParameterMap_LargeComplexStrings(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	const total = 1500
+	rows := make([]map[string]interface{}, 0, total)
+	for i := 0; i < total; i++ {
+		rows = append(rows, map[string]interface{}{
+			"mongoId":      fmt.Sprintf("complex-%d", i),
+			"sourceId":     fmt.Sprintf("complex-%d", i),
+			"originalText": fmt.Sprintf("message %d with json-like payload: {\"a\":1,\"b\":[1,2,3],\"c\":\"x,y,z\"}", i),
+			"page":         "https://example.org/path?x=1,y=2",
+			"meta":         "{\"nested\":{\"k\":\"v,with,commas\"},\"arr\":[{\"x\":1},{\"x\":2}]}",
+		})
+	}
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoDocument)
+SET n += row
+`, map[string]interface{}{"rows": rows})
+	if err != nil {
+		t.Fatalf("UNWIND CREATE SET += row with complex strings failed: %v", err)
+	}
+
+	result, err := exec.Execute(ctx, "MATCH (n:MongoDocument) RETURN count(n)", nil)
+	if err != nil {
+		t.Fatalf("count after UNWIND failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one row, got %d", len(result.Rows))
+	}
+	got, ok := result.Rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("expected int64 count, got %T (%#v)", result.Rows[0][0], result.Rows[0][0])
+	}
+	if got != total {
+		t.Fatalf("expected %d nodes after UNWIND, got %d", total, got)
+	}
+}
+
+func TestUnwindCreateSetMergeFromParameterMap_ValueContainsAS(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoDocument)
+SET n += row
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"mongoId":      "as-1",
+				"sourceId":     "as-1",
+				"originalText": "this value contains as with spaces",
+			},
+			{
+				"mongoId":      "as-2",
+				"sourceId":     "as-2",
+				"originalText": "normal text",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UNWIND CREATE SET += row failed when value contained ' as ': %v", err)
+	}
+
+	result, err := exec.Execute(ctx, `
+MATCH (n:MongoDocument)
+WHERE n.mongoId IN ['as-1', 'as-2']
+RETURN count(n)
+`, nil)
+	if err != nil {
+		t.Fatalf("count verification failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one count row, got %d", len(result.Rows))
+	}
+	got, ok := result.Rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("expected int64 count, got %T (%#v)", result.Rows[0][0], result.Rows[0][0])
+	}
+	if got != 2 {
+		t.Fatalf("expected 2 created nodes, got %d", got)
+	}
+}
+
 func TestUnwindCreateSetWholeMapFromParameter_LargeBatch(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

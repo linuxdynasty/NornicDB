@@ -1117,9 +1117,10 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 		if len(memberIDs) < minClusterSize {
 			continue
 		}
-		// Try loading persisted IVF-HNSW cluster first (same path convention as SaveIVFHNSW).
+		// Try loading persisted IVF-HNSW cluster first only when persistence is enabled
+		// (same path convention as SaveIVFHNSW).
 		var idx *HNSWIndex
-		if hnswPath != "" && vectorLookup != nil {
+		if s.persistEnabled.Load() && hnswPath != "" && vectorLookup != nil {
 			loaded, _ := LoadIVFHNSWCluster(hnswPath, cid, vectorLookup)
 			if loaded != nil && loaded.GetDimensions() == dims {
 				idx = loaded

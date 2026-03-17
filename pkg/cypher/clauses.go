@@ -7,6 +7,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -353,11 +354,6 @@ func (e *StorageExecutor) splitWithItems(expr string) []string {
 
 // executeUnwind handles UNWIND clause - list expansion
 func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Substitute parameters AFTER routing to avoid keyword detection issues
-	if params := getParamsFromContext(ctx); params != nil {
-		cypher = e.substituteParams(cypher, params)
-	}
-
 	upper := strings.ToUpper(cypher)
 
 	// Check for double UNWIND - handle by recursively processing
@@ -392,26 +388,53 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		return nil, fmt.Errorf("UNWIND clause not found in query: %q", truncateQuery(cypher, 80))
 	}
 
-	asIdx := strings.Index(upper, " AS ")
-	if asIdx == -1 {
+	afterUnwind := cypher[unwindIdx+6:]
+	asRelIdx := findKeywordNotInBrackets(afterUnwind, " AS ")
+	if asRelIdx == -1 {
 		return nil, fmt.Errorf("UNWIND requires AS clause (e.g., UNWIND [1,2,3] AS x)")
 	}
 
+	asIdx := unwindIdx + 6 + asRelIdx
 	listExpr := strings.TrimSpace(cypher[unwindIdx+6 : asIdx])
 
-	remainder := strings.TrimSpace(cypher[asIdx+4:])
-	spaceIdx := strings.IndexAny(remainder, " \t\n")
+	remainderStart := asIdx + len("AS")
+	for remainderStart < len(cypher) && isASCIISpace(cypher[remainderStart]) {
+		remainderStart++
+	}
+	remainder := strings.TrimSpace(cypher[remainderStart:])
+	spaceIdx := strings.IndexAny(remainder, " \t\r\n")
 	var variable string
 	var restQuery string
 	if spaceIdx > 0 {
-		variable = remainder[:spaceIdx]
+		variable = strings.TrimSpace(remainder[:spaceIdx])
 		restQuery = strings.TrimSpace(remainder[spaceIdx:])
 	} else {
-		variable = remainder
+		variable = strings.TrimSpace(remainder)
 		restQuery = ""
 	}
 
-	list := e.evaluateExpressionWithContext(listExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+	params := getParamsFromContext(ctx)
+	var list interface{}
+	if strings.HasPrefix(strings.TrimSpace(listExpr), "$") {
+		paramName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(listExpr), "$"))
+		if paramName == "" {
+			return nil, fmt.Errorf("UNWIND requires a valid parameter name after $")
+		}
+		if params == nil {
+			return nil, fmt.Errorf("UNWIND parameter $%s requires parameters to be provided", paramName)
+		}
+		paramValue, exists := params[paramName]
+		if !exists {
+			return nil, fmt.Errorf("UNWIND parameter $%s not found in provided parameters", paramName)
+		}
+		list = paramValue
+	} else {
+		listExprEval := listExpr
+		if params != nil {
+			listExprEval = e.substituteParams(listExprEval, params)
+		}
+		list = e.evaluateExpressionWithContext(listExprEval, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+	}
 
 	var items []interface{}
 	switch v := list.(type) {
@@ -435,9 +458,22 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		for i, n := range v {
 			items[i] = n
 		}
+	case []map[string]interface{}:
+		items = make([]interface{}, len(v))
+		for i := range v {
+			items[i] = v[i]
+		}
 	default:
-		// Single value gets wrapped in a list
-		items = []interface{}{list}
+		rv := reflect.ValueOf(list)
+		if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) {
+			items = make([]interface{}, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				items[i] = rv.Index(i).Interface()
+			}
+		} else {
+			// Single value gets wrapped in a list
+			items = []interface{}{list}
+		}
 	}
 
 	// Handle UNWIND ... CREATE ... pattern
@@ -461,18 +497,35 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 
 		// Execute CREATE for each unwound item
 		for _, item := range items {
-			// Replace variable references ONLY in the CREATE clause
-			createQuerySubstituted := e.replaceVariableInQuery(createPart, variable, item)
-
-			// Reconstruct full query with RETURN
-			fullQuery := createQuerySubstituted
+			// Reconstruct full query with RETURN.
+			fullQuery := createPart
 			if returnPart != "" {
 				fullQuery += " " + returnPart
 			}
 
-			// Execute via the main router so CREATE...SET and other valid CREATE
-			// variants use their dedicated execution paths.
-			createResult, err := e.Execute(ctx, fullQuery, nil)
+			// For CREATE...SET += paths, execute with per-item parameters instead of
+			// literal substitution. This preserves complex map/string payloads and keeps
+			// map-merge sources resolvable via params context.
+			useParamExecution := strings.Contains(createPart, "+=")
+
+			var createResult *ExecuteResult
+			var err error
+			if useParamExecution {
+				callParams := make(map[string]interface{}, len(params)+1)
+				for k, v := range params {
+					callParams[k] = v
+				}
+				callParams[variable] = item
+				createResult, err = e.Execute(ctx, fullQuery, callParams)
+			} else {
+				// Replace variable references ONLY in the CREATE clause
+				createQuerySubstituted := e.replaceVariableInQuery(createPart, variable, item)
+				substitutedFull := createQuerySubstituted
+				if returnPart != "" {
+					substitutedFull += " " + returnPart
+				}
+				createResult, err = e.Execute(ctx, substitutedFull, params)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("UNWIND CREATE failed: %w", err)
 			}

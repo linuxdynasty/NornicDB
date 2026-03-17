@@ -82,6 +82,62 @@ func TestApplySetMergeToCreated_Branches(t *testing.T) {
 		assert.EqualValues(t, 7, edge.Properties["weight"])
 		assert.Equal(t, 1, res.Stats.PropertiesSet)
 	})
+
+	t.Run("node update from map variable in params", func(t *testing.T) {
+		ctxParams := context.WithValue(ctx, paramsKey, map[string]interface{}{
+			"row": map[string]interface{}{
+				"lang": "es",
+				"rank": int64(3),
+			},
+		})
+		res := &ExecuteResult{Stats: &QueryStats{}}
+		err := exec.applySetMergeToCreated(ctxParams, "n += row", map[string]*storage.Node{"n": node}, nil, res, store)
+		require.NoError(t, err)
+		assert.Equal(t, "es", node.Properties["lang"])
+		assert.EqualValues(t, 3, node.Properties["rank"])
+		assert.Equal(t, 2, res.Stats.PropertiesSet)
+	})
+
+	t.Run("node update from dotted map variable in params", func(t *testing.T) {
+		ctxParams := context.WithValue(ctx, paramsKey, map[string]interface{}{
+			"row": map[string]interface{}{
+				"properties": map[string]interface{}{
+					"country": "US",
+				},
+			},
+		})
+		res := &ExecuteResult{Stats: &QueryStats{}}
+		err := exec.applySetMergeToCreated(ctxParams, "n += row.properties", map[string]*storage.Node{"n": node}, nil, res, store)
+		require.NoError(t, err)
+		assert.Equal(t, "US", node.Properties["country"])
+		assert.Equal(t, 1, res.Stats.PropertiesSet)
+	})
+
+	t.Run("map variable missing in scope", func(t *testing.T) {
+		err := exec.applySetMergeToCreated(ctx, "n += row", map[string]*storage.Node{"n": node}, nil, &ExecuteResult{Stats: &QueryStats{}}, store)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in scope")
+	})
+}
+
+func TestExecuteCreateSetMergeFromParamVariable(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE (n:ParamSetVar) SET n += row RETURN n", map[string]interface{}{
+		"row": map[string]interface{}{
+			"id":   "p-1",
+			"name": "param-var",
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, "MATCH (n:ParamSetVar {id:'p-1'}) RETURN n.name", nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	assert.Equal(t, "param-var", res.Rows[0][0])
 }
 
 func TestParseSetMergeMapLiteralStrict_Branches(t *testing.T) {
