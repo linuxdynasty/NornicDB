@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../utils/api';
 import type { DatabaseStats, SearchResult, CypherResponse } from '../utils/api';
+import { splitCypherStatements } from '../utils/cypherStatements';
 
 // Similar results for inline expansion
 interface SimilarExpansion {
@@ -28,6 +29,13 @@ interface AppState {
   // Query
   cypherQuery: string;
   cypherResult: CypherResponse | null;
+  cypherResults: Array<{
+    statement: string;
+    status: 'pending' | 'running' | 'success' | 'error';
+    durationMs?: number;
+    result?: CypherResponse;
+    error?: string;
+  }>;
   queryLoading: boolean;
   queryError: string | null;
   queryHistory: string[];
@@ -51,7 +59,7 @@ interface AppState {
   logout: () => Promise<void>;
   fetchStats: () => Promise<void>;
   setCypherQuery: (query: string) => void;
-  executeCypher: () => Promise<void>;
+  executeCypher: (options?: { continueOnError?: boolean }) => Promise<void>;
   setSearchQuery: (query: string) => void;
   executeSearch: () => Promise<void>;
   setSelectedNode: (node: SearchResult | null) => void;
@@ -73,6 +81,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   databaseList: [],
   cypherQuery: 'MATCH (n) RETURN n LIMIT 25',
   cypherResult: null,
+  cypherResults: [],
   queryLoading: false,
   queryError: null,
   queryHistory: [],
@@ -132,31 +141,87 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Query actions
   setCypherQuery: (query) => set({ cypherQuery: query }),
 
-  executeCypher: async () => {
+  executeCypher: async (options) => {
     const { cypherQuery, queryHistory, selectedDatabase } = get();
     if (!cypherQuery.trim()) return;
+    const continueOnError = Boolean(options?.continueOnError);
 
-    set({ queryLoading: true, queryError: null });
+    const statements = splitCypherStatements(cypherQuery);
+    if (statements.length === 0) {
+      set({ queryLoading: false, queryError: 'No executable statements found' });
+      return;
+    }
+
+    const initialResults = statements.map((statement) => ({
+      statement,
+      status: 'pending' as const,
+    }));
+
+    set({ queryLoading: true, queryError: null, cypherResults: initialResults });
     try {
-      const result = await api.executeCypher(cypherQuery, undefined, selectedDatabase ?? undefined);
-      
-      // Check for errors in response
-      if (result.errors && result.errors.length > 0) {
-        set({
-          queryError: result.errors.map(e => e.message).join('\n'),
-          queryLoading: false,
+      let firstResult: CypherResponse | null = null;
+      const errors: string[] = [];
+
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+        set((state) => {
+          const next = [...state.cypherResults];
+          next[i] = { ...next[i], status: 'running' };
+          return { cypherResults: next };
         });
-        return;
+
+        const started = performance.now();
+        try {
+          const result = await api.executeCypher(statement, undefined, selectedDatabase ?? undefined);
+          const durationMs = Math.round(performance.now() - started);
+
+          const responseErrors = result.errors?.map((e) => e.message).join('\n') || '';
+          if (responseErrors) {
+            set((state) => {
+              const next = [...state.cypherResults];
+              next[i] = { ...next[i], status: 'error', durationMs, error: responseErrors, result };
+              return { cypherResults: next };
+            });
+            errors.push(`Statement ${i + 1} failed: ${responseErrors}`);
+            if (!continueOnError) {
+              break; // stop-on-error default
+            }
+            continue;
+          }
+
+          if (!firstResult) {
+            firstResult = result;
+          }
+          set((state) => {
+            const next = [...state.cypherResults];
+            next[i] = { ...next[i], status: 'success', durationMs, result };
+            return { cypherResults: next };
+          });
+        } catch (err) {
+          const durationMs = Math.round(performance.now() - started);
+          const message = err instanceof Error ? err.message : 'Query failed';
+          set((state) => {
+            const next = [...state.cypherResults];
+            next[i] = { ...next[i], status: 'error', durationMs, error: message };
+            return { cypherResults: next };
+          });
+          errors.push(`Statement ${i + 1} failed: ${message}`);
+          if (!continueOnError) {
+            break; // stop-on-error default
+          }
+          continue;
+        }
       }
-      
+
       // Add to history if not duplicate
       const newHistory = queryHistory.includes(cypherQuery)
         ? queryHistory
         : [cypherQuery, ...queryHistory.slice(0, 19)];
-      
+
       set({
-        cypherResult: result,
+        cypherResult: firstResult,
         queryLoading: false,
+        queryError: errors.length > 0 ? errors.join('\n') : null,
         queryHistory: newHistory,
       });
     } catch (err) {

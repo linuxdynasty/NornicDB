@@ -40,6 +40,7 @@ export function Browser() {
     cypherQuery,
     setCypherQuery,
     cypherResult,
+    cypherResults,
     executeCypher,
     queryLoading,
     queryError,
@@ -268,9 +269,10 @@ export function Browser() {
               queryLoading={queryLoading}
               queryError={queryError}
               cypherResult={cypherResult}
+              cypherResults={cypherResults}
               selectedNodeIds={selectedNodeIds}
               deleteError={deleteError}
-              onExecute={executeCypher}
+              onExecute={(continueOnError) => executeCypher({ continueOnError })}
               onNodeSelect={(nodeData) => {
                 setSelectedNode({
                   node: { ...nodeData, created_at: "" },

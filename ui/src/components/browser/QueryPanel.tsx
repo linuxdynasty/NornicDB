@@ -25,9 +25,24 @@ interface QueryPanelProps {
       }>;
     }>;
   } | null;
+  cypherResults: Array<{
+    statement: string;
+    status: "pending" | "running" | "success" | "error";
+    durationMs?: number;
+    result?: {
+      results: Array<{
+        columns: string[] | null;
+        data: Array<{
+          row: unknown[];
+          meta: unknown[];
+        }>;
+      }>;
+    };
+    error?: string;
+  }>;
   selectedNodeIds: Set<string>;
   deleteError: string | null;
-  onExecute: () => void;
+  onExecute: (continueOnError: boolean) => void;
   onNodeSelect: (nodeData: { id: string; labels: string[]; properties: Record<string, unknown> }) => void;
   onToggleSelect: (nodeId: string) => void; // eslint-disable-line @typescript-eslint/no-unused-vars
   onSelectAll: (nodeIds: string[]) => void;
@@ -43,6 +58,7 @@ export function QueryPanel({
   queryLoading,
   queryError,
   cypherResult,
+  cypherResults,
   selectedNodeIds,
   deleteError,
   onExecute,
@@ -55,11 +71,14 @@ export function QueryPanel({
 }: QueryPanelProps) {
   const [showHistory, setShowHistory] = useState(false);
   const [autocompleteEnabled, setAutocompleteEnabled] = useState(true);
+  const [continueOnError, setContinueOnError] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const runningIndex = cypherResults.findIndex((r) => r.status === "running");
+  const completedCount = cypherResults.filter((r) => r.status === "success" || r.status === "error").length;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onExecute();
+    onExecute(continueOnError);
   };
 
   const handleSuggestionSelect = (suggestion: string) => {
@@ -157,6 +176,15 @@ export function QueryPanel({
           <Play className="w-4 h-4" />
           {queryLoading ? "Executing..." : "Run Query"}
         </button>
+        <label className="flex items-center gap-2 text-xs text-norse-silver select-none">
+          <input
+            type="checkbox"
+            checked={continueOnError}
+            onChange={(e) => setContinueOnError(e.target.checked)}
+            className="cursor-pointer"
+          />
+          Continue on error
+        </label>
       </form>
 
       {queryError && (
@@ -165,8 +193,17 @@ export function QueryPanel({
         </div>
       )}
 
+      {queryLoading && cypherResults.length > 0 && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+          <p className="text-sm text-amber-300 font-mono">
+            Processing {completedCount}/{cypherResults.length}
+            {runningIndex >= 0 ? ` (running statement ${runningIndex + 1})` : ""}
+          </p>
+        </div>
+      )}
+
       {/* Query Results */}
-      {cypherResult?.results[0] && (
+      {((cypherResults.length > 0) || cypherResult?.results[0]) && (
         <div className="flex-1 flex flex-col overflow-hidden">
           <SelectionToolbar
             selectedCount={selectedNodeIds.size}
@@ -182,17 +219,83 @@ export function QueryPanel({
             </div>
           )}
 
-            <QueryResultsTable
-            cypherResult={cypherResult}
-            selectedNodeIds={selectedNodeIds}
-            onNodeSelect={onNodeSelect}
-            onToggleSelect={onToggleSelect}
-              onSelectAll={() => {
-                const allIds = getAllNodeIdsFromQueryResults(cypherResult);
-                onSelectAll(allIds);
-              }}
-            onClearSelection={onClearSelection}
-          />
+          <div className="flex-1 overflow-auto p-2 space-y-3">
+            {cypherResults.length > 0 ? (
+              cypherResults.map((entry, idx) => (
+                <div key={`${idx}:${entry.statement.slice(0, 32)}`} className="border border-norse-rune rounded-lg overflow-hidden bg-norse-stone/30">
+                  <div className="px-3 py-2 border-b border-norse-rune bg-norse-shadow/50">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-mono text-norse-silver truncate">
+                        #{idx + 1}: {entry.statement}
+                      </p>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className={`px-2 py-0.5 rounded ${
+                          entry.status === "success"
+                            ? "bg-green-500/20 text-green-300"
+                            : entry.status === "error"
+                            ? "bg-red-500/20 text-red-300"
+                            : entry.status === "running"
+                            ? "bg-amber-500/20 text-amber-300"
+                            : "bg-norse-rune text-norse-silver"
+                        }`}>
+                          {entry.status}
+                        </span>
+                        {entry.durationMs != null && (
+                          <span className="text-norse-silver">{entry.durationMs} ms</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {entry.error && (
+                    <div className="p-3 bg-red-500/10 border-b border-red-500/30">
+                      <p className="text-sm text-red-400 font-mono">{entry.error}</p>
+                    </div>
+                  )}
+
+                  {(() => {
+                    const entryResult = entry.result;
+                    if (!entryResult?.results?.[0]) {
+                      return entry.status === "running" || entry.status === "pending" ? (
+                        <div className="p-3 text-sm text-norse-silver font-mono">
+                          {entry.status === "running" ? "Running..." : "Queued..."}
+                        </div>
+                      ) : (
+                        <div className="p-3 text-sm text-norse-silver font-mono">No result rows</div>
+                      );
+                    }
+                    return (
+                    <QueryResultsTable
+                      cypherResult={entryResult}
+                      selectedNodeIds={selectedNodeIds}
+                      onNodeSelect={onNodeSelect}
+                      onToggleSelect={onToggleSelect}
+                      onSelectAll={() => {
+                        const allIds = getAllNodeIdsFromQueryResults(entryResult);
+                        onSelectAll(allIds);
+                      }}
+                      onClearSelection={onClearSelection}
+                    />
+                    );
+                  })()}
+                </div>
+              ))
+            ) : (
+              cypherResult?.results[0] && (
+                <QueryResultsTable
+                  cypherResult={cypherResult}
+                  selectedNodeIds={selectedNodeIds}
+                  onNodeSelect={onNodeSelect}
+                  onToggleSelect={onToggleSelect}
+                  onSelectAll={() => {
+                    const allIds = getAllNodeIdsFromQueryResults(cypherResult);
+                    onSelectAll(allIds);
+                  }}
+                  onClearSelection={onClearSelection}
+                />
+              )
+            )}
+          </div>
         </div>
       )}
     </div>
