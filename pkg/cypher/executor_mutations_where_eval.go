@@ -4,11 +4,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+var compiledSimpleWhereCache sync.Map // map[string]func(*storage.Node) bool
+
 func (e *StorageExecutor) filterNodes(nodes []*storage.Node, variable, whereClause string) []*storage.Node {
+	if compiled, ok := e.getCompiledSimpleWhere(variable, whereClause); ok {
+		return parallelFilterNodes(nodes, compiled)
+	}
+
 	// Create filter function for parallel execution
 	filterFn := func(node *storage.Node) bool {
 		return e.evaluateWhere(node, variable, whereClause)
@@ -16,6 +23,124 @@ func (e *StorageExecutor) filterNodes(nodes []*storage.Node, variable, whereClau
 
 	// Use parallel filtering for large datasets
 	return parallelFilterNodes(nodes, filterFn)
+}
+
+func (e *StorageExecutor) getCompiledSimpleWhere(variable, whereClause string) (func(*storage.Node) bool, bool) {
+	key := variable + "\x00" + strings.TrimSpace(whereClause)
+	if cached, ok := compiledSimpleWhereCache.Load(key); ok {
+		if fn, okFn := cached.(func(*storage.Node) bool); okFn {
+			return fn, true
+		}
+	}
+	fn, ok := e.compileSimpleWhere(variable, whereClause)
+	if ok {
+		compiledSimpleWhereCache.Store(key, fn)
+	}
+	return fn, ok
+}
+
+func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func(*storage.Node) bool, bool) {
+	whereClause = strings.TrimSpace(whereClause)
+	upperClause := strings.ToUpper(whereClause)
+
+	// Keep this fast path strict to avoid semantic drift.
+	if strings.Contains(upperClause, " AND ") ||
+		strings.Contains(upperClause, " OR ") ||
+		strings.HasPrefix(upperClause, "NOT ") ||
+		strings.Contains(upperClause, " IN ") ||
+		strings.Contains(upperClause, " CONTAINS ") ||
+		strings.Contains(upperClause, " STARTS WITH ") ||
+		strings.Contains(upperClause, " ENDS WITH ") ||
+		strings.Contains(whereClause, "(") ||
+		strings.Contains(whereClause, ")") {
+		return nil, false
+	}
+
+	getProp := func(node *storage.Node, propName string) (any, bool) {
+		if propName == "has_embedding" {
+			if node.EmbedMeta != nil {
+				if val, ok := node.EmbedMeta["has_embedding"]; ok {
+					return val, true
+				}
+			}
+			return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0, true
+		}
+		val, ok := node.Properties[propName]
+		return val, ok
+	}
+
+	const prefixSep = "."
+	varPrefix := variable + prefixSep
+
+	if strings.HasSuffix(upperClause, " IS NOT NULL") {
+		left := strings.TrimSpace(whereClause[:len(whereClause)-len(" IS NOT NULL")])
+		if !strings.HasPrefix(left, varPrefix) {
+			return nil, false
+		}
+		prop := strings.TrimSpace(left[len(varPrefix):])
+		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
+			return nil, false
+		}
+		return func(node *storage.Node) bool {
+			val, exists := getProp(node, prop)
+			return exists && val != nil
+		}, true
+	}
+
+	if strings.HasSuffix(upperClause, " IS NULL") {
+		left := strings.TrimSpace(whereClause[:len(whereClause)-len(" IS NULL")])
+		if !strings.HasPrefix(left, varPrefix) {
+			return nil, false
+		}
+		prop := strings.TrimSpace(left[len(varPrefix):])
+		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
+			return nil, false
+		}
+		return func(node *storage.Node) bool {
+			val, exists := getProp(node, prop)
+			return !exists || val == nil
+		}, true
+	}
+
+	parseBinary := func(op string, neg bool) (func(*storage.Node) bool, bool) {
+		idx := strings.Index(whereClause, op)
+		if idx < 0 {
+			return nil, false
+		}
+		left := strings.TrimSpace(whereClause[:idx])
+		right := strings.TrimSpace(whereClause[idx+len(op):])
+		if !strings.HasPrefix(left, varPrefix) || right == "" {
+			return nil, false
+		}
+		prop := strings.TrimSpace(left[len(varPrefix):])
+		if prop == "" || strings.ContainsAny(prop, " \t\r\n") {
+			return nil, false
+		}
+		expected := e.parseValue(right)
+		return func(node *storage.Node) bool {
+			actual, exists := getProp(node, prop)
+			if !exists {
+				return false
+			}
+			eq := e.compareEqual(actual, expected)
+			if neg {
+				return !eq
+			}
+			return eq
+		}, true
+	}
+
+	// Order matters so we don't mis-split on "<>" / "!=".
+	if fn, ok := parseBinary("<>", true); ok {
+		return fn, true
+	}
+	if fn, ok := parseBinary("!=", true); ok {
+		return fn, true
+	}
+	if fn, ok := parseBinary("=", false); ok {
+		return fn, true
+	}
+	return nil, false
 }
 
 func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClause string) bool {

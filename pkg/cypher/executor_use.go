@@ -206,6 +206,7 @@ func (e *StorageExecutor) cloneForStorage(store storage.Engine) *StorageExecutor
 	cloned.vectorRegistry = e.vectorRegistry
 	cloned.vectorIndexSpaces = e.vectorIndexSpaces
 	cloned.txContext = e.txContext
+	cloned.fabricPlanCache = e.fabricPlanCache
 
 	e.shellParamsMu.RLock()
 	if len(e.shellParams) > 0 {

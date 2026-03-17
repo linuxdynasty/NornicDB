@@ -193,7 +193,9 @@ type StorageExecutor struct {
 	txContext *TransactionContext // Active transaction context
 	cache     *SmartQueryCache    // Query result cache with label-aware invalidation
 	planCache *QueryPlanCache     // Parsed query plan cache
-	analyzer  *QueryAnalyzer      // Query analysis with AST caching
+	// fabricPlanCache caches planned Fabric fragment trees (query + sessionDB).
+	fabricPlanCache *fabric.PlanCache
+	analyzer        *QueryAnalyzer // Query analysis with AST caching
 
 	// Node lookup cache for MATCH patterns like (n:Label {prop: value})
 	// Key: "Label:{prop:value,...}", Value: *storage.Node
@@ -315,6 +317,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		storage:           store,
 		cache:             NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
 		planCache:         NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		fabricPlanCache:   fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
 		analyzer:          NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache:   make(map[string]*storage.Node, 1000),
 		shellParams:       make(map[string]interface{}),
@@ -575,15 +578,60 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	if e.shouldUseFabricPlanner(cypher) {
 		mergedParams := e.mergeShellParams(params)
 		ctx = context.WithValue(ctx, paramsKey, mergedParams)
+		info := e.analyzer.Analyze(cypher)
+		inExplicitTx := e.txContext != nil && e.txContext.active
+		preparedFabric, err := e.prepareFabricExecution(ctx, cypher)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, fabricPreparedExecKey{}, preparedFabric)
+		allowResultCache := !preparedFabric.hasRemote
+
+		// Mirror normal query-cache policy for Fabric reads (autocommit only).
+		if allowResultCache && !inExplicitTx && info.IsReadOnly && e.cache != nil && isCacheableReadQuery(cypher) {
+			if cached, found := e.cache.Get(cypher, mergedParams); found {
+				return cached, nil
+			}
+		}
+
+		var result *ExecuteResult
+		var execErr error
 		// When an explicit transaction is active on a composite route, execute through
 		// the same FabricTransaction so many-read/one-write constraints are enforced
 		// across all statements in the session.
-		if e.txContext != nil && e.txContext.active {
+		if inExplicitTx {
 			if ftx, ok := e.txContext.tx.(*fabric.FabricTransaction); ok {
-				return e.executeViaFabricWithTx(ctx, cypher, mergedParams, ftx, false)
+				result, execErr = e.executeViaPreparedFabricWithTx(ctx, cypher, mergedParams, ftx, false, preparedFabric)
+			} else {
+				result, execErr = e.executeViaFabric(ctx, cypher, mergedParams)
+			}
+		} else {
+			result, execErr = e.executeViaFabric(ctx, cypher, mergedParams)
+		}
+		if execErr != nil {
+			return nil, execErr
+		}
+
+		if allowResultCache && !inExplicitTx && info.IsReadOnly && e.cache != nil && isCacheableReadQuery(cypher) {
+			ttl := 60 * time.Second
+			if info.HasAggregation {
+				ttl = 1 * time.Second
+			}
+			if info.HasCall || info.HasShow {
+				ttl = 300 * time.Second
+			}
+			e.cache.Put(cypher, mergedParams, result, ttl)
+		}
+
+		if info.IsWriteQuery && e.cache != nil {
+			if len(info.Labels) > 0 {
+				e.cache.InvalidateLabels(info.Labels)
+			} else {
+				e.cache.Invalidate()
 			}
 		}
-		return e.executeViaFabric(ctx, cypher, mergedParams)
+
+		return result, nil
 	}
 
 	// Handle leading Cypher USE clause (openCypher multi-graph syntax).

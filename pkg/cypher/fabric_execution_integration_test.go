@@ -2,6 +2,10 @@ package cypher
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -535,6 +539,30 @@ ORDER BY textKey128
 	}
 }
 
+func TestNormalizeFabricRowWrapper_MapInterfaceKeys(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(storage.NewMemoryEngine(), "nornic"))
+	query := "RETURN sourceId, textKey, originalText, language, translatedText"
+	stream := &fabric.ResultStream{
+		Columns: []string{"__fabric_row"},
+		Rows: [][]interface{}{
+			{
+				map[interface{}]interface{}{
+					"sourceId":       "s1",
+					"textKey":        "k1",
+					"originalText":   "o1",
+					"language":       "es",
+					"translatedText": "t1",
+				},
+			},
+		},
+	}
+
+	exec.normalizeFabricRowWrapper(query, stream)
+	require.Equal(t, []string{"sourceId", "textKey", "originalText", "language", "translatedText"}, stream.Columns)
+	require.Len(t, stream.Rows, 1)
+	require.Equal(t, []interface{}{"s1", "k1", "o1", "es", "t1"}, stream.Rows[0])
+}
+
 func TestExecute_FabricSetBasedSourceTranslationJoin_NoFabricRowLeak(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	mgr, err := multidb.NewDatabaseManager(base, nil)
@@ -699,4 +727,288 @@ ORDER BY sourceId
 	require.Equal(t, int64(2), res.Rows[0][1])
 	require.Equal(t, "src2", res.Rows[1][0])
 	require.Equal(t, int64(1), res.Rows[1][1])
+}
+
+func BenchmarkFabricCorrelatedSourceTranslationJoin_Profile(b *testing.B) {
+	const trNodeCount = 100000
+	const txrNodeCount = 100000
+
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(b, err)
+	defer mgr.Close()
+
+	require.NoError(b, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(b, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(b, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(b, err)
+	txrStore, err := mgr.GetStorage("nornic_txt")
+	require.NoError(b, err)
+
+	for i := 0; i < trNodeCount; i++ {
+		_, err = trStore.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("tr-%d", i)),
+			Labels: []string{"MongoDocument"},
+			Properties: map[string]interface{}{
+				"sourceId":     fmt.Sprintf("src-%06d", i),
+				"textKey":      fmt.Sprintf("key-%06d", i),
+				"originalText": fmt.Sprintf("original-%06d", i),
+			},
+		})
+		require.NoError(b, err)
+	}
+
+	for i := 0; i < txrNodeCount; i++ {
+		_, err = txrStore.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("txr-%d", i)),
+			Labels: []string{"MongoDocument"},
+			Properties: map[string]interface{}{
+				"translationId":  fmt.Sprintf("src-%06d", i%trNodeCount),
+				"language":       "es",
+				"translatedText": fmt.Sprintf("translated-%06d", i),
+			},
+		})
+		require.NoError(b, err)
+	}
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(b, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.sourceId IS NOT NULL
+  RETURN t.sourceId AS sourceId, coalesce(t.textKey, t.textKey128) AS textKey, t.originalText AS originalText
+  ORDER BY t.sourceId
+  LIMIT 25
+}
+CALL {
+  WITH sourceId
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  WHERE tt.translationId = sourceId
+  RETURN tt.language AS language, tt.translatedText AS translatedText
+}
+RETURN sourceId, textKey, originalText, language, translatedText
+ORDER BY sourceId, language
+`
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := exec.Execute(ctx, query, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Rows) == 0 {
+			b.Fatal("expected at least one row")
+		}
+	}
+}
+
+func TestExecute_FabricPlanCache_HitOnRepeatQuery(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{
+		ID:     "tr-1",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId": "src-1",
+		},
+	})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	require.NotNil(t, exec.fabricPlanCache)
+	// Isolate fabric plan cache behavior from result cache short-circuiting.
+	exec.cache = nil
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.sourceId IS NOT NULL
+  RETURN t.sourceId AS sourceId
+  LIMIT 1
+}
+RETURN sourceId
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	hits1, misses1, size1 := exec.fabricPlanCache.Stats()
+	require.Equal(t, int64(0), hits1)
+	require.Equal(t, int64(1), misses1)
+	require.Equal(t, 1, size1)
+
+	res, err = exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	hits2, misses2, size2 := exec.fabricPlanCache.Stats()
+	require.GreaterOrEqual(t, hits2, int64(1))
+	require.Equal(t, misses1, misses2)
+	require.Equal(t, size1, size2)
+}
+
+func TestExecute_FabricResultCache_HitOnRepeatReadQuery(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	_, err = trStore.CreateNode(&storage.Node{
+		ID:     "tr-1",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId": "src-1",
+		},
+	})
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	require.NotNil(t, exec.cache)
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.sourceId IS NOT NULL
+  RETURN t.sourceId AS sourceId
+  LIMIT 1
+}
+RETURN sourceId
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	h1, m1, _, _, _ := exec.cache.Stats()
+	require.Equal(t, int64(0), h1)
+	require.GreaterOrEqual(t, m1, int64(1))
+
+	res, err = exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	h2, m2, _, _, _ := exec.cache.Stats()
+	require.GreaterOrEqual(t, h2, h1+1)
+	require.Equal(t, m1, m2)
+}
+
+func TestExecute_FabricResultCache_SkipsRemoteConstituentTargets(t *testing.T) {
+	var remote *httptest.Server
+	remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/tx") && r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			payload := string(body)
+			if strings.Contains(payload, `"statements":[]`) || strings.Contains(payload, `"statements": []`) {
+				commitURL := remote.URL + r.URL.Path + "/commit"
+				_, _ = w.Write([]byte(`{"commit":"` + commitURL + `","errors":[]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"results":[{"columns":["sourceId"],"data":[{"row":["src-remote"],"meta":[null]}]}],"errors":[]}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/tx/commit") && r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"results":[{"columns":["sourceId"],"data":[{"row":["src-remote"],"meta":[null]}]}],"errors":[]}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/tx") && r.Method == http.MethodDelete {
+			_, _ = w.Write([]byte(`{"results":[],"errors":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[],"errors":[]}`))
+	}))
+	defer remote.Close()
+
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{
+			Alias:        "txr",
+			DatabaseName: "tenant_remote",
+			Type:         "remote",
+			AccessMode:   "read_write",
+			URI:          remote.URL,
+			AuthMode:     "oidc_forwarding",
+		},
+	}))
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	require.NotNil(t, exec.cache)
+
+	query := `
+USE translations
+CALL {
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  RETURN tt.sourceId AS sourceId
+  LIMIT 1
+}
+RETURN sourceId
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	h1, m1, size1, _, _ := exec.cache.Stats()
+	require.Equal(t, int64(0), h1)
+	require.Equal(t, int64(0), m1)
+	require.Equal(t, 0, size1)
+
+	res, err = exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	h2, m2, size2, _, _ := exec.cache.Stats()
+	require.Equal(t, h1, h2)
+	require.Equal(t, m1, m2)
+	require.Equal(t, size1, size2)
 }

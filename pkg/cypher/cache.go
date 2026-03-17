@@ -699,7 +699,10 @@ func extractLabelsFromQuery(cypher string) []string {
 // cacheKeyFNV generates a cache key using FNV-1a hash.
 func cacheKeyFNV(cypher string, params map[string]interface{}) string {
 	h := fnv.New64a()
-	h.Write([]byte(cypher))
+	// Normalize query text so formatting/whitespace/trailing-semicolon differences
+	// do not defeat result cache hits for the same logical query.
+	normalized := normalizeQuery(trimTrailingStatementDelimiters(cypher))
+	h.Write([]byte(normalized))
 	if params != nil {
 		h.Write([]byte(fmt.Sprintf("%v", params)))
 	}

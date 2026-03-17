@@ -13,6 +13,7 @@ import (
 )
 
 type fabricStatsAccumulatorKey struct{}
+type fabricPreparedExecKey struct{}
 
 type fabricStatsAccumulator struct {
 	mu    sync.Mutex
@@ -99,10 +100,24 @@ func (e *StorageExecutor) executeViaFabric(ctx context.Context, cypher string, p
 }
 
 func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher string, params map[string]interface{}, tx *fabric.FabricTransaction, autoCommit bool) (*ExecuteResult, error) {
-	catalog, err := e.buildFabricCatalog()
+	prepared, err := e.preparedFabricFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if prepared == nil {
+		prepared, err = e.prepareFabricExecution(ctx, cypher)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return e.executeViaPreparedFabricWithTx(ctx, cypher, params, tx, autoCommit, prepared)
+}
+
+func (e *StorageExecutor) executeViaPreparedFabricWithTx(ctx context.Context, cypher string, params map[string]interface{}, tx *fabric.FabricTransaction, autoCommit bool, prepared *fabricPreparedExec) (*ExecuteResult, error) {
+	if prepared == nil {
+		return nil, fmt.Errorf("fabric execution was not prepared")
+	}
+	catalog := prepared.catalog
 
 	authToken := GetAuthTokenFromContext(ctx)
 	localExec := fabric.NewLocalFragmentExecutor(&cypherFabricExecutor{
@@ -138,15 +153,10 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 		defer func() { _ = remoteExec.Close() }()
 	}
 
-	planner := fabric.NewFabricPlanner(catalog)
-	sessionDB := e.currentDatabaseName()
-	if dbFromCtx := GetUseDatabaseFromContext(ctx); strings.TrimSpace(dbFromCtx) != "" {
-		sessionDB = dbFromCtx
-	}
 	statsAcc := &fabricStatsAccumulator{}
 	ctx = context.WithValue(ctx, fabricStatsAccumulatorKey{}, statsAcc)
-	gateway := fabric.NewQueryGateway(planner, fabric.NewFabricExecutor(catalog, localExec, remoteExec))
-	stream, err := gateway.Execute(ctx, tx, cypher, sessionDB, params, authToken)
+	fabricExecutor := fabric.NewFabricExecutor(catalog, localExec, remoteExec)
+	stream, err := fabricExecutor.Execute(ctx, tx, prepared.fragment, params, authToken)
 	if err != nil {
 		// In explicit transactions (autoCommit=false), preserve transaction lifecycle
 		// for client-issued COMMIT/ROLLBACK. In autocommit mode, rollback immediately.
@@ -177,6 +187,92 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 	}, nil
 }
 
+type fabricPreparedExec struct {
+	catalog   *fabric.Catalog
+	sessionDB string
+	fragment  fabric.Fragment
+	hasRemote bool
+}
+
+func (e *StorageExecutor) prepareFabricExecution(ctx context.Context, cypher string) (*fabricPreparedExec, error) {
+	catalog, err := e.buildFabricCatalog()
+	if err != nil {
+		return nil, err
+	}
+	sessionDB := e.currentDatabaseName()
+	if dbFromCtx := GetUseDatabaseFromContext(ctx); strings.TrimSpace(dbFromCtx) != "" {
+		sessionDB = dbFromCtx
+	}
+	fragment, err := e.planFabricQuery(catalog, cypher, sessionDB)
+	if err != nil {
+		return nil, err
+	}
+	return &fabricPreparedExec{
+		catalog:   catalog,
+		sessionDB: sessionDB,
+		fragment:  fragment,
+		hasRemote: fabricFragmentHasRemoteTarget(catalog, fragment),
+	}, nil
+}
+
+func (e *StorageExecutor) preparedFabricFromContext(ctx context.Context) (*fabricPreparedExec, error) {
+	if ctx == nil {
+		return nil, nil
+	}
+	v := ctx.Value(fabricPreparedExecKey{})
+	if v == nil {
+		return nil, nil
+	}
+	prepared, ok := v.(*fabricPreparedExec)
+	if !ok {
+		return nil, fmt.Errorf("invalid prepared fabric execution in context")
+	}
+	return prepared, nil
+}
+
+func fabricFragmentHasRemoteTarget(catalog *fabric.Catalog, f fabric.Fragment) bool {
+	if catalog == nil || f == nil {
+		return false
+	}
+	switch frag := f.(type) {
+	case *fabric.FragmentExec:
+		loc, err := catalog.Resolve(frag.GraphName)
+		if err != nil {
+			return false
+		}
+		_, isRemote := loc.(*fabric.LocationRemote)
+		return isRemote
+	case *fabric.FragmentApply:
+		return fabricFragmentHasRemoteTarget(catalog, frag.Input) || fabricFragmentHasRemoteTarget(catalog, frag.Inner)
+	case *fabric.FragmentUnion:
+		return fabricFragmentHasRemoteTarget(catalog, frag.LHS) || fabricFragmentHasRemoteTarget(catalog, frag.RHS)
+	case *fabric.FragmentLeaf:
+		return fabricFragmentHasRemoteTarget(catalog, frag.Input)
+	case *fabric.FragmentInit:
+		return false
+	default:
+		return false
+	}
+}
+
+func (e *StorageExecutor) planFabricQuery(catalog *fabric.Catalog, cypher, sessionDB string) (fabric.Fragment, error) {
+	if e.fabricPlanCache != nil {
+		if cached, found := e.fabricPlanCache.Get(cypher, sessionDB); found && cached != nil {
+			return cached, nil
+		}
+	}
+
+	planner := fabric.NewFabricPlanner(catalog)
+	fragment, err := planner.Plan(cypher, sessionDB)
+	if err != nil {
+		return nil, err
+	}
+	if e.fabricPlanCache != nil {
+		e.fabricPlanCache.Put(cypher, sessionDB, fragment)
+	}
+	return fragment, nil
+}
+
 func (e *StorageExecutor) normalizeFabricRowWrapper(cypher string, stream *fabric.ResultStream) {
 	if stream == nil || len(stream.Columns) != 1 || stream.Columns[0] != "__fabric_row" || len(stream.Rows) == 0 {
 		return
@@ -190,7 +286,7 @@ func (e *StorageExecutor) normalizeFabricRowWrapper(cypher string, stream *fabri
 		if len(row) == 0 {
 			continue
 		}
-		m, ok := row[0].(map[string]interface{})
+		m, ok := normalizeFabricRowMap(row[0])
 		if !ok {
 			continue
 		}
@@ -214,6 +310,21 @@ func (e *StorageExecutor) normalizeFabricRowWrapper(cypher string, stream *fabri
 	}
 	stream.Columns = inferred
 	stream.Rows = projectedRows
+}
+
+func normalizeFabricRowMap(v interface{}) (map[string]interface{}, bool) {
+	switch m := v.(type) {
+	case map[string]interface{}:
+		return m, true
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[fmt.Sprint(k)] = val
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func lookupColumnBySourceIDInRows(rowsAny interface{}, sourceID interface{}, col string) (interface{}, bool) {
