@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1029,4 +1030,81 @@ func TestNamespacedEngine_UserConversionHelpers(t *testing.T) {
 	deepNode := NewNamespacedEngine(asyncInner, "tenant_a").toUserNode(&Node{ID: "tenant_a:n2", Labels: []string{"Doc"}})
 	require.NotNil(t, deepNode)
 	assert.Equal(t, NodeID("n2"), deepNode.ID)
+}
+
+func TestNamespacedEngine_UnprefixFallback(t *testing.T) {
+	inner, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer inner.Close()
+
+	ns := NewNamespacedEngine(inner, "mydb")
+
+	// IDs that don't match the namespace should be returned as-is
+	assert.Equal(t, NodeID("otherdb:n1"), ns.unprefixNodeID("otherdb:n1"))
+	assert.Equal(t, EdgeID("otherdb:e1"), ns.unprefixEdgeID("otherdb:e1"))
+
+	// IDs that match should be stripped
+	assert.Equal(t, NodeID("n1"), ns.unprefixNodeID("mydb:n1"))
+	assert.Equal(t, EdgeID("e1"), ns.unprefixEdgeID("mydb:e1"))
+}
+
+func TestNamespacedEngine_GetEdgeBetween_NotFound(t *testing.T) {
+	inner, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer inner.Close()
+
+	ns := NewNamespacedEngine(inner, "mydb")
+
+	// No edge exists between non-existent nodes
+	edge := ns.GetEdgeBetween("n1", "n2", "KNOWS")
+	assert.Nil(t, edge)
+}
+
+func TestNamespacedEngine_ForEachNodeIDByLabel_EarlyStop(t *testing.T) {
+	inner, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer inner.Close()
+
+	ns := NewNamespacedEngine(inner, "mydb")
+
+	// Create several nodes
+	for i := 0; i < 5; i++ {
+		_, err := ns.CreateNode(&Node{
+			ID:         NodeID(fmt.Sprintf("n%d", i)),
+			Labels:     []string{"Item"},
+			Properties: map[string]interface{}{},
+		})
+		require.NoError(t, err)
+	}
+
+	// Early stop after 2
+	var visited []NodeID
+	err = ns.ForEachNodeIDByLabel("Item", func(id NodeID) bool {
+		visited = append(visited, id)
+		return len(visited) < 2
+	})
+	require.NoError(t, err)
+	assert.Len(t, visited, 2)
+}
+
+func TestNamespacedEngine_GetEdgesByType(t *testing.T) {
+	inner, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer inner.Close()
+
+	ns := NewNamespacedEngine(inner, "mydb")
+
+	n1 := &Node{ID: "n1", Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: "n2", Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err = ns.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = ns.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, ns.CreateEdge(&Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	edges, err := ns.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	assert.Len(t, edges, 1)
+	// Should return unprefixed IDs
+	assert.Equal(t, EdgeID("e1"), edges[0].ID)
 }

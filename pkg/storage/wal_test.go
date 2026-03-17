@@ -3175,3 +3175,50 @@ func TestFullStorageChain_Streaming(t *testing.T) {
 		assert.Equal(t, 100, count, "Should stream all 100 nodes after flush")
 	})
 }
+
+func TestCloneNodeForWAL(t *testing.T) {
+	t.Run("nil node returns nil", func(t *testing.T) {
+		result := cloneNodeForWAL("mydb", nil)
+		assert.Nil(t, result)
+	})
+
+	t.Run("strips database prefix from node ID", func(t *testing.T) {
+		node := &Node{
+			ID:         NodeID("mydb:node-1"),
+			Labels:     []string{"Person"},
+			Properties: map[string]interface{}{"name": "Alice"},
+		}
+		result := cloneNodeForWAL("mydb", node)
+		require.NotNil(t, result)
+		assert.Equal(t, NodeID("node-1"), result.ID)
+		// Original should be unchanged
+		assert.Equal(t, NodeID("mydb:node-1"), node.ID)
+		// Properties should be the same reference (shallow clone)
+		assert.Equal(t, "Alice", result.Properties["name"])
+	})
+}
+
+func TestCloneEdgeForWAL(t *testing.T) {
+	t.Run("nil edge returns nil", func(t *testing.T) {
+		result := cloneEdgeForWAL("mydb", nil)
+		assert.Nil(t, result)
+	})
+
+	t.Run("strips database prefix from all IDs", func(t *testing.T) {
+		edge := &Edge{
+			ID:         EdgeID("mydb:edge-1"),
+			StartNode:  NodeID("mydb:node-1"),
+			EndNode:    NodeID("mydb:node-2"),
+			Type:       "KNOWS",
+			Properties: map[string]interface{}{"since": 2020},
+		}
+		result := cloneEdgeForWAL("mydb", edge)
+		require.NotNil(t, result)
+		assert.Equal(t, EdgeID("edge-1"), result.ID)
+		assert.Equal(t, NodeID("node-1"), result.StartNode)
+		assert.Equal(t, NodeID("node-2"), result.EndNode)
+		assert.Equal(t, "KNOWS", result.Type)
+		// Original should be unchanged
+		assert.Equal(t, EdgeID("mydb:edge-1"), edge.ID)
+	})
+}

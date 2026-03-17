@@ -1,9 +1,13 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSchemaManager(t *testing.T) {
@@ -1079,4 +1083,433 @@ func BenchmarkCompositeIndex(b *testing.B) {
 			idx.LookupPrefix("country-1", "city-1")
 		}
 	})
+}
+
+func TestSchemaManager_PersistenceErrorRollback(t *testing.T) {
+	persistErr := errors.New("disk full")
+
+	t.Run("AddUniqueConstraint rolls back on persist error", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.SetPersister(func(def *SchemaDefinition) error { return persistErr })
+
+		err := sm.AddUniqueConstraint("uc1", "Person", "email")
+		require.ErrorIs(t, err, persistErr)
+
+		// Constraint should NOT be registered
+		constraints := sm.GetConstraints()
+		assert.Len(t, constraints, 0)
+	})
+
+	t.Run("AddPropertyTypeConstraint rolls back on persist error", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.SetPersister(func(def *SchemaDefinition) error { return persistErr })
+
+		err := sm.AddPropertyTypeConstraint("ptc1", "Person", "age", PropertyTypeInteger)
+		require.ErrorIs(t, err, persistErr)
+
+		// Should NOT be registered
+		ptcs := sm.GetAllPropertyTypeConstraints()
+		assert.Len(t, ptcs, 0)
+	})
+
+	t.Run("AddPropertyIndex rolls back on persist error", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.SetPersister(func(def *SchemaDefinition) error { return persistErr })
+
+		err := sm.AddPropertyIndex("idx1", "Person", []string{"name"})
+		require.ErrorIs(t, err, persistErr)
+
+		// Should NOT be registered
+		indexes := sm.GetIndexes()
+		assert.Len(t, indexes, 0)
+	})
+
+	t.Run("AddCompositeIndex rolls back on persist error", func(t *testing.T) {
+		sm := NewSchemaManager()
+		sm.SetPersister(func(def *SchemaDefinition) error { return persistErr })
+
+		err := sm.AddCompositeIndex("cidx1", "Person", []string{"first", "last"})
+		require.ErrorIs(t, err, persistErr)
+
+		// Should NOT be registered
+		_, exists := sm.GetCompositeIndex("cidx1")
+		assert.False(t, exists)
+	})
+
+	t.Run("AddPropertyTypeConstraint duplicate is no-op", func(t *testing.T) {
+		sm := NewSchemaManager()
+		err := sm.AddPropertyTypeConstraint("ptc1", "Person", "age", PropertyTypeInteger)
+		require.NoError(t, err)
+
+		// Adding same name again should be a no-op (return nil)
+		err = sm.AddPropertyTypeConstraint("ptc1", "Person", "age", PropertyTypeInteger)
+		assert.NoError(t, err)
+	})
+}
+
+func TestValidateConstraintOnCreation_UnknownType(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	err := ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "bad",
+		Type:       ConstraintType("INVALID"),
+		Label:      "Person",
+		Properties: []string{"name"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown constraint type")
+}
+
+func TestValidateConstraintOnCreation_UniqueViolation(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create two nodes with the same property value
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"email": "dup@test.com"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"email": "dup@test.com"}})
+	require.NoError(t, err)
+
+	err = ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "unique_email",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	})
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.True(t, errors.As(err, &cve))
+	assert.Equal(t, ConstraintUnique, cve.Type)
+}
+
+func TestValidateConstraintOnCreation_ExistenceViolation(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create a node missing the required property
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+
+	err = ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "exists_name",
+		Type:       ConstraintExists,
+		Label:      "Person",
+		Properties: []string{"name"},
+	})
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.True(t, errors.As(err, &cve))
+	assert.Equal(t, ConstraintExists, cve.Type)
+}
+
+func TestValidateConstraintOnCreation_UniqueMultipleProperties(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// UNIQUE constraint requires exactly 1 property
+	err := ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "bad_unique",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"first", "last"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly 1 property")
+}
+
+func TestValidateExistenceRelationshipConstraint(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create nodes and an edge without the required property
+	n1 := testNode("rel-n1")
+	n2 := testNode("rel-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID: EdgeID(prefixTestID("rel-e1")), StartNode: n1.ID, EndNode: n2.ID,
+		Type: "WORKS_AT", Properties: map[string]interface{}{},
+	}))
+
+	// Validate existence constraint on relationship property
+	rc := RelationshipConstraint{
+		Name:       "rel_since",
+		RelType:    "WORKS_AT",
+		Properties: []string{"since"},
+	}
+	err = engine.validateExistenceRelationshipConstraint(rc)
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.True(t, errors.As(err, &cve))
+	assert.Equal(t, ConstraintExists, cve.Type)
+}
+
+func TestValidateExistenceRelationshipConstraint_MultipleProperties(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	rc := RelationshipConstraint{
+		Name:       "bad_rel",
+		RelType:    "WORKS_AT",
+		Properties: []string{"a", "b"},
+	}
+	err := engine.validateExistenceRelationshipConstraint(rc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly 1 property")
+}
+
+func TestValidateConstraintOnCreation_NodeKeyViolation(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create two nodes with the same composite key
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John", "last": "Doe"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John", "last": "Doe"}})
+	require.NoError(t, err)
+
+	err = ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "nk_person",
+		Type:       ConstraintNodeKey,
+		Label:      "Person",
+		Properties: []string{"first", "last"},
+	})
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.True(t, errors.As(err, &cve))
+	assert.Equal(t, ConstraintNodeKey, cve.Type)
+}
+
+func TestValidateConstraintOnCreation_NodeKeyNullProperty(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John"}})
+	require.NoError(t, err)
+
+	err = ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "nk_person2",
+		Type:       ConstraintNodeKey,
+		Label:      "Person",
+		Properties: []string{"first", "last"},
+	})
+	// Null property on NODE KEY — should return violation
+	require.Error(t, err)
+	var cve *ConstraintViolationError
+	require.True(t, errors.As(err, &cve))
+	assert.Equal(t, ConstraintNodeKey, cve.Type)
+}
+
+func TestValidateConstraintOnCreation_TemporalOverlap(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create two nodes with overlapping temporal intervals for the same key
+	_, err := engine.CreateNode(&Node{
+		ID: "test:n1", Labels: []string{"Contract"},
+		Properties: map[string]interface{}{
+			"contract_id": "C1",
+			"valid_from":  "2024-01-01T00:00:00Z",
+			"valid_to":    "2024-12-31T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&Node{
+		ID: "test:n2", Labels: []string{"Contract"},
+		Properties: map[string]interface{}{
+			"contract_id": "C1",
+			"valid_from":  "2024-06-01T00:00:00Z",
+			"valid_to":    "2025-06-01T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	err = ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "temporal_contract",
+		Type:       ConstraintTemporal,
+		Label:      "Contract",
+		Properties: []string{"contract_id", "valid_from", "valid_to"},
+	})
+	require.Error(t, err)
+}
+
+func TestValidateConstraintOnCreation_TemporalBadProperties(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	err := ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "bad_temporal",
+		Type:       ConstraintTemporal,
+		Label:      "Contract",
+		Properties: []string{"only_one"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "3 properties")
+}
+
+func TestValidateConstraintOnCreation_ExistenceMultipleProperties(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	err := ValidateConstraintOnCreationForEngine(engine, Constraint{
+		Name:       "bad_exists",
+		Type:       ConstraintExists,
+		Label:      "Person",
+		Properties: []string{"a", "b"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly 1 property")
+}
+
+func TestSchemaManager_AddFulltextIndex_PersistError(t *testing.T) {
+	sm := NewSchemaManager()
+	sm.SetPersister(func(def *SchemaDefinition) error { return errors.New("fail") })
+
+	err := sm.AddFulltextIndex("ft1", []string{"Person"}, []string{"bio"})
+	require.Error(t, err)
+
+	// Should be rolled back
+	indexes := sm.GetIndexes()
+	assert.Len(t, indexes, 0)
+}
+
+func TestSchemaManager_AddVectorIndex_PersistError(t *testing.T) {
+	sm := NewSchemaManager()
+	sm.SetPersister(func(def *SchemaDefinition) error { return errors.New("fail") })
+
+	err := sm.AddVectorIndex("vi1", "Document", "embedding", 128, "cosine")
+	require.Error(t, err)
+
+	// Should be rolled back
+	indexes := sm.GetIndexes()
+	assert.Len(t, indexes, 0)
+}
+
+func TestSchemaManager_AddRangeIndex_PersistError(t *testing.T) {
+	sm := NewSchemaManager()
+	sm.SetPersister(func(def *SchemaDefinition) error { return errors.New("fail") })
+
+	err := sm.AddRangeIndex("ri1", "Person", "age")
+	require.Error(t, err)
+
+	// Should be rolled back
+	indexes := sm.GetIndexes()
+	assert.Len(t, indexes, 0)
+}
+
+func TestSchemaManager_AddVectorIndex_Idempotent(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.AddVectorIndex("vi1", "Document", "embedding", 128, "cosine"))
+	require.NoError(t, sm.AddVectorIndex("vi1", "Document", "embedding", 128, "cosine")) // no-op
+}
+
+func TestSchemaManager_AddRangeIndex_Idempotent(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.AddRangeIndex("ri1", "Person", "age"))
+	require.NoError(t, sm.AddRangeIndex("ri1", "Person", "age")) // no-op
+}
+
+func TestSchemaManager_AddFulltextIndex_Idempotent(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.AddFulltextIndex("ft1", []string{"Person"}, []string{"bio"}))
+	require.NoError(t, sm.AddFulltextIndex("ft1", []string{"Person"}, []string{"bio"})) // no-op
+}
+
+func TestCompositeIndex_LookupWithFilter(t *testing.T) {
+	idx := &CompositeIndex{
+		Name:        "test_filter",
+		Label:       "User",
+		Properties:  []string{"country", "city"},
+		fullIndex:   make(map[string][]NodeID),
+		prefixIndex: make(map[string][]NodeID),
+	}
+
+	idx.IndexNode("test:n1", map[string]interface{}{"country": "US", "city": "NYC"})
+	idx.IndexNode("test:n2", map[string]interface{}{"country": "US", "city": "LA"})
+	idx.IndexNode("test:n3", map[string]interface{}{"country": "UK", "city": "LDN"})
+
+	// Filter by prefix "US", then apply filter to only keep n1
+	results := idx.LookupWithFilter(func(id NodeID) bool {
+		return id == "test:n1"
+	}, "US")
+	assert.Len(t, results, 1)
+	assert.Equal(t, NodeID("test:n1"), results[0])
+
+	// Filter with no prefix match
+	results = idx.LookupWithFilter(func(id NodeID) bool { return true }, "JP")
+	assert.Nil(t, results)
+}
+
+func TestCompositeIndex_Stats(t *testing.T) {
+	idx := &CompositeIndex{
+		Name:        "stats_idx",
+		Label:       "User",
+		Properties:  []string{"country", "city"},
+		fullIndex:   make(map[string][]NodeID),
+		prefixIndex: make(map[string][]NodeID),
+	}
+
+	idx.IndexNode("test:n1", map[string]interface{}{"country": "US", "city": "NYC"})
+
+	stats := idx.Stats()
+	assert.Equal(t, "stats_idx", stats["name"])
+	assert.Equal(t, "User", stats["label"])
+	assert.Equal(t, 1, stats["fullIndexEntries"])
+}
+
+func TestSchemaManager_LookupPrefix_FullMatch(t *testing.T) {
+	idx := &CompositeIndex{
+		Name:        "prefix_full",
+		Label:       "User",
+		Properties:  []string{"country", "city"},
+		fullIndex:   make(map[string][]NodeID),
+		prefixIndex: make(map[string][]NodeID),
+	}
+
+	idx.IndexNode("test:n1", map[string]interface{}{"country": "US", "city": "NYC"})
+
+	// LookupPrefix with all properties is a full match
+	results := idx.LookupPrefix("US", "NYC")
+	assert.Len(t, results, 1)
+
+	// LookupPrefix with no values returns nil
+	results = idx.LookupPrefix()
+	assert.Nil(t, results)
+
+	// LookupPrefix with too many values returns nil
+	results = idx.LookupPrefix("US", "NYC", "extra")
+	assert.Nil(t, results)
+}
+
+func TestCompositeIndex_RemoveNode(t *testing.T) {
+	idx := &CompositeIndex{
+		Name:        "test_idx",
+		Label:       "User",
+		Properties:  []string{"country", "city"},
+		fullIndex:   make(map[string][]NodeID),
+		prefixIndex: make(map[string][]NodeID),
+	}
+
+	// Index a node
+	idx.IndexNode("test:n1", map[string]interface{}{"country": "US", "city": "NYC"})
+	idx.IndexNode("test:n2", map[string]interface{}{"country": "US", "city": "LA"})
+
+	// Verify indexed
+	results := idx.LookupFull("US", "NYC")
+	assert.Len(t, results, 1)
+	prefixResults := idx.LookupPrefix("US")
+	assert.Len(t, prefixResults, 2)
+
+	// Remove n1
+	idx.RemoveNode("test:n1", map[string]interface{}{"country": "US", "city": "NYC"})
+
+	// Full lookup for NYC should return empty
+	results = idx.LookupFull("US", "NYC")
+	assert.Len(t, results, 0)
+
+	// Prefix lookup for US should only have n2
+	prefixResults = idx.LookupPrefix("US")
+	assert.Len(t, prefixResults, 1)
 }

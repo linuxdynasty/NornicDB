@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
@@ -577,4 +578,342 @@ func TestNodeConfigStore_AddToNodeDenyList(t *testing.T) {
 	cfg := store.Get("nornic:node-x")
 	require.NotNil(t, cfg)
 	assert.Contains(t, cfg.DenyList, "nornic:node-y")
+}
+
+func TestBadgerEngine_ForEachNodeIDByLabel_EarlyStop(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create several nodes with the same label
+	for i := 0; i < 5; i++ {
+		n := &Node{
+			ID:         NodeID(prefixTestID(fmt.Sprintf("each-n%d", i))),
+			Labels:     []string{"Batch"},
+			Properties: map[string]interface{}{},
+		}
+		_, err := engine.CreateNode(n)
+		require.NoError(t, err)
+	}
+
+	// Visit and stop after 2
+	var visited []NodeID
+	err := engine.ForEachNodeIDByLabel("Batch", func(id NodeID) bool {
+		visited = append(visited, id)
+		return len(visited) < 2 // stop after 2
+	})
+	require.NoError(t, err)
+	assert.Len(t, visited, 2)
+}
+
+func TestBadgerEngine_ForEachNodeIDByLabel_NilVisitor(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	err := engine.ForEachNodeIDByLabel("Person", nil)
+	assert.NoError(t, err) // nil visitor is a no-op
+}
+
+func TestBadgerEngine_ForEachNodeIDByLabel_ClosedEngine(t *testing.T) {
+	engine, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	require.NoError(t, engine.Close())
+
+	err = engine.ForEachNodeIDByLabel("Person", func(id NodeID) bool { return true })
+	assert.ErrorIs(t, err, ErrStorageClosed)
+}
+
+func TestBadgerEngine_HasLabelBatch(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := &Node{ID: NodeID(prefixTestID("hlb-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: NodeID(prefixTestID("hlb-n2")), Labels: []string{"Dog"}, Properties: map[string]interface{}{}}
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	result, err := engine.HasLabelBatch([]NodeID{n1.ID, n2.ID, NodeID(prefixTestID("hlb-missing"))}, "Person")
+	require.NoError(t, err)
+	assert.True(t, result[n1.ID])
+	assert.False(t, result[n2.ID])
+	assert.False(t, result[NodeID(prefixTestID("hlb-missing"))])
+}
+
+func TestBadgerEngine_HasLabelBatch_Empty(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	result, err := engine.HasLabelBatch(nil, "Person")
+	require.NoError(t, err)
+	assert.Empty(t, result)
+}
+
+func TestBadgerEngine_GetEdgesByType_EmptyType(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create nodes and edge
+	n1 := &Node{ID: NodeID(prefixTestID("ete-n1")), Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: NodeID(prefixTestID("ete-n2")), Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: EdgeID(prefixTestID("ete-e1")), StartNode: n1.ID, EndNode: n2.ID, Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	// Empty type returns all edges
+	edges, err := engine.GetEdgesByType("")
+	require.NoError(t, err)
+	assert.Len(t, edges, 1)
+}
+
+func TestBadgerEngine_GetEdgesByType_CacheEviction(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := &Node{ID: NodeID(prefixTestID("ce-n1")), Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: NodeID(prefixTestID("ce-n2")), Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	// Create edges with many different types to trigger cache eviction
+	for i := 0; i < 200; i++ {
+		edgeType := fmt.Sprintf("TYPE_%d", i)
+		e := &Edge{ID: EdgeID(prefixTestID(fmt.Sprintf("ce-e%d", i))), StartNode: n1.ID, EndNode: n2.ID, Type: edgeType, Properties: map[string]interface{}{}}
+		require.NoError(t, engine.CreateEdge(e))
+	}
+
+	// Query them all to populate and overflow cache
+	for i := 0; i < 200; i++ {
+		edges, err := engine.GetEdgesByType(fmt.Sprintf("TYPE_%d", i))
+		require.NoError(t, err)
+		assert.Len(t, edges, 1)
+	}
+}
+
+func TestBadgerEngine_GetOutgoingEdges_EmptyID(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	_, err := engine.GetOutgoingEdges("")
+	assert.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestBadgerEngine_GetIncomingEdges_EmptyID(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	_, err := engine.GetIncomingEdges("")
+	assert.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestBadgerEngine_BulkDeleteNodes_WithEdges(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("bdn-n1")
+	n2 := testNode("bdn-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(testEdge("bdn-e1", "bdn-n1", "bdn-n2", "KNOWS")))
+
+	// Bulk delete both nodes — should also cascade delete edges
+	err = engine.BulkDeleteNodes([]NodeID{n1.ID, n2.ID})
+	require.NoError(t, err)
+
+	_, err = engine.GetNode(n1.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge(EdgeID(prefixTestID("bdn-e1")))
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_BulkDeleteEdges_Multiple(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("bde-n1")
+	n2 := testNode("bde-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	e1 := testEdge("bde-e1", "bde-n1", "bde-n2", "KNOWS")
+	e2 := testEdge("bde-e2", "bde-n1", "bde-n2", "LIKES")
+	require.NoError(t, engine.CreateEdge(e1))
+	require.NoError(t, engine.CreateEdge(e2))
+
+	// Delete both edges
+	err = engine.BulkDeleteEdges([]EdgeID{e1.ID, e2.ID})
+	require.NoError(t, err)
+
+	_, err = engine.GetEdge(e1.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge(e2.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_DeleteEdge_UnknownType(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("det-n1")
+	n2 := testNode("det-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	e := testEdge("det-e1", "det-n1", "det-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Delete without knowing the type first — exercises the cacheOnEdgeDeleted path
+	err = engine.DeleteEdge(e.ID)
+	require.NoError(t, err)
+
+	_, err = engine.GetEdge(e.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_DeleteEdge_NotFound(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	err := engine.DeleteEdge(EdgeID(prefixTestID("nonexistent")))
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_CreateEdge_DuplicateEdge(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("ced-n1")
+	n2 := testNode("ced-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	e := testEdge("ced-e1", "ced-n1", "ced-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	err = engine.CreateEdge(e)
+	assert.ErrorIs(t, err, ErrAlreadyExists)
+}
+
+func TestBadgerEngine_BulkCreateNodes_UniqueConstraintViolation(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "unique_email",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	}))
+
+	nodes := []*Node{
+		{ID: NodeID(prefixTestID("bcu-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{"email": "dup@test.com"}},
+		{ID: NodeID(prefixTestID("bcu-n2")), Labels: []string{"Person"}, Properties: map[string]interface{}{"email": "dup@test.com"}},
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists in batch")
+}
+
+func TestBadgerEngine_BulkCreateNodes_NodeKeyConstraintViolation(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "nodekey_person",
+		Type:       ConstraintNodeKey,
+		Label:      "Person",
+		Properties: []string{"first", "last"},
+	}))
+
+	nodes := []*Node{
+		{ID: NodeID(prefixTestID("bck-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John", "last": "Doe"}},
+		{ID: NodeID(prefixTestID("bck-n2")), Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John", "last": "Doe"}},
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists in batch")
+}
+
+func TestBadgerEngine_BulkCreateNodes_NodeKeyNullProperty(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "nodekey_person2",
+		Type:       ConstraintNodeKey,
+		Label:      "Person",
+		Properties: []string{"first", "last"},
+	}))
+
+	nodes := []*Node{
+		{ID: NodeID(prefixTestID("bckn-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{"first": "John"}}, // "last" is nil
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be null")
+}
+
+func TestBadgerEngine_BulkCreateNodes_ExistsConstraintViolation(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "exists_name",
+		Type:       ConstraintExists,
+		Label:      "Person",
+		Properties: []string{"name"},
+	}))
+
+	nodes := []*Node{
+		{ID: NodeID(prefixTestID("bce-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{}}, // missing "name"
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing")
+}
+
+func TestBadgerEngine_BulkCreateNodes_ExistsConstraintNilProperties(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	require.NoError(t, schema.AddConstraint(Constraint{
+		Name:       "exists_name2",
+		Type:       ConstraintExists,
+		Label:      "Person",
+		Properties: []string{"name"},
+	}))
+
+	nodes := []*Node{
+		{ID: NodeID(prefixTestID("bcen-n1")), Labels: []string{"Person"}, Properties: nil},
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing")
+}
+
+func TestBadgerEngine_BulkCreateEdges_MissingNodes(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create one node but not the other
+	n1 := testNode("bcedge-n1")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+
+	edges := []*Edge{
+		{ID: EdgeID(prefixTestID("bcedge-e1")), StartNode: n1.ID, EndNode: NodeID(prefixTestID("missing")), Type: "KNOWS", Properties: map[string]interface{}{}},
+	}
+	err = engine.BulkCreateEdges(edges)
+	assert.Error(t, err) // end node doesn't exist
+}
+
+func TestBadgerEngine_CreateEdge_MissingNodes(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Start node doesn't exist
+	e := testEdge("cem-e1", "cem-missing", "cem-n2", "KNOWS")
+	err := engine.CreateEdge(e)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// Create start node but end node doesn't exist
+	n1 := testNode("cem-n1")
+	_, err = engine.CreateNode(n1)
+	require.NoError(t, err)
+
+	e2 := testEdge("cem-e2", "cem-n1", "cem-missing2", "KNOWS")
+	err = engine.CreateEdge(e2)
+	assert.ErrorIs(t, err, ErrNotFound)
 }

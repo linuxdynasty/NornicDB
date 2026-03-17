@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -321,4 +322,172 @@ func TestCompositeEngine_CircularDependencyPrevention(t *testing.T) {
 		// Note: DatabaseManager.CreateCompositeDatabase() prevents this at creation time,
 		// but the engine itself doesn't prevent it - it just routes queries through
 	})
+}
+
+func TestCompositeEngine_GetConstituentByAlias(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	defer engine1.Close()
+
+	constituents := map[string]Engine{"db1": engine1}
+	constituentNames := map[string]string{"db1": "database1"}
+	accessModes := map[string]string{"db1": "read_write"}
+	composite := NewCompositeEngine(constituents, constituentNames, accessModes)
+
+	t.Run("returns engine for valid alias", func(t *testing.T) {
+		eng, err := composite.GetConstituentByAlias("db1")
+		require.NoError(t, err)
+		assert.Equal(t, engine1, eng)
+	})
+
+	t.Run("returns error for invalid alias", func(t *testing.T) {
+		_, err := composite.GetConstituentByAlias("nonexistent")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+}
+
+func TestCompositeEngine_IsComposite(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	defer engine1.Close()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1},
+		map[string]string{"db1": "database1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	assert.True(t, composite.IsComposite())
+
+	// Also verify the interface-based detection pattern
+	type compositeChecker interface{ IsComposite() bool }
+	var eng Engine = composite
+	cc, ok := eng.(compositeChecker)
+	require.True(t, ok)
+	assert.True(t, cc.IsComposite())
+}
+
+func TestCompositeEngine_routeWrite_EmptyDatabaseID(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	engine2 := NewMemoryEngine()
+	defer engine1.Close()
+	defer engine2.Close()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1, "db2": engine2},
+		map[string]string{"db1": "database1", "db2": "database2"},
+		map[string]string{"db1": "read_write", "db2": "read_write"},
+	)
+
+	// Empty string database_id should return "" (ambiguous)
+	result := composite.routeWrite("create_node", nil, map[string]interface{}{
+		"database_id": "   ",
+	}, []string{"db1", "db2"})
+	assert.Equal(t, "", result)
+}
+
+func TestCompositeEngine_routeWrite_ByConstituentName(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	engine2 := NewMemoryEngine()
+	defer engine1.Close()
+	defer engine2.Close()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1, "db2": engine2},
+		map[string]string{"db1": "database1", "db2": "database2"},
+		map[string]string{"db1": "read_write", "db2": "read_write"},
+	)
+
+	// Route by backing database name (not alias)
+	result := composite.routeWrite("create_node", nil, map[string]interface{}{
+		"database_id": "database2",
+	}, []string{"db1", "db2"})
+	assert.Equal(t, "db2", result)
+}
+
+func TestCompositeEngine_UpdateEdge_CrossConstituent(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	defer engine1.Close()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1},
+		map[string]string{"db1": "database1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	// Create nodes and edge in db1 — IDs must be namespace-prefixed
+	n1 := &Node{ID: "db1:n1", Labels: []string{"A"}, Properties: map[string]interface{}{"database_id": "db1"}}
+	n2 := &Node{ID: "db1:n2", Labels: []string{"B"}, Properties: map[string]interface{}{"database_id": "db1"}}
+	_, err := engine1.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine1.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine1.CreateEdge(&Edge{ID: "db1:e1", StartNode: "db1:n1", EndNode: "db1:n2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	// Update the edge through composite
+	updated := &Edge{ID: "db1:e1", StartNode: "db1:n1", EndNode: "db1:n2", Type: "LIKES", Properties: map[string]interface{}{"weight": 1}}
+	err = composite.UpdateEdge(updated)
+	require.NoError(t, err)
+
+	// Verify through composite
+	edge, err := composite.GetEdge("db1:e1")
+	require.NoError(t, err)
+	assert.Equal(t, "LIKES", edge.Type)
+}
+
+func TestCompositeEngine_DeleteEdge_CrossConstituent(t *testing.T) {
+	engine1 := NewMemoryEngine()
+	defer engine1.Close()
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1},
+		map[string]string{"db1": "database1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	n1 := &Node{ID: "db1:n1", Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: "db1:n2", Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err := engine1.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine1.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine1.CreateEdge(&Edge{ID: "db1:e1", StartNode: "db1:n1", EndNode: "db1:n2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	// Delete through composite
+	err = composite.DeleteEdge("db1:e1")
+	require.NoError(t, err)
+
+	// Verify gone
+	_, err = composite.GetEdge("db1:e1")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestCompositeEngine_StreamEdges_Fallback(t *testing.T) {
+	// Use a plain MemoryEngine which doesn't implement StreamingEngine
+	engine1 := NewMemoryEngine()
+	defer engine1.Close()
+
+	// Create test data — IDs must be namespace-prefixed
+	n1 := &Node{ID: "db1:n1", Labels: []string{"A"}, Properties: map[string]interface{}{}}
+	n2 := &Node{ID: "db1:n2", Labels: []string{"B"}, Properties: map[string]interface{}{}}
+	_, err := engine1.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine1.CreateNode(n2)
+	require.NoError(t, err)
+	require.NoError(t, engine1.CreateEdge(&Edge{ID: "db1:e1", StartNode: "db1:n1", EndNode: "db1:n2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+
+	composite := NewCompositeEngine(
+		map[string]Engine{"db1": engine1},
+		map[string]string{"db1": "database1"},
+		map[string]string{"db1": "read_write"},
+	)
+
+	// StreamEdges should use AllEdges fallback since MemoryEngine doesn't implement StreamingEngine
+	var collected []*Edge
+	err = composite.StreamEdges(context.Background(), func(edge *Edge) error {
+		collected = append(collected, edge)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, collected, 1)
+	assert.Equal(t, EdgeID("db1:e1"), collected[0].ID)
 }

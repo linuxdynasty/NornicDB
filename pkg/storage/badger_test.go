@@ -1545,3 +1545,179 @@ func BenchmarkBadgerEngine_BulkCreateNodes(b *testing.B) {
 		})
 	}
 }
+
+// ============================================================================
+// Edge Update with Endpoint and Type Changes
+// ============================================================================
+
+func TestBadgerEngine_UpdateEdge_EndpointChange(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create three nodes
+	n1 := testNode("ep-n1")
+	n2 := testNode("ep-n2")
+	n3 := testNode("ep-n3")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n3)
+	require.NoError(t, err)
+
+	// Create an edge from n1 -> n2
+	edge := testEdge("ep-e1", "ep-n1", "ep-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+
+	// Verify edge exists
+	got, err := engine.GetEdge(EdgeID(prefixTestID("ep-e1")))
+	require.NoError(t, err)
+	assert.Equal(t, NodeID(prefixTestID("ep-n1")), got.StartNode)
+	assert.Equal(t, NodeID(prefixTestID("ep-n2")), got.EndNode)
+
+	// Update edge to point n1 -> n3 (endpoint change)
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("ep-e1")),
+		StartNode:  NodeID(prefixTestID("ep-n1")),
+		EndNode:    NodeID(prefixTestID("ep-n3")),
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{},
+	}
+	err = engine.UpdateEdge(updated)
+	require.NoError(t, err)
+
+	// Verify the edge was updated
+	got, err = engine.GetEdge(EdgeID(prefixTestID("ep-e1")))
+	require.NoError(t, err)
+	assert.Equal(t, NodeID(prefixTestID("ep-n3")), got.EndNode)
+
+	// Verify incoming edges updated: n3 should have the incoming edge, n2 should not
+	incoming, err := engine.GetIncomingEdges(NodeID(prefixTestID("ep-n3")))
+	require.NoError(t, err)
+	assert.Len(t, incoming, 1)
+
+	incoming, err = engine.GetIncomingEdges(NodeID(prefixTestID("ep-n2")))
+	require.NoError(t, err)
+	assert.Len(t, incoming, 0)
+}
+
+func TestBadgerEngine_UpdateEdge_TypeChange(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("tc-n1")
+	n2 := testNode("tc-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	edge := testEdge("tc-e1", "tc-n1", "tc-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+
+	// Update edge type from KNOWS to LIKES
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("tc-e1")),
+		StartNode:  NodeID(prefixTestID("tc-n1")),
+		EndNode:    NodeID(prefixTestID("tc-n2")),
+		Type:       "LIKES",
+		Properties: map[string]interface{}{},
+	}
+	err = engine.UpdateEdge(updated)
+	require.NoError(t, err)
+
+	// Verify the type changed
+	got, err := engine.GetEdge(EdgeID(prefixTestID("tc-e1")))
+	require.NoError(t, err)
+	assert.Equal(t, "LIKES", got.Type)
+
+	// Verify edge type index: LIKES should have the edge, KNOWS should not
+	likeEdges, err := engine.GetEdgesByType("LIKES")
+	require.NoError(t, err)
+	assert.Len(t, likeEdges, 1)
+
+	knowEdges, err := engine.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	assert.Len(t, knowEdges, 0)
+}
+
+func TestBadgerEngine_UpdateEdge_NotFound(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("nonexistent")),
+		StartNode:  NodeID(prefixTestID("n1")),
+		EndNode:    NodeID(prefixTestID("n2")),
+		Type:       "REL",
+		Properties: map[string]interface{}{},
+	}
+	err := engine.UpdateEdge(updated)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_UpdateEdge_NilAndEmptyID(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	err := engine.UpdateEdge(nil)
+	assert.ErrorIs(t, err, ErrInvalidData)
+
+	err = engine.UpdateEdge(&Edge{ID: ""})
+	assert.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestBadgerEngine_ClosedEngineErrors(t *testing.T) {
+	engine, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	require.NoError(t, engine.Close())
+
+	// All operations should return ErrStorageClosed on a closed engine
+	_, err = engine.CreateNode(testNode("x"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	err = engine.CreateEdge(testEdge("x", "a", "b", "R"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	_, err = engine.GetNode(NodeID("x"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	_, err = engine.GetEdge(EdgeID("x"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	err = engine.UpdateEdge(&Edge{ID: "x", StartNode: "a", EndNode: "b", Type: "R"})
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	err = engine.DeleteEdge(EdgeID("x"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+
+	err = engine.DeleteNode(NodeID("x"))
+	assert.ErrorIs(t, err, ErrStorageClosed)
+}
+
+func TestBadgerEngine_GetEdge_EmptyID(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+	_, err := engine.GetEdge("")
+	assert.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestBadgerEngine_UpdateEdge_MissingEndpoint(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create nodes and edge
+	n1 := testNode("me-n1")
+	n2 := testNode("me-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	e := testEdge("me-e1", "me-n1", "me-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Try to update with a start node that doesn't exist
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("me-e1")),
+		StartNode:  NodeID(prefixTestID("nonexistent")),
+		EndNode:    NodeID(prefixTestID("me-n2")),
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{},
+	}
+	err = engine.UpdateEdge(updated)
+	assert.ErrorIs(t, err, ErrNotFound)
+}

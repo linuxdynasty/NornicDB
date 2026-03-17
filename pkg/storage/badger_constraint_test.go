@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestBadgerTransaction_FullScanUniqueConstraint tests UNIQUE constraint with full database scan.
@@ -627,4 +629,46 @@ func setupTestBadgerEngine(t *testing.T) (*BadgerEngine, func()) {
 	}
 
 	return engine, cleanup
+}
+
+func TestCompareValues_CrossType(t *testing.T) {
+	// Cypher semantics: numeric types compare across int/int64/float64
+	tests := []struct {
+		name     string
+		a, b     interface{}
+		expected bool
+	}{
+		{"int==int equal", 42, 42, true},
+		{"int==int not equal", 42, 43, false},
+		{"int==int64 equal", 42, int64(42), true},
+		{"int==int64 not equal", 42, int64(43), false},
+		{"int==float64 equal", 42, float64(42), true},
+		{"int==float64 not equal", 42, float64(42.5), false},
+		{"int64==int equal", int64(42), 42, true},
+		{"int64==int not equal", int64(42), 43, false},
+		{"int64==int64 equal", int64(42), int64(42), true},
+		{"int64==int64 not equal", int64(42), int64(99), false},
+		{"int64==float64 equal", int64(42), float64(42), true},
+		{"int64==float64 not equal", int64(42), float64(42.1), false},
+		{"float64==int equal", float64(42), 42, true},
+		{"float64==int not equal", float64(42.5), 42, false},
+		{"float64==int64 equal", float64(42), int64(42), true},
+		{"float64==int64 not equal", float64(42.5), int64(42), false},
+		{"float64==float64 equal", float64(3.14), float64(3.14), true},
+		{"float64==float64 not equal", float64(3.14), float64(2.72), false},
+		{"string==string equal", "hello", "hello", true},
+		{"string==string not equal", "hello", "world", false},
+		{"bool==bool equal", true, true, true},
+		{"bool==bool not equal", true, false, false},
+		{"string vs int", "42", 42, false},
+		{"bool vs string", true, "true", false},
+		{"nil==nil", nil, nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := compareValues(tt.a, tt.b)
+			assert.Equal(t, tt.expected, result, "compareValues(%v, %v)", tt.a, tt.b)
+		})
+	}
 }

@@ -88,3 +88,46 @@ func TestBadgerEngine_DeleteByPrefix_EdgeCases(t *testing.T) {
 		require.ErrorIs(t, err, ErrStorageClosed)
 	})
 }
+
+func TestBadgerEngine_DeleteByPrefix_EmptyPrefix(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	_, _, err := engine.DeleteByPrefix("")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "prefix cannot be empty")
+}
+
+func TestBadgerEngine_DeleteByPrefix_CleansIndexes(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create nodes with label and edge type indexes
+	n1 := &Node{ID: NodeID(prefixTestID("dp-n1")), Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}}
+	n2 := &Node{ID: NodeID(prefixTestID("dp-n2")), Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}}
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	e := &Edge{ID: EdgeID(prefixTestID("dp-e1")), StartNode: n1.ID, EndNode: n2.ID, Type: "KNOWS", Properties: map[string]interface{}{}}
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Verify data exists
+	nodes, err := engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	// Delete by prefix — "test:" matches the test prefix
+	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix("test:")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), nodesDeleted)
+	require.Equal(t, int64(1), edgesDeleted)
+
+	// Verify everything is gone
+	nodes, err = engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, nodes, 0)
+
+	edges, err := engine.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	require.Len(t, edges, 0)
+}

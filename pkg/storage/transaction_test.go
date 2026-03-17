@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1250,4 +1251,221 @@ func BenchmarkTransaction_RollbackNodes(b *testing.B) {
 		}
 		tx.Rollback()
 	}
+}
+
+func TestTransaction_CreateEdge_MissingNodes(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	// Create only start node
+	n1 := testNode("ce-n1")
+	_, err = tx.CreateNode(n1)
+	require.NoError(t, err)
+
+	// CreateEdge should fail — end node doesn't exist
+	edge := testEdge("ce-e1", "ce-n1", "ce-missing", "KNOWS")
+	err = tx.CreateEdge(edge)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not exist")
+
+	// CreateEdge should fail — start node doesn't exist
+	edge2 := testEdge("ce-e2", "ce-missing", "ce-n1", "KNOWS")
+	err = tx.CreateEdge(edge2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not exist")
+}
+
+func TestTransaction_CreateEdge_Duplicate(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	n1 := testNode("dup-n1")
+	n2 := testNode("dup-n2")
+	_, err = tx.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = tx.CreateNode(n2)
+	require.NoError(t, err)
+
+	edge := testEdge("dup-e1", "dup-n1", "dup-n2", "KNOWS")
+	require.NoError(t, tx.CreateEdge(edge))
+
+	// Duplicate edge should fail
+	err = tx.CreateEdge(edge)
+	assert.ErrorIs(t, err, ErrAlreadyExists)
+}
+
+func TestTransaction_DeleteNode_CascadeEdges(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create nodes and edges directly in the engine
+	n1 := testNode("dc-n1")
+	n2 := testNode("dc-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	e := testEdge("dc-e1", "dc-n1", "dc-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Delete node in transaction — should cascade delete edges
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	err = tx.DeleteNode(NodeID(prefixTestID("dc-n1")))
+	require.NoError(t, err)
+
+	err = tx.Commit()
+	require.NoError(t, err)
+
+	// Node and edge should be gone
+	_, err = engine.GetNode(NodeID(prefixTestID("dc-n1")))
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge(EdgeID(prefixTestID("dc-e1")))
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestTransaction_UpdateEdge_EndpointChange(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("ue-n1")
+	n2 := testNode("ue-n2")
+	n3 := testNode("ue-n3")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n3)
+	require.NoError(t, err)
+
+	e := testEdge("ue-e1", "ue-n1", "ue-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Update edge endpoints in a transaction
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("ue-e1")),
+		StartNode:  NodeID(prefixTestID("ue-n1")),
+		EndNode:    NodeID(prefixTestID("ue-n3")),
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{},
+	}
+	err = tx.UpdateEdge(updated)
+	require.NoError(t, err)
+
+	err = tx.Commit()
+	require.NoError(t, err)
+
+	// Verify endpoint changed
+	got, err := engine.GetEdge(EdgeID(prefixTestID("ue-e1")))
+	require.NoError(t, err)
+	assert.Equal(t, NodeID(prefixTestID("ue-n3")), got.EndNode)
+}
+
+func TestTransaction_UpdateEdge_TypeChange(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("utc-n1")
+	n2 := testNode("utc-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	e := testEdge("utc-e1", "utc-n1", "utc-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+
+	// Update edge type in a transaction
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	updated := &Edge{
+		ID:         EdgeID(prefixTestID("utc-e1")),
+		StartNode:  NodeID(prefixTestID("utc-n1")),
+		EndNode:    NodeID(prefixTestID("utc-n2")),
+		Type:       "LIKES",
+		Properties: map[string]interface{}{},
+	}
+	err = tx.UpdateEdge(updated)
+	require.NoError(t, err)
+
+	err = tx.Commit()
+	require.NoError(t, err)
+
+	// Verify type changed
+	got, err := engine.GetEdge(EdgeID(prefixTestID("utc-e1")))
+	require.NoError(t, err)
+	assert.Equal(t, "LIKES", got.Type)
+
+	// Verify edge type indexes updated
+	likeEdges, err := engine.GetEdgesByType("LIKES")
+	require.NoError(t, err)
+	assert.Len(t, likeEdges, 1)
+}
+
+func TestTransaction_DeleteNode_NotFound(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	err = tx.DeleteNode(NodeID(prefixTestID("nonexistent")))
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestTransaction_HasLabel(t *testing.T) {
+	assert.True(t, hasLabel([]string{"Person", "Employee"}, "Person"))
+	assert.True(t, hasLabel([]string{"Person", "Employee"}, "Employee"))
+	assert.False(t, hasLabel([]string{"Person", "Employee"}, "Company"))
+	assert.False(t, hasLabel(nil, "Person"))
+	assert.False(t, hasLabel([]string{}, "Person"))
+}
+
+func TestTransaction_ValidateAllConstraints(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Add a unique constraint to the "test" namespace schema (matching prefixTestID)
+	schema := engine.GetSchemaForNamespace("test")
+	err := schema.AddConstraint(Constraint{
+		Name:       "unique_name",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"name"},
+	})
+	require.NoError(t, err)
+
+	// Enable deferred constraint validation
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	err = tx.SetDeferredConstraintValidation(true)
+	require.NoError(t, err)
+
+	// Create two nodes with the same unique property — deferred so no error yet
+	n1 := &Node{
+		ID:         NodeID(prefixTestID("vac-n1")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	_, err = tx.CreateNode(n1)
+	require.NoError(t, err)
+
+	n2 := &Node{
+		ID:         NodeID(prefixTestID("vac-n2")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	_, err = tx.CreateNode(n2)
+	require.NoError(t, err)
+
+	// Commit should fail due to deferred constraint validation
+	err = tx.Commit()
+	assert.Error(t, err) // unique constraint violation
 }

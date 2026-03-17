@@ -666,3 +666,26 @@ func newTestBadgerEngineForPending(t *testing.T) *BadgerEngine {
 	t.Cleanup(func() { engine.Close() })
 	return engine
 }
+
+func TestBadgerEngine_InvalidatePendingEmbeddingsIndex(t *testing.T) {
+	engine := newTestBadgerEngineForPending(t)
+
+	// InvalidatePendingEmbeddingsIndex is documented as a no-op for Badger.
+	// Verify it doesn't panic and the index remains functional.
+	node := &Node{
+		ID:         NodeID(prefixTestID("inv-n1")),
+		Labels:     []string{"TestNode"},
+		Properties: map[string]interface{}{"name": "test"},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Call the no-op — should not panic or error
+	engine.InvalidatePendingEmbeddingsIndex()
+
+	// Index should still be functional after "invalidation"
+	count := engine.RefreshPendingEmbeddingsIndex()
+	// count may be 0 or positive depending on whether the node needs embeddings;
+	// the point is it doesn't error
+	_ = count
+}
