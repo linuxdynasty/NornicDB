@@ -168,12 +168,84 @@ func (e *StorageExecutor) executeViaFabricWithTx(ctx context.Context, cypher str
 			stream.Columns = inferred
 		}
 	}
+	e.normalizeFabricRowWrapper(cypher, stream)
 	s := statsAcc.snapshot()
 	return &ExecuteResult{
 		Columns: stream.Columns,
 		Rows:    stream.Rows,
 		Stats:   &s,
 	}, nil
+}
+
+func (e *StorageExecutor) normalizeFabricRowWrapper(cypher string, stream *fabric.ResultStream) {
+	if stream == nil || len(stream.Columns) != 1 || stream.Columns[0] != "__fabric_row" || len(stream.Rows) == 0 {
+		return
+	}
+	inferred := e.inferTopLevelReturnColumns(cypher)
+	if len(inferred) == 0 {
+		return
+	}
+	projectedRows := make([][]interface{}, 0, len(stream.Rows))
+	for _, row := range stream.Rows {
+		if len(row) == 0 {
+			continue
+		}
+		m, ok := row[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		out := make([]interface{}, len(inferred))
+		sourceID, _ := m["sourceId"]
+		for i, col := range inferred {
+			if v, ok := m[col]; ok {
+				out[i] = v
+				continue
+			}
+			if sourceID != nil {
+				if v, ok := lookupColumnBySourceIDInRows(m["rows"], sourceID, col); ok {
+					out[i] = v
+				}
+			}
+		}
+		projectedRows = append(projectedRows, out)
+	}
+	if len(projectedRows) == 0 {
+		return
+	}
+	stream.Columns = inferred
+	stream.Rows = projectedRows
+}
+
+func lookupColumnBySourceIDInRows(rowsAny interface{}, sourceID interface{}, col string) (interface{}, bool) {
+	switch rows := rowsAny.(type) {
+	case []interface{}:
+		for _, item := range rows {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if sameSourceID(m["sourceId"], sourceID) {
+				v, exists := m[col]
+				return v, exists
+			}
+		}
+	case []map[string]interface{}:
+		for _, m := range rows {
+			if sameSourceID(m["sourceId"], sourceID) {
+				v, exists := m[col]
+				return v, exists
+			}
+		}
+	}
+	return nil, false
+}
+
+func sameSourceID(a interface{}, b interface{}) bool {
+	normalize := func(v interface{}) string {
+		s := strings.TrimSpace(fmt.Sprint(v))
+		return strings.Trim(s, `"`)
+	}
+	return normalize(a) == normalize(b)
 }
 
 func (e *StorageExecutor) currentDatabaseName() string {

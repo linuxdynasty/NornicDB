@@ -135,6 +135,7 @@ func TestFabricExecutor_SimpleExec(t *testing.T) {
 				Rows:    [][]interface{}{{"id1"}, {"id2"}},
 			},
 		},
+		calls: map[string]int{},
 	}
 
 	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
@@ -2356,6 +2357,111 @@ func TestExecuteRowsGroupedJoinProjection_RowsIdxOutOfBounds(t *testing.T) {
 	}
 }
 
+func TestExecuteCollectedMapJoinFlatProjection(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"rows", "sourceId", "language", "translatedText"},
+		Rows: [][]interface{}{
+			{
+				[]interface{}{
+					map[string]interface{}{
+						"sourceId":     "s1",
+						"textKey":      "k1",
+						"originalText": "o1",
+					},
+					map[string]interface{}{
+						"sourceId":     "s2",
+						"textKey":      "k2",
+						"originalText": "o2",
+					},
+				},
+				"s1",
+				"es",
+				"uno",
+			},
+			{
+				[]interface{}{
+					map[string]interface{}{
+						"sourceId":     "s1",
+						"textKey":      "k1",
+						"originalText": "o1",
+					},
+					map[string]interface{}{
+						"sourceId":     "s2",
+						"textKey":      "k2",
+						"originalText": "o2",
+					},
+				},
+				"s1",
+				"fr",
+				"un",
+			},
+			{
+				[]interface{}{
+					map[string]interface{}{
+						"sourceId":     "s1",
+						"textKey":      "k1",
+						"originalText": "o1",
+					},
+					map[string]interface{}{
+						"sourceId":     "s2",
+						"textKey":      "k2",
+						"originalText": "o2",
+					},
+				},
+				"s2",
+				"es",
+				"dos",
+			},
+		},
+	}
+
+	query := "WITH rows, collect({sourceId: sourceId, language: language, translatedText: translatedText}) AS hits UNWIND rows AS r WITH r, [h IN hits WHERE h.sourceId = r.sourceId] AS ms UNWIND ms AS m RETURN r.sourceId AS sourceId, r.textKey AS textKey, r.originalText AS originalText, m.language AS language, m.translatedText AS translatedText"
+	got, ok := executeCollectedMapJoinFlatProjection(input, query)
+	if !ok {
+		t.Fatal("expected structural projection to match")
+	}
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(got.Columns) != 5 {
+		t.Fatalf("expected 5 columns, got %v", got.Columns)
+	}
+	if len(got.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(got.Rows))
+	}
+	if got.Rows[0][0] != "s1" || got.Rows[0][1] != "k1" || got.Rows[0][2] != "o1" {
+		t.Fatalf("unexpected first row: %#v", got.Rows[0])
+	}
+}
+
+func TestExecuteApplyInMemoryProjection_RowsHitsFlatJoinPattern(t *testing.T) {
+	input := &ResultStream{
+		Columns: []string{"rows", "sourceId", "language", "translatedText"},
+		Rows: [][]interface{}{
+			{
+				[]interface{}{
+					map[string]interface{}{
+						"sourceId":     "s1",
+						"textKey":      "k1",
+						"originalText": "o1",
+					},
+				},
+				"s1",
+				"es",
+				"uno",
+			},
+		},
+	}
+	query := "WITH rows, collect({sourceId: sourceId, language: language, translatedText: translatedText}) AS hits UNWIND rows AS r WITH r, [h IN hits WHERE h.sourceId = r.sourceId] AS ms UNWIND ms AS m RETURN r.sourceId AS sourceId, r.textKey AS textKey, r.originalText AS originalText, m.language AS language, m.translatedText AS translatedText"
+	res, ok := executeApplyInMemoryProjection(input, query)
+	if !ok {
+		t.Fatal("expected rows-hits flat join projection to match")
+	}
+	if res == nil || len(res.Rows) != 1 {
+		t.Fatalf("expected one projected row, got %#v", res)
+	}
+}
+
 // --- Phase 3/4 coverage tests ---
 
 func TestFabricExecutor_UnknownFragmentType(t *testing.T) {
@@ -3173,6 +3279,202 @@ func TestTryExecuteApplyBatchedCollectLookup_StandaloneImportInOtherWhere(t *tes
 	_, handled, _ := exec.tryExecuteApplyBatchedCollectLookup(context.Background(), nil, input, inner, nil, "")
 	if handled {
 		t.Fatal("expected not handled when import col appears in otherWhere")
+	}
+}
+
+func TestTryExecuteApplyBatchedLookupRows_AllowsImportNotNullGuard(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	batchedQuery := "MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys RETURN tt.translationId AS __fabric_apply_key, tt.language AS language, tt.translatedText AS translatedText"
+	mock := &mockCypherExecutor{
+		results: map[string]*ResultStream{
+			batchedQuery: {
+				Columns: []string{"__fabric_apply_key", "language", "translatedText"},
+				Rows: [][]interface{}{
+					{"s1", "es", "uno"},
+					{"s2", "fr", "deux"},
+				},
+			},
+		},
+		calls: map[string]int{},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	input := &ResultStream{
+		Columns: []string{"sourceId"},
+		Rows:    [][]interface{}{{"s1"}, {"s2"}},
+	}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"sourceId"}, ImportColumns: []string{"sourceId"}},
+		Query:     "WITH sourceId MATCH (tt:MongoDocument) WHERE tt.translationId = sourceId AND sourceId IS NOT NULL RETURN tt.language AS language, tt.translatedText AS translatedText",
+		GraphName: "db1",
+		Columns:   []string{"language", "translatedText"},
+	}
+	res, handled, err := exec.tryExecuteApplyBatchedLookupRows(context.Background(), nil, input, inner, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled for import not-null guard")
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(res.Rows))
+	}
+	if mock.calls[batchedQuery] < 1 {
+		t.Fatalf("expected batched query execution; calls=%v", mock.calls)
+	}
+}
+
+func TestTryExecuteApplyBatchedCountLookup_TraversalPattern(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	batchedQuery := "MATCH (tt:MongoDocument)-[:IN_LANG]->(l:Lang) WHERE tt.translationId IN $__fabric_apply_keys RETURN tt.translationId AS __fabric_apply_key, count(*) AS c"
+	mock := &mockCypherExecutor{
+		results: map[string]*ResultStream{
+			batchedQuery: {
+				Columns: []string{"__fabric_apply_key", "c"},
+				Rows: [][]interface{}{
+					{"s1", int64(2)},
+					{"s2", int64(1)},
+				},
+			},
+		},
+		calls: map[string]int{},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	input := &ResultStream{
+		Columns: []string{"sourceId"},
+		Rows:    [][]interface{}{{"s1"}, {"s2"}, {"s3"}},
+	}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"sourceId"}, ImportColumns: []string{"sourceId"}},
+		Query:     "WITH sourceId MATCH (tt:MongoDocument)-[:IN_LANG]->(l:Lang) WHERE tt.translationId = sourceId RETURN count(*) AS c",
+		GraphName: "db1",
+		Columns:   []string{"c"},
+	}
+
+	res, handled, err := exec.tryExecuteApplyBatchedCountLookup(context.Background(), nil, input, inner, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled traversal count lookup")
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(res.Rows))
+	}
+	if got := res.Rows[0][1]; got != int64(2) {
+		t.Fatalf("expected s1 count=2, got %#v", got)
+	}
+	if got := res.Rows[1][1]; got != int64(1) {
+		t.Fatalf("expected s2 count=1, got %#v", got)
+	}
+	if got := res.Rows[2][1]; got != int64(0) {
+		t.Fatalf("expected s3 count=0, got %#v", got)
+	}
+	if mock.calls[batchedQuery] < 1 {
+		t.Fatalf("expected batched traversal count query execution; calls=%v", mock.calls)
+	}
+}
+
+func TestTryExecuteApplyBatchedCountLookup_AllowsImportNotNullGuard(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	batchedQuery := "MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys RETURN tt.translationId AS __fabric_apply_key, count(*) AS c"
+	mock := &mockCypherExecutor{
+		results: map[string]*ResultStream{
+			batchedQuery: {
+				Columns: []string{"__fabric_apply_key", "c"},
+				Rows: [][]interface{}{
+					{"s1", int64(3)},
+				},
+			},
+		},
+		calls: map[string]int{},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	input := &ResultStream{
+		Columns: []string{"sourceId"},
+		Rows:    [][]interface{}{{"s1"}},
+	}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"sourceId"}, ImportColumns: []string{"sourceId"}},
+		Query:     "WITH sourceId MATCH (tt:MongoDocument) WHERE tt.translationId = sourceId AND sourceId IS NOT NULL RETURN count(*) AS c",
+		GraphName: "db1",
+		Columns:   []string{"c"},
+	}
+
+	res, handled, err := exec.tryExecuteApplyBatchedCountLookup(context.Background(), nil, input, inner, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled for import not-null guard")
+	}
+	if len(res.Rows) != 1 || res.Rows[0][1] != int64(3) {
+		t.Fatalf("unexpected result rows: %#v", res.Rows)
+	}
+	if mock.calls[batchedQuery] < 1 {
+		t.Fatalf("expected batched query execution; calls=%v", mock.calls)
+	}
+}
+
+func TestTryExecuteApplyBatchedCountLookup_WriteQueryNotHandled(t *testing.T) {
+	exec := NewFabricExecutor(NewCatalog(), nil, nil)
+	input := &ResultStream{Columns: []string{"sourceId"}, Rows: [][]interface{}{{"s1"}}}
+	inner := &FragmentExec{
+		Query: "WITH sourceId MATCH (tt:MongoDocument) WHERE tt.translationId = sourceId CREATE (x:Audit) RETURN count(*) AS c",
+	}
+	_, handled, _ := exec.tryExecuteApplyBatchedCountLookup(context.Background(), nil, input, inner, nil, "")
+	if handled {
+		t.Fatal("expected not handled for write query")
+	}
+}
+
+func TestParseSimpleBatchedCountReturnItems(t *testing.T) {
+	items, ok := parseSimpleBatchedCountReturnItems("count(*) AS c, count(tt) AS n, count(tt.id) AS ids")
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if len(items) != 3 || items[0].alias != "c" || items[1].alias != "n" || items[2].alias != "ids" {
+		t.Fatalf("unexpected parsed items: %#v", items)
+	}
+
+	if _, ok := parseSimpleBatchedCountReturnItems("sum(tt.x) AS s"); ok {
+		t.Fatal("expected parse failure for non-count aggregate")
+	}
+}
+
+func TestSanitizeOtherWhereForImportColumn(t *testing.T) {
+	cases := []struct {
+		name      string
+		where     string
+		importCol string
+		want      string
+		ok        bool
+	}{
+		{name: "empty", where: "", importCol: "sourceId", want: "", ok: true},
+		{name: "keep_non_import_condition", where: "tt.language = 'es'", importCol: "sourceId", want: "tt.language = 'es'", ok: true},
+		{name: "drop_import_not_null_guard", where: "sourceId IS NOT NULL", importCol: "sourceId", want: "", ok: true},
+		{name: "drop_backtick_import_not_null_guard", where: "`sourceId` IS NOT NULL", importCol: "sourceId", want: "", ok: true},
+		{name: "mixed_keep_and_drop", where: "sourceId IS NOT NULL AND tt.language = 'es'", importCol: "sourceId", want: "tt.language = 'es'", ok: true},
+		{name: "reject_other_import_reference", where: "sourceId > 0", importCol: "sourceId", want: "", ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := sanitizeOtherWhereForImportColumn(tc.where, tc.importCol)
+			if ok != tc.ok {
+				t.Fatalf("ok mismatch: got %v want %v", ok, tc.ok)
+			}
+			if got != tc.want {
+				t.Fatalf("where mismatch: got %q want %q", got, tc.want)
+			}
+		})
 	}
 }
 

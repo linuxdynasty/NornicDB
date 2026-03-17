@@ -345,6 +345,12 @@ func (e *FabricExecutor) executeApply(ctx context.Context, tx *FabricTransaction
 			}
 			return batched, nil
 		}
+		if batched, handled, err := e.tryExecuteApplyBatchedCountLookup(ctx, tx, inputResult, execFrag, params, authToken); handled {
+			if err != nil {
+				return nil, fmt.Errorf("apply inner failed: %w", err)
+			}
+			return batched, nil
+		}
 		if batched, handled, err := e.tryExecuteApplyBatchedLookupRows(ctx, tx, inputResult, execFrag, params, authToken); handled {
 			if err != nil {
 				return nil, fmt.Errorf("apply inner failed: %w", err)
@@ -424,6 +430,11 @@ type fabricReturnItem struct {
 	alias string
 }
 
+type fabricCountReturnItem struct {
+	expr  string
+	alias string
+}
+
 // tryExecuteApplyBatchedCollectLookup optimizes a common correlated-subquery pattern:
 //
 //	WITH key USE ... MATCH (...) WHERE n.prop = key RETURN collect(...) AS texts
@@ -474,7 +485,8 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCollectLookup(
 	if !ok {
 		return nil, false, nil
 	}
-	if otherWhere != "" && containsStandaloneIdentifier(otherWhere, importCol) {
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+	if !ok {
 		return nil, false, nil
 	}
 
@@ -632,6 +644,219 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCollectLookup(
 	return result, true, nil
 }
 
+// tryExecuteApplyBatchedCountLookup optimizes correlated scalar-aggregate COUNT subqueries:
+//
+//	WITH key USE ... MATCH (...) WHERE n.prop = key RETURN count(*) AS c
+//
+// by rewriting to batched IN lookups with GROUP BY correlation key and then
+// remapping grouped counts to each outer row.
+func (e *FabricExecutor) tryExecuteApplyBatchedCountLookup(
+	ctx context.Context,
+	tx *FabricTransaction,
+	inputResult *ResultStream,
+	inner *FragmentExec,
+	params map[string]interface{},
+	authToken string,
+) (*ResultStream, bool, error) {
+	if inputResult == nil || len(inputResult.Rows) == 0 || len(inputResult.Columns) == 0 || inner == nil {
+		return nil, false, nil
+	}
+
+	trimmed := strings.TrimSpace(inner.Query)
+	if !startsWithFold(trimmed, "WITH ") || !containsFold(trimmed, "RETURN ") || !containsFold(trimmed, "count(") || queryIsWrite(trimmed) {
+		return nil, false, nil
+	}
+
+	m := reApplyLookupRows.FindStringSubmatch(trimmed)
+	if len(m) != 6 {
+		return nil, false, nil
+	}
+	importCol := strings.TrimSpace(m[1])
+	useClause := strings.TrimSpace(m[2])
+	matchPart := strings.TrimSpace(m[3])
+	wherePart := strings.TrimSpace(m[4])
+	returnPart := strings.TrimSpace(m[5])
+	if importCol == "" || wherePart == "" || returnPart == "" {
+		return nil, false, nil
+	}
+
+	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(wherePart, importCol)
+	if !ok {
+		return nil, false, nil
+	}
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+	if !ok {
+		return nil, false, nil
+	}
+
+	countItems, ok := parseSimpleBatchedCountReturnItems(returnPart)
+	if !ok || len(countItems) == 0 {
+		return nil, false, nil
+	}
+
+	outerIdx := buildColumnIndex(inputResult.Columns)
+	keyIdx, exists := outerIdx[importCol]
+	if !exists {
+		return nil, false, nil
+	}
+
+	distinctKeys := make([]interface{}, 0, minInt(len(inputResult.Rows), fabricApplyLookupBatchSize))
+	seen := make(map[string]struct{}, len(inputResult.Rows))
+	grouped := make(map[string][]interface{}, len(inputResult.Rows))
+	for _, row := range inputResult.Rows {
+		if keyIdx >= len(row) {
+			continue
+		}
+		key := row[keyIdx]
+		if key == nil {
+			continue
+		}
+		k := applyLookupKeyString(key)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		distinctKeys = append(distinctKeys, key)
+	}
+	if len(seen) == 0 {
+		result := &ResultStream{
+			Columns: combineColumns(inputResult.Columns, aliasesFromCountReturnItems(countItems)),
+			Rows:    make([][]interface{}, 0, len(inputResult.Rows)),
+		}
+		innerCols := aliasesFromCountReturnItems(countItems)
+		innerIdx := buildColumnIndex(innerCols)
+		zeroes := zeroCountValues(len(countItems))
+		for _, outerRow := range inputResult.Rows {
+			result.Rows = append(result.Rows, combineRowsByIndexes(result.Columns, outerIdx, outerRow, innerIdx, zeroes))
+		}
+		return result, true, nil
+	}
+
+	var groupedMu sync.Mutex
+	ctxBatch, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+	sem := make(chan struct{}, fabricApplyLookupMaxConcurrency)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	for start := 0; start < len(distinctKeys); start += fabricApplyLookupBatchSize {
+		end := minInt(start+fabricApplyLookupBatchSize, len(distinctKeys))
+		chunk := append([]interface{}(nil), distinctKeys[start:end]...)
+		wg.Add(1)
+		go func(chunk []interface{}) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctxBatch.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			var rewritten strings.Builder
+			if useClause != "" {
+				rewritten.WriteString(useClause)
+				rewritten.WriteByte(' ')
+			}
+			rewritten.WriteString("MATCH ")
+			rewritten.WriteString(matchPart)
+			rewritten.WriteString(" WHERE ")
+			rewritten.WriteString(matchVar)
+			rewritten.WriteByte('.')
+			rewritten.WriteString(matchProp)
+			rewritten.WriteString(" IN $__fabric_apply_keys")
+			if otherWhere != "" {
+				rewritten.WriteString(" AND ")
+				rewritten.WriteString(otherWhere)
+			}
+			rewritten.WriteString(" RETURN ")
+			rewritten.WriteString(matchVar)
+			rewritten.WriteByte('.')
+			rewritten.WriteString(matchProp)
+			rewritten.WriteString(" AS __fabric_apply_key")
+			for _, item := range countItems {
+				rewritten.WriteString(", ")
+				rewritten.WriteString(item.expr)
+				rewritten.WriteString(" AS ")
+				rewritten.WriteString(item.alias)
+			}
+			batchParams := make(map[string]interface{}, len(params)+1)
+			for k, v := range params {
+				batchParams[k] = v
+			}
+			batchParams["__fabric_apply_keys"] = chunk
+
+			batchFrag := *inner
+			batchFrag.Query = rewritten.String()
+			batchResult, err := e.Execute(ctxBatch, tx, &batchFrag, batchParams, authToken)
+			if err != nil {
+				select {
+				case errCh <- err:
+					cancelBatch()
+				default:
+				}
+				return
+			}
+
+			batchIdx := buildColumnIndex(batchResult.Columns)
+			keyColIdx, ok := batchIdx["__fabric_apply_key"]
+			if !ok {
+				select {
+				case errCh <- fmt.Errorf("batched APPLY count lookup produced unexpected columns: %v", batchResult.Columns):
+					cancelBatch()
+				default:
+				}
+				return
+			}
+			localGrouped := make(map[string][]interface{}, len(batchResult.Rows))
+			for _, row := range batchResult.Rows {
+				if keyColIdx >= len(row) {
+					continue
+				}
+				values := make([]interface{}, 0, len(countItems))
+				for _, item := range countItems {
+					idx, ok := batchIdx[item.alias]
+					if !ok || idx >= len(row) {
+						values = append(values, int64(0))
+						continue
+					}
+					values = append(values, row[idx])
+				}
+				localGrouped[applyLookupKeyString(row[keyColIdx])] = values
+			}
+			groupedMu.Lock()
+			for k, v := range localGrouped {
+				grouped[k] = v
+			}
+			groupedMu.Unlock()
+		}(chunk)
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return nil, true, err
+	default:
+	}
+
+	innerCols := aliasesFromCountReturnItems(countItems)
+	innerIdx := buildColumnIndex(innerCols)
+	zeroes := zeroCountValues(len(countItems))
+	result := &ResultStream{
+		Columns: combineColumns(inputResult.Columns, innerCols),
+		Rows:    make([][]interface{}, 0, len(inputResult.Rows)),
+	}
+	for _, outerRow := range inputResult.Rows {
+		var key interface{}
+		if keyIdx < len(outerRow) {
+			key = outerRow[keyIdx]
+		}
+		values, ok := grouped[applyLookupKeyString(key)]
+		if !ok {
+			values = zeroes
+		}
+		result.Rows = append(result.Rows, combineRowsByIndexes(result.Columns, outerIdx, outerRow, innerIdx, values))
+	}
+	return result, true, nil
+}
+
 func applyLookupKeyString(v interface{}) string {
 	switch x := v.(type) {
 	case nil:
@@ -703,7 +928,8 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRows(
 	if !ok {
 		return nil, false, nil
 	}
-	if otherWhere != "" && containsStandaloneIdentifier(otherWhere, importCol) {
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+	if !ok {
 		return nil, false, nil
 	}
 
@@ -907,6 +1133,63 @@ func aliasesFromReturnItems(items []fabricReturnItem) []string {
 	return cols
 }
 
+func parseSimpleBatchedCountReturnItems(returnPart string) ([]fabricCountReturnItem, bool) {
+	items := splitTopLevelCSV(returnPart)
+	if len(items) == 0 {
+		return nil, false
+	}
+	out := make([]fabricCountReturnItem, 0, len(items))
+	for _, raw := range items {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil, false
+		}
+		expr := raw
+		alias := raw
+		if as := lastAsIndexFold(raw); as >= 0 {
+			expr = strings.TrimSpace(raw[:as])
+			alias = strings.TrimSpace(raw[as+4:])
+		}
+		if !isSimpleIdentifier(alias) {
+			return nil, false
+		}
+		if !isSimpleCountExpr(expr) {
+			return nil, false
+		}
+		out = append(out, fabricCountReturnItem{expr: expr, alias: alias})
+	}
+	return out, true
+}
+
+func isSimpleCountExpr(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	if !startsWithFold(expr, "count(") || !strings.HasSuffix(expr, ")") {
+		return false
+	}
+	inner := strings.TrimSpace(expr[len("count(") : len(expr)-1])
+	if inner == "*" || isSimpleIdentifier(inner) {
+		return true
+	}
+	_, _, ok := parseFabricVarProp(inner)
+	return ok
+}
+
+func aliasesFromCountReturnItems(items []fabricCountReturnItem) []string {
+	cols := make([]string, 0, len(items))
+	for _, item := range items {
+		cols = append(cols, item.alias)
+	}
+	return cols
+}
+
+func zeroCountValues(n int) []interface{} {
+	out := make([]interface{}, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, int64(0))
+	}
+	return out
+}
+
 func extractApplyCorrelationWhere(whereClause string, importCol string) (matchVar string, matchProp string, otherWhere string, ok bool) {
 	terms := splitTopLevelAnd(whereClause)
 	if len(terms) == 0 {
@@ -946,6 +1229,49 @@ func extractApplyCorrelationWhere(whereClause string, importCol string) (matchVa
 		}
 	}
 	return matchVar, matchProp, strings.Join(remaining, " AND "), true
+}
+
+func sanitizeOtherWhereForImportColumn(otherWhere string, importCol string) (string, bool) {
+	if strings.TrimSpace(otherWhere) == "" {
+		return "", true
+	}
+	terms := splitTopLevelAnd(otherWhere)
+	if len(terms) == 0 {
+		return "", true
+	}
+	kept := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if isImportNotNullGuardTerm(term, importCol) {
+			continue
+		}
+		if containsStandaloneIdentifier(term, importCol) {
+			return "", false
+		}
+		kept = append(kept, term)
+	}
+	if len(kept) == 0 {
+		return "", true
+	}
+	return strings.Join(kept, " AND "), true
+}
+
+func isImportNotNullGuardTerm(term string, importCol string) bool {
+	parts := strings.Fields(strings.TrimSpace(term))
+	if len(parts) != 4 {
+		return false
+	}
+	left := strings.TrimSpace(parts[0])
+	left = strings.Trim(left, "`")
+	if !strings.EqualFold(left, strings.TrimSpace(importCol)) {
+		return false
+	}
+	return strings.EqualFold(parts[1], "IS") &&
+		strings.EqualFold(parts[2], "NOT") &&
+		strings.EqualFold(parts[3], "NULL")
 }
 
 func splitTopLevelAnd(whereClause string) []string {
@@ -1260,6 +1586,8 @@ var reWithCollectMapOnly = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*\{
 
 var reWithCollectDistinctKeys = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*\{([^}]*)\}\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+UNWIND\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$`)
 
+var reWithCollectJoinFlat = regexp.MustCompile(`(?is)^\s*WITH\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*collect\s*\(\s*\{([^}]*)\}\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+UNWIND\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+([A-Za-z_][A-Za-z0-9_]*)\s+WHERE\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\]\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+UNWIND\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+(.+?)\s*;?\s*$`)
+
 func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*ResultStream, bool) {
 	if inputResult == nil {
 		return nil, false
@@ -1392,6 +1720,16 @@ func executeApplyInMemoryProjection(inputResult *ResultStream, query string) (*R
 		strings.Contains(trimmed, "g.k = r.textKey128") &&
 		containsFold(trimmed, "COALESCE(hit.texts, []) AS texts") {
 		return executeRowsGroupedJoinProjection(inputResult), true
+	}
+
+	// Generic set-based flatten projection:
+	// WITH <rows>, collect({...}) AS <grouped>
+	// UNWIND <rows> AS <r>
+	// WITH <r>, [g IN <grouped> WHERE g.<k1> = <r>.<k2>] AS <ms>
+	// UNWIND <ms> AS <m>
+	// RETURN <r>.<...> AS ..., <m>.<...> AS ...
+	if projected, ok := executeCollectedMapJoinFlatProjection(inputResult, trimmed); ok {
+		return projected, true
 	}
 
 	return nil, false
@@ -1776,6 +2114,174 @@ func executeRowsGroupedJoinProjection(input *ResultStream) *ResultStream {
 	return out
 }
 
+func executeCollectedMapJoinFlatProjection(input *ResultStream, query string) (*ResultStream, bool) {
+	if input == nil || len(input.Rows) == 0 {
+		return nil, false
+	}
+	m := reWithCollectJoinFlat.FindStringSubmatch(query)
+	if len(m) != 17 {
+		return nil, false
+	}
+
+	rowsAlias := strings.TrimSpace(m[1])
+	mapSpec := strings.TrimSpace(m[2])
+	groupAlias := strings.TrimSpace(m[3])
+	unwindList := strings.TrimSpace(m[4])
+	rowVar := strings.TrimSpace(m[5])
+	withRowVar := strings.TrimSpace(m[6])
+	groupVar := strings.TrimSpace(m[7])
+	inGroupAlias := strings.TrimSpace(m[8])
+	groupVarRef := strings.TrimSpace(m[9])
+	groupKeyField := strings.TrimSpace(m[10])
+	rowVarRef := strings.TrimSpace(m[11])
+	rowKeyField := strings.TrimSpace(m[12])
+	msAlias := strings.TrimSpace(m[13])
+	unwindMs := strings.TrimSpace(m[14])
+	itemVar := strings.TrimSpace(m[15])
+	returnClause := strings.TrimSpace(m[16])
+
+	if !strings.EqualFold(rowsAlias, unwindList) ||
+		!strings.EqualFold(rowVar, withRowVar) ||
+		!strings.EqualFold(groupAlias, inGroupAlias) ||
+		!strings.EqualFold(groupVar, groupVarRef) ||
+		!strings.EqualFold(rowVar, rowVarRef) ||
+		!strings.EqualFold(msAlias, unwindMs) {
+		return nil, false
+	}
+
+	collectPairs := splitTopLevelCSV(mapSpec)
+	if len(collectPairs) == 0 {
+		return nil, false
+	}
+	type mapPair struct {
+		key string
+		src string
+	}
+	mapPairs := make([]mapPair, 0, len(collectPairs))
+	joinFieldExists := false
+	for _, p := range collectPairs {
+		p = strings.TrimSpace(p)
+		colon := strings.IndexByte(p, ':')
+		if colon <= 0 {
+			return nil, false
+		}
+		key := strings.TrimSpace(p[:colon])
+		src := strings.TrimSpace(p[colon+1:])
+		if !isSimpleIdentifier(key) || !isSimpleIdentifier(src) {
+			return nil, false
+		}
+		if strings.EqualFold(key, groupKeyField) {
+			joinFieldExists = true
+		}
+		mapPairs = append(mapPairs, mapPair{key: key, src: src})
+	}
+	if !joinFieldExists {
+		return nil, false
+	}
+
+	type retItem struct {
+		srcVar string
+		srcKey string
+		alias  string
+	}
+	retParts := splitTopLevelCSV(returnClause)
+	if len(retParts) == 0 {
+		return nil, false
+	}
+	retItems := make([]retItem, 0, len(retParts))
+	for _, part := range retParts {
+		part = strings.TrimSpace(part)
+		as := lastAsIndexFold(part)
+		if as < 0 {
+			return nil, false
+		}
+		expr := strings.TrimSpace(part[:as])
+		alias := strings.TrimSpace(part[as+4:])
+		if !isSimpleIdentifier(alias) {
+			return nil, false
+		}
+		v, k, ok := parseFabricVarProp(expr)
+		if !ok {
+			return nil, false
+		}
+		retItems = append(retItems, retItem{srcVar: v, srcKey: k, alias: alias})
+	}
+
+	colIdx := buildColumnIndex(input.Columns)
+	rowsIdx, ok := colIdx[rowsAlias]
+	if !ok || len(input.Rows) == 0 || rowsIdx >= len(input.Rows[0]) {
+		return nil, false
+	}
+	for _, pair := range mapPairs {
+		if _, ok := colIdx[pair.src]; !ok {
+			return nil, false
+		}
+	}
+
+	// Build grouped lookup from join key -> collected map rows.
+	grouped := make(map[string][]map[string]interface{}, len(input.Rows))
+	for _, row := range input.Rows {
+		collectMap := make(map[string]interface{}, len(mapPairs))
+		for _, pair := range mapPairs {
+			idx := colIdx[pair.src]
+			if idx < len(row) {
+				collectMap[pair.key] = row[idx]
+			}
+		}
+		key := applyLookupKeyString(collectMap[groupKeyField])
+		grouped[key] = append(grouped[key], collectMap)
+	}
+
+	var rowsAny []interface{}
+	switch v := input.Rows[0][rowsIdx].(type) {
+	case []interface{}:
+		rowsAny = v
+	case []map[string]interface{}:
+		rowsAny = make([]interface{}, 0, len(v))
+		for _, it := range v {
+			rowsAny = append(rowsAny, it)
+		}
+	default:
+		return nil, false
+	}
+
+	outCols := make([]string, 0, len(retItems))
+	for _, item := range retItems {
+		outCols = append(outCols, item.alias)
+	}
+	out := &ResultStream{
+		Columns: outCols,
+		Rows:    make([][]interface{}, 0, len(rowsAny)),
+	}
+
+	for _, it := range rowsAny {
+		rowMap, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		key := applyLookupKeyString(rowMap[rowKeyField])
+		matches := grouped[key]
+		if len(matches) == 0 {
+			continue
+		}
+		for _, match := range matches {
+			outRow := make([]interface{}, 0, len(retItems))
+			for _, item := range retItems {
+				switch {
+				case strings.EqualFold(item.srcVar, rowVar):
+					outRow = append(outRow, rowMap[item.srcKey])
+				case strings.EqualFold(item.srcVar, itemVar):
+					outRow = append(outRow, match[item.srcKey])
+				default:
+					outRow = append(outRow, nil)
+				}
+			}
+			out.Rows = append(out.Rows, outRow)
+		}
+	}
+	return out, true
+}
+
 func (e *FabricExecutor) executeApplyAsPipeline(
 	ctx context.Context,
 	tx *FabricTransaction,
@@ -1854,6 +2360,13 @@ func (e *FabricExecutor) executeApplyAsPipeline(
 	res, err := e.executeExec(ctx, tx, &copied, mergedParams, authToken)
 	if err != nil {
 		return nil, true, err
+	}
+	if res != nil && len(res.Columns) == 1 && res.Columns[0] == "__fabric_row" {
+		// Fallback: when pipeline execution leaks the wrapper row map column,
+		// apply structural in-memory projection from the original inner query.
+		if projected, ok := executeCollectedMapJoinFlatProjection(inputResult, trimmed); ok {
+			return projected, true, nil
+		}
 	}
 	return res, true, nil
 }
