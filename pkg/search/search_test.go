@@ -1046,7 +1046,13 @@ func TestSearchService_BuildIndexes_DoesNotReuseDiskIndexesWhenStorageEmpty(t *t
 	require.Equal(t, int64(0), edgesDeleted)
 
 	// Rebuild should detect empty storage and clear stale on-disk index state.
-	svc2 := NewServiceWithDimensions(base, 3)
+	vecInfo, err := os.Stat(vectorPath + ".vec")
+	require.NoError(t, err)
+	engineWithWrite := &lastWriteEngine{
+		Engine:    base,
+		writeTime: vecInfo.ModTime().Add(2 * time.Second),
+	}
+	svc2 := NewServiceWithDimensions(engineWithWrite, 3)
 	svc2.SetPersistenceEnabled(true)
 	t.Cleanup(func() { svc2.SetPersistenceEnabled(false) })
 	svc2.SetFulltextIndexPath(bm25Path)

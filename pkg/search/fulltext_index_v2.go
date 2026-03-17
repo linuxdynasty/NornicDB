@@ -371,6 +371,9 @@ func (f *FulltextIndexV2) LexicalSeedDocIDs(maxTerms, docsPerTerm int) []string 
 	}
 	sort.Slice(terms, func(i, j int) bool {
 		if terms[i].idf == terms[j].idf {
+			if terms[i].df == terms[j].df {
+				return terms[i].term < terms[j].term
+			}
 			return terms[i].df < terms[j].df
 		}
 		return terms[i].idf > terms[j].idf
@@ -398,7 +401,12 @@ func (f *FulltextIndexV2) LexicalSeedDocIDs(maxTerms, docsPerTerm int) []string 
 			}
 			docs = append(docs, docTF{id: id, tf: p.TF})
 		}
-		sort.Slice(docs, func(i, j int) bool { return docs[i].tf > docs[j].tf })
+		sort.Slice(docs, func(i, j int) bool {
+			if docs[i].tf == docs[j].tf {
+				return docs[i].id < docs[j].id
+			}
+			return docs[i].tf > docs[j].tf
+		})
 		lim := docsPerTerm
 		if lim > len(docs) {
 			lim = len(docs)

@@ -2412,8 +2412,21 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	// When both paths are set and both indexes have content, skip the full iteration.
 	vectorCount := s.EmbeddingCount()
+	shouldClearStaleDisk := false
 	if storageNodeCount == 0 && (s.fulltextIndex.Count() > 0 || vectorCount > 0) {
-		log.Printf("📇 BuildIndexes: storage is empty but on-disk indexes are non-empty; clearing stale search artifacts")
+		// Only clear disk-backed indexes when we can prove storage changed after
+		// those artifacts were written (e.g., DB dropped/recreated with same name).
+		// This avoids breaking valid "disk-only bootstrap" test/restore scenarios.
+		if p, ok := s.engine.(interface{ LastWriteTime() time.Time }); ok {
+			if lastWrite := p.LastWriteTime(); !lastWrite.IsZero() {
+				if info, statErr := os.Stat(vectorPath + ".vec"); statErr == nil {
+					shouldClearStaleDisk = lastWrite.After(info.ModTime())
+				}
+			}
+		}
+	}
+	if shouldClearStaleDisk {
+		log.Printf("📇 BuildIndexes: storage is empty and newer than disk indexes; clearing stale search artifacts")
 		s.fulltextIndex.Clear()
 		vectorCount = 0
 		restartVectorStore = true
