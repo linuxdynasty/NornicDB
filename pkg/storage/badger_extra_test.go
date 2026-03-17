@@ -900,6 +900,263 @@ func TestBadgerEngine_BulkCreateEdges_MissingNodes(t *testing.T) {
 	assert.Error(t, err) // end node doesn't exist
 }
 
+// makeLargeChunkEmbeddings creates multiple embedding chunks that collectively
+// exceed maxNodeSize (50KB) but individually stay under Badger's 65KB value limit.
+func makeLargeChunkEmbeddings() [][]float32 {
+	chunks := make([][]float32, 4)
+	for c := 0; c < 4; c++ {
+		chunk := make([]float32, 4000) // ~16KB each, total ~64KB > 50KB threshold
+		for i := range chunk {
+			chunk[i] = float32(c*4000+i) * 0.001
+		}
+		chunks[c] = chunk
+	}
+	return chunks
+}
+
+func TestBadgerEngine_CreateNode_LargeEmbedding_SeparateStorage(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	node := &Node{
+		ID:              NodeID(prefixTestID("large-emb-n1")),
+		Labels:          []string{"Document"},
+		Properties:      map[string]interface{}{"title": "test"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Document", got.Labels[0])
+	require.Len(t, got.ChunkEmbeddings, 4)
+	assert.Len(t, got.ChunkEmbeddings[0], 4000)
+}
+
+func TestBadgerEngine_UpdateNode_LargeEmbedding_SeparateStorage(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	node := &Node{
+		ID:         NodeID(prefixTestID("large-emb-up-n1")),
+		Labels:     []string{"Document"},
+		Properties: map[string]interface{}{"title": "test"},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Update with large embeddings
+	node.ChunkEmbeddings = makeLargeChunkEmbeddings()
+	err = engine.UpdateNode(node)
+	require.NoError(t, err)
+
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 4)
+	assert.Len(t, got.ChunkEmbeddings[0], 4000)
+}
+
+func TestTransaction_CreateNode_LargeEmbedding_SeparateStorage(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	node := &Node{
+		ID:              NodeID(prefixTestID("tx-large-n1")),
+		Labels:          []string{"Document"},
+		Properties:      map[string]interface{}{"title": "test"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+
+	_, err = tx.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 4)
+	assert.Len(t, got.ChunkEmbeddings[0], 4000)
+}
+
+func TestBadgerEngine_UpdateNodeEmbedding_LargeThenSmall(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create node with large embeddings (stored separately)
+	node := &Node{
+		ID:              NodeID(prefixTestID("emb-swap-n1")),
+		Labels:          []string{"Document"},
+		Properties:      map[string]interface{}{"title": "test"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Verify large embeddings stored
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 4)
+
+	// Now update with small embedding (should go inline, cleaning up separate storage)
+	smallEmb := [][]float32{{0.1, 0.2, 0.3}}
+	updateNode := &Node{
+		ID:              node.ID,
+		ChunkEmbeddings: smallEmb,
+	}
+	err = engine.UpdateNodeEmbedding(updateNode)
+	require.NoError(t, err)
+
+	got, err = engine.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 1)
+	assert.Len(t, got.ChunkEmbeddings[0], 3)
+}
+
+func TestBadgerEngine_UpdateNodeEmbedding_SmallToLarge(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Create node with small embedding
+	node := &Node{
+		ID:              NodeID(prefixTestID("emb-grow-n1")),
+		Labels:          []string{"Document"},
+		Properties:      map[string]interface{}{"title": "test"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2}},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Update with large embeddings (triggers replaceSeparateEmbeddingChunks)
+	updateNode := &Node{
+		ID:              node.ID,
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+	err = engine.UpdateNodeEmbedding(updateNode)
+	require.NoError(t, err)
+
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 4)
+	assert.Len(t, got.ChunkEmbeddings[0], 4000)
+}
+
+func TestBadgerEngine_UpdateNodeEmbedding_NotFound(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	err := engine.UpdateNodeEmbedding(&Node{
+		ID:              NodeID(prefixTestID("nonexistent")),
+		ChunkEmbeddings: [][]float32{{0.1}},
+	})
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_UpdateNode_UpsertNewNode(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// UpdateNode on a non-existing node should upsert (insert)
+	node := &Node{
+		ID:         NodeID(prefixTestID("upsert-n1")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	err := engine.UpdateNode(node)
+	require.NoError(t, err)
+
+	// Verify the node was created
+	got, err := engine.GetNode(node.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice", got.Properties["name"])
+
+	// Verify label index was created
+	nodes, err := engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	found := false
+	for _, n := range nodes {
+		if n.ID == node.ID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "upserted node should appear in label index")
+}
+
+func TestBadgerEngine_UpdateNode_LabelChange(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	node := &Node{
+		ID:         NodeID(prefixTestID("lc-n1")),
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Bob"},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Update labels
+	node.Labels = []string{"Employee"}
+	err = engine.UpdateNode(node)
+	require.NoError(t, err)
+
+	// Old label should not find it
+	persons, err := engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	for _, n := range persons {
+		assert.NotEqual(t, node.ID, n.ID)
+	}
+
+	// New label should find it
+	employees, err := engine.GetNodesByLabel("Employee")
+	require.NoError(t, err)
+	found := false
+	for _, n := range employees {
+		if n.ID == node.ID {
+			found = true
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestBadgerEngine_UpdateNodeEmbedding_Validation(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	err := engine.UpdateNodeEmbedding(nil)
+	assert.ErrorIs(t, err, ErrInvalidData)
+
+	err = engine.UpdateNodeEmbedding(&Node{ID: ""})
+	assert.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestBadgerEngine_BulkCreateNodes_LargeEmbedding(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	// Use multiple smaller chunks that total >50KB to trigger separate storage
+	// but each chunk stays under Badger's 65KB value limit
+	chunk1 := make([]float32, 4000) // ~16KB per chunk
+	chunk2 := make([]float32, 4000)
+	chunk3 := make([]float32, 4000)
+	chunk4 := make([]float32, 4000)
+	for i := range chunk1 {
+		chunk1[i] = float32(i) * 0.001
+		chunk2[i] = float32(i) * 0.002
+		chunk3[i] = float32(i) * 0.003
+		chunk4[i] = float32(i) * 0.004
+	}
+
+	nodes := []*Node{
+		{
+			ID:              NodeID(prefixTestID("bulk-large-n1")),
+			Labels:          []string{"Document"},
+			Properties:      map[string]interface{}{"title": "bulk1"},
+			ChunkEmbeddings: [][]float32{chunk1, chunk2, chunk3, chunk4},
+		},
+	}
+	err := engine.BulkCreateNodes(nodes)
+	require.NoError(t, err)
+
+	got, err := engine.GetNode(nodes[0].ID)
+	require.NoError(t, err)
+	require.Len(t, got.ChunkEmbeddings, 4)
+	assert.Len(t, got.ChunkEmbeddings[0], 4000)
+}
+
 func TestBadgerEngine_CreateEdge_MissingNodes(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 

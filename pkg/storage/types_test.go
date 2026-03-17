@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -188,6 +189,47 @@ func TestNeo4jExport_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.Relationships[0].Type, exported.Relationships[0].Type)
 }
 
+func TestExtractInternalProperties_NilProperties(t *testing.T) {
+	node := &Node{ID: "test:n1", Labels: []string{"A"}}
+	// Should not panic on nil Properties
+	node.ExtractInternalProperties()
+	assert.Nil(t, node.Properties)
+}
+
+func TestExtractInternalProperties_AllFields(t *testing.T) {
+	now := time.Now()
+	node := &Node{
+		ID:     "test:n1",
+		Labels: []string{"A"},
+		Properties: map[string]interface{}{
+			"name":          "Alice",
+			"_createdAt":    float64(now.Unix()),
+			"_updatedAt":    float64(now.Unix()),
+			"_decayScore":   0.85,
+			"_lastAccessed": float64(now.Unix()),
+			"_accessCount":  float64(42),
+		},
+	}
+	node.ExtractInternalProperties()
+
+	assert.False(t, node.CreatedAt.IsZero())
+	assert.False(t, node.UpdatedAt.IsZero())
+	assert.InDelta(t, 0.85, node.DecayScore, 0.01)
+	assert.False(t, node.LastAccessed.IsZero())
+	assert.Equal(t, int64(42), node.AccessCount)
+
+	// Internal properties should be removed
+	_, hasCreatedAt := node.Properties["_createdAt"]
+	assert.False(t, hasCreatedAt)
+	// Regular properties should remain
+	assert.Equal(t, "Alice", node.Properties["name"])
+}
+
+func TestCopyEdge_Nil(t *testing.T) {
+	result := copyEdge(nil)
+	assert.Nil(t, result)
+}
+
 func TestErrors(t *testing.T) {
 	// Verify error messages are descriptive
 	assert.Equal(t, "not found", ErrNotFound.Error())
@@ -195,4 +237,73 @@ func TestErrors(t *testing.T) {
 	assert.Equal(t, "invalid id", ErrInvalidID.Error())
 	assert.Equal(t, "invalid data", ErrInvalidData.Error())
 	assert.Equal(t, "storage closed", ErrStorageClosed.Error())
+}
+
+func TestCollectLabels(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"Person", "Employee"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"Person", "Manager"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+
+	labels, err := CollectLabels(context.Background(), engine)
+	require.NoError(t, err)
+	assert.Len(t, labels, 3)
+	assert.ElementsMatch(t, []string{"Person", "Employee", "Manager"}, labels)
+}
+
+func TestCollectEdgeTypes(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"A"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"B"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:n1", EndNode: "test:n2", Type: "KNOWS", Properties: map[string]interface{}{}}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e2", StartNode: "test:n1", EndNode: "test:n2", Type: "LIKES", Properties: map[string]interface{}{}}))
+
+	types, err := CollectEdgeTypes(context.Background(), engine)
+	require.NoError(t, err)
+	assert.Len(t, types, 2)
+	assert.ElementsMatch(t, []string{"KNOWS", "LIKES"}, types)
+}
+
+func TestStreamNodesWithFallback(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"A"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"B"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+
+	var count int
+	err = StreamNodesWithFallback(context.Background(), engine, 10, func(node *Node) error {
+		count++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+func TestStreamEdgesWithFallback(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	_, err := engine.CreateNode(&Node{ID: "test:n1", Labels: []string{"A"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "test:n2", Labels: []string{"B"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:e1", StartNode: "test:n1", EndNode: "test:n2", Type: "R", Properties: map[string]interface{}{}}))
+
+	var count int
+	err = StreamEdgesWithFallback(context.Background(), engine, 10, func(edge *Edge) error {
+		count++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }

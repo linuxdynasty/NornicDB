@@ -41,6 +41,16 @@ func TestQueryAnalyzer_RouteQuery_LabelRouting(t *testing.T) {
 	assert.Equal(t, []string{"dbA", "dbB", "dbC"}, r3)
 }
 
+func TestQueryAnalyzer_AnalyzeQuery_ParenLabel(t *testing.T) {
+	a := NewQueryAnalyzer()
+
+	// Test the ( :Label pattern — triggers the uncovered branch at line 73
+	// where a label follows "(" or ","
+	q := a.AnalyzeQuery("MATCH ( :Person ) RETURN n")
+	assert.Contains(t, q.Labels, "PERSON")
+	assert.False(t, q.IsWrite)
+}
+
 func TestQueryAnalyzer_RouteQuery_PropertyRouting(t *testing.T) {
 	a := NewQueryAnalyzer()
 	a.SetPropertyRouting("tenant", "a", "dbA")

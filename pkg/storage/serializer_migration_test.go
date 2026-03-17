@@ -206,3 +206,73 @@ func TestDetectStoredSerializer(t *testing.T) {
 		require.Equal(t, StorageSerializerMsgpack, serializer)
 	})
 }
+
+func TestMigrateBadgerSerializer_DryRun(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create engine with gob serializer and some data
+	engine, err := NewBadgerEngineWithOptions(BadgerOptions{
+		DataDir:    dir,
+		Serializer: StorageSerializerGob,
+	})
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&Node{ID: "test:dry1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.Close())
+
+	// Dry run should report what would change without modifying data
+	stats, err := MigrateBadgerSerializer(dir, StorageSerializerMsgpack, SerializerMigrationOptions{DryRun: true, BatchSize: 10})
+	require.NoError(t, err)
+	require.True(t, stats.HasData)
+	require.Greater(t, stats.NodesConverted, 0)
+}
+
+func TestMigrateBadgerSerializer_WithEmbeddings(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := NewBadgerEngineWithOptions(BadgerOptions{
+		DataDir:    dir,
+		Serializer: StorageSerializerGob,
+	})
+	require.NoError(t, err)
+
+	// Create node with large embeddings (stored separately, triggering embedding prefix migration)
+	node := &Node{
+		ID:              "test:emb1",
+		Labels:          []string{"Document"},
+		Properties:      map[string]interface{}{"title": "test"},
+		ChunkEmbeddings: makeLargeChunkEmbeddings(),
+	}
+	_, err = engine.CreateNode(node)
+	require.NoError(t, err)
+
+	// Also create an edge
+	_, err = engine.CreateNode(&Node{ID: "test:emb2", Labels: []string{"Doc"}, Properties: map[string]interface{}{}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "test:ee1", StartNode: "test:emb1", EndNode: "test:emb2", Type: "REF", Properties: map[string]interface{}{}}))
+	require.NoError(t, engine.Close())
+
+	stats, err := MigrateBadgerSerializer(dir, StorageSerializerMsgpack, SerializerMigrationOptions{BatchSize: 2})
+	require.NoError(t, err)
+	require.True(t, stats.HasData)
+	require.Greater(t, stats.NodesConverted, 0)
+	require.Greater(t, stats.EdgesConverted, 0)
+	require.Greater(t, stats.EmbeddingsConverted, 0)
+}
+
+func TestMigrateBadgerSerializer_InvalidDir(t *testing.T) {
+	_, err := MigrateBadgerSerializer("/nonexistent/badger/dir", StorageSerializerMsgpack, SerializerMigrationOptions{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "open badger")
+}
+
+func TestMigrateBadgerSerializerWithDB_InvalidSerializer(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = MigrateBadgerSerializerWithDB(db, dir, StorageSerializer("invalid"), SerializerMigrationOptions{})
+	require.Error(t, err)
+}
