@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.19] - 2026-03-17
+
+### Added
+
+- **Cypher multi-statement browser execution UX**: Added semicolon-delimited script execution in the Browser query pane with Cypher-aware splitting (strings/comments/backticks safe), stacked per-statement result panels, per-statement status/timing, and a **continue-on-error** toggle.
+- **Infinigraph implementation guidance**: Rewrote and expanded the Infinigraph topology user guide to target managed-service parity scenarios (not generic Fabric-only usage), including concrete architecture and implementation diagrams.
+
+### Changed
+
+- **Per-database rerank override application**: Search request paths now consistently use per-database reranker resolution across HTTP and Qdrant gRPC execution paths instead of relying on global-only rerank flags.
+- **Reranker resolution model**: Server startup now resolves effective per-DB rerank provider/model/API settings from DB config overrides with global fallback and cached external reranker instances.
+- **Database UI metadata**: `/databases` and related API/UI surfaces now expose and display search strategy details more consistently for operational visibility.
+
+### Fixed
+
+- **UNWIND create/execution hardening**: Fixed execution-path edge handling in Cypher/Fabric integration where UNWIND-based create flows could diverge under composite/fabric routing branches.
+- **Composite-only Fabric routing guardrails**: Tightened routing so Fabric-specific execution paths are applied only where composite semantics require them, reducing misrouting and ambiguous behavior.
+
+### Tests
+
+- **Storage package coverage push**: Expanded real-assertion coverage across storage engines and helper paths to sustain 90%+ package coverage and lock regression-prone branches.
+- **Cypher/Fabric regression expansion**: Added and hardened deterministic tests around composite routing, UNWIND execution, and protocol-level parity paths.
+
+### Documentation
+
+- Replaced generic topology guidance with a concrete Infinigraph parity implementation guide, including:
+  - control-plane/data-plane architecture diagram
+  - property contract diagram
+  - bounded cross-constituent query flow diagram
+  - shard split/rebalance sequence diagram
+
+### Technical Details
+
+- **Range covered**: post-`v1.0.18` release marker commit `02973e2..main` (no `v1.0.18` git tag present in this repository state).
+- **Commits in range**: 6 (non-merge)
+- **Repository delta**: 40 files changed, +3,865 / -357 lines
+- **Non-test surface changed**: 20 files
+- **Primary focus areas**: per-DB rerank correctness, Browser multi-statement UX, Cypher/Fabric hardening, storage regression coverage, and Infinigraph implementation documentation.
+
 ## [1.0.18] - 2026-03-16
 
 ### Added
