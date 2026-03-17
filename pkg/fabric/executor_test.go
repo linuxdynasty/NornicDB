@@ -3321,7 +3321,7 @@ func TestTryExecuteApplyBatchedLookupRows_AllowsImportNotNullGuard(t *testing.T)
 	if len(res.Rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(res.Rows))
 	}
-	if mock.calls[batchedQuery] < 1 {
+	if mock.calls[batchedQuery] != 1 {
 		t.Fatalf("expected batched query execution; calls=%v", mock.calls)
 	}
 }

@@ -969,112 +969,190 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRows(
 			Rows:    [][]interface{}{},
 		}, true, nil
 	}
-	var groupedMu sync.Mutex
-	ctxBatch, cancelBatch := context.WithCancel(ctx)
-	defer cancelBatch()
-	sem := make(chan struct{}, fabricApplyLookupMaxConcurrency)
-	errCh := make(chan error, 1)
-	var wg sync.WaitGroup
-	for start := 0; start < len(distinctKeys); start += fabricApplyLookupBatchSize {
-		end := minInt(start+fabricApplyLookupBatchSize, len(distinctKeys))
-		chunk := append([]interface{}(nil), distinctKeys[start:end]...)
-		wg.Add(1)
-		go func(chunk []interface{}) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctxBatch.Done():
-				return
-			}
-			defer func() { <-sem }()
+	executeChunk := func(execCtx context.Context, chunk []interface{}) error {
+		var rewritten strings.Builder
+		if useClause != "" {
+			rewritten.WriteString(useClause)
+			rewritten.WriteByte(' ')
+		}
+		rewritten.WriteString("MATCH ")
+		rewritten.WriteString(matchPart)
+		rewritten.WriteString(" WHERE ")
+		rewritten.WriteString(matchVar)
+		rewritten.WriteByte('.')
+		rewritten.WriteString(matchProp)
+		rewritten.WriteString(" IN $__fabric_apply_keys")
+		if otherWhere != "" {
+			rewritten.WriteString(" AND ")
+			rewritten.WriteString(otherWhere)
+		}
+		rewritten.WriteString(" RETURN ")
+		rewritten.WriteString(matchVar)
+		rewritten.WriteByte('.')
+		rewritten.WriteString(matchProp)
+		rewritten.WriteString(" AS __fabric_apply_key")
+		for _, item := range returnItems {
+			rewritten.WriteString(", ")
+			rewritten.WriteString(matchVar)
+			rewritten.WriteByte('.')
+			rewritten.WriteString(item.prop)
+			rewritten.WriteString(" AS ")
+			rewritten.WriteString(item.alias)
+		}
 
-			var rewritten strings.Builder
-			if useClause != "" {
-				rewritten.WriteString(useClause)
-				rewritten.WriteByte(' ')
+		batchParams := make(map[string]interface{}, len(params)+1)
+		for k, v := range params {
+			batchParams[k] = v
+		}
+		batchParams["__fabric_apply_keys"] = chunk
+
+		batchFrag := *inner
+		batchFrag.Query = rewritten.String()
+		batchResult, err := e.Execute(execCtx, tx, &batchFrag, batchParams, authToken)
+		if err != nil {
+			return err
+		}
+
+		batchIdx := buildColumnIndex(batchResult.Columns)
+		keyColIdx, okKey := batchIdx["__fabric_apply_key"]
+		if !okKey {
+			return fmt.Errorf("batched APPLY row lookup produced unexpected columns: %v", batchResult.Columns)
+		}
+		for _, row := range batchResult.Rows {
+			if keyColIdx >= len(row) {
+				continue
 			}
-			rewritten.WriteString("MATCH ")
-			rewritten.WriteString(matchPart)
-			rewritten.WriteString(" WHERE ")
-			rewritten.WriteString(matchVar)
-			rewritten.WriteByte('.')
-			rewritten.WriteString(matchProp)
-			rewritten.WriteString(" IN $__fabric_apply_keys")
-			if otherWhere != "" {
-				rewritten.WriteString(" AND ")
-				rewritten.WriteString(otherWhere)
-			}
-			rewritten.WriteString(" RETURN ")
-			rewritten.WriteString(matchVar)
-			rewritten.WriteByte('.')
-			rewritten.WriteString(matchProp)
-			rewritten.WriteString(" AS __fabric_apply_key")
+			innerRow := make([]interface{}, 0, len(returnItems))
 			for _, item := range returnItems {
-				rewritten.WriteString(", ")
-				rewritten.WriteString(matchVar)
-				rewritten.WriteByte('.')
-				rewritten.WriteString(item.prop)
-				rewritten.WriteString(" AS ")
-				rewritten.WriteString(item.alias)
-			}
-
-			batchParams := make(map[string]interface{}, len(params)+1)
-			for k, v := range params {
-				batchParams[k] = v
-			}
-			batchParams["__fabric_apply_keys"] = chunk
-
-			batchFrag := *inner
-			batchFrag.Query = rewritten.String()
-			batchResult, err := e.Execute(ctxBatch, tx, &batchFrag, batchParams, authToken)
-			if err != nil {
-				select {
-				case errCh <- err:
-					cancelBatch()
-				default:
-				}
-				return
-			}
-
-			batchIdx := buildColumnIndex(batchResult.Columns)
-			keyColIdx, okKey := batchIdx["__fabric_apply_key"]
-			if !okKey {
-				select {
-				case errCh <- fmt.Errorf("batched APPLY row lookup produced unexpected columns: %v", batchResult.Columns):
-					cancelBatch()
-				default:
-				}
-				return
-			}
-			localGrouped := make(map[string][][]interface{}, len(batchResult.Rows))
-			for _, row := range batchResult.Rows {
-				if keyColIdx >= len(row) {
+				idx, ok := batchIdx[item.alias]
+				if !ok || idx >= len(row) {
+					innerRow = append(innerRow, nil)
 					continue
 				}
-				innerRow := make([]interface{}, 0, len(returnItems))
-				for _, item := range returnItems {
-					idx, ok := batchIdx[item.alias]
-					if !ok || idx >= len(row) {
-						innerRow = append(innerRow, nil)
-						continue
-					}
-					innerRow = append(innerRow, row[idx])
-				}
-				k := applyLookupKeyString(row[keyColIdx])
-				localGrouped[k] = append(localGrouped[k], innerRow)
+				innerRow = append(innerRow, row[idx])
 			}
-			groupedMu.Lock()
-			for k, rows := range localGrouped {
-				groupedRows[k] = append(groupedRows[k], rows...)
-			}
-			groupedMu.Unlock()
-		}(chunk)
+			k := applyLookupKeyString(row[keyColIdx])
+			groupedRows[k] = append(groupedRows[k], innerRow)
+		}
+		return nil
 	}
-	wg.Wait()
-	select {
-	case err := <-errCh:
-		return nil, true, err
-	default:
+
+	// Small, single-batch lookups are common for LIMITed correlated joins.
+	// Run inline to avoid goroutine/channel overhead on latency-sensitive paths.
+	if len(distinctKeys) <= fabricApplyLookupBatchSize {
+		if err := executeChunk(ctx, distinctKeys); err != nil {
+			return nil, true, err
+		}
+	} else {
+		var groupedMu sync.Mutex
+		ctxBatch, cancelBatch := context.WithCancel(ctx)
+		defer cancelBatch()
+		sem := make(chan struct{}, fabricApplyLookupMaxConcurrency)
+		errCh := make(chan error, 1)
+		var wg sync.WaitGroup
+		for start := 0; start < len(distinctKeys); start += fabricApplyLookupBatchSize {
+			end := minInt(start+fabricApplyLookupBatchSize, len(distinctKeys))
+			chunk := append([]interface{}(nil), distinctKeys[start:end]...)
+			wg.Add(1)
+			go func(chunk []interface{}) {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctxBatch.Done():
+					return
+				}
+				defer func() { <-sem }()
+
+				localGrouped := make(map[string][][]interface{})
+				localExec := func(execCtx context.Context, chunk []interface{}) error {
+					var rewritten strings.Builder
+					if useClause != "" {
+						rewritten.WriteString(useClause)
+						rewritten.WriteByte(' ')
+					}
+					rewritten.WriteString("MATCH ")
+					rewritten.WriteString(matchPart)
+					rewritten.WriteString(" WHERE ")
+					rewritten.WriteString(matchVar)
+					rewritten.WriteByte('.')
+					rewritten.WriteString(matchProp)
+					rewritten.WriteString(" IN $__fabric_apply_keys")
+					if otherWhere != "" {
+						rewritten.WriteString(" AND ")
+						rewritten.WriteString(otherWhere)
+					}
+					rewritten.WriteString(" RETURN ")
+					rewritten.WriteString(matchVar)
+					rewritten.WriteByte('.')
+					rewritten.WriteString(matchProp)
+					rewritten.WriteString(" AS __fabric_apply_key")
+					for _, item := range returnItems {
+						rewritten.WriteString(", ")
+						rewritten.WriteString(matchVar)
+						rewritten.WriteByte('.')
+						rewritten.WriteString(item.prop)
+						rewritten.WriteString(" AS ")
+						rewritten.WriteString(item.alias)
+					}
+
+					batchParams := make(map[string]interface{}, len(params)+1)
+					for k, v := range params {
+						batchParams[k] = v
+					}
+					batchParams["__fabric_apply_keys"] = chunk
+
+					batchFrag := *inner
+					batchFrag.Query = rewritten.String()
+					batchResult, err := e.Execute(execCtx, tx, &batchFrag, batchParams, authToken)
+					if err != nil {
+						return err
+					}
+
+					batchIdx := buildColumnIndex(batchResult.Columns)
+					keyColIdx, okKey := batchIdx["__fabric_apply_key"]
+					if !okKey {
+						return fmt.Errorf("batched APPLY row lookup produced unexpected columns: %v", batchResult.Columns)
+					}
+					for _, row := range batchResult.Rows {
+						if keyColIdx >= len(row) {
+							continue
+						}
+						innerRow := make([]interface{}, 0, len(returnItems))
+						for _, item := range returnItems {
+							idx, ok := batchIdx[item.alias]
+							if !ok || idx >= len(row) {
+								innerRow = append(innerRow, nil)
+								continue
+							}
+							innerRow = append(innerRow, row[idx])
+						}
+						k := applyLookupKeyString(row[keyColIdx])
+						localGrouped[k] = append(localGrouped[k], innerRow)
+					}
+					return nil
+				}
+
+				if err := localExec(ctxBatch, chunk); err != nil {
+					select {
+					case errCh <- err:
+						cancelBatch()
+					default:
+					}
+					return
+				}
+				groupedMu.Lock()
+				for k, rows := range localGrouped {
+					groupedRows[k] = append(groupedRows[k], rows...)
+				}
+				groupedMu.Unlock()
+			}(chunk)
+		}
+		wg.Wait()
+		select {
+		case err := <-errCh:
+			return nil, true, err
+		default:
+		}
 	}
 
 	innerCols := aliasesFromReturnItems(returnItems)

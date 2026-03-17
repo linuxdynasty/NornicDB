@@ -102,6 +102,23 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 		}, true
 	}
 
+	// Restrict fast-path binary compilation to plain equality/inequality only.
+	// Regex and comparison operators must use the full evaluator to preserve
+	// Cypher semantics (e.g. "=~", "<", ">", "<=", ">="). Keep "<>"/"!="
+	// in fast-path because they are simple inequality checks.
+	hasNotEqual := e.hasOperatorOutsideQuotes(whereClause, "<>")
+	hasLessEq := e.hasOperatorOutsideQuotes(whereClause, "<=")
+	hasGreaterEq := e.hasOperatorOutsideQuotes(whereClause, ">=")
+	hasBareLess := e.hasOperatorOutsideQuotes(whereClause, "<") && !hasNotEqual && !hasLessEq
+	hasBareGreater := e.hasOperatorOutsideQuotes(whereClause, ">") && !hasNotEqual && !hasGreaterEq
+	if e.hasOperatorOutsideQuotes(whereClause, "=~") ||
+		hasLessEq ||
+		hasGreaterEq ||
+		hasBareLess ||
+		hasBareGreater {
+		return nil, false
+	}
+
 	parseBinary := func(op string, neg bool) (func(*storage.Node) bool, bool) {
 		idx := strings.Index(whereClause, op)
 		if idx < 0 {

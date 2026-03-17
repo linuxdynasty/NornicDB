@@ -634,16 +634,22 @@ func TestSearchServices_RerankerStatusAndBuildStartHelpers(t *testing.T) {
 	db.SetSearchReranker(nil)
 
 	// Resolver should be consulted for new DB services.
-	calledDB := ""
+	var calledMu sync.Mutex
+	called := make(map[string]int)
 	db.SetRerankerResolver(func(dbName string) search.Reranker {
-		calledDB = dbName
+		calledMu.Lock()
+		called[dbName]++
+		calledMu.Unlock()
 		return nil
 	})
 
 	svc, err := db.GetOrCreateSearchService("tenant_cov", nil)
 	require.NoError(t, err)
 	require.NotNil(t, svc)
-	require.Equal(t, "tenant_cov", calledDB)
+	calledMu.Lock()
+	tenantCalls := called["tenant_cov"]
+	calledMu.Unlock()
+	require.GreaterOrEqual(t, tenantCalls, 1, "reranker resolver must be consulted for tenant_cov")
 
 	// Not initialized path: missing entry and nil-svc entry both report not_initialized.
 	missing := db.GetDatabaseSearchStatus("missing_cov")
