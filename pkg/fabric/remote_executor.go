@@ -53,6 +53,18 @@ func (r *RemoteFragmentExecutor) Execute(ctx context.Context, loc *LocationRemot
 	}, nil
 }
 
+// ExecuteRows runs a Cypher query against a remote location and returns a row iterator.
+func (r *RemoteFragmentExecutor) ExecuteRows(ctx context.Context, loc *LocationRemote, query string, params map[string]interface{}, authToken string) ([]string, RowIterator, error) {
+	res, err := r.Execute(ctx, loc, query, params, authToken)
+	if err != nil {
+		return nil, nil, err
+	}
+	if res == nil {
+		return nil, NewResultRowIterator(nil), nil
+	}
+	return res.Columns, NewResultRowIterator(res), nil
+}
+
 // Close closes all cached remote engines.
 func (r *RemoteFragmentExecutor) Close() error {
 	r.mu.Lock()

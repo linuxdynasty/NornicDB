@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,10 @@ import (
 var compiledSimpleWhereCache sync.Map // map[string]func(*storage.Node) bool
 
 func (e *StorageExecutor) filterNodes(nodes []*storage.Node, variable, whereClause string) []*storage.Node {
+	if fastIN, ok := e.buildBoundInFastFilter(variable, whereClause); ok {
+		return parallelFilterNodes(nodes, fastIN)
+	}
+
 	if compiled, ok := e.getCompiledSimpleWhere(variable, whereClause); ok {
 		return parallelFilterNodes(nodes, compiled)
 	}
@@ -23,6 +28,90 @@ func (e *StorageExecutor) filterNodes(nodes []*storage.Node, variable, whereClau
 
 	// Use parallel filtering for large datasets
 	return parallelFilterNodes(nodes, filterFn)
+}
+
+// buildBoundInFastFilter compiles a high-frequency correlated predicate:
+//
+//	<var>.<prop> IN <bindingIdent>
+//
+// where bindingIdent resolves from fabricRecordBindings to a slice.
+// This avoids per-row expression parsing/evaluation and converts membership checks
+// to O(1) hash lookups for comparable keys.
+func (e *StorageExecutor) buildBoundInFastFilter(variable, whereClause string) (FilterFunc, bool) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" || containsFold(clause, " AND ") || containsFold(clause, " OR ") || hasPrefixFold(clause, "NOT ") {
+		return nil, false
+	}
+
+	inIdx := findTopLevelKeyword(clause, " IN ")
+	if inIdx <= 0 {
+		return nil, false
+	}
+
+	left := strings.TrimSpace(clause[:inIdx])
+	right := strings.TrimSpace(clause[inIdx+4:])
+	varPrefix := variable + "."
+	if !strings.HasPrefix(left, varPrefix) {
+		return nil, false
+	}
+
+	propName := strings.TrimSpace(left[len(varPrefix):])
+	if propName == "" || strings.ContainsAny(propName, " \t\r\n") {
+		return nil, false
+	}
+	if strings.HasPrefix(right, "$") {
+		right = strings.TrimSpace(right[1:])
+	}
+	if !isValidIdentifier(right) {
+		return nil, false
+	}
+
+	boundList, ok := e.fabricRecordBindings[right]
+	if !ok {
+		return nil, false
+	}
+	items, ok := toInterfaceSlice(boundList)
+	if !ok {
+		return nil, false
+	}
+
+	comparableSet := make(map[interface{}]struct{}, len(items))
+	nonComparable := make([]interface{}, 0)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if isComparableValue(item) {
+			comparableSet[item] = struct{}{}
+		} else {
+			nonComparable = append(nonComparable, item)
+		}
+	}
+
+	return func(node *storage.Node) bool {
+		actual, exists := node.Properties[propName]
+		if !exists || actual == nil {
+			return false
+		}
+		if isComparableValue(actual) {
+			if _, hit := comparableSet[actual]; hit {
+				return true
+			}
+		}
+		for _, item := range nonComparable {
+			if e.compareEqual(actual, item) {
+				return true
+			}
+		}
+		return false
+	}, true
+}
+
+func isComparableValue(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	return reflect.TypeOf(v).Comparable()
 }
 
 func (e *StorageExecutor) getCompiledSimpleWhere(variable, whereClause string) (func(*storage.Node) bool, bool) {
@@ -41,16 +130,14 @@ func (e *StorageExecutor) getCompiledSimpleWhere(variable, whereClause string) (
 
 func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func(*storage.Node) bool, bool) {
 	whereClause = strings.TrimSpace(whereClause)
-	upperClause := strings.ToUpper(whereClause)
 
 	// Keep this fast path strict to avoid semantic drift.
-	if strings.Contains(upperClause, " AND ") ||
-		strings.Contains(upperClause, " OR ") ||
-		strings.HasPrefix(upperClause, "NOT ") ||
-		strings.Contains(upperClause, " IN ") ||
-		strings.Contains(upperClause, " CONTAINS ") ||
-		strings.Contains(upperClause, " STARTS WITH ") ||
-		strings.Contains(upperClause, " ENDS WITH ") ||
+	if containsFold(whereClause, " AND ") ||
+		containsFold(whereClause, " OR ") ||
+		hasPrefixFold(whereClause, "NOT ") ||
+		containsFold(whereClause, " CONTAINS ") ||
+		containsFold(whereClause, " STARTS WITH ") ||
+		containsFold(whereClause, " ENDS WITH ") ||
 		strings.Contains(whereClause, "(") ||
 		strings.Contains(whereClause, ")") {
 		return nil, false
@@ -72,7 +159,57 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 	const prefixSep = "."
 	varPrefix := variable + prefixSep
 
-	if strings.HasSuffix(upperClause, " IS NOT NULL") {
+	// Simple IN fast-path: <var>.<prop> IN [<literal-list>]
+	// Keeps semantics for the common membership predicate while avoiding
+	// per-row expression parsing/evaluation.
+	if inIdx := findTopLevelKeyword(whereClause, " IN "); inIdx > 0 {
+		left := strings.TrimSpace(whereClause[:inIdx])
+		right := strings.TrimSpace(whereClause[inIdx+4:])
+		if strings.HasPrefix(left, varPrefix) {
+			prop := strings.TrimSpace(left[len(varPrefix):])
+			if prop != "" && !strings.ContainsAny(prop, " \t\r\n") {
+				var listVal interface{}
+				if isValidIdentifier(right) && len(e.fabricRecordBindings) > 0 {
+					listVal = e.fabricRecordBindings[right]
+				} else {
+					listVal = e.parseValue(right)
+				}
+				if items, ok := toInterfaceSlice(listVal); ok {
+					comparableSet := make(map[interface{}]struct{}, len(items))
+					nonComparable := make([]interface{}, 0)
+					for _, item := range items {
+						if item == nil {
+							continue
+						}
+						if isComparableValue(item) {
+							comparableSet[item] = struct{}{}
+						} else {
+							nonComparable = append(nonComparable, item)
+						}
+					}
+					return func(node *storage.Node) bool {
+						actual, exists := getProp(node, prop)
+						if !exists || actual == nil {
+							return false
+						}
+						if isComparableValue(actual) {
+							if _, hit := comparableSet[actual]; hit {
+								return true
+							}
+						}
+						for _, item := range nonComparable {
+							if e.compareEqual(actual, item) {
+								return true
+							}
+						}
+						return false
+					}, true
+				}
+			}
+		}
+	}
+
+	if hasSuffixFold(whereClause, " IS NOT NULL") {
 		left := strings.TrimSpace(whereClause[:len(whereClause)-len(" IS NOT NULL")])
 		if !strings.HasPrefix(left, varPrefix) {
 			return nil, false
@@ -87,7 +224,7 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 		}, true
 	}
 
-	if strings.HasSuffix(upperClause, " IS NULL") {
+	if hasSuffixFold(whereClause, " IS NULL") {
 		left := strings.TrimSpace(whereClause[:len(whereClause)-len(" IS NULL")])
 		if !strings.HasPrefix(left, varPrefix) {
 			return nil, false
@@ -162,7 +299,6 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 
 func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClause string) bool {
 	whereClause = strings.TrimSpace(whereClause)
-	upperClause := strings.ToUpper(whereClause)
 
 	// Handle parenthesized expressions - strip outer parens and recurse
 	if strings.HasPrefix(whereClause, "(") && strings.HasSuffix(whereClause, ")") {
@@ -218,7 +354,7 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	}
 
 	// Handle NOT prefix
-	if strings.HasPrefix(upperClause, "NOT ") {
+	if hasPrefixFold(whereClause, "NOT ") {
 		inner := strings.TrimSpace(whereClause[4:])
 		return !e.evaluateWhere(node, variable, inner)
 	}
@@ -244,22 +380,22 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	}
 
 	// Handle string operators (case-insensitive check)
-	if strings.Contains(upperClause, " CONTAINS ") {
+	if containsFold(whereClause, " CONTAINS ") {
 		return e.evaluateStringOp(node, variable, whereClause, "CONTAINS")
 	}
-	if strings.Contains(upperClause, " STARTS WITH ") {
+	if containsFold(whereClause, " STARTS WITH ") {
 		return e.evaluateStringOp(node, variable, whereClause, "STARTS WITH")
 	}
-	if strings.Contains(upperClause, " ENDS WITH ") {
+	if containsFold(whereClause, " ENDS WITH ") {
 		return e.evaluateStringOp(node, variable, whereClause, "ENDS WITH")
 	}
-	if strings.Contains(upperClause, " IN ") {
+	if containsFold(whereClause, " IN ") {
 		return e.evaluateInOp(node, variable, whereClause)
 	}
-	if strings.Contains(upperClause, " IS NULL") {
+	if containsFold(whereClause, " IS NULL") {
 		return e.evaluateIsNull(node, variable, whereClause, false)
 	}
-	if strings.Contains(upperClause, " IS NOT NULL") {
+	if containsFold(whereClause, " IS NOT NULL") {
 		return e.evaluateIsNull(node, variable, whereClause, true)
 	}
 
@@ -301,8 +437,7 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	right := strings.TrimSpace(whereClause[opIdx+len(op):])
 
 	// Handle id(variable) = value comparisons
-	lowerLeft := strings.ToLower(left)
-	if strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")") {
+	if hasPrefixFold(left, "id(") && strings.HasSuffix(left, ")") {
 		// Extract variable name from id(varName)
 		idVar := strings.TrimSpace(left[3 : len(left)-1])
 		if idVar == variable {
@@ -322,7 +457,7 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	}
 
 	// Handle elementId(variable) = value comparisons
-	if strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")") {
+	if hasPrefixFold(left, "elementid(") && strings.HasSuffix(left, ")") {
 		// Extract variable name from elementId(varName)
 		idVar := strings.TrimSpace(left[10 : len(left)-1])
 		if idVar == variable {
@@ -371,8 +506,16 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		return false
 	}
 
-	// Parse the expected value from right side
-	expectedVal := e.parseValue(right)
+	// Parse expected value (fast-path for correlated Fabric bind identifiers).
+	var expectedVal any
+	if len(e.fabricRecordBindings) > 0 && isValidIdentifier(right) {
+		if bound, ok := e.fabricRecordBindings[right]; ok {
+			expectedVal = bound
+		}
+	}
+	if expectedVal == nil {
+		expectedVal = e.parseValue(right)
+	}
 
 	// Perform comparison based on operator
 	switch op {
@@ -393,6 +536,36 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	default:
 		return true
 	}
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func hasSuffixFold(s, suffix string) bool {
+	if len(s) < len(suffix) {
+		return false
+	}
+	return strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+func containsFold(s, sub string) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	if len(s) < len(sub) {
+		return false
+	}
+	max := len(s) - len(sub)
+	for i := 0; i <= max; i++ {
+		if strings.EqualFold(s[i:i+len(sub)], sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // evaluateWhereAsBoolean evaluates a WHERE expression (e.g. size(n.content) > 10000, exists(n.prop))

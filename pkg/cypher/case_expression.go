@@ -298,26 +298,14 @@ func (e *StorageExecutor) evaluateCondition(condition string, nodes map[string]*
 // Returns the byte index in the original string, or -1 if not found.
 // Properly handles UTF-8 encoded strings with multi-byte characters.
 func findTopLevelKeyword(s, keyword string) int {
-	upperKeyword := strings.ToUpper(keyword)
+	if len(keyword) == 0 || len(s) < len(keyword) {
+		return -1
+	}
 	depth := 0
 	inString := false
-	stringChar := rune(0)
-	runes := []rune(s)
-	runeLen := len(runes)
-
-	// Build a mapping from rune index to byte index
-	runeToByteIndex := make([]int, runeLen+1)
-	byteIdx := 0
-	for ri, r := range runes {
-		runeToByteIndex[ri] = byteIdx
-		byteIdx += len(string(r))
-	}
-	runeToByteIndex[runeLen] = byteIdx
-
-	for ri := 0; ri < runeLen; ri++ {
-		ch := runes[ri]
-
-		// Track string literals
+	var stringChar byte
+	for i := 0; i+len(keyword) <= len(s); i++ {
+		ch := s[i]
 		if ch == '\'' || ch == '"' {
 			if !inString {
 				inString = true
@@ -327,25 +315,21 @@ func findTopLevelKeyword(s, keyword string) int {
 			}
 			continue
 		}
-
-		// Track parentheses, brackets, and curly braces
-		// This ensures we don't find keywords inside nested structures like EXISTS { ... }
-		// NOTE: We track curly braces here because they're used in EXISTS subqueries in WHERE clauses
-		// Property maps with curly braces are parsed separately and don't use this function
-		if !inString {
-			if ch == '(' || ch == '[' || ch == '{' {
-				depth++
-			} else if ch == ')' || ch == ']' || ch == '}' {
+		if inString {
+			continue
+		}
+		switch ch {
+		case '(', '[', '{':
+			depth++
+			continue
+		case ')', ']', '}':
+			if depth > 0 {
 				depth--
 			}
+			continue
 		}
-
-		// Check for keyword at top level (using byte indices for the substring comparison)
-		bytePos := runeToByteIndex[ri]
-		if !inString && depth == 0 && bytePos+len(keyword) <= len(s) {
-			if strings.ToUpper(s[bytePos:bytePos+len(keyword)]) == upperKeyword {
-				return bytePos
-			}
+		if depth == 0 && strings.EqualFold(s[i:i+len(keyword)], keyword) {
+			return i
 		}
 	}
 	return -1
@@ -442,9 +426,15 @@ func isTruthy(val interface{}) bool {
 
 // indexCaseInsensitive finds the index of a keyword in a case-insensitive manner.
 func indexCaseInsensitive(s, keyword string) int {
-	upper := strings.ToUpper(s)
-	upperKeyword := strings.ToUpper(keyword)
-	return strings.Index(upper, upperKeyword)
+	if len(keyword) == 0 || len(s) < len(keyword) {
+		return -1
+	}
+	for i := 0; i+len(keyword) <= len(s); i++ {
+		if strings.EqualFold(s[i:i+len(keyword)], keyword) {
+			return i
+		}
+	}
+	return -1
 }
 
 // splitByKeyword splits a string by a keyword, respecting string literals and nested expressions.
@@ -453,25 +443,12 @@ func splitByKeyword(s, keyword string) []string {
 	var result []string
 	var current strings.Builder
 	var inString bool
-	var stringChar rune
+	var stringChar byte
 	var parenDepth int
 
-	upperKeyword := strings.ToUpper(keyword)
 	keywordLen := len(keyword)
-	runes := []rune(s)
-	runeLen := len(runes)
-
-	// Build a mapping from rune index to byte index
-	runeToByteIndex := make([]int, runeLen+1)
-	byteIdx := 0
-	for ri, r := range runes {
-		runeToByteIndex[ri] = byteIdx
-		byteIdx += len(string(r))
-	}
-	runeToByteIndex[runeLen] = byteIdx
-
-	for ri := 0; ri < runeLen; ri++ {
-		ch := runes[ri]
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
 
 		// Track string literals
 		if ch == '\'' || ch == '"' {
@@ -481,7 +458,7 @@ func splitByKeyword(s, keyword string) []string {
 			} else if ch == stringChar {
 				inString = false
 			}
-			current.WriteRune(ch)
+			current.WriteByte(ch)
 			continue
 		}
 
@@ -494,32 +471,26 @@ func splitByKeyword(s, keyword string) []string {
 			}
 		}
 
-		// Check for keyword at current position (using byte indices)
-		bytePos := runeToByteIndex[ri]
-		if !inString && parenDepth == 0 && bytePos+keywordLen <= len(s) {
-			if strings.ToUpper(s[bytePos:bytePos+keywordLen]) == upperKeyword {
+		// Check for keyword at current position
+		if !inString && parenDepth == 0 && i+keywordLen <= len(s) {
+			if strings.EqualFold(s[i:i+keywordLen], keyword) {
 				// Check word boundary (not part of a longer word)
-				validStart := ri == 0 || !isAlphaNumeric(runes[ri-1])
-				// Find the rune after the keyword by scanning forward
-				endBytePos := bytePos + keywordLen
-				endRuneIdx := ri
-				for endRuneIdx < runeLen && runeToByteIndex[endRuneIdx] < endBytePos {
-					endRuneIdx++
-				}
-				validEnd := endRuneIdx >= runeLen || !isAlphaNumeric(runes[endRuneIdx])
+				validStart := i == 0 || !isAlphaNumeric(rune(s[i-1]))
+				endPos := i + keywordLen
+				validEnd := endPos >= len(s) || !isAlphaNumeric(rune(s[endPos]))
 
 				if validStart && validEnd {
 					// Found keyword at word boundary
 					result = append(result, current.String())
 					current.Reset()
-					// Skip to the rune after the keyword
-					ri = endRuneIdx - 1 // -1 because loop will increment
+					// Skip to the byte after keyword
+					i = endPos - 1 // -1 because loop increments
 					continue
 				}
 			}
 		}
 
-		current.WriteRune(ch)
+		current.WriteByte(ch)
 	}
 
 	// Add remaining content

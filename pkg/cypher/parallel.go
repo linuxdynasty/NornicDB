@@ -97,14 +97,22 @@ type FilterFunc func(node *storage.Node) bool
 // Returns:
 //   - Slice of nodes that passed the filter
 func parallelFilterNodes(nodes []*storage.Node, filterFn FilterFunc) []*storage.Node {
-	if !parallelConfig.Enabled || len(nodes) < parallelConfig.MinBatchSize {
+	if !parallelConfig.Enabled || len(nodes) < parallelConfig.MinBatchSize || len(nodes) < 4*parallelConfig.MinBatchSize {
 		// Sequential fallback for small datasets
 		return sequentialFilterNodes(nodes, filterFn)
 	}
 
 	numWorkers := parallelConfig.MaxWorkers
+	// For medium-sized rowsets, reduce scheduling overhead by capping worker fanout.
+	// This avoids runtime condvar churn dominating predicate evaluation costs.
+	if capByRows := len(nodes) / 5000; capByRows > 0 && capByRows < numWorkers {
+		numWorkers = capByRows
+	}
 	if numWorkers > len(nodes) {
 		numWorkers = len(nodes)
+	}
+	if numWorkers <= 1 {
+		return sequentialFilterNodes(nodes, filterFn)
 	}
 
 	chunkSize := (len(nodes) + numWorkers - 1) / numWorkers

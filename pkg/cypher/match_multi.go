@@ -845,6 +845,8 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	ctx context.Context,
 	labels []string,
 	properties map[string]interface{},
+	whereVariable string,
+	whereClause string,
 	limit int,
 ) ([]*storage.Node, error) {
 	store := e.getStorage(ctx)
@@ -857,6 +859,14 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	if canStream && limit > 0 {
 		// Use streaming with early termination for LIMIT queries
 		nodes = make([]*storage.Node, 0, limit)
+		var whereFilter FilterFunc
+		if strings.TrimSpace(whereClause) != "" {
+			if fastIN, ok := e.buildBoundInFastFilter(whereVariable, whereClause); ok {
+				whereFilter = fastIN
+			} else if compiled, ok := e.getCompiledSimpleWhere(whereVariable, whereClause); ok {
+				whereFilter = compiled
+			}
+		}
 		if streamer, ok := store.(storage.StreamingEngine); ok {
 			hideSystemNodes := shouldHideSystemNodes(store)
 			err = streamer.StreamNodes(ctx, func(node *storage.Node) error {
@@ -877,6 +887,9 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 					if !hasLabel {
 						return nil // Skip this node
 					}
+				}
+				if whereFilter != nil && !whereFilter(node) {
+					return nil
 				}
 
 				nodes = append(nodes, node)

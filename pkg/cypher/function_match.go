@@ -5,27 +5,41 @@
 package cypher
 
 import (
-	"regexp"
 	"strings"
 	"sync"
 )
 
-// funcMatchCache stores compiled regex patterns for function matching.
-// Using sync.Map for thread-safe lazy initialization.
-var funcMatchCache sync.Map
+type funcMatcher struct {
+	funcName string
+}
 
-// getFuncMatcher returns a compiled regex for matching a function name with optional whitespace.
-// Pattern: ^funcname\s*\( (case-insensitive)
-// Cached for performance - each function name is compiled only once.
-func getFuncMatcher(funcName string) *regexp.Regexp {
-	if cached, ok := funcMatchCache.Load(funcName); ok {
-		return cached.(*regexp.Regexp)
+func (m *funcMatcher) MatchString(expr string) bool {
+	if m == nil {
+		return false
 	}
-	// Pattern: start of string, function name, optional whitespace, open paren
-	pattern := `(?i)^` + regexp.QuoteMeta(funcName) + `\s*\(`
-	re := regexp.MustCompile(pattern)
-	funcMatchCache.Store(funcName, re)
-	return re
+	return hasFuncStart(expr, m.funcName)
+}
+
+func (m *funcMatcher) String() string {
+	if m == nil {
+		return ""
+	}
+	return "func:" + strings.ToLower(strings.TrimSpace(m.funcName))
+}
+
+var funcMatcherCache sync.Map
+
+func getFuncMatcher(funcName string) *funcMatcher {
+	key := strings.ToLower(strings.TrimSpace(funcName))
+	if key == "" {
+		return &funcMatcher{funcName: funcName}
+	}
+	if cached, ok := funcMatcherCache.Load(key); ok {
+		return cached.(*funcMatcher)
+	}
+	m := &funcMatcher{funcName: key}
+	funcMatcherCache.Store(key, m)
+	return m
 }
 
 // matchFuncStart checks if expr starts with funcName followed by optional whitespace and '('.
@@ -40,6 +54,26 @@ func getFuncMatcher(funcName string) *regexp.Regexp {
 //   - matchFuncStart("xcount(n)", "count")    → false (prefix doesn't match)
 func matchFuncStart(expr, funcName string) bool {
 	return getFuncMatcher(funcName).MatchString(expr)
+}
+
+func hasFuncStart(expr, funcName string) bool {
+	expr = strings.TrimSpace(expr)
+	funcName = strings.TrimSpace(funcName)
+	if expr == "" || funcName == "" {
+		return false
+	}
+	if len(expr) < len(funcName)+1 {
+		return false
+	}
+	if !strings.EqualFold(expr[:len(funcName)], funcName) {
+		return false
+	}
+	// Ensure next token is optional whitespace then '('
+	i := len(funcName)
+	for i < len(expr) && isSpaceByte(expr[i]) {
+		i++
+	}
+	return i < len(expr) && expr[i] == '('
 }
 
 // matchFuncStartAndSuffix checks if expr starts with funcName( and ends with ).
@@ -69,7 +103,7 @@ func extractFuncArgs(expr, funcName string) string {
 		return ""
 	}
 	// Find the opening paren position
-	idx := strings.Index(strings.ToLower(expr), "(")
+	idx := strings.IndexByte(expr, '(')
 	if idx == -1 || !strings.HasSuffix(expr, ")") {
 		return ""
 	}
@@ -86,7 +120,7 @@ func extractFuncArgsLen(expr, funcName string) (string, int) {
 	if !matchFuncStart(expr, funcName) {
 		return "", -1
 	}
-	idx := strings.Index(strings.ToLower(expr), "(")
+	idx := strings.IndexByte(expr, '(')
 	if idx == -1 || !strings.HasSuffix(expr, ")") {
 		return "", -1
 	}
@@ -152,7 +186,7 @@ func extractFuncArgsWithSuffix(expr, funcName string) (args string, suffix strin
 	}
 
 	// Find the opening parenthesis
-	openIdx := strings.Index(strings.ToLower(expr), "(")
+	openIdx := strings.IndexByte(expr, '(')
 	if openIdx == -1 {
 		return "", "", false
 	}
@@ -184,4 +218,13 @@ func extractFuncArgsWithSuffix(expr, funcName string) (args string, suffix strin
 		}
 	}
 	return "", "", false
+}
+
+func isSpaceByte(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r':
+		return true
+	default:
+		return false
+	}
 }

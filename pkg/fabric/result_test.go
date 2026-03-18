@@ -1,6 +1,7 @@
 package fabric
 
 import (
+	"context"
 	"testing"
 )
 
@@ -109,5 +110,120 @@ func TestResultStream_MergeSkipsMismatchedColumns(t *testing.T) {
 	a.Merge(b)
 	if got := a.RowCount(); got != 1 {
 		t.Fatalf("expected mismatched merge to be ignored, got %d rows", got)
+	}
+}
+
+func TestResultRowIterator(t *testing.T) {
+	stream := &ResultStream{
+		Columns: []string{"a"},
+		Rows:    [][]interface{}{{1}, {2}},
+	}
+	it := NewResultRowIterator(stream)
+	defer func() { _ = it.Close() }()
+
+	if !it.Next() {
+		t.Fatal("expected first row")
+	}
+	if got := it.Row(); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("unexpected first row: %v", got)
+	}
+	if !it.Next() {
+		t.Fatal("expected second row")
+	}
+	if got := it.Row(); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("unexpected second row: %v", got)
+	}
+	if it.Next() {
+		t.Fatal("expected iterator end")
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("unexpected iterator err: %v", err)
+	}
+}
+
+func TestJoinedRowView(t *testing.T) {
+	outer := []interface{}{"s-1", "k-1"}
+	inner := []interface{}{"en", "hello"}
+	view := NewJoinedRowView(
+		outer,
+		inner,
+		[]int{0, 1, -1, -1},
+		[]int{-1, -1, 0, 1},
+	)
+	got := view.Materialize()
+	if len(got) != 4 {
+		t.Fatalf("expected 4 columns, got %d", len(got))
+	}
+	if got[0] != "s-1" || got[1] != "k-1" || got[2] != "en" || got[3] != "hello" {
+		t.Fatalf("unexpected joined row: %#v", got)
+	}
+}
+
+func TestConvertingRowIterator(t *testing.T) {
+	base := NewResultRowIterator(&ResultStream{
+		Columns: []string{"v"},
+		Rows:    [][]interface{}{{"a"}, {"b"}},
+	})
+	it := NewConvertingRowIterator(base, func(row []interface{}) []interface{} {
+		out := make([]interface{}, len(row))
+		copy(out, row)
+		out[0] = "x-" + row[0].(string)
+		return out
+	})
+	defer func() { _ = it.Close() }()
+
+	if !it.Next() || it.Row()[0] != "x-a" {
+		t.Fatalf("unexpected first converted row: %#v", it.Row())
+	}
+	if !it.Next() || it.Row()[0] != "x-b" {
+		t.Fatalf("unexpected second converted row: %#v", it.Row())
+	}
+	if it.Next() {
+		t.Fatal("expected iterator end")
+	}
+}
+
+func TestPrefetchRowIterator(t *testing.T) {
+	base := NewResultRowIterator(&ResultStream{
+		Columns: []string{"i"},
+		Rows:    [][]interface{}{{1}, {2}, {3}},
+	})
+	it := NewPrefetchRowIterator(context.Background(), base, 2)
+	defer func() { _ = it.Close() }()
+
+	sum := 0
+	for it.Next() {
+		row := it.Row()
+		sum += row[0].(int)
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("unexpected prefetch iterator error: %v", err)
+	}
+	if sum != 6 {
+		t.Fatalf("unexpected row sum: %d", sum)
+	}
+}
+
+func TestConcatAndDistinctRowIterator(t *testing.T) {
+	a := NewResultRowIterator(&ResultStream{
+		Columns: []string{"v"},
+		Rows:    [][]interface{}{{"a"}, {"b"}},
+	})
+	b := NewResultRowIterator(&ResultStream{
+		Columns: []string{"v"},
+		Rows:    [][]interface{}{{"b"}, {"c"}},
+	})
+
+	it := NewDistinctRowIterator(NewConcatRowIterator(a, b))
+	defer func() { _ = it.Close() }()
+	var got []string
+	for it.Next() {
+		got = append(got, it.Row()[0].(string))
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("unexpected iterator error: %v", err)
+	}
+	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("unexpected concat/distinct rows: %#v", got)
 	}
 }

@@ -143,7 +143,79 @@ var (
 
 // hasSubqueryPattern checks if the query contains a subquery pattern (keyword + optional whitespace + brace)
 func hasSubqueryPattern(query string, pattern *regexp.Regexp) bool {
+	switch pattern {
+	case existsSubqueryRe:
+		return hasKeywordFollowedByBrace(query, "EXISTS")
+	case notExistsSubqueryRe:
+		return hasNotExistsFollowedByBrace(query)
+	case countSubqueryRe:
+		return hasKeywordFollowedByBrace(query, "COUNT")
+	case callSubqueryRe:
+		return hasKeywordFollowedByBrace(query, "CALL")
+	case collectSubqueryRe:
+		return hasKeywordFollowedByBrace(query, "COLLECT")
+	}
 	return pattern.MatchString(query)
+}
+
+func hasNotExistsFollowedByBrace(query string) bool {
+	for i := 0; i < len(query); i++ {
+		if !matchKeywordAt(query, i, "NOT") {
+			continue
+		}
+		j := skipSpaces(query, i+3)
+		if !matchKeywordAt(query, j, "EXISTS") {
+			continue
+		}
+		k := skipSpaces(query, j+6)
+		if k < len(query) && query[k] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasKeywordFollowedByBrace(query, keyword string) bool {
+	kwLen := len(keyword)
+	for i := 0; i < len(query); i++ {
+		if !matchKeywordAt(query, i, keyword) {
+			continue
+		}
+		j := skipSpaces(query, i+kwLen)
+		if j < len(query) && query[j] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+func skipSpaces(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func matchKeywordAt(s string, i int, keyword string) bool {
+	if i < 0 || i+len(keyword) > len(s) {
+		return false
+	}
+	if i > 0 && isIdentCharByte(s[i-1]) {
+		return false
+	}
+	if i+len(keyword) < len(s) && isIdentCharByte(s[i+len(keyword)]) {
+		return false
+	}
+	return strings.EqualFold(s[i:i+len(keyword)], keyword)
+}
+
+func isIdentCharByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // StorageExecutor executes Cypher queries against a storage backend.

@@ -6,6 +6,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -462,7 +463,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	// (filtering and sorting invalidate early termination since they need all nodes)
 	hasOrderBy := findKeywordIndex(cypher, "ORDER") > 0
 	streamingLimit := -1
-	if whereIdx == -1 && !hasOrderBy && !hasAggregation && limit > 0 {
+	if !hasOrderBy && !hasAggregation && limit > 0 {
 		streamingLimit = skip + limit
 	}
 
@@ -471,22 +472,34 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	var err error
 	wherePart := ""
 	usedPropertyIndex := false
+	streamingWhereApplied := false
 	if whereIdx > 0 {
 		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
 			nodes = candidates
 			usedPropertyIndex = true
 		}
+		if !usedPropertyIndex && streamingLimit > 0 && !hasOrderBy && !hasAggregation {
+			if _, ok := e.buildBoundInFastFilter(nodePattern.variable, wherePart); ok {
+				streamingWhereApplied = true
+			} else if _, ok := e.getCompiledSimpleWhere(nodePattern.variable, wherePart); ok {
+				streamingWhereApplied = true
+			}
+		}
+		if !streamingWhereApplied {
+			// Preserve full MATCH semantics for WHERE clauses we can't evaluate during stream.
+			streamingLimit = -1
+		}
 	}
 	if !usedPropertyIndex {
-		nodes, err = e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, streamingLimit)
+		nodes, err = e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, nodePattern.variable, wherePart, streamingLimit)
 		if err != nil {
 			return nil, fmt.Errorf("storage error: %w", err)
 		}
 	}
 
 	// Apply WHERE filter if present
-	if whereIdx > 0 {
+	if whereIdx > 0 && !streamingWhereApplied {
 		nodes = e.filterNodes(nodes, nodePattern.variable, strings.TrimSpace(wherePart))
 	}
 
@@ -575,7 +588,17 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			}
 		}
 		orderExpr := strings.TrimSpace(orderPart[:endIdx])
-		nodes = e.orderNodes(nodes, nodePattern.variable, orderExpr)
+		// Fast path for ORDER BY + LIMIT with single node property sort:
+		// maintain only top-K rows, then sort that subset.
+		if skip == 0 && limit > 0 {
+			if topK, ok := e.selectTopKNodesByOrder(nodes, nodePattern.variable, orderExpr, limit); ok {
+				nodes = topK
+			} else {
+				nodes = e.orderNodes(nodes, nodePattern.variable, orderExpr)
+			}
+		} else {
+			nodes = e.orderNodes(nodes, nodePattern.variable, orderExpr)
+		}
 	}
 
 	// Note: skipIdx, skip, limitIdx and limit are already parsed earlier for streaming optimization
@@ -623,6 +646,58 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	}
 
 	return result, nil
+}
+
+// selectTopKNodesByOrder returns the first k nodes for simple ORDER BY expressions
+// without sorting the full node set. It currently supports one ORDER BY term.
+func (e *StorageExecutor) selectTopKNodesByOrder(nodes []*storage.Node, variable, orderExpr string, k int) ([]*storage.Node, bool) {
+	if k <= 0 || len(nodes) <= k {
+		return nodes, false
+	}
+	specs := e.parseNodeOrderSpecs(orderExpr, variable)
+	if len(specs) != 1 {
+		return nil, false
+	}
+	spec := specs[0]
+
+	top := make([]*storage.Node, 0, k)
+	less := func(a, b *storage.Node) bool {
+		av, _ := a.Properties[spec.propName]
+		bv, _ := b.Properties[spec.propName]
+		cmp := e.compareOrderValues(av, bv)
+		if spec.descending {
+			return cmp > 0
+		}
+		return cmp < 0
+	}
+	worse := func(a, b *storage.Node) bool {
+		av, _ := a.Properties[spec.propName]
+		bv, _ := b.Properties[spec.propName]
+		cmp := e.compareOrderValues(av, bv)
+		if spec.descending {
+			return cmp < 0
+		}
+		return cmp > 0
+	}
+
+	for _, n := range nodes {
+		if len(top) < k {
+			top = append(top, n)
+			continue
+		}
+		// Find current worst in top-K (k is small in this workload, linear scan is faster than heap overhead).
+		worstIdx := 0
+		for i := 1; i < len(top); i++ {
+			if worse(top[i], top[worstIdx]) {
+				worstIdx = i
+			}
+		}
+		if less(n, top[worstIdx]) {
+			top[worstIdx] = n
+		}
+	}
+	sort.Slice(top, func(i, j int) bool { return less(top[i], top[j]) })
+	return top, true
 }
 
 // executeAggregation handles aggregate functions (COUNT, SUM, AVG, etc.)

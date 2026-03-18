@@ -286,6 +286,9 @@ func (e *StorageExecutor) hasComparisonOperator(expr string) bool {
 //	hasOperatorOutsideQuotes("a <= 1", "=")          // false (part of <=)
 //	hasOperatorOutsideQuotes("name = 'test=1'", "=") // true (first = only)
 func (e *StorageExecutor) hasOperatorOutsideQuotes(expr, op string) bool {
+	if len(expr) < len(op) || !strings.Contains(expr, op) {
+		return false
+	}
 	inQuote := false
 	quoteChar := rune(0)
 	parenDepth := 0
@@ -808,15 +811,16 @@ func (e *StorageExecutor) subtract(left, right interface{}) interface{} {
 //	hasStringPredicate("n.name CONTAINS 'test'", " CONTAINS ")  // true
 //	hasStringPredicate("'CONTAINS' = n.name", " CONTAINS ")     // false (in quotes)
 func (e *StorageExecutor) hasStringPredicate(expr, predicate string) bool {
-	upperExpr := strings.ToUpper(expr)
-	upperPred := strings.ToUpper(predicate)
-
 	inQuote := false
 	quoteChar := rune(0)
 	parenDepth := 0
 	bracketDepth := 0
 
-	for i := 0; i <= len(upperExpr)-len(upperPred); i++ {
+	if len(expr) < len(predicate) {
+		return false
+	}
+
+	for i := 0; i <= len(expr)-len(predicate); i++ {
 		c := rune(expr[i])
 		switch {
 		case c == '\'' || c == '"':
@@ -835,7 +839,7 @@ func (e *StorageExecutor) hasStringPredicate(expr, predicate string) bool {
 		case c == ']' && !inQuote:
 			bracketDepth--
 		case !inQuote && parenDepth == 0 && bracketDepth == 0:
-			if upperExpr[i:i+len(upperPred)] == upperPred {
+			if strings.EqualFold(expr[i:i+len(predicate)], predicate) {
 				return true
 			}
 		}
