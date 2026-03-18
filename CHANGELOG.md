@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Targeted index-seek regression coverage**:
   - added explicit tests for `MATCH ... WHERE <prop> IS NOT NULL ORDER BY <prop> LIMIT K` index top-K behavior
   - added tests for indexed `IN $param` seek paths used by correlated Fabric APPLY batching
-  - added constant-conjunct (`AND` cache-buster style) top-K matching coverage.
+  - added constant-conjunct top-K matching coverage.
 - **Planning docs expansion**:
   - Added `docs/plans/gpu-hnsw-construction-plan.md`
   - Rewrote/expanded `docs/plans/ui-enhancements.md` to reflect current priorities.
