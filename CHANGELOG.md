@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.20] - 2026-03-18
+
+### Added
+
+- **Fabric plan cache**: Added `pkg/fabric/plan_cache.go` and wired prepared-plan reuse for repeated multi-graph query shapes to reduce repeated planner work on cache misses.
+- **Fabric/Cypher hot-path tracing**: Added explicit hot-path trace plumbing (`pkg/fabric/tracing.go`, `pkg/cypher/executor_hotpath_trace.go`) to verify/lock optimization-path usage in integration tests.
+- **Targeted index-seek regression coverage**:
+  - added explicit tests for `MATCH ... WHERE <prop> IS NOT NULL ORDER BY <prop> LIMIT K` index top-K behavior
+  - added tests for indexed `IN $param` seek paths used by correlated Fabric APPLY batching
+  - added constant-conjunct (`AND` cache-buster style) top-K matching coverage.
+- **Planning docs expansion**:
+  - Added `docs/plans/gpu-hnsw-construction-plan.md`
+  - Rewrote/expanded `docs/plans/ui-enhancements.md` to reflect current priorities.
+
+### Changed
+
+- **Correlated join execution path hardening**:
+  - restored and stabilized correlated Fabric APPLY batched lookup hot paths across cloned executor contexts
+  - improved trace propagation across `USE`-scoped executor clones so hot-path verification reflects real runtime routing.
+- **Cypher/Fabric performance optimization pass**:
+  - reduced allocation-heavy branches in correlated APPLY processing
+  - improved index-first routing for high-frequency MATCH shapes
+  - refined indexed top-K and index-seek behavior for large-cardinality query paths.
+- **Safe query cache behavior for remote targets**:
+  - tightened result cache gating so remote-constituent execution paths avoid unsafe/undesired local result caching.
+- **UI base-path normalization**:
+  - normalized Vite/UI base-path handling to avoid trailing-slash concatenation issues and route/API join breakage.
+
+### Fixed
+
+- **UNWIND map-row create/merge regression**: Fixed Cypher UNWIND parameter handling where map-row create/merge flows could fail or route incorrectly under Fabric/composite execution.
+- **BM25 deterministic lexical-seed stability**: Fixed nondeterministic lexical seed selection in BM25 v2 paths and stabilized index drop/recreate guards.
+- **Dropped-database search artifact cleanup**: Fixed stale per-database persisted search artifacts surviving `DROP DATABASE` and being reloaded unexpectedly on recreate.
+- **`IS NOT NULL` top-K matcher robustness**: Fixed hot-path matcher to keep index top-K active when additional constant top-level `AND` predicates are present.
+
+### Tests
+
+- Added deterministic end-to-end/integration coverage for:
+  - correlated Fabric APPLY joins (including 100k-scale profiling benchmark paths)
+  - hot-path trace assertions (`OuterIndexTopK`, batched APPLY row path, scan-fallback guardrails)
+  - indexed `IN` and indexed top-K MATCH execution branches
+  - UNWIND property map regression scenarios.
+- Expanded storage schema/index tests around top-K ordering and cache invalidation behavior.
+
+### Documentation
+
+- Updated roadmap entries in `README.md` to reflect current planning state.
+- Refreshed UI enhancement planning doc with concrete structure and testability focus.
+- Added GPU-assisted HNSW construction plan doc with persistence-compatibility constraints.
+
+### Technical Details
+
+- **Range covered**: `v1.0.19..HEAD`
+- **Commits in range**: 15 (non-merge)
+- **Repository delta**: 53 files changed, +5,884 / -779 lines
+- **Non-test surface changed**: 36 files
+- **Primary focus areas**: Fabric/Cypher correlated-join performance, index-driven hot paths, cache safety for remote constituents, deterministic search behavior, and roadmap/planning documentation updates.
+
 ## [1.0.19] - 2026-03-17
 
 ### Added
