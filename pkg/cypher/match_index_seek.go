@@ -3,6 +3,7 @@ package cypher
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -133,7 +134,7 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNullOrderLimit(
 		return nil, false, nil
 	}
 
-	whereProp, ok := parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
+	whereProp, ok := e.parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
 	if !ok {
 		return nil, false, nil
 	}
@@ -189,7 +190,7 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNull(
 	nodePattern nodePatternInfo,
 	whereClause string,
 ) ([]*storage.Node, bool, error) {
-	property, ok := parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
+	property, ok := e.parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
 	if !ok {
 		return nil, false, nil
 	}
@@ -421,27 +422,42 @@ func coerceInterfaceList(v interface{}) []interface{} {
 	}
 }
 
-func parseSimpleIndexedIsNotNull(variable, whereClause string) (property string, ok bool) {
+func (e *StorageExecutor) parseSimpleIndexedIsNotNull(variable, whereClause string) (property string, ok bool) {
 	clause := strings.TrimSpace(whereClause)
-	for strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") && len(clause) >= 2 {
-		inner := strings.TrimSpace(clause[1 : len(clause)-1])
-		if inner == clause {
-			break
-		}
-		clause = inner
-	}
+	clause = unwrapOuterParens(clause)
 	if clause == "" {
 		return "", false
 	}
-
-	// Only simple predicate is eligible.
-	for _, kw := range []string{"AND", "OR", " IN ", "=", "<>", "!=", ">=", "<=", ">", "<"} {
-		if topLevelKeywordIndex(clause, kw) >= 0 {
-			return "", false
+	parts := splitTopLevelAndConjuncts(clause)
+	targetProp := ""
+	for _, raw := range parts {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
 		}
+		part = unwrapOuterParens(part)
+		if p, ok := parseSimpleSingleIndexedIsNotNull(variable, part); ok {
+			if targetProp != "" && !strings.EqualFold(targetProp, p) {
+				return "", false
+			}
+			targetProp = p
+			continue
+		}
+		// Allow only constant boolean conjuncts in addition to var.prop IS NOT NULL.
+		// This keeps top-K semantics correct while supporting cache-buster style predicates.
+		if _, isConst := e.tryEvaluateConstantBooleanConjunct(part); isConst {
+			continue
+		}
+		return "", false
 	}
+	if targetProp == "" {
+		return "", false
+	}
+	return targetProp, true
+}
 
-	upper := strings.ToUpper(clause)
+func parseSimpleSingleIndexedIsNotNull(variable, clause string) (property string, ok bool) {
+	upper := strings.ToUpper(strings.TrimSpace(clause))
 	sfx := " IS NOT NULL"
 	if !strings.HasSuffix(upper, sfx) {
 		return "", false
@@ -455,6 +471,239 @@ func parseSimpleIndexedIsNotNull(variable, whereClause string) (property string,
 		return "", false
 	}
 	return prop, true
+}
+
+func unwrapOuterParens(clause string) string {
+	out := strings.TrimSpace(clause)
+	for strings.HasPrefix(out, "(") && strings.HasSuffix(out, ")") && len(out) >= 2 {
+		inner := strings.TrimSpace(out[1 : len(out)-1])
+		if inner == out {
+			break
+		}
+		out = inner
+	}
+	return out
+}
+
+func splitTopLevelAndConjuncts(clause string) []string {
+	inSingle, inDouble, inBacktick := false, false, false
+	paren, bracket, brace := 0, 0, 0
+	parts := make([]string, 0, 2)
+	start := 0
+	for i := 0; i < len(clause); i++ {
+		ch := clause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			paren++
+			continue
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+			continue
+		case '[':
+			bracket++
+			continue
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+			continue
+		case '{':
+			brace++
+			continue
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 && i+3 <= len(clause) && strings.EqualFold(clause[i:i+3], "AND") {
+			prevOK := i == 0 || isWhitespace(clause[i-1]) || clause[i-1] == '('
+			nextIdx := i + 3
+			nextOK := nextIdx >= len(clause) || isWhitespace(clause[nextIdx]) || clause[nextIdx] == ')'
+			if prevOK && nextOK {
+				parts = append(parts, strings.TrimSpace(clause[start:i]))
+				start = nextIdx
+				i = nextIdx - 1
+			}
+		}
+	}
+	parts = append(parts, strings.TrimSpace(clause[start:]))
+	return parts
+}
+
+func (e *StorageExecutor) tryEvaluateConstantBooleanConjunct(clause string) (value bool, ok bool) {
+	expr := strings.TrimSpace(clause)
+	if expr == "" {
+		return false, false
+	}
+	if strings.EqualFold(expr, "TRUE") {
+		return true, true
+	}
+	if strings.EqualFold(expr, "FALSE") {
+		return false, true
+	}
+	// If expression mentions variables/properties, treat as non-constant.
+	if strings.Contains(expr, ".") || strings.Contains(expr, "$") {
+		return false, false
+	}
+	for _, op := range []string{"<>", "!=", ">=", "<=", "=", ">", "<"} {
+		if idx := topLevelSymbolIndex(expr, op); idx >= 0 {
+			left := strings.TrimSpace(expr[:idx])
+			right := strings.TrimSpace(expr[idx+len(op):])
+			lv, lok := parseLiteralValue(left)
+			rv, rok := parseLiteralValue(right)
+			if !lok || !rok {
+				return false, false
+			}
+			return compareLiteralValues(lv, rv, op)
+		}
+	}
+	return false, false
+}
+
+func topLevelSymbolIndex(expr, sym string) int {
+	inSingle, inDouble, inBacktick := false, false, false
+	paren, bracket, brace := 0, 0, 0
+	for i := 0; i <= len(expr)-len(sym); i++ {
+		ch := expr[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			paren++
+			continue
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+			continue
+		case '[':
+			bracket++
+			continue
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+			continue
+		case '{':
+			brace++
+			continue
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 && expr[i:i+len(sym)] == sym {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseLiteralValue(raw string) (interface{}, bool) {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			return s[1 : len(s)-1], true
+		}
+	}
+	if strings.EqualFold(s, "true") {
+		return true, true
+	}
+	if strings.EqualFold(s, "false") {
+		return false, true
+	}
+	if strings.EqualFold(s, "null") {
+		return nil, true
+	}
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i, true
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return nil, false
+}
+
+func compareLiteralValues(left, right interface{}, op string) (bool, bool) {
+	switch op {
+	case "=", "!=", "<>":
+		eq := fmt.Sprintf("%v", left) == fmt.Sprintf("%v", right)
+		if op == "=" {
+			return eq, true
+		}
+		return !eq, true
+	}
+	lf, lok := toFloat64(left)
+	rf, rok := toFloat64(right)
+	if !lok || !rok {
+		return false, false
+	}
+	switch op {
+	case ">":
+		return lf > rf, true
+	case "<":
+		return lf < rf, true
+	case ">=":
+		return lf >= rf, true
+	case "<=":
+		return lf <= rf, true
+	default:
+		return false, false
+	}
 }
 
 func parseVariableProperty(expr, variable string) (string, bool) {
