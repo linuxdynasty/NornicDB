@@ -183,7 +183,11 @@ type PropertyIndex struct {
 	Label      string
 	Properties []string
 	values     map[interface{}][]NodeID // Property value -> node IDs
-	mu         sync.RWMutex
+	// sortedNonNilKeys caches non-nil keys in ascending order.
+	// It is rebuilt lazily when values are mutated.
+	sortedNonNilKeys []interface{}
+	keysDirty        bool
+	mu               sync.RWMutex
 }
 
 // CompositeKey represents a key composed of multiple property values.
@@ -481,6 +485,7 @@ func (sm *SchemaManager) AddPropertyIndex(name, label string, properties []strin
 		Label:      label,
 		Properties: properties,
 		values:     make(map[interface{}][]NodeID),
+		keysDirty:  true,
 	}
 
 	if sm.persist != nil {
@@ -1346,6 +1351,9 @@ func (sm *SchemaManager) PropertyIndexInsert(label, property string, nodeID Node
 		idx.values = make(map[interface{}][]NodeID)
 	}
 
+	if _, exists := idx.values[value]; !exists {
+		idx.keysDirty = true
+	}
 	idx.values[value] = append(idx.values[value], nodeID)
 	return nil
 }
@@ -1374,6 +1382,7 @@ func (sm *SchemaManager) PropertyIndexDelete(label, property string, nodeID Node
 			idx.values[value] = newIDs
 		} else {
 			delete(idx.values, value)
+			idx.keysDirty = true
 		}
 	}
 	return nil
@@ -1419,26 +1428,31 @@ func (sm *SchemaManager) PropertyIndexTopK(label, property string, limit int, de
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	keys := make([]interface{}, 0, len(idx.values))
-	for k, ids := range idx.values {
-		if k == nil || len(ids) == 0 {
-			continue
-		}
-		keys = append(keys, k)
-	}
+	keys := idx.sortedKeysLocked()
 	if len(keys) == 0 {
 		return nil
 	}
 
-	sort.Slice(keys, func(i, j int) bool {
-		cmp := compareSchemaIndexValues(keys[i], keys[j])
-		if descending {
-			return cmp > 0
-		}
-		return cmp < 0
-	})
-
 	out := make([]NodeID, 0, limit)
+	if descending {
+		for i := len(keys) - 1; i >= 0; i-- {
+			k := keys[i]
+			ids := idx.values[k]
+			if len(ids) == 0 {
+				continue
+			}
+			copied := make([]NodeID, len(ids))
+			copy(copied, ids)
+			sort.Slice(copied, func(i, j int) bool { return string(copied[i]) < string(copied[j]) })
+			for _, id := range copied {
+				out = append(out, id)
+				if len(out) >= limit {
+					return out
+				}
+			}
+		}
+		return out
+	}
 	for _, k := range keys {
 		ids := idx.values[k]
 		if len(ids) == 0 {
@@ -1470,26 +1484,26 @@ func (sm *SchemaManager) PropertyIndexAllNonNil(label, property string, descendi
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	keys := make([]interface{}, 0, len(idx.values))
-	for k, ids := range idx.values {
-		if k == nil || len(ids) == 0 {
-			continue
-		}
-		keys = append(keys, k)
-	}
+	keys := idx.sortedKeysLocked()
 	if len(keys) == 0 {
 		return nil
 	}
 
-	sort.Slice(keys, func(i, j int) bool {
-		cmp := compareSchemaIndexValues(keys[i], keys[j])
-		if descending {
-			return cmp > 0
-		}
-		return cmp < 0
-	})
-
 	out := make([]NodeID, 0, len(keys))
+	if descending {
+		for i := len(keys) - 1; i >= 0; i-- {
+			k := keys[i]
+			ids := idx.values[k]
+			if len(ids) == 0 {
+				continue
+			}
+			copied := make([]NodeID, len(ids))
+			copy(copied, ids)
+			sort.Slice(copied, func(i, j int) bool { return string(copied[i]) < string(copied[j]) })
+			out = append(out, copied...)
+		}
+		return out
+	}
 	for _, k := range keys {
 		ids := idx.values[k]
 		if len(ids) == 0 {
@@ -1500,6 +1514,28 @@ func (sm *SchemaManager) PropertyIndexAllNonNil(label, property string, descendi
 		sort.Slice(copied, func(i, j int) bool { return string(copied[i]) < string(copied[j]) })
 		out = append(out, copied...)
 	}
+	return out
+}
+
+// sortedKeysLocked returns non-nil index keys in ascending order.
+// Caller must hold idx.mu (read or write lock).
+func (idx *PropertyIndex) sortedKeysLocked() []interface{} {
+	if idx.keysDirty || idx.sortedNonNilKeys == nil {
+		keys := make([]interface{}, 0, len(idx.values))
+		for k, ids := range idx.values {
+			if k == nil || len(ids) == 0 {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return compareSchemaIndexValues(keys[i], keys[j]) < 0
+		})
+		idx.sortedNonNilKeys = keys
+		idx.keysDirty = false
+	}
+	out := make([]interface{}, len(idx.sortedNonNilKeys))
+	copy(out, idx.sortedNonNilKeys)
 	return out
 }
 

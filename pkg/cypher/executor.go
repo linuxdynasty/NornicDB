@@ -313,6 +313,13 @@ type StorageExecutor struct {
 	// fabricRecordBindings carries correlated APPLY input bindings for Fabric execution.
 	// It is set only on per-query cloned executors.
 	fabricRecordBindings map[string]interface{}
+
+	hotPathTraceState *hotPathTraceState
+}
+
+type hotPathTraceState struct {
+	mu    sync.RWMutex
+	trace HotPathTrace
 }
 
 // DatabaseManagerInterface is a minimal interface to avoid import cycles with multidb package.
@@ -396,6 +403,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		searchService:     nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
 		vectorRegistry:    vectorspace.NewIndexRegistry(),
 		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
+		hotPathTraceState: &hotPathTraceState{},
 	}
 	ensureBuiltInProceduresRegistered()
 	_ = exec.loadPersistedProcedures()
@@ -626,6 +634,7 @@ func queryDeletesNodes(query string) bool {
 //	Returns detailed error messages for syntax errors, type mismatches,
 //	and execution failures with Neo4j-compatible error codes.
 func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
+	e.resetHotPathTrace()
 	// Normalize query: trim BOM (some clients send it) then whitespace
 	cypher = trimBOM(cypher)
 	cypher = strings.TrimSpace(cypher)

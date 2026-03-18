@@ -155,6 +155,8 @@ func (e *StorageExecutor) executeViaPreparedFabricWithTx(ctx context.Context, cy
 
 	statsAcc := &fabricStatsAccumulator{}
 	ctx = context.WithValue(ctx, fabricStatsAccumulatorKey{}, statsAcc)
+	fabricTrace := &fabric.HotPathTrace{}
+	ctx = fabric.WithHotPathTrace(ctx, fabricTrace)
 	fabricExecutor := fabric.NewFabricExecutor(catalog, localExec, remoteExec)
 	stream, err := fabricExecutor.Execute(ctx, tx, prepared.fragment, params, authToken)
 	if err != nil {
@@ -165,6 +167,7 @@ func (e *StorageExecutor) executeViaPreparedFabricWithTx(ctx context.Context, cy
 		}
 		return nil, err
 	}
+	e.setFabricBatchedApplyRowsUsed(fabricTrace.ApplyBatchedLookupRows)
 	if autoCommit {
 		if err := tx.Commit(nil, nil); err != nil {
 			return nil, err

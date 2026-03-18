@@ -829,35 +829,7 @@ CALL {
 RETURN sourceId, textKey, originalText, language, translatedText
 ORDER BY sourceId, language
 `
-	outerOnly := `
-USE translations
-CALL {
-  USE translations.tr
-  MATCH (t:MongoDocument)
-  WHERE t.sourceId IS NOT NULL
-  RETURN t.sourceId AS sourceId
-  ORDER BY t.sourceId
-  LIMIT 25
-}
-RETURN sourceId
-`
-	innerOne := `
-USE translations
-CALL {
-  USE translations.txr
-  MATCH (tt:MongoDocument)
-  WHERE tt.translationId = "src-000000"
-  RETURN tt.language AS language, tt.translatedText AS translatedText
-}
-RETURN language, translatedText
-`
-	preOuter, err := exec.Execute(context.Background(), outerOnly, nil)
-	require.NoError(b, err)
-	preInner, err := exec.Execute(context.Background(), innerOne, nil)
-	require.NoError(b, err)
-	if len(preOuter.Rows) == 0 || len(preInner.Rows) == 0 {
-		b.Fatalf("benchmark setup validation failed: preOuter=%d preInner=%d", len(preOuter.Rows), len(preInner.Rows))
-	}
+
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -867,9 +839,94 @@ RETURN language, translatedText
 			b.Fatal(err)
 		}
 		if len(res.Rows) == 0 {
-			b.Fatalf("expected at least one row; preOuter=%d preInner=%d columns=%v", len(preOuter.Rows), len(preInner.Rows), res.Columns)
+			b.Fatal("expected at least one row")
 		}
 	}
+}
+
+func TestExecute_FabricCorrelatedSourceTranslationJoin_HotPathTrace(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	txrStore, err := mgr.GetStorage("nornic_txt")
+	require.NoError(t, err)
+
+	for i := 0; i < 200; i++ {
+		_, err = trStore.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("tr-hot-%d", i)),
+			Labels: []string{"MongoDocument"},
+			Properties: map[string]interface{}{
+				"sourceId":     fmt.Sprintf("src-hot-%03d", i),
+				"textKey":      fmt.Sprintf("key-hot-%03d", i),
+				"originalText": fmt.Sprintf("orig-hot-%03d", i),
+			},
+		})
+		require.NoError(t, err)
+		_, err = txrStore.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("txr-hot-%d", i)),
+			Labels: []string{"MongoDocument"},
+			Properties: map[string]interface{}{
+				"translationId":  fmt.Sprintf("src-hot-%03d", i),
+				"language":       "es",
+				"translatedText": fmt.Sprintf("tr-hot-%03d", i),
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	trExec := NewStorageExecutor(trStore)
+	_, err = trExec.Execute(context.Background(), "CREATE INDEX tr_hot_sourceid_idx FOR (n:MongoDocument) ON (n.sourceId)", nil)
+	require.NoError(t, err)
+	txrExec := NewStorageExecutor(txrStore)
+	_, err = txrExec.Execute(context.Background(), "CREATE INDEX txr_hot_translationid_idx FOR (n:MongoDocument) ON (n.translationId)", nil)
+	require.NoError(t, err)
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	exec.cache = nil
+
+	query := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.sourceId IS NOT NULL
+  RETURN t.sourceId AS sourceId, coalesce(t.textKey, t.textKey128) AS textKey, t.originalText AS originalText
+  ORDER BY t.sourceId
+  LIMIT 25
+}
+CALL {
+  WITH sourceId
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  WHERE tt.translationId = sourceId
+  RETURN tt.language AS language, tt.translatedText AS translatedText
+}
+RETURN sourceId, textKey, originalText, language, translatedText
+ORDER BY sourceId
+`
+
+	res, err := exec.Execute(context.Background(), query, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Rows)
+
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.OuterIndexTopK, "outer MATCH should use index top-k path")
+	require.True(t, trace.FabricBatchedApplyRows, "inner correlated subquery should use batched APPLY row lookup")
+	require.False(t, trace.OuterScanFallbackUsed, "index path should not fall back to full scan")
 }
 
 func TestExecute_FabricPlanCache_HitOnRepeatQuery(t *testing.T) {

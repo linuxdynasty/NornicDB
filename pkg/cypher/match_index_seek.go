@@ -1,6 +1,7 @@
 package cypher
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -58,6 +59,62 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndex(nodePattern nodePatte
 		nodes = append(nodes, node)
 	}
 
+	return nodes, true, nil
+}
+
+// tryCollectNodesFromPropertyIndexIn attempts to satisfy simple IN-list predicates:
+//
+//	<var>.<prop> IN $param
+//
+// where $param is a list value from params. This path is used heavily by Fabric
+// batched correlated APPLY lookups.
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexIn(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	property, listValues, ok := e.parseSimpleIndexedInParam(nodePattern.variable, whereClause, params)
+	if !ok {
+		return nil, false, nil
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+	labels := e.indexCandidateLabels(schema, nodePattern.labels, property)
+	if len(labels) == 0 {
+		return nil, false, nil
+	}
+
+	idSet := make(map[storage.NodeID]struct{}, 256)
+	for _, label := range labels {
+		for _, value := range listValues {
+			for _, id := range schema.PropertyIndexLookup(label, property, value) {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(idSet))
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		node, err := e.storage.GetNode(storage.NodeID(id))
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
 	return nodes, true, nil
 }
 
@@ -272,6 +329,96 @@ func (e *StorageExecutor) parseSimpleIndexedEquality(variable, whereClause strin
 		return prop, e.parseValue(left), true
 	}
 	return "", nil, false
+}
+
+func (e *StorageExecutor) parseSimpleIndexedInParam(variable, whereClause string, params map[string]interface{}) (property string, values []interface{}, ok bool) {
+	clause := strings.TrimSpace(whereClause)
+	for strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") && len(clause) >= 2 {
+		inner := strings.TrimSpace(clause[1 : len(clause)-1])
+		if inner == clause {
+			break
+		}
+		clause = inner
+	}
+	if clause == "" {
+		return "", nil, false
+	}
+	// Keep this optimization deterministic and safe: only simple standalone IN predicates.
+	if containsFold(clause, " AND ") || containsFold(clause, " OR ") {
+		return "", nil, false
+	}
+	inIdx := keywordIndexFrom(clause, "IN", 0, defaultKeywordScanOpts())
+	if inIdx <= 0 || inIdx >= len(clause)-2 {
+		return "", nil, false
+	}
+	left := strings.TrimSpace(clause[:inIdx])
+	right := strings.TrimSpace(clause[inIdx+2:])
+	if !strings.HasPrefix(right, "$") {
+		return "", nil, false
+	}
+	paramName := strings.TrimSpace(strings.TrimPrefix(right, "$"))
+	if paramName == "" || params == nil {
+		return "", nil, false
+	}
+	parsedProp, ok := parseVariableProperty(left, variable)
+	if !ok {
+		return "", nil, false
+	}
+	raw, exists := params[paramName]
+	if !exists || raw == nil {
+		return "", nil, false
+	}
+	list := coerceInterfaceList(raw)
+	if len(list) == 0 {
+		return "", []interface{}{}, true
+	}
+	out := make([]interface{}, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, v := range list {
+		if v == nil {
+			continue
+		}
+		k := fmt.Sprintf("%T:%v", v, v)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, v)
+	}
+	return parsedProp, out, true
+}
+
+func coerceInterfaceList(v interface{}) []interface{} {
+	switch x := v.(type) {
+	case []interface{}:
+		return x
+	case []string:
+		out := make([]interface{}, len(x))
+		for i := range x {
+			out[i] = x[i]
+		}
+		return out
+	case []int:
+		out := make([]interface{}, len(x))
+		for i := range x {
+			out[i] = x[i]
+		}
+		return out
+	case []int64:
+		out := make([]interface{}, len(x))
+		for i := range x {
+			out[i] = x[i]
+		}
+		return out
+	case []float64:
+		out := make([]interface{}, len(x))
+		for i := range x {
+			out[i] = x[i]
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func parseSimpleIndexedIsNotNull(variable, whereClause string) (property string, ok bool) {

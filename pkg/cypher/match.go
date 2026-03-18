@@ -125,6 +125,7 @@ func compareForSort(a, b interface{}) bool {
 }
 
 func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	originalCypher := cypher
 	// Substitute parameters AFTER routing to avoid keyword detection issues
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -274,6 +275,15 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 
 	// Extract pattern between MATCH and WHERE/RETURN
 	whereIdx := findKeywordNotInBrackets(upper, " WHERE ")
+	rawWherePart := ""
+	if params := getParamsFromContext(ctx); params != nil {
+		originalUpper := strings.ToUpper(originalCypher)
+		rawWhereIdx := findKeywordNotInBrackets(originalUpper, " WHERE ")
+		rawReturnIdx := findKeywordIndex(originalCypher, "RETURN")
+		if rawWhereIdx > 0 && rawReturnIdx > rawWhereIdx {
+			rawWherePart = strings.TrimSpace(originalCypher[rawWhereIdx+5 : rawReturnIdx])
+		}
+	}
 	// Use findKeywordNotInBrackets to avoid matching WHERE inside list comprehensions like [x WHERE ...]
 	matchPart := cypher[5:] // Skip "MATCH"
 	// Note: whereIdx already defined above for fast-path count optimization
@@ -500,11 +510,20 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	streamingWhereApplied := false
 	if whereIdx > 0 {
 		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		inWherePart := wherePart
+		if rawWherePart != "" {
+			inWherePart = rawWherePart
+		}
+		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+			nodes = candidates
+			usedPropertyIndex = true
+		}
 		if !hasAggregation && hasOrderBy && skip == 0 && limit > 0 && orderExprEarly != "" {
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNullOrderLimit(nodePattern, wherePart, orderExprEarly, limit); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
 				usedIndexTopK = true
+				e.markOuterIndexTopKUsed()
 			}
 		}
 		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
@@ -532,6 +551,16 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 	}
 	if !usedPropertyIndex {
+		nodes, err = e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, nodePattern.variable, wherePart, streamingLimit)
+		if err != nil {
+			return nil, fmt.Errorf("storage error: %w", err)
+		}
+	} else if len(nodes) == 0 && whereIdx > 0 {
+		// Preserve Cypher correctness when index metadata exists but candidate sets are stale/empty.
+		// Fall back to full MATCH evaluation instead of returning a false empty result.
+		usedPropertyIndex = false
+		usedIndexTopK = false
+		e.markOuterScanFallbackUsed()
 		nodes, err = e.collectNodesWithStreaming(ctx, nodePattern.labels, nodePattern.properties, nodePattern.variable, wherePart, streamingLimit)
 		if err != nil {
 			return nil, fmt.Errorf("storage error: %w", err)

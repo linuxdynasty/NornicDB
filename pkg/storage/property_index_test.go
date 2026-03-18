@@ -138,6 +138,44 @@ func TestPropertyIndex_NumericValues(t *testing.T) {
 	}
 }
 
+func TestPropertyIndex_SortedKeyCacheInvalidation(t *testing.T) {
+	sm := NewSchemaManager()
+	err := sm.AddPropertyIndex("idx_src", "MongoDocument", []string{"sourceId"})
+	if err != nil {
+		t.Fatalf("AddPropertyIndex failed: %v", err)
+	}
+
+	// Insert out of order.
+	requireNoErr := func(e error) {
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	requireNoErr(sm.PropertyIndexInsert("MongoDocument", "sourceId", "n3", "src-003"))
+	requireNoErr(sm.PropertyIndexInsert("MongoDocument", "sourceId", "n1", "src-001"))
+	requireNoErr(sm.PropertyIndexInsert("MongoDocument", "sourceId", "n2", "src-002"))
+
+	// Prime cache.
+	top2 := sm.PropertyIndexTopK("MongoDocument", "sourceId", 2, false)
+	if len(top2) != 2 || top2[0] != "n1" || top2[1] != "n2" {
+		t.Fatalf("unexpected top2: %#v", top2)
+	}
+
+	// Add a new lower key; cache must invalidate.
+	requireNoErr(sm.PropertyIndexInsert("MongoDocument", "sourceId", "n0", "src-000"))
+	top2 = sm.PropertyIndexTopK("MongoDocument", "sourceId", 2, false)
+	if len(top2) != 2 || top2[0] != "n0" || top2[1] != "n1" {
+		t.Fatalf("unexpected top2 after insert: %#v", top2)
+	}
+
+	// Delete the lowest key; cache must invalidate again.
+	requireNoErr(sm.PropertyIndexDelete("MongoDocument", "sourceId", "n0", "src-000"))
+	top2 = sm.PropertyIndexTopK("MongoDocument", "sourceId", 2, false)
+	if len(top2) != 2 || top2[0] != "n1" || top2[1] != "n2" {
+		t.Fatalf("unexpected top2 after delete: %#v", top2)
+	}
+}
+
 func TestGetPropertyIndex(t *testing.T) {
 	sm := NewSchemaManager()
 
