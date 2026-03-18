@@ -1402,6 +1402,153 @@ func (sm *SchemaManager) PropertyIndexLookup(label, property string, value inter
 	return nil
 }
 
+// PropertyIndexTopK returns up to limit node IDs from a property index ordered by
+// indexed property value. Nil keys are skipped.
+func (sm *SchemaManager) PropertyIndexTopK(label, property string, limit int, descending bool) []NodeID {
+	if limit <= 0 {
+		return nil
+	}
+
+	sm.mu.RLock()
+	idx, exists := sm.propertyIndexes[fmt.Sprintf("%s:%s", label, property)]
+	sm.mu.RUnlock()
+	if !exists || idx == nil {
+		return nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	keys := make([]interface{}, 0, len(idx.values))
+	for k, ids := range idx.values {
+		if k == nil || len(ids) == 0 {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		cmp := compareSchemaIndexValues(keys[i], keys[j])
+		if descending {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+
+	out := make([]NodeID, 0, limit)
+	for _, k := range keys {
+		ids := idx.values[k]
+		if len(ids) == 0 {
+			continue
+		}
+		copied := make([]NodeID, len(ids))
+		copy(copied, ids)
+		sort.Slice(copied, func(i, j int) bool { return string(copied[i]) < string(copied[j]) })
+		for _, id := range copied {
+			out = append(out, id)
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// PropertyIndexAllNonNil returns all node IDs from the property index in key order,
+// excluding nil keys.
+func (sm *SchemaManager) PropertyIndexAllNonNil(label, property string, descending bool) []NodeID {
+	sm.mu.RLock()
+	idx, exists := sm.propertyIndexes[fmt.Sprintf("%s:%s", label, property)]
+	sm.mu.RUnlock()
+	if !exists || idx == nil {
+		return nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	keys := make([]interface{}, 0, len(idx.values))
+	for k, ids := range idx.values {
+		if k == nil || len(ids) == 0 {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		cmp := compareSchemaIndexValues(keys[i], keys[j])
+		if descending {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+
+	out := make([]NodeID, 0, len(keys))
+	for _, k := range keys {
+		ids := idx.values[k]
+		if len(ids) == 0 {
+			continue
+		}
+		copied := make([]NodeID, len(ids))
+		copy(copied, ids)
+		sort.Slice(copied, func(i, j int) bool { return string(copied[i]) < string(copied[j]) })
+		out = append(out, copied...)
+	}
+	return out
+}
+
+func compareSchemaIndexValues(a, b interface{}) int {
+	if a == nil && b == nil {
+		return 0
+	}
+	if a == nil {
+		return -1
+	}
+	if b == nil {
+		return 1
+	}
+
+	if af, ok := convert.ToFloat64(a); ok {
+		if bf, ok2 := convert.ToFloat64(b); ok2 {
+			if af < bf {
+				return -1
+			}
+			if af > bf {
+				return 1
+			}
+			return 0
+		}
+	}
+
+	if as, ok := a.(string); ok {
+		if bs, ok2 := b.(string); ok2 {
+			if as < bs {
+				return -1
+			}
+			if as > bs {
+				return 1
+			}
+			return 0
+		}
+	}
+
+	astr := fmt.Sprintf("%v", a)
+	bstr := fmt.Sprintf("%v", b)
+	if astr < bstr {
+		return -1
+	}
+	if astr > bstr {
+		return 1
+	}
+	return 0
+}
+
 // IndexStats represents statistics about an index.
 type IndexStats struct {
 	Name         string   `json:"name"`

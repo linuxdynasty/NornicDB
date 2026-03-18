@@ -1513,3 +1513,19 @@ func TestCompositeIndex_RemoveNode(t *testing.T) {
 	prefixResults = idx.LookupPrefix("US")
 	assert.Len(t, prefixResults, 1)
 }
+
+func TestSchemaManager_PropertyIndexTopK(t *testing.T) {
+	sm := NewSchemaManager()
+	require.NoError(t, sm.AddPropertyIndex("idx_src", "MongoDocument", []string{"sourceId"}))
+	require.NoError(t, sm.PropertyIndexInsert("MongoDocument", "sourceId", NodeID("n3"), "src-003"))
+	require.NoError(t, sm.PropertyIndexInsert("MongoDocument", "sourceId", NodeID("n1"), "src-001"))
+	require.NoError(t, sm.PropertyIndexInsert("MongoDocument", "sourceId", NodeID("n2"), "src-002"))
+	require.NoError(t, sm.PropertyIndexInsert("MongoDocument", "sourceId", NodeID("n4"), "src-004"))
+	require.NoError(t, sm.PropertyIndexInsert("MongoDocument", "sourceId", NodeID("n-nil"), nil))
+
+	asc := sm.PropertyIndexTopK("MongoDocument", "sourceId", 2, false)
+	require.Equal(t, []NodeID{"n1", "n2"}, asc)
+
+	desc := sm.PropertyIndexTopK("MongoDocument", "sourceId", 2, true)
+	require.Equal(t, []NodeID{"n4", "n3"}, desc)
+}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/fabric"
 	"github.com/orneryd/nornicdb/pkg/multidb"
@@ -775,11 +776,38 @@ func BenchmarkFabricCorrelatedSourceTranslationJoin_Profile(b *testing.B) {
 		})
 		require.NoError(b, err)
 	}
+	waitForCount := func(store storage.Engine, label string, want int) {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			nodes, err := store.GetNodesByLabel(label)
+			if err == nil && len(nodes) >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				got := 0
+				if err == nil {
+					got = len(nodes)
+				}
+				b.Fatalf("benchmark setup timeout waiting for %s nodes visibility: want=%d got=%d err=%v", label, want, got, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitForCount(trStore, "MongoDocument", trNodeCount)
+	waitForCount(txrStore, "MongoDocument", txrNodeCount)
+	trExec := NewStorageExecutor(trStore)
+	_, err = trExec.Execute(context.Background(), "CREATE INDEX bench_tr_sourceid_idx FOR (n:MongoDocument) ON (n.sourceId)", nil)
+	require.NoError(b, err)
+	txrExec := NewStorageExecutor(txrStore)
+	_, err = txrExec.Execute(context.Background(), "CREATE INDEX bench_txr_translationid_idx FOR (n:MongoDocument) ON (n.translationId)", nil)
+	require.NoError(b, err)
 
 	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
 	require.NoError(b, err)
 	exec := NewStorageExecutor(defaultStore)
 	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	// Measure execution path cost, not result-cache hits.
+	exec.cache = nil
 
 	query := `
 USE translations
@@ -801,7 +829,35 @@ CALL {
 RETURN sourceId, textKey, originalText, language, translatedText
 ORDER BY sourceId, language
 `
-
+	outerOnly := `
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.sourceId IS NOT NULL
+  RETURN t.sourceId AS sourceId
+  ORDER BY t.sourceId
+  LIMIT 25
+}
+RETURN sourceId
+`
+	innerOne := `
+USE translations
+CALL {
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+  WHERE tt.translationId = "src-000000"
+  RETURN tt.language AS language, tt.translatedText AS translatedText
+}
+RETURN language, translatedText
+`
+	preOuter, err := exec.Execute(context.Background(), outerOnly, nil)
+	require.NoError(b, err)
+	preInner, err := exec.Execute(context.Background(), innerOne, nil)
+	require.NoError(b, err)
+	if len(preOuter.Rows) == 0 || len(preInner.Rows) == 0 {
+		b.Fatalf("benchmark setup validation failed: preOuter=%d preInner=%d", len(preOuter.Rows), len(preInner.Rows))
+	}
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -811,7 +867,7 @@ ORDER BY sourceId, language
 			b.Fatal(err)
 		}
 		if len(res.Rows) == 0 {
-			b.Fatal("expected at least one row")
+			b.Fatalf("expected at least one row; preOuter=%d preInner=%d columns=%v", len(preOuter.Rows), len(preInner.Rows), res.Columns)
 		}
 	}
 }

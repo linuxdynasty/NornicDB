@@ -458,10 +458,34 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 	}
 
+	hasOrderBy := findKeywordIndex(cypher, "ORDER") > 0
+
+	// Parse ORDER BY expression early for index-backed top-K planning.
+	orderExprEarly := ""
+	if hasOrderBy {
+		orderByIdx := findKeywordIndex(cypher, "ORDER")
+		if orderByIdx > 0 {
+			orderStart := orderByIdx + 5
+			for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
+				orderStart++
+			}
+			if orderStart+2 <= len(cypher) && strings.EqualFold(cypher[orderStart:orderStart+2], "BY") {
+				orderStart += 2
+			}
+			orderPart := cypher[orderStart:]
+			endIdx := len(orderPart)
+			for _, kw := range []string{"SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(orderPart, kw); idx >= 0 && idx < endIdx {
+					endIdx = idx
+				}
+			}
+			orderExprEarly = strings.TrimSpace(orderPart[:endIdx])
+		}
+	}
+
 	// Calculate streaming limit: need to load enough nodes for SKIP + LIMIT
 	// Only use streaming optimization when there's NO WHERE clause, NO ORDER BY, and NO aggregation
 	// (filtering and sorting invalidate early termination since they need all nodes)
-	hasOrderBy := findKeywordIndex(cypher, "ORDER") > 0
 	streamingLimit := -1
 	if !hasOrderBy && !hasAggregation && limit > 0 {
 		streamingLimit = skip + limit
@@ -472,12 +496,28 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	var err error
 	wherePart := ""
 	usedPropertyIndex := false
+	usedIndexTopK := false
 	streamingWhereApplied := false
 	if whereIdx > 0 {
 		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		if !hasAggregation && hasOrderBy && skip == 0 && limit > 0 && orderExprEarly != "" {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNullOrderLimit(nodePattern, wherePart, orderExprEarly, limit); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+				usedIndexTopK = true
+			}
+		}
 		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
-			nodes = candidates
-			usedPropertyIndex = true
+			if !usedPropertyIndex {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNull(nodePattern, wherePart); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
 		}
 		if !usedPropertyIndex && streamingLimit > 0 && !hasOrderBy && !hasAggregation {
 			if _, ok := e.buildBoundInFastFilter(nodePattern.variable, wherePart); ok {
@@ -572,7 +612,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 
 	// Parse ORDER BY (whitespace-tolerant)
 	orderByIdx := findKeywordIndex(cypher, "ORDER")
-	if orderByIdx > 0 {
+	if orderByIdx > 0 && !usedIndexTopK {
 		orderStart := orderByIdx + 5
 		for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
 			orderStart++

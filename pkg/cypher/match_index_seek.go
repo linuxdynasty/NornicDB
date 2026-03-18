@@ -61,6 +61,122 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndex(nodePattern nodePatte
 	return nodes, true, nil
 }
 
+// tryCollectNodesFromPropertyIndexNotNullOrderLimit attempts to satisfy:
+//
+//	MATCH (n:Label) WHERE n.prop IS NOT NULL RETURN ... ORDER BY n.prop [ASC|DESC] LIMIT K
+//
+// using the property index directly (top-K by indexed key) without label scan.
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNullOrderLimit(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	orderExpr string,
+	limit int,
+) ([]*storage.Node, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+
+	whereProp, ok := parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
+	if !ok {
+		return nil, false, nil
+	}
+
+	orderSpecs := e.parseNodeOrderSpecs(orderExpr, nodePattern.variable)
+	if len(orderSpecs) != 1 {
+		return nil, false, nil
+	}
+	spec := orderSpecs[0]
+	if !strings.EqualFold(strings.TrimSpace(spec.propName), strings.TrimSpace(whereProp)) {
+		return nil, false, nil
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+
+	labels := e.indexCandidateLabels(schema, nodePattern.labels, whereProp)
+	if len(labels) != 1 {
+		// Keep semantics simple/deterministic for now; multi-label merge ordering can be added later.
+		return nil, false, nil
+	}
+	label := labels[0]
+	ids := schema.PropertyIndexTopK(label, whereProp, limit, spec.descending)
+	if len(ids) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(ids))
+	for _, id := range ids {
+		node, err := e.storage.GetNode(id)
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+		if len(nodes) >= limit {
+			break
+		}
+	}
+	return nodes, true, nil
+}
+
+// tryCollectNodesFromPropertyIndexNotNull attempts to satisfy:
+//
+//	MATCH (n:Label) WHERE n.prop IS NOT NULL
+//
+// from schema index entries, avoiding label scans.
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNull(
+	nodePattern nodePatternInfo,
+	whereClause string,
+) ([]*storage.Node, bool, error) {
+	property, ok := parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause)
+	if !ok {
+		return nil, false, nil
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+
+	labels := e.indexCandidateLabels(schema, nodePattern.labels, property)
+	if len(labels) == 0 {
+		return nil, false, nil
+	}
+
+	idSet := make(map[storage.NodeID]struct{})
+	ordered := make([]storage.NodeID, 0)
+	for _, label := range labels {
+		ids := schema.PropertyIndexAllNonNil(label, property, false)
+		for _, id := range ids {
+			if _, exists := idSet[id]; exists {
+				continue
+			}
+			idSet[id] = struct{}{}
+			ordered = append(ordered, id)
+		}
+	}
+	if len(ordered) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(ordered))
+	for _, id := range ordered {
+		node, err := e.storage.GetNode(id)
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, true, nil
+}
+
 func (e *StorageExecutor) indexCandidateLabels(schema *storage.SchemaManager, queryLabels []string, property string) []string {
 	if len(queryLabels) > 0 {
 		out := make([]string, 0, len(queryLabels))
@@ -156,6 +272,42 @@ func (e *StorageExecutor) parseSimpleIndexedEquality(variable, whereClause strin
 		return prop, e.parseValue(left), true
 	}
 	return "", nil, false
+}
+
+func parseSimpleIndexedIsNotNull(variable, whereClause string) (property string, ok bool) {
+	clause := strings.TrimSpace(whereClause)
+	for strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") && len(clause) >= 2 {
+		inner := strings.TrimSpace(clause[1 : len(clause)-1])
+		if inner == clause {
+			break
+		}
+		clause = inner
+	}
+	if clause == "" {
+		return "", false
+	}
+
+	// Only simple predicate is eligible.
+	for _, kw := range []string{"AND", "OR", " IN ", "=", "<>", "!=", ">=", "<=", ">", "<"} {
+		if topLevelKeywordIndex(clause, kw) >= 0 {
+			return "", false
+		}
+	}
+
+	upper := strings.ToUpper(clause)
+	sfx := " IS NOT NULL"
+	if !strings.HasSuffix(upper, sfx) {
+		return "", false
+	}
+	left := strings.TrimSpace(clause[:len(clause)-len(sfx)])
+	if left == "" {
+		return "", false
+	}
+	prop, ok := parseVariableProperty(left, variable)
+	if !ok {
+		return "", false
+	}
+	return prop, true
 }
 
 func parseVariableProperty(expr, variable string) (string, bool) {
