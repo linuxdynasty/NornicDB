@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [1.0.21] - 2026-03-19
+## [1.0.22] - 2026-03-19
 
 ### Added
 
