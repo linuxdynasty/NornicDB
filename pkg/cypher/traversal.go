@@ -141,11 +141,11 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 
 // executeMatchWithRelationships handles MATCH queries with relationship patterns
 func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereClause string, returnItems []returnItem) (*ExecuteResult, error) {
-	return e.executeMatchWithRelationshipsWithPath(pattern, whereClause, returnItems, "")
+	return e.executeMatchWithRelationshipsWithPath(pattern, whereClause, returnItems, "", -1)
 }
 
 // executeMatchWithRelationshipsWithPath handles MATCH queries with relationship patterns and optional path variable
-func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, whereClause string, returnItems []returnItem, pathVariable string) (*ExecuteResult, error) {
+func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, whereClause string, returnItems []returnItem, pathVariable string, earlyLimit int) (*ExecuteResult, error) {
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -170,6 +170,12 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	// Store the path variable for path functions (relationships(path), nodes(path), length(path))
 	if pathVariable != "" {
 		matches.PathVariable = pathVariable
+	}
+	if earlyLimit == 0 {
+		return result, nil
+	}
+	if earlyLimit > 0 && whereClause == "" {
+		matches.TraversalLimit = earlyLimit
 	}
 
 	// Fast path: MATCH ()-[r(:TYPE|...)?]->() RETURN count(r|*) [AS ...]
@@ -209,7 +215,22 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	// OPTIMIZATION: If WHERE clause filters by id(startNode) = value, filter start nodes before traversal
 	// This avoids traversing from all nodes when we only need one specific node
 	var optimizedStartNodes []*storage.Node
+	usedPropertyIndex := false
 	if whereClause != "" {
+		// Prefer indexed start-node pruning for simple property predicates.
+		if matches.StartNode.variable != "" {
+			if nodes, used, idxErr := e.tryCollectNodesFromPropertyIndex(matches.StartNode, whereClause); idxErr == nil && used {
+				optimizedStartNodes = nodes
+				usedPropertyIndex = true
+			}
+			if !usedPropertyIndex {
+				if nodes, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNull(matches.StartNode, whereClause); idxErr == nil && used {
+					optimizedStartNodes = nodes
+					usedPropertyIndex = true
+				}
+			}
+		}
+
 		// Check if WHERE clause has id(startVar) = $param pattern
 		startVar := matches.StartNode.variable
 		if startVar != "" {
@@ -235,6 +256,7 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 					// Try to get the specific node
 					if node, err := e.storage.GetNode(storage.NodeID(afterEq)); err == nil && node != nil {
 						optimizedStartNodes = []*storage.Node{node}
+						usedPropertyIndex = false
 					}
 				}
 			}
@@ -460,6 +482,9 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 
 	// Build result rows (non-aggregation)
 	for _, path := range paths {
+		if earlyLimit >= 0 && len(result.Rows) >= earlyLimit {
+			break
+		}
 		row := make([]interface{}, len(returnItems))
 		context := e.buildPathContext(path, matches)
 
@@ -525,6 +550,7 @@ type TraversalMatch struct {
 	Segments          []TraversalSegment // All segments in the chain
 	IsChained         bool               // True if this is a multi-segment pattern
 	PathVariable      string             // Variable name for path assignment (e.g., "path" in "path = (a)-[r]-(b)")
+	TraversalLimit    int                // Early traversal cap for LIMIT-only shapes (0 = disabled)
 }
 
 // TraversalSegment represents one segment in a chained pattern
@@ -911,7 +937,9 @@ func (e *StorageExecutor) traverseGraph(match *TraversalMatch) []PathResult {
 	// OPTIMIZATION: Use parallel traversal for large start node sets
 	// Threshold is MinBatchSize (default 200) - goroutine overhead hurts small traversals
 	config := GetParallelConfig()
-	if config.Enabled && len(startNodes) >= config.MinBatchSize {
+	// Keep traversal single-threaded when early LIMIT short-circuiting is active so
+	// we can stop globally once enough paths are found.
+	if config.Enabled && len(startNodes) >= config.MinBatchSize && match.TraversalLimit <= 0 {
 		return e.traverseGraphParallel(match, startNodes, config)
 	}
 
@@ -921,8 +949,19 @@ func (e *StorageExecutor) traverseGraph(match *TraversalMatch) []PathResult {
 // traverseGraphSequential performs sequential traversal from start nodes
 func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNodes []*storage.Node) []PathResult {
 	var results []PathResult
+	remaining := -1
+	if match.TraversalLimit > 0 {
+		remaining = match.TraversalLimit
+	}
 
 	for _, startNode := range startNodes {
+		if remaining == 0 {
+			break
+		}
+		ctxLimit := 0
+		if remaining > 0 {
+			ctxLimit = remaining
+		}
 		ctx := &TraversalContext{
 			startNode:  startNode,
 			relTypes:   match.Relationship.Types,
@@ -932,10 +971,14 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 			maxHops:    match.Relationship.MaxHops,
 			visited:    make(map[storage.NodeID]bool),
 			nodeCache:  make(map[storage.NodeID]*storage.Node),
+			limit:      ctxLimit,
 		}
 
 		paths := e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
 		results = append(results, paths...)
+		if remaining > 0 {
+			remaining -= len(paths)
+		}
 	}
 
 	return results

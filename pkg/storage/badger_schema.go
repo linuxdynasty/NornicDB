@@ -136,13 +136,46 @@ func (b *BadgerEngine) rebuildUniqueConstraintValues(namespace string, sm *Schem
 		return nil
 	}
 
-	// Fast skip: if there are no unique constraints, there's nothing to rebuild.
-	// (Constraints map includes all constraint types; uniqueConstraints tracks only unique.)
+	// Fast skip: if there are no derived schema caches, there's nothing to rebuild.
 	sm.mu.RLock()
 	hasUnique := len(sm.uniqueConstraints) > 0
+	hasPropertyIndexes := len(sm.propertyIndexes) > 0
+	hasCompositeIndexes := len(sm.compositeIndexes) > 0
+	uniqueConstraints := make([]*UniqueConstraint, 0, len(sm.uniqueConstraints))
+	for _, uc := range sm.uniqueConstraints {
+		uniqueConstraints = append(uniqueConstraints, uc)
+	}
+	propertyIndexes := make([]*PropertyIndex, 0, len(sm.propertyIndexes))
+	for _, idx := range sm.propertyIndexes {
+		propertyIndexes = append(propertyIndexes, idx)
+	}
+	compositeIndexes := make([]*CompositeIndex, 0, len(sm.compositeIndexes))
+	for _, idx := range sm.compositeIndexes {
+		compositeIndexes = append(compositeIndexes, idx)
+	}
 	sm.mu.RUnlock()
-	if !hasUnique {
+	if !hasUnique && !hasPropertyIndexes && !hasCompositeIndexes {
 		return nil
+	}
+
+	// Reset all in-memory derived caches first.
+	for _, uc := range uniqueConstraints {
+		uc.mu.Lock()
+		uc.values = make(map[interface{}]NodeID)
+		uc.mu.Unlock()
+	}
+	for _, idx := range propertyIndexes {
+		idx.mu.Lock()
+		idx.values = make(map[interface{}][]NodeID)
+		idx.sortedNonNilKeys = nil
+		idx.keysDirty = true
+		idx.mu.Unlock()
+	}
+	for _, idx := range compositeIndexes {
+		idx.mu.Lock()
+		idx.fullIndex = make(map[string][]NodeID)
+		idx.prefixIndex = make(map[string][]NodeID)
+		idx.mu.Unlock()
 	}
 
 	prefix := make([]byte, 0, 1+len(namespace)+1)
@@ -172,12 +205,40 @@ func (b *BadgerEngine) rebuildUniqueConstraintValues(namespace string, sm *Schem
 				return fmt.Errorf("schema: rebuild unique values: decode node: %w", err)
 			}
 
-			for _, label := range node.Labels {
-				for propName, propValue := range node.Properties {
-					if err := sm.CheckUniqueConstraint(label, propName, propValue, node.ID); err != nil {
-						return fmt.Errorf("schema: rebuild unique values: namespace=%q: %w", namespace, err)
+			if hasUnique {
+				for _, label := range node.Labels {
+					for propName, propValue := range node.Properties {
+						if err := sm.CheckUniqueConstraint(label, propName, propValue, node.ID); err != nil {
+							return fmt.Errorf("schema: rebuild unique values: namespace=%q: %w", namespace, err)
+						}
+						sm.RegisterUniqueValue(label, propName, propValue, node.ID)
 					}
-					sm.RegisterUniqueValue(label, propName, propValue, node.ID)
+				}
+			}
+
+			if hasPropertyIndexes {
+				for _, label := range node.Labels {
+					for propName, propValue := range node.Properties {
+						if _, ok := sm.GetPropertyIndex(label, propName); !ok {
+							continue
+						}
+						if err := sm.PropertyIndexInsert(label, propName, node.ID, propValue); err != nil {
+							return fmt.Errorf("schema: rebuild property indexes: namespace=%q label=%q property=%q: %w", namespace, label, propName, err)
+						}
+					}
+				}
+			}
+
+			if hasCompositeIndexes {
+				for _, label := range node.Labels {
+					for _, idx := range sm.GetCompositeIndexesForLabel(label) {
+						if idx == nil {
+							continue
+						}
+						if err := idx.IndexNode(node.ID, node.Properties); err != nil {
+							return fmt.Errorf("schema: rebuild composite indexes: namespace=%q index=%q: %w", namespace, idx.Name, err)
+						}
+					}
 				}
 			}
 		}

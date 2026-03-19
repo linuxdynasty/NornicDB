@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
 )
 
 type nilSchemaEngine struct {
@@ -686,6 +687,10 @@ func TestSchemaCommandDispatcherAndTypeParserBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DROP CONSTRAINT IF EXISTS should not error for missing constraint: %v", err)
 	}
+	_, err = exec.executeDropConstraint(ctx, "DROP CONSTRAINT IF EXISTS missing_name")
+	if err != nil {
+		t.Fatalf("DROP CONSTRAINT IF EXISTS <name> should not error for missing constraint: %v", err)
+	}
 
 	typeCases := map[string]storage.PropertyType{
 		"STRING":         storage.PropertyTypeString,
@@ -903,6 +908,64 @@ func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSchemaDDL_AllowsTrailingOptionsAndBacktickIdentifiers(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	ddl := []string{
+		"CREATE CONSTRAINT `uq order id` IF NOT EXISTS FOR (`n`:`Order`) REQUIRE `n`.`id` IS UNIQUE OPTIONS {indexProvider: 'range-1.0'}",
+		"CREATE INDEX `idx order created` IF NOT EXISTS FOR (`o`:`Order`) ON (`o`.`createdAt`) OPTIONS {indexProvider: 'range-1.0'}",
+		"CREATE FULLTEXT INDEX `ft order` IF NOT EXISTS FOR (`o`:`Order`) ON EACH [`o`.`title`, `o`.`body`] OPTIONS {analyzer: 'standard'}",
+	}
+	for _, q := range ddl {
+		_, err := exec.Execute(ctx, q, nil)
+		require.NoError(t, err, "expected DDL with OPTIONS/backticks to parse: %s", q)
+	}
+
+	_, err := exec.Execute(ctx, "DROP CONSTRAINT IF EXISTS `uq order id`", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "DROP CONSTRAINT `uq order id` IF EXISTS", nil)
+	require.NoError(t, err)
+}
+
+func TestCreateIndex_RebuildsUsableEntriesAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	base1, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	store1 := storage.NewNamespacedEngine(base1, "test")
+	exec1 := NewStorageExecutor(store1)
+
+	_, err = exec1.Execute(ctx, "CREATE (n:MongoDocument {sourceId: 'src-001'})", nil)
+	require.NoError(t, err)
+	_, err = exec1.Execute(ctx, "CREATE (n:MongoDocument {sourceId: 'src-002'})", nil)
+	require.NoError(t, err)
+
+	_, err = exec1.Execute(ctx, "CREATE INDEX idx_source_id IF NOT EXISTS FOR (n:MongoDocument) ON (n.sourceId)", nil)
+	require.NoError(t, err)
+
+	pre := store1.GetSchema().PropertyIndexLookup("MongoDocument", "sourceId", "src-002")
+	require.Len(t, pre, 1)
+
+	require.NoError(t, base1.Close())
+
+	base2, err := storage.NewBadgerEngine(dir)
+	require.NoError(t, err)
+	defer base2.Close()
+	store2 := storage.NewNamespacedEngine(base2, "test")
+	exec2 := NewStorageExecutor(store2)
+
+	showRes, err := exec2.Execute(ctx, "SHOW INDEXES", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, showRes.Rows)
+
+	post := store2.GetSchema().PropertyIndexLookup("MongoDocument", "sourceId", "src-002")
+	require.Len(t, post, 1, "property index entries should remain usable after restart")
 }
 
 func TestCreateFulltextIndex_CompatSyntaxWithoutParenthesizedPattern(t *testing.T) {

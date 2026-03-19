@@ -301,6 +301,28 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		if whereIdx > 0 {
 			whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 		}
+		// Parse ORDER/SKIP/LIMIT once so traversal can short-circuit when safe.
+		orderByIdx := findKeywordIndex(cypher, "ORDER")
+		skipIdx := findKeywordIndex(cypher, "SKIP")
+		skip := 0
+		if skipIdx > 0 {
+			skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+			if fields := strings.Fields(skipPart); len(fields) > 0 {
+				if s, err := strconv.Atoi(fields[0]); err == nil {
+					skip = s
+				}
+			}
+		}
+		limitIdx := findKeywordIndex(cypher, "LIMIT")
+		limit := -1
+		if limitIdx > 0 {
+			limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+			if fields := strings.Fields(limitPart); len(fields) > 0 {
+				if l, err := strconv.Atoi(fields[0]); err == nil {
+					limit = l
+				}
+			}
+		}
 
 		// Extract path variable if pattern has assignment: path = (a)-[r]-(b)
 		pathVariable := ""
@@ -316,7 +338,11 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			}
 		}
 
-		result, err := e.executeMatchWithRelationshipsWithPath(patternForParsing, whereClause, returnItems, pathVariable)
+		earlyLimit := -1
+		if !hasAggregation && !distinct && orderByIdx < 0 && skip == 0 && limit >= 0 {
+			earlyLimit = limit
+		}
+		result, err := e.executeMatchWithRelationshipsWithPath(patternForParsing, whereClause, returnItems, pathVariable, earlyLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -336,7 +362,6 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 
 		// Apply ORDER BY (whitespace-tolerant) - ORDER BY is NOT handled inside executeMatchWithRelationships
-		orderByIdx := findKeywordIndex(cypher, "ORDER")
 		if orderByIdx > 0 {
 			orderStart := orderByIdx + 5 // skip "ORDER"
 			// Skip whitespace
@@ -367,7 +392,6 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 
 		// Apply SKIP
-		skipIdx := findKeywordIndex(cypher, "SKIP")
 		if skipIdx > 0 {
 			skipPart := strings.TrimSpace(cypher[skipIdx+4:])
 			if fields := strings.Fields(skipPart); len(fields) > 0 {
@@ -382,7 +406,6 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 
 		// Apply LIMIT
-		limitIdx := findKeywordIndex(cypher, "LIMIT")
 		if limitIdx > 0 {
 			limitPart := strings.TrimSpace(cypher[limitIdx+5:])
 			if fields := strings.Fields(limitPart); len(fields) > 0 {

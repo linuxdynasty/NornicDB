@@ -1042,6 +1042,42 @@ func TestBadgerEngine_Persistence(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, incoming, 3)
 	})
+
+	t.Run("property index entries survive restart", func(t *testing.T) {
+		dir3 := t.TempDir()
+		engine1, err := NewBadgerEngine(dir3)
+		require.NoError(t, err)
+
+		nodes := []*Node{
+			{ID: NodeID(prefixTestID("doc-1")), Labels: []string{"MongoDocument"}, Properties: map[string]any{"sourceId": "src-001"}},
+			{ID: NodeID(prefixTestID("doc-2")), Labels: []string{"MongoDocument"}, Properties: map[string]any{"sourceId": "src-002"}},
+			{ID: NodeID(prefixTestID("doc-3")), Labels: []string{"MongoDocument"}, Properties: map[string]any{"sourceId": "src-003"}},
+		}
+		for _, n := range nodes {
+			_, err := engine1.CreateNode(n)
+			require.NoError(t, err)
+		}
+
+		schema1 := engine1.GetSchemaForNamespace("test")
+		require.NoError(t, schema1.AddPropertyIndex("idx_source_id", "MongoDocument", []string{"sourceId"}))
+		for _, n := range nodes {
+			require.NoError(t, schema1.PropertyIndexInsert("MongoDocument", "sourceId", n.ID, n.Properties["sourceId"]))
+		}
+		before := schema1.PropertyIndexLookup("MongoDocument", "sourceId", "src-002")
+		require.Len(t, before, 1)
+		require.Equal(t, NodeID(prefixTestID("doc-2")), before[0])
+
+		require.NoError(t, engine1.Close())
+
+		engine2, err := NewBadgerEngine(dir3)
+		require.NoError(t, err)
+		defer engine2.Close()
+
+		schema2 := engine2.GetSchemaForNamespace("test")
+		after := schema2.PropertyIndexLookup("MongoDocument", "sourceId", "src-002")
+		require.Len(t, after, 1, "property index entries should be rebuilt on restart")
+		require.Equal(t, NodeID(prefixTestID("doc-2")), after[0])
+	})
 }
 
 // ============================================================================

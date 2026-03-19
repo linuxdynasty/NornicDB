@@ -21,11 +21,11 @@ import (
 var (
 	identifierCompatPattern  = `(?:` + "`" + `[^` + "`" + `]+` + "`" + `|[A-Za-z_][A-Za-z0-9_]*)`
 	createIndexLegacyPattern = regexp.MustCompile(
-		`(?i)^CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+:(` + identifierCompatPattern + `)\s*\(([^)]+)\)\s*$`)
+		`(?is)^\s*CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+:(` + identifierCompatPattern + `)\s*\(([^)]+)\)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
 	createIndexForCompatPattern = regexp.MustCompile(
-		`(?i)^CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(\w+)\s*:\s*(` + identifierCompatPattern + `)\s*\)\s+ON\s+(.+)$`)
+		`(?is)^\s*CREATE\s+INDEX(?:\s+(` + identifierCompatPattern + `))?(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + identifierCompatPattern + `)\s*:\s*(` + identifierCompatPattern + `)\s*\)\s+ON\s+(.+?)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
 	fulltextIndexCompatPattern = regexp.MustCompile(
-		`(?i)^CREATE\s+FULLTEXT\s+INDEX\s+(` + identifierCompatPattern + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(?\s*(\w+)\s*:\s*(` + identifierCompatPattern + `)\s*\)?\s+ON(?:\s+EACH)?\s+(.+)$`)
+		`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + identifierCompatPattern + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(?\s*(` + identifierCompatPattern + `)\s*:\s*(` + identifierCompatPattern + `)\s*\)?\s+ON(?:\s+EACH)?\s+(.+?)(?:\s+OPTIONS\s+\{.*\})?\s*$`)
 )
 
 // isCompositeRoot returns true if the storage engine is a composite database root.
@@ -118,8 +118,8 @@ func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher strin
 func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	// NODE KEY constraints (Neo4j 5.x)
 	if matches := constraintNamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
-		constraintName := matches[1]
-		label := matches[3]
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
 		properties := e.parseConstraintProperties(matches[4])
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("NODE KEY constraint requires properties")
@@ -142,7 +142,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintUnnamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
+		label := normalizeIdentifierToken(matches[2])
 		properties := e.parseConstraintProperties(matches[3])
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("NODE KEY constraint requires properties")
@@ -166,7 +166,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintOnAssertNodeKey.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
+		label := normalizeIdentifierToken(matches[2])
 		properties := e.parseConstraintProperties(matches[3])
 		if len(properties) == 0 {
 			return nil, fmt.Errorf("NODE KEY constraint requires properties")
@@ -191,8 +191,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 
 	// Temporal no-overlap constraints (NornicDB extension)
 	if matches := constraintNamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		constraintName := matches[1]
-		label := matches[3]
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
 		properties := e.parseConstraintProperties(matches[4])
 		if len(properties) != 3 {
 			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
@@ -215,7 +215,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintUnnamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
+		label := normalizeIdentifierToken(matches[2])
 		properties := e.parseConstraintProperties(matches[3])
 		if len(properties) != 3 {
 			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
@@ -240,9 +240,9 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 
 	// EXISTS / NOT NULL constraints
 	if matches := constraintNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		constraintName := matches[1]
-		label := matches[3]
-		property := matches[5]
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
 		constraint := storage.Constraint{
 			Name:       constraintName,
 			Type:       storage.ConstraintExists,
@@ -260,8 +260,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintUnnamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
 		constraint := storage.Constraint{
 			Name:       constraintName,
@@ -280,8 +280,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintOnAssertExists.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
 		constraint := storage.Constraint{
 			Name:       constraintName,
@@ -300,8 +300,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintOnAssertNotNull.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
 		constraint := storage.Constraint{
 			Name:       constraintName,
@@ -321,9 +321,9 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 
 	// Property type constraints
 	if matches := constraintNamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		constraintName := matches[1]
-		label := matches[3]
-		property := matches[5]
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
 		expectedType, err := parsePropertyType(matches[6])
 		if err != nil {
 			return nil, err
@@ -344,8 +344,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintUnnamedForRequireType.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		expectedType, err := parsePropertyType(matches[5])
 		if err != nil {
 			return nil, err
@@ -367,8 +367,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	if matches := constraintOnAssertType.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		expectedType, err := parsePropertyType(matches[5])
 		if err != nil {
 			return nil, err
@@ -392,9 +392,9 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	// Pattern 1 (Neo4j 5.x): CREATE CONSTRAINT name IF NOT EXISTS FOR (n:Label) REQUIRE n.property IS UNIQUE
 	// Uses pre-compiled pattern from regex_patterns.go
 	if matches := constraintNamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		constraintName := matches[1]
-		label := matches[3]
-		property := matches[5]
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
 
 		constraint := storage.Constraint{
 			Name:       constraintName,
@@ -415,8 +415,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	// Pattern 2 (Neo4j 5.x without name): CREATE CONSTRAINT IF NOT EXISTS FOR (n:Label) REQUIRE n.property IS UNIQUE
 	// Uses pre-compiled pattern from regex_patterns.go
 	if matches := constraintUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
 
 		constraint := storage.Constraint{
@@ -438,8 +438,8 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	// Pattern 3 (Neo4j 4.x): CREATE CONSTRAINT IF NOT EXISTS ON (n:Label) ASSERT n.property IS UNIQUE
 	// Uses pre-compiled pattern from regex_patterns.go
 	if matches := constraintOnAssert.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
-		property := matches[4]
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
 		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
 
 		constraint := storage.Constraint{
@@ -518,18 +518,50 @@ func (e *StorageExecutor) executeDropIndex(ctx context.Context, cypher string) (
 
 // executeDropConstraint handles DROP CONSTRAINT commands.
 func (e *StorageExecutor) executeDropConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	matches := dropConstraintPattern.FindStringSubmatch(cypher)
-	if matches == nil {
+	trimmed := strings.TrimSpace(cypher)
+	upper := strings.ToUpper(trimmed)
+	if !strings.HasPrefix(upper, "DROP CONSTRAINT") {
 		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
 	}
-	name := matches[1]
+
+	rest := strings.TrimSpace(trimmed[len("DROP CONSTRAINT"):])
+	if rest == "" {
+		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
+	}
+
+	ifExists := false
+	upperRest := strings.ToUpper(rest)
+	if strings.HasPrefix(upperRest, "IF EXISTS") {
+		ifExists = true
+		rest = strings.TrimSpace(rest[len("IF EXISTS"):])
+		upperRest = strings.ToUpper(rest)
+	}
+	if strings.HasSuffix(upperRest, " IF EXISTS") {
+		ifExists = true
+		rest = strings.TrimSpace(rest[:len(rest)-len(" IF EXISTS")])
+	}
+
+	if rest == "" {
+		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(rest), "`") && len(strings.Fields(rest)) > 1 {
+		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
+	}
+	name := normalizeIdentifierToken(rest)
+	if name == "" {
+		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
+	}
 
 	if err := e.storage.GetSchema().DropConstraint(name); err != nil {
 		// If IF EXISTS was used, swallow missing constraint errors.
-		if strings.Contains(strings.ToUpper(cypher), "IF EXISTS") && strings.Contains(err.Error(), "does not exist") {
+		if ifExists && strings.Contains(err.Error(), "does not exist") {
 			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 		}
 		return nil, err
+	}
+
+	if e.cache != nil {
+		e.cache.Invalidate()
 	}
 
 	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -548,8 +580,8 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 	// Pattern: CREATE INDEX name IF NOT EXISTS FOR (n:Label) ON (n.property[, n.property2, ...])
 	// Uses pre-compiled patterns from regex_patterns.go
 	if matches := indexNamedFor.FindStringSubmatch(cypher); matches != nil {
-		indexName := matches[1]
-		label := matches[3]
+		indexName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
 		propertiesStr := matches[4] // e.g., "n.prop1, n.prop2"
 
 		// Parse properties (single or multiple)
@@ -571,7 +603,7 @@ func (e *StorageExecutor) executeCreateIndex(ctx context.Context, cypher string)
 
 	// Try without index name
 	if matches := indexUnnamedFor.FindStringSubmatch(cypher); matches != nil {
-		label := matches[2]
+		label := normalizeIdentifierToken(matches[2])
 		propertiesStr := matches[3] // e.g., "n.prop1, n.prop2"
 
 		// Parse properties
@@ -773,7 +805,7 @@ func (e *StorageExecutor) parseConstraintProperties(propertiesStr string) []stri
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if dotIdx := strings.LastIndex(part, "."); dotIdx >= 0 && dotIdx < len(part)-1 {
-			propName := strings.TrimSpace(part[dotIdx+1:])
+			propName := normalizeIdentifierToken(part[dotIdx+1:])
 			if propName != "" {
 				properties = append(properties, propName)
 			}
@@ -840,8 +872,8 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
-	indexName := matches[1]
-	label := matches[3]
+	indexName := normalizeIdentifierToken(matches[1])
+	label := normalizeIdentifierToken(matches[3])
 	propertiesStr := matches[4]
 
 	// Parse properties: "n.prop1, n.prop2" -> ["prop1", "prop2"]
@@ -889,9 +921,9 @@ func (e *StorageExecutor) executeCreateVectorIndex(ctx context.Context, cypher s
 		return nil, fmt.Errorf("invalid CREATE VECTOR INDEX syntax")
 	}
 
-	indexName := matches[1]
-	label := matches[3]
-	property := matches[5]
+	indexName := normalizeIdentifierToken(matches[1])
+	label := normalizeIdentifierToken(matches[3])
+	property := normalizeIdentifierToken(matches[5])
 
 	// Parse OPTIONS if present - use configured default dimensions
 	dimensions := e.GetDefaultEmbeddingDimensions()

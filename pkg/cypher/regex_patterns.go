@@ -19,44 +19,50 @@ import (
 // Schema DDL Patterns (CREATE CONSTRAINT, CREATE INDEX)
 // =============================================================================
 
+const (
+	ddlIdentifierToken = "(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)"
+	ddlVariableToken   = "(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)"
+	ddlOptionsTail     = "(?:\\s+OPTIONS\\s+\\{.*\\})?"
+)
+
 var (
 	// Constraint patterns - CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (var:Label) REQUIRE var.prop IS UNIQUE
-	constraintNamedForRequire   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+UNIQUE`)
-	constraintUnnamedForRequire = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+UNIQUE`)
-	constraintOnAssert          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+UNIQUE`)
+	constraintNamedForRequire   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+	constraintUnnamedForRequire = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+	constraintOnAssert          = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
 
 	// EXISTS / NOT NULL constraints
-	constraintNamedForRequireNotNull   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
-	constraintUnnamedForRequireNotNull = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
-	constraintOnAssertExists           = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+exists\s*\(\s*(\w+)\.(\w+)\s*\)`)
-	constraintOnAssertNotNull          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
+	constraintNamedForRequireNotNull   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL` + ddlOptionsTail + `\s*$`)
+	constraintUnnamedForRequireNotNull = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL` + ddlOptionsTail + `\s*$`)
+	constraintOnAssertExists           = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+exists\s*\(\s*(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s*\)` + ddlOptionsTail + `\s*$`)
+	constraintOnAssertNotNull          = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL` + ddlOptionsTail + `\s*$`)
 
 	// NODE KEY constraints
-	constraintNamedForRequireNodeKey   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
-	constraintUnnamedForRequireNodeKey = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
-	constraintOnAssertNodeKey          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
+	constraintNamedForRequireNodeKey   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY` + ddlOptionsTail + `\s*$`)
+	constraintUnnamedForRequireNodeKey = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY` + ddlOptionsTail + `\s*$`)
+	constraintOnAssertNodeKey          = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY` + ddlOptionsTail + `\s*$`)
 
 	// Temporal no-overlap constraints (NornicDB extension)
-	constraintNamedForRequireTemporal   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?`)
-	constraintUnnamedForRequireTemporal = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?`)
+	constraintNamedForRequireTemporal   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?` + ddlOptionsTail + `\s*$`)
+	constraintUnnamedForRequireTemporal = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?` + ddlOptionsTail + `\s*$`)
 
 	// Property type constraints
-	constraintNamedForRequireType   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
-	constraintUnnamedForRequireType = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
-	constraintOnAssertType          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
+	constraintNamedForRequireType   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
+	constraintUnnamedForRequireType = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
+	constraintOnAssertType          = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
 
 	// DROP CONSTRAINT
-	dropConstraintPattern = regexp.MustCompile(`(?i)DROP\s+CONSTRAINT(?:\s+IF\s+EXISTS)?\s+(\w+)`)
+	dropConstraintPattern = regexp.MustCompile(`(?is)^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(` + ddlIdentifierToken + `)(?:\s+IF\s+EXISTS)?\s*$`)
 
 	// Index patterns - CREATE INDEX [name] [IF NOT EXISTS] FOR (var:Label) ON (var.prop)
-	indexNamedFor   = regexp.MustCompile(`(?i)CREATE\s+INDEX\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+\(([^)]+)\)`)
-	indexUnnamedFor = regexp.MustCompile(`(?i)CREATE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+\(([^)]+)\)`)
+	indexNamedFor   = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
+	indexUnnamedFor = regexp.MustCompile(`(?is)^\s*CREATE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(([^)]+)\)` + ddlOptionsTail + `\s*$`)
 
 	// Fulltext index pattern - CREATE FULLTEXT INDEX name FOR (var:Label) ON EACH [props]
-	fulltextIndexPattern = regexp.MustCompile(`(?i)CREATE\s+FULLTEXT\s+INDEX\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+EACH\s+\[([^\]]+)\]`)
+	fulltextIndexPattern = regexp.MustCompile(`(?is)^\s*CREATE\s+FULLTEXT\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+EACH\s+\[([^\]]+)\]` + ddlOptionsTail + `\s*$`)
 
 	// Vector index patterns
-	vectorIndexPattern      = regexp.MustCompile(`(?i)CREATE\s+VECTOR\s+INDEX\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+\((\w+)\.(\w+)\)`)
+	vectorIndexPattern      = regexp.MustCompile(`(?is)^\s*CREATE\s+VECTOR\s+INDEX\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s*\)`)
 	vectorDimensionsPattern = regexp.MustCompile(`vector\.dimensions[:\s]+(\d+)`)
 	vectorSimilarityPattern = regexp.MustCompile(`vector\.similarity_function[:\s]+['"]?(\w+)['"]?`)
 )
