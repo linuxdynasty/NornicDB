@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **MATCH...CREATE join execution hot path**:
-  - added join-aware combination building for 2-variable equality join shapes to avoid unnecessary cartesian expansion
+  - added join-aware combination building for N-variable equality-join shapes to avoid unnecessary cartesian expansion
   - improved selective pushdown behavior for `IN` + equality predicates before combination building.
 - **UNWIND correlated rewrite routing**:
   - preserved correlation semantics in rewrite transforms so value-bucket joins do not degrade into cross-key cartesian behavior.
@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added deterministic tests for:
   - dual-side `IN` join-filtered `MATCH...CREATE` write paths
-  - join-aware combination builder correctness for 2-variable equality joins
+  - join-aware combination builder correctness for multi-variable equality joins
   - correlated UNWIND + multi-MATCH execution routing and count semantics.
 - Expanded Fabric/Cypher targeted regression validation around direct context matching and correlated execution behavior.
 

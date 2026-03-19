@@ -157,3 +157,39 @@ func TestBuildCombinationsUsingWhereJoin_TwoVarEquality(t *testing.T) {
 	require.Equal(t, "nornic:t1", got["nornic:o1"])
 	require.Equal(t, "nornic:t2", got["nornic:o2"])
 }
+
+func TestBuildCombinationsUsingWhereJoin_ThreeVarEqualityChain(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+
+	o1 := &storage.Node{ID: "nornic:o1", Properties: map[string]interface{}{"joinKey": "k1"}}
+	o2 := &storage.Node{ID: "nornic:o2", Properties: map[string]interface{}{"joinKey": "k2"}}
+	t1 := &storage.Node{ID: "nornic:t1", Properties: map[string]interface{}{"joinKey": "k1"}}
+	t2 := &storage.Node{ID: "nornic:t2", Properties: map[string]interface{}{"joinKey": "k2"}}
+	a1 := &storage.Node{ID: "nornic:a1", Properties: map[string]interface{}{"joinKey": "k1"}}
+	a2 := &storage.Node{ID: "nornic:a2", Properties: map[string]interface{}{"joinKey": "k2"}}
+	a3 := &storage.Node{ID: "nornic:a3", Properties: map[string]interface{}{"joinKey": "k3"}}
+
+	patternMatches := []struct {
+		variable string
+		nodes    []*storage.Node
+	}{
+		{variable: "o", nodes: []*storage.Node{o1, o2}},
+		{variable: "t", nodes: []*storage.Node{t1, t2}},
+		{variable: "a", nodes: []*storage.Node{a1, a2, a3}},
+	}
+
+	joined, ok := exec.buildCombinationsUsingWhereJoin(
+		patternMatches,
+		"o.joinKey IN ['k1','k2'] AND t.joinKey = o.joinKey AND a.joinKey = t.joinKey",
+	)
+	require.True(t, ok)
+	require.Len(t, joined, 2)
+	for _, row := range joined {
+		require.Contains(t, row, "o")
+		require.Contains(t, row, "t")
+		require.Contains(t, row, "a")
+		ok := row["o"].Properties["joinKey"] == row["t"].Properties["joinKey"] &&
+			row["t"].Properties["joinKey"] == row["a"].Properties["joinKey"]
+		require.True(t, ok)
+	}
+}

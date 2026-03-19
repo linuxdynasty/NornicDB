@@ -2751,17 +2751,24 @@ func (e *StorageExecutor) buildCombinationsUsingWhereJoin(
 	},
 	whereClause string,
 ) ([]map[string]*storage.Node, bool) {
-	if len(patternMatches) != 2 || strings.TrimSpace(whereClause) == "" {
+	if len(patternMatches) < 2 || strings.TrimSpace(whereClause) == "" {
 		return nil, false
 	}
-	if patternMatches[0].variable == "" || patternMatches[1].variable == "" {
-		return nil, false
+	varOrder := make([]string, 0, len(patternMatches))
+	varToNodes := make(map[string][]*storage.Node, len(patternMatches))
+	for _, pm := range patternMatches {
+		if pm.variable == "" {
+			return nil, false
+		}
+		if _, exists := varToNodes[pm.variable]; exists {
+			return nil, false
+		}
+		varOrder = append(varOrder, pm.variable)
+		varToNodes[pm.variable] = pm.nodes
 	}
 
-	terms := splitTopLevelAndCartesian(whereClause)
-	var join cartesianEqConstraint
-	foundJoin := false
-	for _, term := range terms {
+	eqConstraints := make([]cartesianEqConstraint, 0, 4)
+	for _, term := range splitTopLevelAndCartesian(whereClause) {
 		term = strings.TrimSpace(term)
 		if term == "" {
 			continue
@@ -2770,68 +2777,211 @@ func (e *StorageExecutor) buildCombinationsUsingWhereJoin(
 		if !ok {
 			continue
 		}
-		if (lv == patternMatches[0].variable && rv == patternMatches[1].variable) ||
-			(lv == patternMatches[1].variable && rv == patternMatches[0].variable) {
-			join = cartesianEqConstraint{leftVar: lv, leftProp: lp, rightVar: rv, rightProp: rp}
-			foundJoin = true
-			break
+		if _, lok := varToNodes[lv]; !lok {
+			continue
 		}
+		if _, rok := varToNodes[rv]; !rok {
+			continue
+		}
+		eqConstraints = append(eqConstraints, cartesianEqConstraint{
+			leftVar:   lv,
+			leftProp:  lp,
+			rightVar:  rv,
+			rightProp: rp,
+		})
 	}
-	if !foundJoin {
+	if len(eqConstraints) == 0 {
 		return nil, false
 	}
 
-	left := patternMatches[0]
-	right := patternMatches[1]
-	leftVar := left.variable
-	rightVar := right.variable
-	leftProp := ""
-	rightProp := ""
-	switch {
-	case join.leftVar == leftVar && join.rightVar == rightVar:
-		leftProp, rightProp = join.leftProp, join.rightProp
-	case join.leftVar == rightVar && join.rightVar == leftVar:
-		leftProp, rightProp = join.rightProp, join.leftProp
-	default:
-		return nil, false
+	parent := make(map[string]string, len(varOrder))
+	for _, v := range varOrder {
+		parent[v] = v
 	}
-	if leftProp == "" || rightProp == "" {
-		return nil, false
+	var find func(string) string
+	find = func(v string) string {
+		p := parent[v]
+		if p != v {
+			parent[v] = find(p)
+		}
+		return parent[v]
 	}
-
-	rightByJoinValue := make(map[string][]*storage.Node, len(right.nodes))
-	for _, n := range right.nodes {
-		if n == nil || n.Properties == nil {
-			continue
+	union := func(a, b string) {
+		ra := find(a)
+		rb := find(b)
+		if ra != rb {
+			parent[rb] = ra
 		}
-		v, ok := n.Properties[rightProp]
-		if !ok {
-			continue
-		}
-		key := cartesianValueKey(v)
-		rightByJoinValue[key] = append(rightByJoinValue[key], n)
+	}
+	for _, c := range eqConstraints {
+		union(c.leftVar, c.rightVar)
 	}
 
-	if len(rightByJoinValue) == 0 {
-		return []map[string]*storage.Node{}, true
+	components := make(map[string][]string, len(varOrder))
+	componentOrder := make([]string, 0, len(varOrder))
+	for _, v := range varOrder {
+		root := find(v)
+		if _, exists := components[root]; !exists {
+			componentOrder = append(componentOrder, root)
+		}
+		components[root] = append(components[root], v)
 	}
 
-	out := make([]map[string]*storage.Node, 0, len(left.nodes))
-	for _, ln := range left.nodes {
-		if ln == nil || ln.Properties == nil {
-			continue
+	constraintsByRoot := make(map[string][]cartesianEqConstraint, len(componentOrder))
+	for _, c := range eqConstraints {
+		root := find(c.leftVar)
+		constraintsByRoot[root] = append(constraintsByRoot[root], c)
+	}
+
+	indexCache := map[string]map[string][]*storage.Node{}
+	buildIndex := func(variable, prop string) map[string][]*storage.Node {
+		cacheKey := variable + "|" + prop
+		if idx, exists := indexCache[cacheKey]; exists {
+			return idx
 		}
-		lv, ok := ln.Properties[leftProp]
-		if !ok {
-			continue
+		nodes := varToNodes[variable]
+		idx := make(map[string][]*storage.Node, len(nodes))
+		for _, n := range nodes {
+			if n == nil || n.Properties == nil {
+				continue
+			}
+			v, ok := n.Properties[prop]
+			if !ok {
+				continue
+			}
+			k := cartesianValueKey(v)
+			idx[k] = append(idx[k], n)
 		}
-		matches := rightByJoinValue[cartesianValueKey(lv)]
-		for _, rn := range matches {
-			out = append(out, map[string]*storage.Node{
-				leftVar:  ln,
-				rightVar: rn,
-			})
+		indexCache[cacheKey] = idx
+		return idx
+	}
+
+	buildComponentRows := func(vars []string, constraints []cartesianEqConstraint) []map[string]*storage.Node {
+		if len(vars) == 0 {
+			return []map[string]*storage.Node{{}}
 		}
+		if len(vars) == 1 {
+			v := vars[0]
+			rows := make([]map[string]*storage.Node, 0, len(varToNodes[v]))
+			for _, n := range varToNodes[v] {
+				rows = append(rows, map[string]*storage.Node{v: n})
+			}
+			return rows
+		}
+
+		seed := vars[0]
+		rows := make([]map[string]*storage.Node, 0, len(varToNodes[seed]))
+		for _, n := range varToNodes[seed] {
+			rows = append(rows, map[string]*storage.Node{seed: n})
+		}
+		added := map[string]struct{}{seed: {}}
+
+		for len(added) < len(vars) {
+			progressed := false
+			for _, c := range constraints {
+				baseVar := ""
+				baseProp := ""
+				newVar := ""
+				newProp := ""
+				if _, ok := added[c.leftVar]; ok {
+					if _, seen := added[c.rightVar]; !seen {
+						baseVar, baseProp = c.leftVar, c.leftProp
+						newVar, newProp = c.rightVar, c.rightProp
+					}
+				}
+				if baseVar == "" {
+					if _, ok := added[c.rightVar]; ok {
+						if _, seen := added[c.leftVar]; !seen {
+							baseVar, baseProp = c.rightVar, c.rightProp
+							newVar, newProp = c.leftVar, c.leftProp
+						}
+					}
+				}
+				if baseVar == "" {
+					continue
+				}
+
+				idx := buildIndex(newVar, newProp)
+				nextRows := make([]map[string]*storage.Node, 0, len(rows))
+				for _, row := range rows {
+					baseNode := row[baseVar]
+					if baseNode == nil || baseNode.Properties == nil {
+						continue
+					}
+					baseVal, ok := baseNode.Properties[baseProp]
+					if !ok {
+						continue
+					}
+					for _, matchNode := range idx[cartesianValueKey(baseVal)] {
+						joined := make(map[string]*storage.Node, len(row)+1)
+						for k, v := range row {
+							joined[k] = v
+						}
+						joined[newVar] = matchNode
+						nextRows = append(nextRows, joined)
+					}
+				}
+				rows = nextRows
+				added[newVar] = struct{}{}
+				progressed = true
+			}
+			if !progressed {
+				return nil
+			}
+		}
+
+		filtered := make([]map[string]*storage.Node, 0, len(rows))
+		for _, row := range rows {
+			keep := true
+			for _, c := range constraints {
+				ln := row[c.leftVar]
+				rn := row[c.rightVar]
+				if ln == nil || rn == nil || ln.Properties == nil || rn.Properties == nil {
+					keep = false
+					break
+				}
+				lv, lok := ln.Properties[c.leftProp]
+				rv, rok := rn.Properties[c.rightProp]
+				if !lok || !rok || cartesianValueKey(lv) != cartesianValueKey(rv) {
+					keep = false
+					break
+				}
+			}
+			if keep {
+				filtered = append(filtered, row)
+			}
+		}
+		return filtered
+	}
+
+	componentRows := make([][]map[string]*storage.Node, 0, len(componentOrder))
+	for _, root := range componentOrder {
+		rows := buildComponentRows(components[root], constraintsByRoot[root])
+		if rows == nil {
+			return nil, false
+		}
+		componentRows = append(componentRows, rows)
+	}
+
+	out := []map[string]*storage.Node{{}}
+	for _, rows := range componentRows {
+		if len(rows) == 0 {
+			return []map[string]*storage.Node{}, true
+		}
+		next := make([]map[string]*storage.Node, 0, len(out)*len(rows))
+		for _, base := range out {
+			for _, row := range rows {
+				merged := make(map[string]*storage.Node, len(base)+len(row))
+				for k, v := range base {
+					merged[k] = v
+				}
+				for k, v := range row {
+					merged[k] = v
+				}
+				next = append(next, merged)
+			}
+		}
+		out = next
 	}
 	return out, true
 }
