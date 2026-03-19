@@ -120,7 +120,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_MODELS_DIR=/app/models \
     NORNICDB_EMBEDDING_GPU_LAYERS=0 \
     # Search reranker (Stage-2)
-    NORNICDB_SEARCH_RERANK_ENABLED=true \
+    NORNICDB_SEARCH_RERANK_ENABLED=false \
     NORNICDB_SEARCH_RERANK_PROVIDER=local \
     NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3.gguf \
     # Heimdall configuration (cognitive guardian)
