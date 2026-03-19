@@ -316,6 +316,11 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 	// Extract the outer MATCH + WHERE part (before CALL)
 	outerPart := strings.TrimSpace(cypher[:callIdx])
+	// Allow MATCH ... WITH ... CALL {} shapes by constraining this fast-path's
+	// seed extraction to the MATCH segment before the outer WITH.
+	if outerWithIdx := findKeywordIndex(outerPart, "WITH"); outerWithIdx > 0 {
+		outerPart = strings.TrimSpace(outerPart[:outerWithIdx])
+	}
 
 	// Parse the outer MATCH to get seed nodes
 	// First, execute the outer query to get the seed nodes
@@ -432,6 +437,82 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		// Create parameters map with the seed ID (safe from injection)
 		subqueryParams := map[string]interface{}{
 			seedIDParamName: seedID,
+		}
+
+		// UNION subqueries with WITH-imported outer variables are executed branch-by-branch
+		// using correlated seed rows to preserve CALL/YIELD tail semantics.
+		if findKeywordIndex(subqueryBody, "UNION ALL") >= 0 || findKeywordIndex(subqueryBody, "UNION") >= 0 {
+			branches, unionModeAll, splitOK := splitTopLevelUnionBranches(subqueryBody)
+			if !splitOK {
+				return nil, fmt.Errorf("failed to parse UNION branches in correlated CALL subquery")
+			}
+
+			seedResult := &ExecuteResult{
+				Columns: []string{nodePattern.variable},
+				Rows:    [][]interface{}{{seedNode}},
+			}
+
+			var perSeed *ExecuteResult
+			seen := make(map[string]bool)
+			for i, branch := range branches {
+				trimmedBranch := strings.TrimSpace(branch)
+				if trimmedBranch == "" {
+					continue
+				}
+
+				withVars, innerBody, hasWith, parseErr := parseLeadingWithImports(trimmedBranch)
+				if parseErr != nil {
+					return nil, fmt.Errorf("failed to parse UNION branch %d WITH imports: %w", i+1, parseErr)
+				}
+
+				var branchResult *ExecuteResult
+				if hasWith {
+					branchResult, err = subqueryExecutor.executeCorrelatedCallWithSeedRows(ctx, seedResult, innerBody, withVars)
+				} else {
+					branchResult, err = subqueryExecutor.executeInternal(ctx, innerBody, nil)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("failed correlated UNION subquery branch %d for seed %s: %w", i+1, seedID, err)
+				}
+
+				if perSeed == nil {
+					perSeed = &ExecuteResult{
+						Columns: append([]string{}, branchResult.Columns...),
+						Rows:    make([][]interface{}, 0),
+					}
+				} else if len(perSeed.Columns) != len(branchResult.Columns) {
+					return nil, fmt.Errorf("UNION queries must return the same number of columns (got %d and %d)", len(perSeed.Columns), len(branchResult.Columns))
+				}
+
+				if unionModeAll {
+					perSeed.Rows = append(perSeed.Rows, branchResult.Rows...)
+					continue
+				}
+				for _, row := range branchResult.Rows {
+					key := fmt.Sprintf("%v", row)
+					if !seen[key] {
+						perSeed.Rows = append(perSeed.Rows, row)
+						seen[key] = true
+					}
+				}
+			}
+
+			if perSeed == nil {
+				perSeed = &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}
+			}
+
+			if combinedResult == nil {
+				combinedResult = &ExecuteResult{
+					Columns: perSeed.Columns,
+					Rows:    make([][]interface{}, 0),
+				}
+			}
+
+			if len(combinedResult.Columns) != len(perSeed.Columns) {
+				return nil, fmt.Errorf("UNION queries must return the same number of columns (got %d and %d)", len(combinedResult.Columns), len(perSeed.Columns))
+			}
+			combinedResult.Rows = append(combinedResult.Rows, perSeed.Rows...)
+			continue
 		}
 
 		// If the rest starts with MATCH, we need to handle the path pattern
@@ -1146,6 +1227,112 @@ func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody 
 	}
 
 	return withVars, innerBody, true, nil
+}
+
+// splitTopLevelUnionBranches splits a query by top-level UNION/UNION ALL separators.
+// Returns branches, unionAllMode, ok.
+func splitTopLevelUnionBranches(query string) ([]string, bool, bool) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return nil, false, false
+	}
+
+	type sep struct {
+		pos int
+		end int
+		all bool
+	}
+	seps := make([]sep, 0)
+	inSingle := false
+	inDouble := false
+	depthParen := 0
+	depthBracket := 0
+	depthBrace := 0
+
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		switch ch {
+		case '(':
+			depthParen++
+			continue
+		case ')':
+			if depthParen > 0 {
+				depthParen--
+			}
+			continue
+		case '[':
+			depthBracket++
+			continue
+		case ']':
+			if depthBracket > 0 {
+				depthBracket--
+			}
+			continue
+		case '{':
+			depthBrace++
+			continue
+		case '}':
+			if depthBrace > 0 {
+				depthBrace--
+			}
+			continue
+		}
+
+		if depthParen != 0 || depthBracket != 0 || depthBrace != 0 {
+			continue
+		}
+		if !matchKeywordAt(trimmed, i, "UNION") {
+			continue
+		}
+		j := skipSpaces(trimmed, i+len("UNION"))
+		all := false
+		if matchKeywordAt(trimmed, j, "ALL") {
+			all = true
+			j = skipSpaces(trimmed, j+len("ALL"))
+		}
+		seps = append(seps, sep{pos: i, end: j, all: all})
+		i = j - 1
+	}
+
+	if len(seps) == 0 {
+		return nil, false, false
+	}
+
+	unionAllMode := true
+	for _, s := range seps {
+		if !s.all {
+			unionAllMode = false
+			break
+		}
+	}
+
+	branches := make([]string, 0, len(seps)+1)
+	start := 0
+	for _, s := range seps {
+		part := strings.TrimSpace(trimmed[start:s.pos])
+		if part == "" {
+			return nil, false, false
+		}
+		branches = append(branches, part)
+		start = s.end
+	}
+	last := strings.TrimSpace(trimmed[start:])
+	if last == "" {
+		return nil, false, false
+	}
+	branches = append(branches, last)
+	return branches, unionAllMode, true
 }
 
 func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context, seedResult *ExecuteResult, innerBody string, importVars []string) (*ExecuteResult, error) {

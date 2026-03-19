@@ -245,17 +245,17 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 					}
 				}
 				replacement := "[" + strings.Join(parts, ", ") + "]"
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, replacement)
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, replacement)
 			case string:
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, fmt.Sprintf("'%s'", v))
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, fmt.Sprintf("'%s'", v))
 			case map[string]interface{}:
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, mapToCypherLiteral(v))
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, mapToCypherLiteral(v))
 			case map[interface{}]interface{}:
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, mapToCypherLiteral(normalizeInterfaceMap(v)))
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, mapToCypherLiteral(normalizeInterfaceMap(v)))
 			case nil:
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, "null")
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, "null")
 			default:
-				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, fmt.Sprintf("%v", v))
+				substitutedRemainder = replaceStandaloneCypherIdentifier(substitutedRemainder, varName, fmt.Sprintf("%v", v))
 			}
 		}
 		return e.executeInternal(ctx, substitutedRemainder, nil)

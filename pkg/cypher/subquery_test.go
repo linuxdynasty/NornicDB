@@ -2577,6 +2577,64 @@ func TestSubqueryHelpers_BatchingAndResultModifiers_Branches(t *testing.T) {
 	assert.Equal(t, "b", modified.Rows[0][0])
 }
 
+func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered', embedding: [1.0, 0.0, 0.0]})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	query := `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.GreaterOrEqual(t, len(result.Rows), 2)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+}
+
 func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
