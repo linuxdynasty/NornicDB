@@ -635,6 +635,28 @@ func TestParseYieldClause(t *testing.T) {
 				returnExpr: "label",
 			},
 		},
+		{
+			name:   "yield with WITH boundary",
+			cypher: "CALL db.index.vector.queryNodes('idx', 10, [1,2,3]) YIELD node, score WITH node MATCH (node)-[:REL]->(m) RETURN node, m",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "node", alias: ""},
+					{name: "score", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with WITH boundary and multiple projected columns",
+			cypher: "CALL db.proc() YIELD a, b AS bAlias, c, d AS dAlias WITH a, bAlias MATCH (n) RETURN n",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: "bAlias"},
+					{name: "c", alias: ""},
+					{name: "d", alias: "dAlias"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

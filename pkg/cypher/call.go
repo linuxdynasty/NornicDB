@@ -90,25 +90,36 @@ func parseYieldClause(cypher string) *yieldClause {
 	}
 
 	// Find WHERE, RETURN, ORDER BY, LIMIT, SKIP boundaries
-	whereIdx := findKeywordIndexInContext(afterYield, "WHERE")
-	returnIdx := findKeywordIndexInContext(afterYield, "RETURN")
-	orderIdx := findKeywordIndexInContext(afterYield, "ORDER")
-	limitIdx := findKeywordIndexInContext(afterYield, "LIMIT")
-	skipIdx := findKeywordIndexInContext(afterYield, "SKIP")
+	withIdx := findKeywordIndexInContext(afterYield, "WITH")
+	yieldScope := afterYield
+	if withIdx != -1 {
+		yieldScope = strings.TrimSpace(afterYield[:withIdx])
+	}
+	whereIdx := findKeywordIndexInContext(yieldScope, "WHERE")
+	returnIdx := findKeywordIndexInContext(yieldScope, "RETURN")
+	orderIdx := findKeywordIndexInContext(yieldScope, "ORDER")
+	limitIdx := findKeywordIndexInContext(yieldScope, "LIMIT")
+	skipIdx := findKeywordIndexInContext(yieldScope, "SKIP")
 
 	// Extract WHERE clause if present
 	if whereIdx != -1 {
-		if returnIdx != -1 && returnIdx > whereIdx {
-			result.where = strings.TrimSpace(afterYield[whereIdx+5 : returnIdx])
+		whereEnd := len(yieldScope)
+		for _, idx := range []int{returnIdx, orderIdx, limitIdx, skipIdx} {
+			if idx != -1 && idx > whereIdx && idx < whereEnd {
+				whereEnd = idx
+			}
+		}
+		if whereEnd > whereIdx+5 {
+			result.where = strings.TrimSpace(yieldScope[whereIdx+5 : whereEnd])
 		} else {
-			result.where = strings.TrimSpace(afterYield[whereIdx+5:])
+			result.where = strings.TrimSpace(yieldScope[whereIdx+5:])
 		}
 	}
 
 	// Extract RETURN clause if present (strip and parse ORDER BY, LIMIT, SKIP)
 	if returnIdx != -1 {
 		result.hasReturn = true
-		returnPart := strings.TrimSpace(afterYield[returnIdx+6:])
+		returnPart := strings.TrimSpace(yieldScope[returnIdx+6:])
 
 		// Find ORDER BY, LIMIT, SKIP positions
 		orderIdx := findKeywordIndexInContext(returnPart, "ORDER")
@@ -180,14 +191,14 @@ func parseYieldClause(cypher string) *yieldClause {
 		// Parse ORDER BY clause
 		if orderIdx != -1 {
 			// Find end of ORDER BY (at LIMIT, SKIP, or end of string)
-			orderEnd := len(afterYield)
+			orderEnd := len(yieldScope)
 			if limitIdx != -1 && limitIdx > orderIdx {
 				orderEnd = min(orderEnd, limitIdx)
 			}
 			if skipIdx != -1 && skipIdx > orderIdx {
 				orderEnd = min(orderEnd, skipIdx)
 			}
-			orderPart := strings.TrimSpace(afterYield[orderIdx:orderEnd])
+			orderPart := strings.TrimSpace(yieldScope[orderIdx:orderEnd])
 			// Strip "ORDER BY" prefix
 			if strings.HasPrefix(strings.ToUpper(orderPart), "ORDER BY") {
 				result.orderBy = strings.TrimSpace(orderPart[8:])
@@ -198,14 +209,14 @@ func parseYieldClause(cypher string) *yieldClause {
 
 		// Parse LIMIT value
 		if limitIdx != -1 {
-			limitEnd := len(afterYield)
+			limitEnd := len(yieldScope)
 			if skipIdx != -1 && skipIdx > limitIdx {
 				limitEnd = skipIdx
 			}
 			if orderIdx != -1 && orderIdx > limitIdx {
 				limitEnd = min(limitEnd, orderIdx)
 			}
-			limitPart := strings.TrimSpace(afterYield[limitIdx+5 : limitEnd])
+			limitPart := strings.TrimSpace(yieldScope[limitIdx+5 : limitEnd])
 			// Extract just the number
 			limitPart = strings.TrimSpace(strings.Split(limitPart, " ")[0])
 			if n, err := strconv.Atoi(limitPart); err == nil {
@@ -215,14 +226,14 @@ func parseYieldClause(cypher string) *yieldClause {
 
 		// Parse SKIP value
 		if skipIdx != -1 {
-			skipEnd := len(afterYield)
+			skipEnd := len(yieldScope)
 			if limitIdx != -1 && limitIdx > skipIdx {
 				skipEnd = limitIdx
 			}
 			if orderIdx != -1 && orderIdx > skipIdx {
 				skipEnd = min(skipEnd, orderIdx)
 			}
-			skipPart := strings.TrimSpace(afterYield[skipIdx+4 : skipEnd])
+			skipPart := strings.TrimSpace(yieldScope[skipIdx+4 : skipEnd])
 			// Extract just the number
 			skipPart = strings.TrimSpace(strings.Split(skipPart, " ")[0])
 			if n, err := strconv.Atoi(skipPart); err == nil {
@@ -234,14 +245,14 @@ func parseYieldClause(cypher string) *yieldClause {
 	// Parse yield items (if not YIELD *)
 	if !result.yieldAll {
 		// Get the items part (before WHERE, RETURN, ORDER, LIMIT, SKIP)
-		itemsEnd := len(afterYield)
+		itemsEnd := len(yieldScope)
 		for _, idx := range []int{whereIdx, returnIdx, orderIdx, limitIdx, skipIdx} {
 			if idx != -1 && idx < itemsEnd {
 				itemsEnd = idx
 			}
 		}
 
-		itemsStr := strings.TrimSpace(afterYield[:itemsEnd])
+		itemsStr := strings.TrimSpace(yieldScope[:itemsEnd])
 		if itemsStr != "" {
 			// Split by comma, respecting AS keyword
 			for _, item := range strings.Split(itemsStr, ",") {
