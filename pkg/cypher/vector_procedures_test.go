@@ -864,6 +864,313 @@ func TestMatchWithCallProcedure(t *testing.T) {
 	})
 }
 
+func TestCallLeadingVectorYieldMatchPipeline(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.index.vector.createNodeIndex('idx_original_text', 'OriginalText', 'embedding', 4, 'cosine')", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE (o1:OriginalText {id:'o1', originalText:'Get it delivered'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (o2:OriginalText {id:'o2', originalText:'Schedule delivery date'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (t1:TranslatedText {id:'t1', language:'es', translatedText:'Recibelo a domicilio'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (t2:TranslatedText {id:'t2', language:'es', translatedText:'Programar fecha de entrega'})", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "MATCH (o:OriginalText {id:'o1'}) SET o.embedding = [1.0, 0.0, 0.0, 0.0]", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (o:OriginalText {id:'o2'}) SET o.embedding = [0.9, 0.1, 0.0, 0.0]", nil)
+	require.NoError(t, err)
+
+	o1, err := exec.Execute(ctx, "MATCH (o:OriginalText {id:'o1'}) RETURN o", nil)
+	require.NoError(t, err)
+	require.Len(t, o1.Rows, 1)
+	o1Node, ok := o1.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	o2, err := exec.Execute(ctx, "MATCH (o:OriginalText {id:'o2'}) RETURN o", nil)
+	require.NoError(t, err)
+	require.Len(t, o2.Rows, 1)
+	o2Node, ok := o2.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	t1, err := exec.Execute(ctx, "MATCH (t:TranslatedText {id:'t1'}) RETURN t", nil)
+	require.NoError(t, err)
+	require.Len(t, t1.Rows, 1)
+	t1Node, ok := t1.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	t2, err := exec.Execute(ctx, "MATCH (t:TranslatedText {id:'t2'}) RETURN t", nil)
+	require.NoError(t, err)
+	require.Len(t, t2.Rows, 1)
+	t2Node, ok := t2.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+
+	require.NoError(t, engine.CreateEdge(&storage.Edge{
+		ID:        "edge-o1-t1",
+		Type:      "TRANSLATES_TO",
+		StartNode: o1Node.ID,
+		EndNode:   t1Node.ID,
+	}))
+	require.NoError(t, engine.CreateEdge(&storage.Edge{
+		ID:        "edge-o2-t2",
+		Type:      "TRANSLATES_TO",
+		StartNode: o2Node.ID,
+		EndNode:   t2Node.ID,
+	}))
+
+	result, err := exec.Execute(ctx, `
+CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+RETURN
+  node.originalText AS originalText,
+  score,
+  t.language AS language,
+  t.translatedText AS translatedText
+ORDER BY score DESC, t.language
+LIMIT 5
+`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{"originalText", "score", "language", "translatedText"}, result.Columns)
+	require.GreaterOrEqual(t, len(result.Rows), 1)
+}
+
+func TestCallLeadingVectorYieldTailClausePermutations(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.index.vector.createNodeIndex('idx_tail', 'OriginalText', 'embedding', 4, 'cosine')", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE (o1:OriginalText {id:'o1', originalText:'Get it delivered', embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (o2:OriginalText {id:'o2', originalText:'Schedule delivery date', embedding:[0.9,0.1,0.0,0.0]})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (t1:TranslatedText {id:'t1', language:'es', translatedText:'Recibelo a domicilio'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (t2:TranslatedText {id:'t2', language:'fr', translatedText:'Recevez-le a domicile'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:TailDeleteTarget {id:'td1'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "CREATE (:TailDetachDeleteTarget {id:'tdd1'})-[:TMP_REL]->(:TailDetachDeletePeer {id:'peer1'})", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (o:OriginalText {id:'o1'}), (t:TranslatedText {id:'t1'}) CREATE (o)-[:TRANSLATES_TO]->(t)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "MATCH (o:OriginalText {id:'o2'}), (t:TranslatedText {id:'t2'}) CREATE (o)-[:TRANSLATES_TO]->(t)", nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		query         string
+		minRows       int
+		expectedCols  []string
+		validateAfter func(t *testing.T)
+	}{
+		{
+			name: "WITH_then_RETURN",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+WITH node, score
+RETURN node.originalText AS originalText, score
+ORDER BY score DESC
+`,
+			minRows:      1,
+			expectedCols: []string{"originalText", "score"},
+		},
+		{
+			name: "MATCH_traversal",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+RETURN node.originalText AS originalText, t.language AS language
+ORDER BY language
+`,
+			minRows:      1,
+			expectedCols: []string{"originalText", "language"},
+		},
+		{
+			name: "OPTIONAL_MATCH",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+OPTIONAL MATCH (node)-[:DOES_NOT_EXIST]->(x)
+RETURN node.originalText AS originalText, x AS missing
+`,
+			minRows:      1,
+			expectedCols: []string{"originalText", "missing"},
+		},
+		{
+			name: "UNWIND_scalar_tail",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+UNWIND [score] AS s
+RETURN s AS score
+`,
+			minRows:      1,
+			expectedCols: []string{"score"},
+		},
+		{
+			name: "SET_mutation",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+MATCH (node:OriginalText)
+SET node.tailSeen = true
+RETURN node.originalText AS originalText
+`,
+			minRows:      1,
+			expectedCols: []string{"originalText"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (o:OriginalText) WHERE o.tailSeen = true RETURN count(o) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.GreaterOrEqual(t, check.Rows[0][0].(int64), int64(1))
+			},
+		},
+		{
+			name: "REMOVE_mutation",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+MATCH (node:OriginalText)
+REMOVE node.tailSeen
+RETURN node.originalText AS originalText
+`,
+			minRows:      1,
+			expectedCols: []string{"originalText"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (o:OriginalText) WHERE o.tailSeen IS NOT NULL RETURN count(o) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.Equal(t, int64(0), check.Rows[0][0])
+			},
+		},
+		{
+			name: "CREATE_mutation",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+CREATE (m:TailProbe {name: node.originalText})
+RETURN m.name AS probeName
+`,
+			minRows:      1,
+			expectedCols: []string{"probeName"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (m:TailProbe) RETURN count(m) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.GreaterOrEqual(t, check.Rows[0][0].(int64), int64(1))
+			},
+		},
+		{
+			name: "MERGE_no_seed_reference",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+MERGE (m:TailMerge {id: 'fixed'})
+RETURN m.id AS mergedName
+`,
+			minRows:      1,
+			expectedCols: []string{"mergedName"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (m:TailMerge {id:'fixed'}) RETURN count(m) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.GreaterOrEqual(t, check.Rows[0][0].(int64), int64(1))
+			},
+		},
+		{
+			name: "CALL_subquery_tail",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+CALL {
+  WITH node
+  RETURN node.originalText AS txt
+}
+RETURN txt
+`,
+			minRows:      1,
+			expectedCols: []string{"txt"},
+		},
+		{
+			name: "DELETE_tail",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node
+MATCH (d:TailDeleteTarget {id:'td1'})
+DELETE d
+RETURN count(*) AS deletedCount
+`,
+			minRows:      0,
+			expectedCols: []string{"deletedCount"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (d:TailDeleteTarget {id:'td1'}) RETURN count(d) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.Equal(t, int64(0), check.Rows[0][0])
+			},
+		},
+		{
+			name: "DETACH_DELETE_tail",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD node
+MATCH (d:TailDetachDeleteTarget {id:'tdd1'})
+DETACH DELETE d
+RETURN count(*) AS deletedCount
+`,
+			minRows:      0,
+			expectedCols: []string{"deletedCount"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (d:TailDetachDeleteTarget {id:'tdd1'}) RETURN count(d) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.Equal(t, int64(0), check.Rows[0][0])
+			},
+		},
+		{
+			name: "FOREACH_tail",
+			query: `
+CALL db.index.vector.queryNodes('idx_tail', 2, [1.0, 0.0, 0.0, 0.0])
+YIELD score
+			FOREACH (x IN [1] | CREATE (:TailForeach {v: score}))
+RETURN score
+`,
+			minRows:      0,
+			expectedCols: []string{"score"},
+			validateAfter: func(t *testing.T) {
+				check, err := exec.Execute(ctx, "MATCH (m:TailForeach) RETURN count(m) AS c", nil)
+				require.NoError(t, err)
+				require.Len(t, check.Rows, 1)
+				assert.GreaterOrEqual(t, check.Rows[0][0].(int64), int64(1))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := exec.Execute(ctx, tt.query, nil)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.GreaterOrEqual(t, len(result.Rows), tt.minRows)
+			assert.Equal(t, tt.expectedCols, result.Columns)
+			if tt.validateAfter != nil {
+				tt.validateAfter(t)
+			}
+		})
+	}
+}
+
 func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
 	baseEngine := newTestMemoryEngine(t)
 

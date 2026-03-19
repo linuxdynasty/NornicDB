@@ -106,7 +106,12 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 	}
 
 	// Use findKeywordIndex which handles whitespace/newlines properly
-	nextClauseKeywords := []string{"MATCH", "WHERE", "RETURN", "CREATE", "MERGE", "DELETE", "SET", "UNWIND", "ORDER", "SKIP", "LIMIT"}
+	nextClauseKeywords := []string{
+		"MATCH", "OPTIONAL MATCH", "WHERE", "RETURN",
+		"CREATE", "MERGE", "DELETE", "DETACH DELETE", "SET", "REMOVE",
+		"UNWIND", "CALL", "FOREACH",
+		"ORDER", "SKIP", "LIMIT",
+	}
 	nextClauseIdx := len(cypher)
 	for _, keyword := range nextClauseKeywords {
 		idx := findKeywordIndex(cypher[remainderStart:], keyword)
@@ -2308,6 +2313,25 @@ func (e *StorageExecutor) executeForeachWithContext(ctx context.Context, cypher 
 			result.Stats.NodesCreated += updateResult.Stats.NodesCreated
 			result.Stats.PropertiesSet += updateResult.Stats.PropertiesSet
 			result.Stats.RelationshipsCreated += updateResult.Stats.RelationshipsCreated
+		}
+	}
+
+	// Support continuation after FOREACH, e.g.:
+	// FOREACH (...) RETURN ...
+	trailing := strings.TrimSpace(cypher[parenEnd:])
+	if trailing != "" {
+		after, err := e.executeInternal(ctx, trailing, nil)
+		if err != nil {
+			return nil, err
+		}
+		if after != nil {
+			if after.Stats == nil {
+				after.Stats = &QueryStats{}
+			}
+			after.Stats.NodesCreated += result.Stats.NodesCreated
+			after.Stats.PropertiesSet += result.Stats.PropertiesSet
+			after.Stats.RelationshipsCreated += result.Stats.RelationshipsCreated
+			return after, nil
 		}
 	}
 

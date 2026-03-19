@@ -21,6 +21,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -52,20 +53,19 @@ type yieldItem struct {
 	alias string // Alias (empty if no AS clause)
 }
 
+type callSplit struct {
+	callOnly string
+	tail     string
+}
+
 // parseYieldClause extracts YIELD information from a CALL statement.
 // Handles: YIELD *, YIELD a, b, YIELD a AS x, b AS y, YIELD a WHERE a.score > 0.5
 func parseYieldClause(cypher string) *yieldClause {
 	// Normalize whitespace: replace newlines/tabs with spaces for keyword detection
 	normalized := strings.ReplaceAll(strings.ReplaceAll(cypher, "\n", " "), "\t", " ")
-	upper := strings.ToUpper(normalized)
-	yieldIdx := strings.Index(upper, " YIELD ")
+	yieldIdx := findKeywordIndexInContext(normalized, "YIELD")
 	if yieldIdx == -1 {
-		// Also try at start of string (no leading space needed)
-		if strings.HasPrefix(upper, "YIELD ") {
-			yieldIdx = -1 // Will be handled below
-		} else {
-			return nil
-		}
+		return nil
 	}
 
 	result := &yieldClause{
@@ -75,12 +75,7 @@ func parseYieldClause(cypher string) *yieldClause {
 	}
 
 	// Get everything after YIELD
-	var afterYield string
-	if yieldIdx == -1 {
-		afterYield = strings.TrimSpace(normalized[6:]) // After "YIELD "
-	} else {
-		afterYield = strings.TrimSpace(normalized[yieldIdx+7:])
-	}
+	afterYield := strings.TrimSpace(normalized[yieldIdx+len("YIELD"):])
 
 	// Check for YIELD *
 	trimmedYield := strings.TrimSpace(afterYield)
@@ -280,6 +275,14 @@ func parseYieldClause(cypher string) *yieldClause {
 // scopeYieldToCallClause trims text after YIELD to the first outer query-clause
 // boundary so YIELD item parsing does not accidentally consume later clauses.
 func scopeYieldToCallClause(afterYield string) string {
+	scopeEnd := findYieldOuterBoundary(afterYield)
+	if scopeEnd == -1 {
+		scopeEnd = len(afterYield)
+	}
+	return strings.TrimSpace(afterYield[:scopeEnd])
+}
+
+func findYieldOuterBoundary(afterYield string) int {
 	scopeEnd := len(afterYield)
 	// Keep this list conservative and clause-oriented; ORDER/RETURN/WHERE/LIMIT/SKIP
 	// are intentionally excluded here because they are valid within the YIELD scope.
@@ -291,7 +294,203 @@ func scopeYieldToCallClause(afterYield string) string {
 			scopeEnd = idx
 		}
 	}
-	return strings.TrimSpace(afterYield[:scopeEnd])
+	if scopeEnd >= len(afterYield) {
+		return -1
+	}
+	return scopeEnd
+}
+
+func splitCallAndTail(cypher string) callSplit {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(cypher, "\n", " "), "\t", " ")
+	yieldIdx := findKeywordIndexInContext(normalized, "YIELD")
+	if yieldIdx == -1 {
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(normalized)), "CALL ") {
+			return callSplit{callOnly: strings.TrimSpace(cypher)}
+		}
+		// No YIELD clause; treat full query as call-only.
+		return callSplit{callOnly: strings.TrimSpace(cypher)}
+	}
+
+	afterYieldStart := yieldIdx + len("YIELD")
+	if afterYieldStart >= len(normalized) {
+		return callSplit{callOnly: strings.TrimSpace(cypher)}
+	}
+	afterYield := normalized[afterYieldStart:]
+	boundary := findYieldOuterBoundary(afterYield)
+	if boundary == -1 {
+		return callSplit{callOnly: strings.TrimSpace(normalized)}
+	}
+
+	callOnly := strings.TrimSpace(normalized[:afterYieldStart+boundary])
+	tail := strings.TrimSpace(afterYield[boundary:])
+	return callSplit{callOnly: callOnly, tail: tail}
+}
+
+func buildCallTailPredicateInjection(tail string, predicates []string) string {
+	if len(predicates) == 0 {
+		return strings.TrimSpace(tail)
+	}
+	injected := strings.Join(predicates, " AND ")
+	trimmed := strings.TrimSpace(tail)
+
+	whereIdx := findKeywordIndexInContext(trimmed, "WHERE")
+	if whereIdx != -1 {
+		endIdx := len(trimmed)
+		for _, kw := range []string{"WITH", "RETURN", "ORDER", "SKIP", "LIMIT", "UNWIND", "SET", "REMOVE", "DELETE", "DETACH", "MERGE", "CREATE"} {
+			if idx := findKeywordIndexInContext(trimmed, kw); idx != -1 && idx > whereIdx && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		left := strings.TrimSpace(trimmed[:endIdx])
+		right := strings.TrimSpace(trimmed[endIdx:])
+		if right == "" {
+			return left + " AND " + injected
+		}
+		return left + " AND " + injected + " " + right
+	}
+
+	insertIdx := len(trimmed)
+	for _, kw := range []string{"WITH", "RETURN", "ORDER", "SKIP", "LIMIT", "UNWIND", "SET", "REMOVE", "DELETE", "DETACH", "MERGE", "CREATE"} {
+		if idx := findKeywordIndexInContext(trimmed, kw); idx != -1 && idx < insertIdx {
+			insertIdx = idx
+		}
+	}
+	if insertIdx >= len(trimmed) {
+		return trimmed + " WHERE " + injected
+	}
+	left := strings.TrimSpace(trimmed[:insertIdx])
+	right := strings.TrimSpace(trimmed[insertIdx:])
+	return left + " WHERE " + injected + " " + right
+}
+
+func tailStartsWithMatchClause(tail string) bool {
+	trimmed := strings.ToUpper(strings.TrimSpace(tail))
+	return strings.HasPrefix(trimmed, "MATCH ") || strings.HasPrefix(trimmed, "OPTIONAL MATCH ")
+}
+
+func expectedReturnColumnsFromTail(tail string) []string {
+	trimmed := strings.TrimSpace(tail)
+	retIdx := findKeywordIndexInContext(trimmed, "RETURN")
+	if retIdx == -1 {
+		return nil
+	}
+	returnPart := strings.TrimSpace(trimmed[retIdx+len("RETURN"):])
+	if returnPart == "" {
+		return nil
+	}
+	end := len(returnPart)
+	for _, kw := range []string{"ORDER", "SKIP", "LIMIT"} {
+		if idx := findKeywordIndexInContext(returnPart, kw); idx != -1 && idx < end {
+			end = idx
+		}
+	}
+	returnExpr := strings.TrimSpace(returnPart[:end])
+	if returnExpr == "" {
+		return nil
+	}
+	items := splitReturnExpressions(returnExpr)
+	cols := make([]string, 0, len(items))
+	for _, item := range items {
+		expr := strings.TrimSpace(item)
+		if expr == "" {
+			continue
+		}
+		upperExpr := strings.ToUpper(expr)
+		if asIdx := strings.Index(upperExpr, " AS "); asIdx >= 0 {
+			alias := strings.TrimSpace(expr[asIdx+4:])
+			if alias != "" {
+				cols = append(cols, alias)
+				continue
+			}
+		}
+		cols = append(cols, expr)
+	}
+	return cols
+}
+
+func (e *StorageExecutor) executeCallTail(ctx context.Context, seed *ExecuteResult, tail string) (*ExecuteResult, error) {
+	if seed == nil {
+		return nil, fmt.Errorf("CALL tail execution requires seed result")
+	}
+	if strings.TrimSpace(tail) == "" {
+		return seed, nil
+	}
+
+	expectedCols := expectedReturnColumnsFromTail(tail)
+
+	var combined *ExecuteResult
+	for _, row := range seed.Rows {
+		params := map[string]interface{}{}
+		prefix := make([]string, 0, len(seed.Columns)+2)
+		withBindings := make([]string, 0, len(seed.Columns))
+		predicates := make([]string, 0, len(seed.Columns))
+		tailIsMatch := tailStartsWithMatchClause(tail)
+
+		for i, col := range seed.Columns {
+			if i >= len(row) {
+				continue
+			}
+			if !isIdentifierReferenced(tail, col) {
+				continue
+			}
+			val := row[i]
+			if val == nil {
+				continue
+			}
+			if node, ok := val.(*storage.Node); ok && node != nil {
+				pname := "seed_id_" + col
+				params[pname] = string(node.ID)
+				if tailIsMatch {
+					predicates = append(predicates, fmt.Sprintf("id(%s) = $%s", col, pname))
+				} else {
+					// Bind yielded node variables through explicit id() matches so they can
+					// be referenced by non-MATCH trailing clause shapes (SET/CREATE/UNWIND/etc).
+					prefix = append(prefix, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", col, col, pname))
+					withBindings = append(withBindings, col)
+				}
+				continue
+			}
+			pname := "seed_" + col
+			params[pname] = val
+			withBindings = append(withBindings, fmt.Sprintf("$%s AS %s", pname, col))
+		}
+
+		query := buildCallTailPredicateInjection(tail, predicates)
+		if len(withBindings) > 0 {
+			prefix = append(prefix, "WITH "+strings.Join(withBindings, ", "))
+		}
+		if len(prefix) > 0 {
+			query = strings.Join(prefix, " ") + " " + query
+		}
+
+		inner, err := e.executeInternal(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		if len(expectedCols) > 0 && len(expectedCols) == len(inner.Columns) {
+			inner.Columns = append([]string{}, expectedCols...)
+		}
+		if combined == nil {
+			combined = &ExecuteResult{
+				Columns: append([]string{}, inner.Columns...),
+				Rows:    make([][]interface{}, 0, len(inner.Rows)),
+			}
+		}
+		combined.Rows = append(combined.Rows, inner.Rows...)
+	}
+
+	if combined == nil {
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	return combined, nil
+}
+
+func isIdentifierReferenced(query, identifier string) bool {
+	if strings.TrimSpace(identifier) == "" {
+		return false
+	}
+	pat := `\b` + regexp.QuoteMeta(identifier) + `\b`
+	return regexp.MustCompile(pat).FindStringIndex(query) != nil
 }
 
 // findKeywordIndexInContext finds a keyword in context, avoiding matches inside quotes
@@ -643,29 +842,38 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
 	}
+	parts := splitCallAndTail(cypher)
+	callCypher := parts.callOnly
+	tailCypher := parts.tail
 
-	upper := strings.ToUpper(cypher)
+	upper := strings.ToUpper(callCypher)
 
 	// Parse YIELD clause for post-processing
-	yield := parseYieldClause(cypher)
+	yield := parseYieldClause(callCypher)
 
 	// Registry-first path: canonical procedure contract for built-ins and UDFs.
 	ensureBuiltInProceduresRegistered()
-	procName := extractProcedureName(cypher)
+	procName := extractProcedureName(callCypher)
 	if proc, found := globalProcedureRegistry.Get(procName); found {
-		args, err := extractCallArguments(cypher)
+		args, err := extractCallArguments(callCypher)
 		if err != nil {
 			return nil, err
 		}
 		if err := validateProcedureArgCount(proc.Spec, args); err != nil {
 			return nil, err
 		}
-		result, err := proc.Handler(ctx, e, cypher, args)
+		result, err := proc.Handler(ctx, e, callCypher, args)
 		if err != nil {
 			return nil, err
 		}
 		if yield != nil {
-			return e.applyYieldFilter(result, yield)
+			result, err = e.applyYieldFilter(result, yield)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if strings.TrimSpace(tailCypher) != "" {
+			return e.executeCallTail(ctx, result, tailCypher)
 		}
 		return result, nil
 	}
@@ -676,59 +884,59 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 	switch {
 	// Neo4j Vector Index Procedures (CRITICAL for Mimir)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.QUERYNODES"):
-		result, err = e.callDbIndexVectorQueryNodes(ctx, cypher)
+		result, err = e.callDbIndexVectorQueryNodes(ctx, callCypher)
 	// Neo4j Fulltext Index Procedures (CRITICAL for Mimir)
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.QUERYNODES"):
-		result, err = e.callDbIndexFulltextQueryNodes(cypher)
+		result, err = e.callDbIndexFulltextQueryNodes(callCypher)
 	// APOC Procedures (CRITICAL for Mimir graph traversal)
 	case strings.Contains(upper, "APOC.PATH.SUBGRAPHNODES"):
-		result, err = e.callApocPathSubgraphNodes(cypher)
+		result, err = e.callApocPathSubgraphNodes(callCypher)
 	case strings.Contains(upper, "APOC.PATH.EXPAND"):
-		result, err = e.callApocPathExpand(cypher)
+		result, err = e.callApocPathExpand(callCypher)
 	case strings.Contains(upper, "APOC.PATH.SPANNINGTREE"):
-		result, err = e.callApocPathSpanningTree(cypher)
+		result, err = e.callApocPathSpanningTree(callCypher)
 	// APOC Graph Algorithms
 	case strings.Contains(upper, "APOC.ALGO.DIJKSTRA"):
-		result, err = e.callApocAlgoDijkstra(ctx, cypher)
+		result, err = e.callApocAlgoDijkstra(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.ASTAR"):
-		result, err = e.callApocAlgoAStar(ctx, cypher)
+		result, err = e.callApocAlgoAStar(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.ALLSIMPLEPATHS"):
-		result, err = e.callApocAlgoAllSimplePaths(ctx, cypher)
+		result, err = e.callApocAlgoAllSimplePaths(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.PAGERANK"):
-		result, err = e.callApocAlgoPageRank(ctx, cypher)
+		result, err = e.callApocAlgoPageRank(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.BETWEENNESS"):
-		result, err = e.callApocAlgoBetweenness(ctx, cypher)
+		result, err = e.callApocAlgoBetweenness(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.CLOSENESS"):
-		result, err = e.callApocAlgoCloseness(ctx, cypher)
+		result, err = e.callApocAlgoCloseness(ctx, callCypher)
 	// APOC Community Detection
 	case strings.Contains(upper, "APOC.ALGO.LOUVAIN"):
-		result, err = e.callApocAlgoLouvain(ctx, cypher)
+		result, err = e.callApocAlgoLouvain(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.LABELPROPAGATION"):
-		result, err = e.callApocAlgoLabelPropagation(ctx, cypher)
+		result, err = e.callApocAlgoLabelPropagation(ctx, callCypher)
 	case strings.Contains(upper, "APOC.ALGO.WCC"):
-		result, err = e.callApocAlgoWCC(ctx, cypher)
+		result, err = e.callApocAlgoWCC(ctx, callCypher)
 	// APOC Neighbor Traversal
 	case strings.Contains(upper, "APOC.NEIGHBORS.TOHOP"):
-		result, err = e.callApocNeighborsTohop(ctx, cypher)
+		result, err = e.callApocNeighborsTohop(ctx, callCypher)
 	case strings.Contains(upper, "APOC.NEIGHBORS.BYHOP"):
-		result, err = e.callApocNeighborsByhop(ctx, cypher)
+		result, err = e.callApocNeighborsByhop(ctx, callCypher)
 	// APOC Load/Export Procedures
 	case strings.Contains(upper, "APOC.LOAD.JSONARRAY"):
-		result, err = e.callApocLoadJsonArray(ctx, cypher)
+		result, err = e.callApocLoadJsonArray(ctx, callCypher)
 	case strings.Contains(upper, "APOC.LOAD.JSON"):
-		result, err = e.callApocLoadJson(ctx, cypher)
+		result, err = e.callApocLoadJson(ctx, callCypher)
 	case strings.Contains(upper, "APOC.LOAD.CSV"):
-		result, err = e.callApocLoadCsv(ctx, cypher)
+		result, err = e.callApocLoadCsv(ctx, callCypher)
 	case strings.Contains(upper, "APOC.EXPORT.JSON.ALL"):
-		result, err = e.callApocExportJsonAll(ctx, cypher)
+		result, err = e.callApocExportJsonAll(ctx, callCypher)
 	case strings.Contains(upper, "APOC.EXPORT.JSON.QUERY"):
-		result, err = e.callApocExportJsonQuery(ctx, cypher)
+		result, err = e.callApocExportJsonQuery(ctx, callCypher)
 	case strings.Contains(upper, "APOC.EXPORT.CSV.ALL"):
-		result, err = e.callApocExportCsvAll(ctx, cypher)
+		result, err = e.callApocExportCsvAll(ctx, callCypher)
 	case strings.Contains(upper, "APOC.EXPORT.CSV.QUERY"):
-		result, err = e.callApocExportCsvQuery(ctx, cypher)
+		result, err = e.callApocExportCsvQuery(ctx, callCypher)
 	case strings.Contains(upper, "APOC.IMPORT.JSON"):
-		result, err = e.callApocImportJson(ctx, cypher)
+		result, err = e.callApocImportJson(ctx, callCypher)
 	// NornicDB Extensions
 	case strings.Contains(upper, "NORNICDB.VERSION"):
 		result, err = e.callNornicDbVersion()
@@ -738,13 +946,13 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callNornicDbDecayInfo()
 	// Seam-aligned RAG procedures
 	case strings.Contains(upper, "DB.RETRIEVE"):
-		result, err = e.callDbRetrieve(ctx, cypher)
+		result, err = e.callDbRetrieve(ctx, callCypher)
 	case strings.Contains(upper, "DB.RRETRIEVE"):
-		result, err = e.callDbRRetrieve(ctx, cypher)
+		result, err = e.callDbRRetrieve(ctx, callCypher)
 	case strings.Contains(upper, "DB.RERANK"):
-		result, err = e.callDbRerank(ctx, cypher)
+		result, err = e.callDbRerank(ctx, callCypher)
 	case strings.Contains(upper, "DB.INFER"):
-		result, err = e.callDbInfer(ctx, cypher)
+		result, err = e.callDbInfer(ctx, callCypher)
 	// Neo4j Schema/Metadata Procedures
 	case strings.Contains(upper, "DB.SCHEMA.VISUALIZATION"):
 		result, err = e.callDbSchemaVisualization()
@@ -766,59 +974,59 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callDbPropertyKeys()
 	// Neo4j GDS Link Prediction Procedures (topological)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.ADAMICADAR.STREAM"):
-		result, err = e.callGdsLinkPredictionAdamicAdar(cypher)
+		result, err = e.callGdsLinkPredictionAdamicAdar(callCypher)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.COMMONNEIGHBORS.STREAM"):
-		result, err = e.callGdsLinkPredictionCommonNeighbors(cypher)
+		result, err = e.callGdsLinkPredictionCommonNeighbors(callCypher)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.RESOURCEALLOCATION.STREAM"):
-		result, err = e.callGdsLinkPredictionResourceAllocation(cypher)
+		result, err = e.callGdsLinkPredictionResourceAllocation(callCypher)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.PREFERENTIALATTACHMENT.STREAM"):
-		result, err = e.callGdsLinkPredictionPreferentialAttachment(cypher)
+		result, err = e.callGdsLinkPredictionPreferentialAttachment(callCypher)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.JACCARD.STREAM"):
-		result, err = e.callGdsLinkPredictionJaccard(cypher)
+		result, err = e.callGdsLinkPredictionJaccard(callCypher)
 	case strings.Contains(upper, "GDS.LINKPREDICTION.PREDICT.STREAM"):
-		result, err = e.callGdsLinkPredictionPredict(cypher)
+		result, err = e.callGdsLinkPredictionPredict(callCypher)
 	// GDS Graph Management and FastRP
 	case strings.Contains(upper, "GDS.VERSION"):
 		result, err = e.callGdsVersion()
 	case strings.Contains(upper, "GDS.GRAPH.LIST"):
 		result, err = e.callGdsGraphList()
 	case strings.Contains(upper, "GDS.GRAPH.DROP"):
-		result, err = e.callGdsGraphDrop(cypher)
+		result, err = e.callGdsGraphDrop(callCypher)
 	case strings.Contains(upper, "GDS.GRAPH.PROJECT"):
-		result, err = e.callGdsGraphProject(cypher)
+		result, err = e.callGdsGraphProject(callCypher)
 	case strings.Contains(upper, "GDS.FASTRP.STREAM"):
-		result, err = e.callGdsFastRPStream(cypher)
+		result, err = e.callGdsFastRPStream(callCypher)
 	case strings.Contains(upper, "GDS.FASTRP.STATS"):
-		result, err = e.callGdsFastRPStats(cypher)
+		result, err = e.callGdsFastRPStats(callCypher)
 	// Additional Neo4j procedures for compatibility
 	case strings.Contains(upper, "DB.INFO"):
 		result, err = e.callDbInfo()
 	case strings.Contains(upper, "DB.PING"):
 		result, err = e.callDbPing()
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.QUERYRELATIONSHIPS"):
-		result, err = e.callDbIndexFulltextQueryRelationships(cypher)
+		result, err = e.callDbIndexFulltextQueryRelationships(callCypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.QUERYRELATIONSHIPS"):
-		result, err = e.callDbIndexVectorQueryRelationships(ctx, cypher)
+		result, err = e.callDbIndexVectorQueryRelationships(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.EMBED"):
-		result, err = e.callDbIndexVectorEmbed(ctx, cypher)
+		result, err = e.callDbIndexVectorEmbed(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATENODEINDEX"):
-		result, err = e.callDbIndexVectorCreateNodeIndex(ctx, cypher)
+		result, err = e.callDbIndexVectorCreateNodeIndex(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATERELATIONSHIPINDEX"):
-		result, err = e.callDbIndexVectorCreateRelationshipIndex(ctx, cypher)
+		result, err = e.callDbIndexVectorCreateRelationshipIndex(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.CREATENODEINDEX"):
-		result, err = e.callDbIndexFulltextCreateNodeIndex(ctx, cypher)
+		result, err = e.callDbIndexFulltextCreateNodeIndex(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.CREATERELATIONSHIPINDEX"):
-		result, err = e.callDbIndexFulltextCreateRelationshipIndex(ctx, cypher)
+		result, err = e.callDbIndexFulltextCreateRelationshipIndex(ctx, callCypher)
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.DROP"):
-		result, err = e.callDbIndexFulltextDrop(cypher)
+		result, err = e.callDbIndexFulltextDrop(callCypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.DROP"):
-		result, err = e.callDbIndexVectorDrop(cypher)
+		result, err = e.callDbIndexVectorDrop(callCypher)
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.LISTAVAILABLEANALYZERS"):
 		result, err = e.callDbIndexFulltextListAvailableAnalyzers()
 	case strings.Contains(upper, "DB.CREATE.SETNODEVECTORPROPERTY"):
-		result, err = e.callDbCreateSetNodeVectorProperty(ctx, cypher)
+		result, err = e.callDbCreateSetNodeVectorProperty(ctx, callCypher)
 	case strings.Contains(upper, "DB.CREATE.SETRELATIONSHIPVECTORPROPERTY"):
-		result, err = e.callDbCreateSetRelationshipVectorProperty(ctx, cypher)
+		result, err = e.callDbCreateSetRelationshipVectorProperty(ctx, callCypher)
 	case strings.Contains(upper, "DBMS.INFO"):
 		result, err = e.callDbmsInfo()
 	case strings.Contains(upper, "DBMS.LISTCONFIG"):
@@ -835,31 +1043,31 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callDbmsFunctions()
 	// Transaction log query procedures (NornicDB extension for Idea #7)
 	case strings.Contains(upper, "DB.TXLOG.ENTRIES"):
-		result, err = e.callDbTxlogEntries(ctx, cypher)
+		result, err = e.callDbTxlogEntries(ctx, callCypher)
 	case strings.Contains(upper, "DB.TXLOG.BYTXID"):
-		result, err = e.callDbTxlogByTxID(ctx, cypher)
+		result, err = e.callDbTxlogByTxID(ctx, callCypher)
 	// Temporal helper procedures (NornicDB extension for Idea #7)
 	case strings.Contains(upper, "DB.TEMPORAL.ASSERTNOOVERLAP"):
-		result, err = e.callDbTemporalAssertNoOverlap(ctx, cypher)
+		result, err = e.callDbTemporalAssertNoOverlap(ctx, callCypher)
 	case strings.Contains(upper, "DB.TEMPORAL.ASOF"):
-		result, err = e.callDbTemporalAsOf(ctx, cypher)
+		result, err = e.callDbTemporalAsOf(ctx, callCypher)
 	// Transaction metadata (Neo4j tx.setMetaData)
 	case strings.Contains(upper, "TX.SETMETADATA"):
-		result, err = e.callTxSetMetadata(cypher)
+		result, err = e.callTxSetMetadata(callCypher)
 	// Index management procedures
 	case strings.Contains(upper, "DB.AWAITINDEXES"):
-		result, err = e.callDbAwaitIndexes(cypher)
+		result, err = e.callDbAwaitIndexes(callCypher)
 	case strings.Contains(upper, "DB.AWAITINDEX"):
-		result, err = e.callDbAwaitIndex(cypher)
+		result, err = e.callDbAwaitIndex(callCypher)
 	case strings.Contains(upper, "DB.RESAMPLEINDEX"):
-		result, err = e.callDbResampleIndex(cypher)
+		result, err = e.callDbResampleIndex(callCypher)
 	// Query statistics procedures (longer matches first)
 	case strings.Contains(upper, "DB.STATS.RETRIEVEALLANTHESTATS"):
 		result, err = e.callDbStatsRetrieveAllAnTheStats()
 	case strings.Contains(upper, "DB.STATS.RETRIEVE"):
-		result, err = e.callDbStatsRetrieve(cypher)
+		result, err = e.callDbStatsRetrieve(callCypher)
 	case strings.Contains(upper, "DB.STATS.COLLECT"):
-		result, err = e.callDbStatsCollect(cypher)
+		result, err = e.callDbStatsCollect(callCypher)
 	case strings.Contains(upper, "DB.STATS.CLEAR"):
 		result, err = e.callDbStatsClear()
 	case strings.Contains(upper, "DB.STATS.STATUS"):
@@ -871,21 +1079,21 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callDbClearQueryCaches()
 	// APOC Dynamic Cypher Execution
 	case strings.Contains(upper, "APOC.CYPHER.RUN"):
-		result, err = e.callApocCypherRun(ctx, cypher)
+		result, err = e.callApocCypherRun(ctx, callCypher)
 	case strings.Contains(upper, "APOC.CYPHER.DOITALL"):
-		result, err = e.callApocCypherRun(ctx, cypher) // Alias
+		result, err = e.callApocCypherRun(ctx, callCypher) // Alias
 	case strings.Contains(upper, "APOC.CYPHER.RUNMANY"):
-		result, err = e.callApocCypherRunMany(ctx, cypher)
+		result, err = e.callApocCypherRunMany(ctx, callCypher)
 	// APOC Periodic/Batch Operations
 	case strings.Contains(upper, "APOC.PERIODIC.ITERATE"):
-		result, err = e.callApocPeriodicIterate(ctx, cypher)
+		result, err = e.callApocPeriodicIterate(ctx, callCypher)
 	case strings.Contains(upper, "APOC.PERIODIC.COMMIT"):
-		result, err = e.callApocPeriodicCommit(ctx, cypher)
+		result, err = e.callApocPeriodicCommit(ctx, callCypher)
 	case strings.Contains(upper, "APOC.PERIODIC.ROCK_N_ROLL"):
-		result, err = e.callApocPeriodicIterate(ctx, cypher) // Alias
+		result, err = e.callApocPeriodicIterate(ctx, callCypher) // Alias
 	default:
 		// Extract procedure name for clearer error
-		procName := extractProcedureName(cypher)
+		procName := extractProcedureName(callCypher)
 		return nil, fmt.Errorf("unknown procedure: %s (try SHOW PROCEDURES for available procedures)", procName)
 	}
 
@@ -896,9 +1104,14 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 
 	// Apply YIELD clause filtering (WHERE, column selection, aliasing)
 	if yield != nil {
-		return e.applyYieldFilter(result, yield)
+		result, err = e.applyYieldFilter(result, yield)
+		if err != nil {
+			return nil, err
+		}
 	}
-
+	if strings.TrimSpace(tailCypher) != "" {
+		return e.executeCallTail(ctx, result, tailCypher)
+	}
 	return result, nil
 }
 

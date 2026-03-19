@@ -667,6 +667,103 @@ func TestParseYieldClause(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:   "yield with OPTIONAL MATCH boundary",
+			cypher: "CALL db.proc() YIELD a, b OPTIONAL MATCH (n) RETURN n",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with UNWIND boundary",
+			cypher: "CALL db.proc() YIELD a, b UNWIND [a,b] AS v RETURN v",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with CALL boundary",
+			cypher: "CALL db.proc() YIELD a, b CALL { WITH a RETURN a } RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with CREATE boundary",
+			cypher: "CALL db.proc() YIELD a CREATE (:Tag {v:a}) RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with MERGE boundary",
+			cypher: "CALL db.proc() YIELD a MERGE (:Tag {v:a}) RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with SET boundary",
+			cypher: "CALL db.proc() YIELD a, b SET a.flag = true RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with REMOVE boundary",
+			cypher: "CALL db.proc() YIELD a, b REMOVE a.flag RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with DELETE boundary",
+			cypher: "CALL db.proc() YIELD a, b DELETE a RETURN b",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with DETACH DELETE boundary",
+			cypher: "CALL db.proc() YIELD a, b DETACH DELETE a RETURN b",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+					{name: "b", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with FOREACH boundary",
+			cypher: "CALL db.proc() YIELD a FOREACH (x IN [1] | SET a.flag = x) RETURN a",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "a", alias: ""},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
