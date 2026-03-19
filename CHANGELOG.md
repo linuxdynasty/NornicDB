@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [1.0.21] - 2026-03-19
+
+### Added
+
+- **Expanded Cypher regression coverage**:
+  - added targeted tests for correlated `UNWIND` + multi-`MATCH` execution routing
+  - added stability tests for `MATCH ... CREATE ... RETURN count(*)` cardinality and idempotent behavior.
+
+### Changed
+
+- **MATCH...CREATE join execution hot path**:
+  - added join-aware combination building for 2-variable equality join shapes to avoid unnecessary cartesian expansion
+  - improved selective pushdown behavior for `IN` + equality predicates before combination building.
+- **UNWIND correlated rewrite routing**:
+  - preserved correlation semantics in rewrite transforms so value-bucket joins do not degrade into cross-key cartesian behavior.
+
+### Fixed
+
+- **Aggregation row-shape correctness**: Fixed edge cases where aggregation-only `RETURN count(*)` could produce an empty rowset instead of a single deterministic row.
+- **MATCH/WHERE context handling**: Fixed multi-variable `WHERE` handling in `MATCH...CREATE` paths so per-node filters are only applied when semantically valid and cross-variable predicates are evaluated in the correct phase.
+- **Relationship existence filter handling**: Fixed `NOT (a)-[:TYPE]->(b)` handling in post-filter execution so write guards remain correct under batched correlated joins.
+
+### Tests
+
+- Added deterministic tests for:
+  - dual-side `IN` join-filtered `MATCH...CREATE` write paths
+  - join-aware combination builder correctness for 2-variable equality joins
+  - correlated UNWIND + multi-MATCH execution routing and count semantics.
+- Expanded Fabric/Cypher targeted regression validation around direct context matching and correlated execution behavior.
+
+### Technical Details
+
+- **Range covered**: `v1.0.20..HEAD`
+- **Commits in range**: 3 (non-merge)
+- **Repository delta**: 15 files changed, +2,799 / -116 lines
+- **Primary focus areas**: Cypher write-path reliability, correlated `UNWIND` routing correctness, `MATCH...CREATE` join-path performance, and aggregation result-shape determinism.
+
 ## [1.0.20] - 2026-03-18
 
 ### Added
