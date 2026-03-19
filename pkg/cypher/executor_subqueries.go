@@ -371,19 +371,21 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		seedNodes = e.filterNodesByWhereClause(seedNodes, whereClause, nodePattern.variable)
 	}
 
-	if len(seedNodes) == 0 {
-		// No seed nodes found - return empty result
-		return &ExecuteResult{
-			Columns: []string{nodePattern.variable, "neighbors"},
-			Rows:    [][]interface{}{},
-		}, nil
-	}
-
 	// Parse the CALL {} subquery and what comes after
 	callPart := strings.TrimSpace(cypher[callIdx:])
 	subqueryBody, afterCall, _, _ := e.parseCallSubquery(callPart)
 	if subqueryBody == "" {
 		return nil, fmt.Errorf("invalid CALL {} subquery: empty body")
+	}
+
+	if len(seedNodes) == 0 {
+		// No seed nodes matched. Preserve projected column semantics from trailing
+		// clauses (e.g. RETURN after CALL {}) instead of returning internal defaults.
+		empty := &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}
+		if strings.TrimSpace(afterCall) != "" {
+			return e.processAfterCallSubquery(ctx, empty, afterCall)
+		}
+		return empty, nil
 	}
 
 	// Handle USE clause inside CALL subquery body — resolve the target database

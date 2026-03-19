@@ -2635,6 +2635,27 @@ LIMIT 6
 	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
 }
 
+func TestExecute_MatchWithCallSubquery_NoSeedRows_PreservesReturnColumns(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	query := `
+MATCH (p:SystemPrompt {promptId: "missing"})
+WITH p
+CALL {
+  WITH p
+  RETURN p.text AS systemPrompt
+}
+RETURN systemPrompt
+`
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"systemPrompt"}, result.Columns)
+	require.Len(t, result.Rows, 0)
+}
+
 func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
