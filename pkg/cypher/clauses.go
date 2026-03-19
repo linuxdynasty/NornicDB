@@ -2416,13 +2416,44 @@ func replaceIdentifierOutsideQuotes(input string, ident string, replacement stri
 			i++
 		}
 		token := input[start:i]
-		if token == ident {
+		if token == ident && shouldReplaceIdentifierToken(input, start, i) {
 			b.WriteString(replacement)
 		} else {
 			b.WriteString(token)
 		}
 	}
 	return b.String()
+}
+
+func shouldReplaceIdentifierToken(input string, tokenStart int, tokenEnd int) bool {
+	// Do not replace property tokens (n.name) or map keys ({name: ...}).
+	prev := prevNonSpaceByte(input, tokenStart)
+	if prev == '.' {
+		return false
+	}
+	next := nextNonSpaceByte(input, tokenEnd)
+	if next == ':' {
+		return false
+	}
+	return true
+}
+
+func prevNonSpaceByte(s string, pos int) byte {
+	for i := pos - 1; i >= 0; i-- {
+		if !isASCIISpace(s[i]) {
+			return s[i]
+		}
+	}
+	return 0
+}
+
+func nextNonSpaceByte(s string, pos int) byte {
+	for i := pos; i < len(s); i++ {
+		if !isASCIISpace(s[i]) {
+			return s[i]
+		}
+	}
+	return 0
 }
 
 func toStringAnyMap(value interface{}) (map[string]interface{}, bool) {

@@ -408,3 +408,15 @@ func TestReplaceVariableInQuery_ReplacesScalarAcrossNewlinesAndPunctuation(t *te
 	require.Contains(t, out, "__tmpJoinKey: 'k1'")
 	require.NotContains(t, out, "__tmpJoinKey: k")
 }
+
+func TestReplaceVariableInQuery_DoesNotReplaceMapKeysOrPropertyNames(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	query := "CREATE (n:TestNode {name: name}) RETURN n.name AS nodeName"
+	out := exec.replaceVariableInQuery(query, "name", "A")
+	require.Contains(t, out, "{name: 'A'}")
+	require.Contains(t, out, "RETURN n.name AS nodeName")
+	require.NotContains(t, out, "{'A':")
+}
