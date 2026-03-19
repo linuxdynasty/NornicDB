@@ -559,105 +559,87 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		}
 	}
 
-	// Handle UNWIND ... MATCH ... (including MATCH...MERGE/CREATE/SET/RETURN pipelines)
-	// by executing the trailing query once per unwound value with the variable bound
-	// as a query parameter.
+	// Handle UNWIND ... MATCH ... RETURN ... by evaluating MATCH per unwound value
+	// and combining results. This avoids silently returning only unwound values when
+	// a trailing MATCH pipeline is present.
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
-		if optimized, handled, err := e.tryExecuteUnwindMatchOptimized(ctx, variable, items, restQuery); handled {
-			return optimized, err
+		normalizedRestQuery := normalizeMultiMatchWhereClauses(restQuery)
+		// Fast path: set-based rewrite for correlated MATCH pipelines that return
+		// COUNT(...). This avoids per-item subquery execution in UNWIND loops.
+		if canApplySetBasedUnwindRewrite(normalizedRestQuery, items) {
+			if rewritten, ok := rewriteUnwindCorrelationToIn(normalizedRestQuery, variable, "__unwind_items"); ok {
+				rewritten = rewriteTopLevelMultiMatchToCartesianMatch(rewritten)
+				callParams := make(map[string]interface{}, len(params)+1)
+				for k, v := range params {
+					callParams[k] = v
+				}
+				callParams["__unwind_items"] = items
+				rewrittenResult, err := e.Execute(ctx, rewritten, callParams)
+				if err == nil {
+					return rewrittenResult, nil
+				}
+			}
 		}
 
+		returnItems := []returnItem{}
+		if retIdx := findKeywordIndex(normalizedRestQuery, "RETURN"); retIdx > 0 {
+			returnClause := strings.TrimSpace(normalizedRestQuery[retIdx+6:])
+			returnEnd := len(returnClause)
+			for _, keyword := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(returnClause, keyword); idx >= 0 && idx < returnEnd {
+					returnEnd = idx
+				}
+			}
+			returnClause = strings.TrimSpace(returnClause[:returnEnd])
+			returnItems = e.parseReturnItems(returnClause)
+		}
+
+		aggregateCountOnly := len(returnItems) == 1 && isAggregateFuncName(returnItems[0].expr, "count")
+		var aggregatedCount int64
 		result := &ExecuteResult{
 			Columns: []string{},
 			Rows:    [][]interface{}{},
 			Stats:   &QueryStats{},
 		}
-		matchQuery := strings.TrimSpace(restQuery)
-		returnIdx := findKeywordIndex(matchQuery, "RETURN")
-		aggregateCountOnly := false
-		aggregateCountColumn := "count(*)"
-		if returnIdx > 0 {
-			returnPart := strings.TrimSpace(matchQuery[returnIdx+len("RETURN"):])
-			retItems := e.parseReturnItems(returnPart)
-			if len(retItems) == 1 {
-				expr := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(retItems[0].expr), " ", ""))
-				if expr == "COUNT(*)" {
-					aggregateCountOnly = true
-					if retItems[0].alias != "" {
-						aggregateCountColumn = retItems[0].alias
-					}
-				}
-			}
-		}
-		var aggregateCountValue int64
-		paramName := "__unwind_value"
-		varRefRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(variable) + `\b`)
-		subQueryTemplate := varRefRe.ReplaceAllLiteralString(matchQuery, "$"+paramName)
-		baseParams := getParamsFromContext(ctx)
-		for _, item := range items {
-			callParams := make(map[string]interface{}, len(baseParams)+1)
-			for k, v := range baseParams {
-				callParams[k] = v
-			}
-			callParams[paramName] = item
-			subQuery := subQueryTemplate
-			subQuery = rewriteSequentialMatchMerge(subQuery)
 
-			subResult, err := e.executeInternal(ctx, subQuery, callParams)
+		for _, item := range items {
+			substitutedQuery := e.replaceVariableInQuery(normalizedRestQuery, variable, item)
+			subResult, err := e.Execute(ctx, substitutedQuery, params)
 			if err != nil {
 				return nil, fmt.Errorf("UNWIND MATCH failed: %w", err)
 			}
 			if subResult == nil {
 				continue
 			}
-			if aggregateCountOnly {
-				// Normalized COUNT(*) should return one numeric row, but some
-				// write pipelines can currently return nil. Fallback to row count.
-				added := false
-				if len(subResult.Rows) > 0 && len(subResult.Rows[0]) > 0 {
-					switch v := subResult.Rows[0][0].(type) {
-					case int:
-						aggregateCountValue += int64(v)
-						added = true
-					case int32:
-						aggregateCountValue += int64(v)
-						added = true
-					case int64:
-						aggregateCountValue += v
-						added = true
-					case float64:
-						aggregateCountValue += int64(v)
-						added = true
-					}
-				}
-				if !added {
-					if subResult.Stats != nil && subResult.Stats.RelationshipsCreated > 0 {
-						aggregateCountValue += int64(subResult.Stats.RelationshipsCreated)
-						added = true
-					}
-				}
-				if !added {
-					aggregateCountValue += int64(len(subResult.Rows))
-				}
-			}
 			if len(result.Columns) == 0 {
-				result.Columns = subResult.Columns
+				result.Columns = append([]string(nil), subResult.Columns...)
 			}
-			if !aggregateCountOnly && len(subResult.Rows) > 0 {
-				result.Rows = append(result.Rows, subResult.Rows...)
+			if aggregateCountOnly {
+				if len(subResult.Rows) == 0 || len(subResult.Rows[0]) == 0 {
+					continue
+				}
+				switch v := subResult.Rows[0][0].(type) {
+				case int64:
+					aggregatedCount += v
+				case int:
+					aggregatedCount += int64(v)
+				case float64:
+					aggregatedCount += int64(v)
+				}
+				continue
 			}
-			if subResult.Stats != nil {
-				result.Stats.NodesCreated += subResult.Stats.NodesCreated
-				result.Stats.NodesDeleted += subResult.Stats.NodesDeleted
-				result.Stats.RelationshipsCreated += subResult.Stats.RelationshipsCreated
-				result.Stats.RelationshipsDeleted += subResult.Stats.RelationshipsDeleted
-				result.Stats.PropertiesSet += subResult.Stats.PropertiesSet
-				result.Stats.LabelsAdded += subResult.Stats.LabelsAdded
-			}
+			result.Rows = append(result.Rows, subResult.Rows...)
 		}
+
 		if aggregateCountOnly {
-			result.Columns = []string{aggregateCountColumn}
-			result.Rows = [][]interface{}{{aggregateCountValue}}
+			if len(result.Columns) == 0 {
+				if returnItems[0].alias != "" {
+					result.Columns = []string{returnItems[0].alias}
+				} else {
+					result.Columns = []string{returnItems[0].expr}
+				}
+			}
+			result.Rows = [][]interface{}{{aggregatedCount}}
 		}
 		return result, nil
 	}
@@ -807,139 +789,174 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	return result, nil
 }
 
-func (e *StorageExecutor) tryExecuteUnwindMatchOptimized(
-	ctx context.Context,
-	variable string,
-	items []interface{},
-	restQuery string,
-) (*ExecuteResult, bool, error) {
-	if len(items) == 0 {
-		return &ExecuteResult{
-			Columns: []string{},
-			Rows:    [][]interface{}{},
-			Stats:   &QueryStats{},
-		}, true, nil
+func rewriteUnwindCorrelationToIn(query string, variable string, paramName string) (string, bool) {
+	if strings.TrimSpace(query) == "" || strings.TrimSpace(variable) == "" || strings.TrimSpace(paramName) == "" {
+		return "", false
+	}
+	// Preserve join correlation semantics:
+	//   a.prop = unwindVar AND b.prop = unwindVar
+	// => a.prop IN $items AND b.prop = a.prop
+	// so we do not produce cross-key cartesian joins.
+	re := regexp.MustCompile(`(?i)([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*=\s*` + regexp.QuoteMeta(variable) + `\b`)
+	matches := re.FindAllStringSubmatchIndex(query, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	firstExpr := strings.TrimSpace(query[matches[0][2]:matches[0][3]])
+	if firstExpr == "" {
+		return "", false
 	}
 
-	removeRe := regexp.MustCompile(
-		`(?is)^\s*MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*REMOVE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`,
-	)
-	if m := removeRe.FindStringSubmatch(strings.TrimSpace(restQuery)); len(m) == 7 {
-		if m[4] != variable {
-			return nil, false, nil
+	var b strings.Builder
+	cursor := 0
+	for i, m := range matches {
+		start, end := m[0], m[1]
+		lhs := strings.TrimSpace(query[m[2]:m[3]])
+		b.WriteString(query[cursor:start])
+		if i == 0 {
+			b.WriteString(lhs)
+			b.WriteString(" IN $")
+			b.WriteString(paramName)
+		} else {
+			b.WriteString(lhs)
+			b.WriteString(" = ")
+			b.WriteString(firstExpr)
 		}
-		if m[1] != m[5] {
-			return nil, false, nil
-		}
-		query := fmt.Sprintf(
-			"MATCH (%s:%s {%s: %%s}) REMOVE %s.%s",
-			m[1], m[2], m[3], m[1], m[6],
-		)
-		stats := &QueryStats{}
-		for _, it := range items {
-			lit := e.valueToLiteral(it)
-			out, err := e.executeInternal(ctx, fmt.Sprintf(query, lit), nil)
-			if err != nil {
-				return nil, true, err
-			}
-			if out != nil && out.Stats != nil {
-				stats.PropertiesSet += out.Stats.PropertiesSet
-				stats.LabelsAdded += out.Stats.LabelsAdded
-			}
-		}
-		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: stats}, true, nil
+		cursor = end
 	}
-
-	mergeWithCountRe := regexp.MustCompile(
-		`(?is)^\s*MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*` +
-			`MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*` +
-			`MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*` +
-			`RETURN\s+count\(\*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`,
-	)
-	if m := mergeWithCountRe.FindStringSubmatch(strings.TrimSpace(restQuery)); len(m) == 13 {
-		if m[4] != variable || m[8] != variable {
-			return nil, false, nil
-		}
-		if m[1] != m[9] || m[5] != m[11] {
-			return nil, false, nil
-		}
-		writeTemplate := fmt.Sprintf(
-			"MATCH (%s:%s {%s: %%s}) MATCH (%s:%s {%s: %%s}) MERGE (%s)-[:%s]->(%s)",
-			m[1], m[2], m[3],
-			m[5], m[6], m[7],
-			m[1], m[10], m[5],
-		)
-		countTemplate := fmt.Sprintf(
-			"MATCH (%s:%s {%s: %%s}) MATCH (%s:%s {%s: %%s}) RETURN count(*) AS %s",
-			m[1], m[2], m[3],
-			m[5], m[6], m[7],
-			m[12],
-		)
-		var total int64
-		stats := &QueryStats{}
-		for _, it := range items {
-			lit := e.valueToLiteral(it)
-			writeOut, err := e.executeInternal(ctx, fmt.Sprintf(writeTemplate, lit, lit), nil)
-			if err != nil {
-				return nil, true, err
-			}
-			if writeOut != nil && writeOut.Stats != nil {
-				stats.RelationshipsCreated += writeOut.Stats.RelationshipsCreated
-				stats.PropertiesSet += writeOut.Stats.PropertiesSet
-			}
-			countOut, err := e.executeInternal(ctx, fmt.Sprintf(countTemplate, lit, lit), nil)
-			if err != nil {
-				return nil, true, err
-			}
-			if countOut != nil && len(countOut.Rows) > 0 && len(countOut.Rows[0]) > 0 {
-				switch v := countOut.Rows[0][0].(type) {
-				case int:
-					total += int64(v)
-				case int32:
-					total += int64(v)
-				case int64:
-					total += v
-				case float64:
-					total += int64(v)
-				}
-			}
-		}
-		return &ExecuteResult{
-			Columns: []string{m[12]},
-			Rows:    [][]interface{}{{total}},
-			Stats:   stats,
-		}, true, nil
-	}
-
-	return nil, false, nil
+	b.WriteString(query[cursor:])
+	return b.String(), true
 }
 
-var sequentialMatchMergeRe = regexp.MustCompile(`(?is)^\s*MATCH\s*\(([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)\)\s*WHERE\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*MATCH\s*\(([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)\)\s*WHERE\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*(MERGE\s+.+)$`)
+func rewriteTopLevelMultiMatchToCartesianMatch(query string) string {
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
+		return query
+	}
+	returnIdx := findKeywordIndex(trimmed, "RETURN")
+	if returnIdx <= 0 {
+		return query
+	}
+	body := strings.TrimSpace(trimmed[:returnIdx])
+	tail := strings.TrimSpace(trimmed[returnIdx:])
+	whereIdx := findKeywordIndex(body, "WHERE")
+	if whereIdx <= 0 {
+		return query
+	}
+	patterns := strings.TrimSpace(body[:whereIdx])
+	whereClause := strings.TrimSpace(body[whereIdx+len("WHERE"):])
+	if patterns == "" || whereClause == "" {
+		return query
+	}
 
-func rewriteSequentialMatchMerge(query string) string {
-	m := sequentialMatchMergeRe.FindStringSubmatch(strings.TrimSpace(query))
-	if len(m) != 12 {
+	upperPatterns := strings.ToUpper(patterns)
+	if strings.Count(upperPatterns, "MATCH ") != 2 {
 		return query
 	}
-	rhs1 := strings.TrimSpace(m[5])
-	rhs2 := strings.TrimSpace(m[10])
-	// Ensure WHERE variables correspond to their MATCH aliases and both sides
-	// compare against the same parameter token.
-	if m[1] != m[3] || m[6] != m[8] || rhs1 != rhs2 {
+	first := strings.TrimSpace(patterns[len("MATCH "):])
+	secondIdx := findKeywordIndex(first, "MATCH")
+	if secondIdx <= 0 {
 		return query
 	}
-	return fmt.Sprintf(
-		"MATCH (%s:%s {%s: %s}), (%s:%s {%s: %s}) %s",
-		strings.TrimSpace(m[1]),
-		strings.TrimSpace(m[2]),
-		strings.TrimSpace(m[4]),
-		rhs1,
-		strings.TrimSpace(m[6]),
-		strings.TrimSpace(m[7]),
-		strings.TrimSpace(m[9]),
-		rhs2,
-		strings.TrimSpace(m[11]),
-	)
+	left := strings.TrimSpace(first[:secondIdx])
+	right := strings.TrimSpace(first[secondIdx+len("MATCH"):])
+	if left == "" || right == "" {
+		return query
+	}
+	return "MATCH " + left + ", " + right + " WHERE " + whereClause + " " + tail
+}
+
+func canApplySetBasedUnwindRewrite(query string, items []interface{}) bool {
+	if strings.TrimSpace(query) == "" || len(items) == 0 {
+		return false
+	}
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "RETURN") || !strings.Contains(upper, "COUNT(") {
+		return false
+	}
+	// Rewrites should preserve semantics. We only apply when unwind items are
+	// distinct comparable values so IN-list matching does not collapse duplicates.
+	seen := map[interface{}]struct{}{}
+	for _, it := range items {
+		if it == nil {
+			if _, exists := seen[nil]; exists {
+				return false
+			}
+			seen[nil] = struct{}{}
+			continue
+		}
+		rv := reflect.ValueOf(it)
+		if !rv.IsValid() || !rv.Type().Comparable() {
+			return false
+		}
+		if _, exists := seen[it]; exists {
+			return false
+		}
+		seen[it] = struct{}{}
+	}
+	return true
+}
+
+// normalizeMultiMatchWhereClauses rewrites top-level two-MATCH forms that place
+// WHERE after each MATCH into a single terminal WHERE joined by AND:
+// MATCH A WHERE wa MATCH B WHERE wb RETURN ...
+// -> MATCH A MATCH B WHERE wa AND wb RETURN ...
+func normalizeMultiMatchWhereClauses(query string) string {
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
+		return query
+	}
+
+	returnIdx := findKeywordIndex(trimmed, "RETURN")
+	if returnIdx <= 0 {
+		return query
+	}
+	mainPart := strings.TrimSpace(trimmed[:returnIdx])
+	tailPart := strings.TrimSpace(trimmed[returnIdx:])
+
+	searchFrom := len("MATCH")
+	secondMatchIdx := -1
+	if searchFrom < len(mainPart) {
+		if rel := findKeywordIndex(mainPart[searchFrom:], "MATCH"); rel >= 0 {
+			secondMatchIdx = searchFrom + rel
+		}
+	}
+	if secondMatchIdx <= 0 {
+		return query
+	}
+	left := strings.TrimSpace(mainPart[:secondMatchIdx])
+	right := strings.TrimSpace(mainPart[secondMatchIdx+len("MATCH"):])
+	if !strings.HasPrefix(strings.ToUpper(left), "MATCH ") {
+		return query
+	}
+
+	leftWhereIdx := findKeywordIndex(left, "WHERE")
+	rightWhereIdx := findKeywordIndex(right, "WHERE")
+	if leftWhereIdx <= 0 || rightWhereIdx <= 0 {
+		return query
+	}
+
+	leftPattern := strings.TrimSpace(left[len("MATCH "):leftWhereIdx])
+	leftWhere := strings.TrimSpace(left[leftWhereIdx+len("WHERE"):])
+	rightPattern := strings.TrimSpace(right[:rightWhereIdx])
+	rightWhere := strings.TrimSpace(right[rightWhereIdx+len("WHERE"):])
+
+	if leftPattern == "" || rightPattern == "" || leftWhere == "" || rightWhere == "" {
+		return query
+	}
+
+	var b strings.Builder
+	b.WriteString("MATCH ")
+	b.WriteString(leftPattern)
+	b.WriteString(" MATCH ")
+	b.WriteString(rightPattern)
+	b.WriteString(" WHERE ")
+	b.WriteString(leftWhere)
+	b.WriteString(" AND ")
+	b.WriteString(rightWhere)
+	b.WriteString(" ")
+	b.WriteString(tailPart)
+	return b.String()
 }
 
 var unwindCollectDistinctProjectionPattern = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)

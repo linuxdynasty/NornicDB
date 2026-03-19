@@ -929,6 +929,128 @@ ORDER BY sourceId
 	require.False(t, trace.OuterScanFallbackUsed, "index path should not fall back to full scan")
 }
 
+func TestExecute_FabricCorrelatedSourceTranslationJoin_HotPathShapeMatrix(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	mgr, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	defer mgr.Close()
+
+	require.NoError(t, mgr.CreateDatabase("nornic_tr"))
+	require.NoError(t, mgr.CreateDatabase("nornic_txt"))
+	require.NoError(t, mgr.CreateCompositeDatabase("translations", []multidb.ConstituentRef{
+		{Alias: "tr", DatabaseName: "nornic_tr", Type: "local", AccessMode: "read_write"},
+		{Alias: "txr", DatabaseName: "nornic_txt", Type: "local", AccessMode: "read_write"},
+	}))
+
+	trStore, err := mgr.GetStorage("nornic_tr")
+	require.NoError(t, err)
+	txrStore, err := mgr.GetStorage("nornic_txt")
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		_, err = trStore.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("tr-mat-%d", i)),
+			Labels: []string{"MongoDocument"},
+			Properties: map[string]interface{}{
+				"sourceId":     fmt.Sprintf("src-%d", i),
+				"textKey":      fmt.Sprintf("key-%d", i),
+				"originalText": "Get it delivered",
+			},
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < 3; i++ {
+		for _, lang := range []string{"en", "es"} {
+			_, err = txrStore.CreateNode(&storage.Node{
+				ID:     storage.NodeID(fmt.Sprintf("txr-mat-%d-%s", i, lang)),
+				Labels: []string{"MongoDocument"},
+				Properties: map[string]interface{}{
+					"translationId":  fmt.Sprintf("src-%d", i),
+					"language":       lang,
+					"translatedText": fmt.Sprintf("%s-%d", lang, i),
+				},
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	defaultStore, err := mgr.GetStorage(mgr.DefaultDatabaseName())
+	require.NoError(t, err)
+	exec := NewStorageExecutor(defaultStore)
+	exec.SetDatabaseManager(&testDatabaseManagerAdapter{manager: mgr})
+	exec.cache = nil
+
+	tests := []struct {
+		name                string
+		innerWhere          string
+		innerReturnMods     string
+		expectHotPathRows   bool
+		expectRowsPerSource int
+	}{
+		{
+			name:                "where_1_no_order",
+			innerWhere:          "WHERE tt.translationId = sourceId",
+			innerReturnMods:     "",
+			expectHotPathRows:   true,
+			expectRowsPerSource: 2,
+		},
+		{
+			name:                "where_n_with_order_limit",
+			innerWhere:          "WHERE tt.translationId = sourceId AND tt.language IS NOT NULL AND tt.translatedText IS NOT NULL",
+			innerReturnMods:     "ORDER BY tt.language DESC LIMIT 1",
+			expectHotPathRows:   true,
+			expectRowsPerSource: 1,
+		},
+		{
+			name:                "where_0_label_only",
+			innerWhere:          "",
+			innerReturnMods:     "",
+			expectHotPathRows:   false,
+			expectRowsPerSource: 6,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var whereClause string
+			if strings.TrimSpace(tc.innerWhere) != "" {
+				whereClause = "  " + tc.innerWhere + "\n"
+			}
+			var returnMods string
+			if strings.TrimSpace(tc.innerReturnMods) != "" {
+				returnMods = "  " + tc.innerReturnMods + "\n"
+			}
+			query := fmt.Sprintf(`
+USE translations
+CALL {
+  USE translations.tr
+  MATCH (t:MongoDocument)
+  WHERE t.originalText = "Get it delivered"
+  RETURN t.sourceId AS sourceId, coalesce(t.textKey, t.textKey128) AS textKey, t.originalText AS originalText
+  ORDER BY t.sourceId
+  LIMIT 1
+}
+CALL {
+  WITH sourceId
+  USE translations.txr
+  MATCH (tt:MongoDocument)
+%s  RETURN tt.language AS language, tt.translatedText AS translatedText
+%s}
+RETURN sourceId, textKey, originalText, language, translatedText
+ORDER BY sourceId, language
+`, whereClause, returnMods)
+
+			res, err := exec.Execute(context.Background(), query, nil)
+			require.NoError(t, err)
+			require.NotEmpty(t, res.Rows)
+			require.Equal(t, tc.expectRowsPerSource, len(res.Rows))
+
+			trace := exec.LastHotPathTrace()
+			require.Equal(t, tc.expectHotPathRows, trace.FabricBatchedApplyRows)
+		})
+	}
+}
+
 func TestExecute_FabricPlanCache_HitOnRepeatQuery(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	mgr, err := multidb.NewDatabaseManager(base, nil)

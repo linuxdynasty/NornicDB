@@ -981,6 +981,10 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 		variable string
 		nodes    []*storage.Node
 	}, 0, len(nodePatterns))
+	whereClause := ""
+	if whereIdx > 0 {
+		whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+	}
 
 	for _, pattern := range nodePatterns {
 		pattern = strings.TrimSpace(pattern)
@@ -1045,15 +1049,21 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 		}
 	}
 
+	// Push down selective WHERE predicates before cartesian expansion.
+	// This avoids catastrophic row explosion for shapes like:
+	// MATCH (o),(t) WHERE o.k IN [...] AND t.k = o.k
+	if whereClause != "" && len(patternMatches) > 1 {
+		patternMatches = e.applyCartesianWherePushdown(patternMatches, whereClause)
+	}
+
 	// Build cartesian product
 	allMatches := e.buildCartesianProduct(patternMatches)
 
 	// Apply WHERE clause to filter combinations
-	if whereIdx > 0 {
-		wherePart := strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+	if whereClause != "" {
 		var filtered []map[string]*storage.Node
 		for _, match := range allMatches {
-			if e.evaluateWhereForContext(wherePart, match) {
+			if e.evaluateWhereForContext(whereClause, match) {
 				filtered = append(filtered, match)
 			}
 		}
@@ -1144,6 +1154,306 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 	}
 
 	return result, nil
+}
+
+type cartesianInConstraint struct {
+	prop      string
+	allowed   map[string]struct{}
+	hasValues bool
+}
+
+type cartesianEqConstraint struct {
+	leftVar   string
+	leftProp  string
+	rightVar  string
+	rightProp string
+}
+
+func (e *StorageExecutor) applyCartesianWherePushdown(
+	patternMatches []struct {
+		variable string
+		nodes    []*storage.Node
+	},
+	whereClause string,
+) []struct {
+	variable string
+	nodes    []*storage.Node
+} {
+	if len(patternMatches) < 2 || strings.TrimSpace(whereClause) == "" {
+		return patternMatches
+	}
+
+	varIndex := make(map[string]int, len(patternMatches))
+	for i, pm := range patternMatches {
+		if pm.variable != "" {
+			varIndex[pm.variable] = i
+		}
+	}
+
+	inConstraints := map[string]cartesianInConstraint{}
+	eqConstraints := make([]cartesianEqConstraint, 0, 2)
+	for _, term := range splitTopLevelAndCartesian(whereClause) {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if v, p, vals, ok := parseCartesianInListTerm(term); ok {
+			c := inConstraints[v]
+			if c.prop == "" {
+				c.prop = p
+				c.allowed = make(map[string]struct{}, len(vals))
+				for _, raw := range vals {
+					c.allowed[cartesianValueKey(raw)] = struct{}{}
+				}
+				c.hasValues = true
+			}
+			inConstraints[v] = c
+			continue
+		}
+		if lv, lp, rv, rp, ok := parseCartesianVarPropEqualityTerm(term); ok {
+			eqConstraints = append(eqConstraints, cartesianEqConstraint{
+				leftVar:   lv,
+				leftProp:  lp,
+				rightVar:  rv,
+				rightProp: rp,
+			})
+		}
+	}
+
+	// Apply direct IN constraints.
+	for v, c := range inConstraints {
+		if !c.hasValues {
+			continue
+		}
+		idx, ok := varIndex[v]
+		if !ok {
+			continue
+		}
+		patternMatches[idx].nodes = filterNodesByAllowedPropSet(patternMatches[idx].nodes, c.prop, c.allowed)
+	}
+
+	// Propagate equality constraints both directions until stable.
+	for changed := true; changed; {
+		changed = false
+		for _, c := range eqConstraints {
+			leftIdx, lok := varIndex[c.leftVar]
+			rightIdx, rok := varIndex[c.rightVar]
+			if !lok || !rok {
+				continue
+			}
+			leftAllowed := collectPropValues(patternMatches[leftIdx].nodes, c.leftProp)
+			rightAllowed := collectPropValues(patternMatches[rightIdx].nodes, c.rightProp)
+			if len(leftAllowed) == 0 || len(rightAllowed) == 0 {
+				continue
+			}
+			if filtered := filterNodesByAllowedPropSet(patternMatches[rightIdx].nodes, c.rightProp, leftAllowed); len(filtered) != len(patternMatches[rightIdx].nodes) {
+				patternMatches[rightIdx].nodes = filtered
+				changed = true
+			}
+			if filtered := filterNodesByAllowedPropSet(patternMatches[leftIdx].nodes, c.leftProp, rightAllowed); len(filtered) != len(patternMatches[leftIdx].nodes) {
+				patternMatches[leftIdx].nodes = filtered
+				changed = true
+			}
+		}
+	}
+	return patternMatches
+}
+
+func splitTopLevelAndCartesian(whereClause string) []string {
+	parts := make([]string, 0, 4)
+	start := 0
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(whereClause); i++ {
+		ch := whereClause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if i+5 <= len(whereClause) && strings.EqualFold(whereClause[i:i+5], " AND ") {
+			parts = append(parts, strings.TrimSpace(whereClause[start:i]))
+			start = i + 5
+			i += 4
+		}
+	}
+	parts = append(parts, strings.TrimSpace(whereClause[start:]))
+	return parts
+}
+
+func parseCartesianVarProp(expr string) (string, string, bool) {
+	expr = strings.TrimSpace(expr)
+	dot := strings.IndexByte(expr, '.')
+	if dot <= 0 || dot >= len(expr)-1 {
+		return "", "", false
+	}
+	v := strings.TrimSpace(expr[:dot])
+	p := strings.TrimSpace(expr[dot+1:])
+	if !isSimpleIdentifierCartesian(v) || p == "" {
+		return "", "", false
+	}
+	return v, normalizePropertyKey(p), true
+}
+
+func parseCartesianInListTerm(term string) (string, string, []interface{}, bool) {
+	upper := strings.ToUpper(term)
+	idx := strings.Index(upper, " IN ")
+	if idx <= 0 || idx+4 >= len(term) {
+		return "", "", nil, false
+	}
+	lhs := strings.TrimSpace(term[:idx])
+	rhs := strings.TrimSpace(term[idx+4:])
+	v, p, ok := parseCartesianVarProp(lhs)
+	if !ok {
+		return "", "", nil, false
+	}
+	if !(strings.HasPrefix(rhs, "[") && strings.HasSuffix(rhs, "]")) {
+		return "", "", nil, false
+	}
+	inner := strings.TrimSpace(rhs[1 : len(rhs)-1])
+	if inner == "" {
+		return v, p, []interface{}{}, true
+	}
+	items := splitTopLevelCommaKeepEmpty(inner)
+	values := make([]interface{}, 0, len(items))
+	for _, raw := range items {
+		lit, ok := parseLiteralValue(strings.TrimSpace(raw))
+		if !ok {
+			return "", "", nil, false
+		}
+		values = append(values, lit)
+	}
+	return v, p, values, true
+}
+
+func isSimpleIdentifierCartesian(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' {
+			continue
+		}
+		if i > 0 && ch >= '0' && ch <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func parseCartesianVarPropEqualityTerm(term string) (string, string, string, string, bool) {
+	idx := strings.Index(term, "=")
+	if idx <= 0 || idx+1 >= len(term) {
+		return "", "", "", "", false
+	}
+	lhs := strings.TrimSpace(term[:idx])
+	rhs := strings.TrimSpace(term[idx+1:])
+	lv, lp, lok := parseCartesianVarProp(lhs)
+	rv, rp, rok := parseCartesianVarProp(rhs)
+	if !lok || !rok {
+		return "", "", "", "", false
+	}
+	return lv, lp, rv, rp, true
+}
+
+func cartesianValueKey(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return "<nil>"
+	case string:
+		return "s:" + x
+	case int:
+		return fmt.Sprintf("i:%d", x)
+	case int64:
+		return fmt.Sprintf("i64:%d", x)
+	case float64:
+		return fmt.Sprintf("f:%g", x)
+	case bool:
+		if x {
+			return "b:1"
+		}
+		return "b:0"
+	default:
+		return fmt.Sprintf("%T:%v", v, v)
+	}
+}
+
+func collectPropValues(nodes []*storage.Node, prop string) map[string]struct{} {
+	out := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		if n == nil || n.Properties == nil {
+			continue
+		}
+		val, ok := n.Properties[prop]
+		if !ok {
+			continue
+		}
+		out[cartesianValueKey(val)] = struct{}{}
+	}
+	return out
+}
+
+func filterNodesByAllowedPropSet(nodes []*storage.Node, prop string, allowed map[string]struct{}) []*storage.Node {
+	if len(nodes) == 0 || len(allowed) == 0 {
+		return nodes
+	}
+	out := make([]*storage.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n == nil || n.Properties == nil {
+			continue
+		}
+		val, ok := n.Properties[prop]
+		if !ok {
+			continue
+		}
+		if _, keep := allowed[cartesianValueKey(val)]; keep {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // executeCartesianAggregation handles aggregation over cartesian product results

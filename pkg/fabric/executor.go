@@ -778,10 +778,19 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRowsIter(
 	return result, true, nil
 }
 
-var reApplyCollectLookup = regexp.MustCompile(`(?is)^WITH\s+([A-Za-z_][A-Za-z0-9_]*)\s+((?:USE\s+[A-Za-z0-9_.` + "`" + `]+\s+)?)MATCH\s+(.+?)\s+WHERE\s+(.+?)\s+RETURN\s+collect\((.+)\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$`)
+type applyCorrelatedLookupSpec struct {
+	importCol        string
+	useClause        string
+	matchPart        string
+	wherePart        string
+	returnProjection string
+	returnModifiers  string
+}
+
 var reApplyLookupRows = regexp.MustCompile(`(?is)^WITH\s+([A-Za-z_][A-Za-z0-9_]*)\s+((?:USE\s+[A-Za-z0-9_.` + "`" + `]+\s+)?)MATCH\s+(.+?)\s+WHERE\s+(.+?)\s+RETURN\s+(.+?)\s*;?\s*$`)
 
 type fabricReturnItem struct {
+	expr  string
 	prop  string
 	alias string
 }
@@ -813,41 +822,26 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCollectLookup(
 		return nil, false, nil
 	}
 
-	var (
-		importCol  string
-		useClause  string
-		matchPart  string
-		wherePart  string
-		matchVar   string
-		matchProp  string
-		otherWhere string
-		collectExp string
-		outAlias   string
-		ok         bool
-	)
-	if m := reApplyCollectLookup.FindStringSubmatch(trimmed); len(m) == 7 {
-		importCol = strings.TrimSpace(m[1])
-		useClause = strings.TrimSpace(m[2])
-		matchPart = strings.TrimSpace(m[3])
-		wherePart = strings.TrimSpace(m[4])
-		collectExp = strings.TrimSpace(m[5])
-		outAlias = strings.TrimSpace(m[6])
-		ok = true
-	}
-	if !ok || importCol == "" || outAlias == "" || wherePart == "" {
+	spec, ok := parseApplyCorrelatedLookupSubquery(trimmed)
+	if !ok || spec.importCol == "" || strings.TrimSpace(spec.wherePart) == "" || strings.TrimSpace(spec.returnModifiers) != "" {
 		return nil, false, nil
 	}
-	matchVar, matchProp, otherWhere, ok = extractApplyCorrelationWhere(wherePart, importCol)
+	collectExp, outAlias, ok := parseSimpleCollectReturnItem(spec.returnProjection)
 	if !ok {
 		return nil, false, nil
 	}
-	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+
+	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(spec.wherePart, spec.importCol)
+	if !ok {
+		return nil, false, nil
+	}
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, spec.importCol)
 	if !ok {
 		return nil, false, nil
 	}
 
 	outerIdx := buildColumnIndex(inputResult.Columns)
-	keyIdx, exists := outerIdx[importCol]
+	keyIdx, exists := outerIdx[spec.importCol]
 	if !exists {
 		return nil, false, nil
 	}
@@ -909,12 +903,12 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCollectLookup(
 			defer func() { <-sem }()
 
 			var rewritten strings.Builder
-			if useClause != "" {
-				rewritten.WriteString(useClause)
+			if spec.useClause != "" {
+				rewritten.WriteString(spec.useClause)
 				rewritten.WriteByte(' ')
 			}
 			rewritten.WriteString("MATCH ")
-			rewritten.WriteString(matchPart)
+			rewritten.WriteString(spec.matchPart)
 			rewritten.WriteString(" WHERE ")
 			rewritten.WriteString(matchVar)
 			rewritten.WriteByte('.')
@@ -1025,35 +1019,27 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCountLookup(
 		return nil, false, nil
 	}
 
-	m := reApplyLookupRows.FindStringSubmatch(trimmed)
-	if len(m) != 6 {
-		return nil, false, nil
-	}
-	importCol := strings.TrimSpace(m[1])
-	useClause := strings.TrimSpace(m[2])
-	matchPart := strings.TrimSpace(m[3])
-	wherePart := strings.TrimSpace(m[4])
-	returnPart := strings.TrimSpace(m[5])
-	if importCol == "" || wherePart == "" || returnPart == "" {
+	spec, ok := parseApplyCorrelatedLookupSubquery(trimmed)
+	if !ok || spec.importCol == "" || strings.TrimSpace(spec.wherePart) == "" || strings.TrimSpace(spec.returnProjection) == "" || strings.TrimSpace(spec.returnModifiers) != "" {
 		return nil, false, nil
 	}
 
-	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(wherePart, importCol)
+	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(spec.wherePart, spec.importCol)
 	if !ok {
 		return nil, false, nil
 	}
-	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, spec.importCol)
 	if !ok {
 		return nil, false, nil
 	}
 
-	countItems, ok := parseSimpleBatchedCountReturnItems(returnPart)
+	countItems, ok := parseSimpleBatchedCountReturnItems(spec.returnProjection)
 	if !ok || len(countItems) == 0 {
 		return nil, false, nil
 	}
 
 	outerIdx := buildColumnIndex(inputResult.Columns)
-	keyIdx, exists := outerIdx[importCol]
+	keyIdx, exists := outerIdx[spec.importCol]
 	if !exists {
 		return nil, false, nil
 	}
@@ -1115,12 +1101,12 @@ func (e *FabricExecutor) tryExecuteApplyBatchedCountLookup(
 			defer func() { <-sem }()
 
 			var rewritten strings.Builder
-			if useClause != "" {
-				rewritten.WriteString(useClause)
+			if spec.useClause != "" {
+				rewritten.WriteString(spec.useClause)
 				rewritten.WriteByte(' ')
 			}
 			rewritten.WriteString("MATCH ")
-			rewritten.WriteString(matchPart)
+			rewritten.WriteString(spec.matchPart)
 			rewritten.WriteString(" WHERE ")
 			rewritten.WriteString(matchVar)
 			rewritten.WriteByte('.')
@@ -1271,35 +1257,26 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRows(
 		return nil, false, nil
 	}
 
-	m := reApplyLookupRows.FindStringSubmatch(trimmed)
-	if len(m) != 6 {
+	spec, ok := parseApplyCorrelatedLookupSubquery(trimmed)
+	if !ok || spec.importCol == "" || strings.TrimSpace(spec.wherePart) == "" || strings.TrimSpace(spec.returnProjection) == "" {
 		return nil, false, nil
 	}
-	importCol := strings.TrimSpace(m[1])
-	useClause := strings.TrimSpace(m[2])
-	matchPart := strings.TrimSpace(m[3])
-	wherePart := strings.TrimSpace(m[4])
-	returnPart := strings.TrimSpace(m[5])
-	if importCol == "" || wherePart == "" || returnPart == "" {
-		return nil, false, nil
-	}
-
-	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(wherePart, importCol)
+	matchVar, matchProp, otherWhere, ok := extractApplyCorrelationWhere(spec.wherePart, spec.importCol)
 	if !ok {
 		return nil, false, nil
 	}
-	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, importCol)
+	otherWhere, ok = sanitizeOtherWhereForImportColumn(otherWhere, spec.importCol)
 	if !ok {
 		return nil, false, nil
 	}
 
-	returnItems, ok := parseSimpleBatchedLookupReturnItems(returnPart, matchVar)
+	returnItems, ok := parseSimpleBatchedLookupReturnItems(spec.returnProjection, matchVar)
 	if !ok || len(returnItems) == 0 {
 		return nil, false, nil
 	}
 
 	outerIdx := buildColumnIndex(inputResult.Columns)
-	keyIdx, exists := outerIdx[importCol]
+	keyIdx, exists := outerIdx[spec.importCol]
 	if !exists {
 		return nil, false, nil
 	}
@@ -1313,12 +1290,12 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRows(
 	combiner := newCompiledRowCombiner(result.Columns, outerIdx, innerIdx)
 
 	var rewritten strings.Builder
-	if useClause != "" {
-		rewritten.WriteString(useClause)
+	if spec.useClause != "" {
+		rewritten.WriteString(spec.useClause)
 		rewritten.WriteByte(' ')
 	}
 	rewritten.WriteString("MATCH ")
-	rewritten.WriteString(matchPart)
+	rewritten.WriteString(spec.matchPart)
 	rewritten.WriteString(" WHERE ")
 	rewritten.WriteString(matchVar)
 	rewritten.WriteByte('.')
@@ -1499,6 +1476,18 @@ func (e *FabricExecutor) tryExecuteApplyBatchedLookupRows(
 			}
 		}
 
+		if strings.TrimSpace(spec.returnModifiers) != "" {
+			orderAliasMap := buildResultModifierAliasMap(returnItems)
+			for k, rows := range groupedRows {
+				rs := &ResultStream{
+					Columns: innerCols,
+					Rows:    rows,
+				}
+				applySimpleResultModifiers(rs, spec.returnModifiers, orderAliasMap)
+				groupedRows[k] = rs.Rows
+			}
+		}
+
 		for i, outerRow := range chunkRows {
 			if !outerHasKey[i] {
 				continue
@@ -1537,9 +1526,22 @@ func parseSimpleBatchedLookupReturnItems(returnPart, matchVar string) ([]fabricR
 		if !ok || !strings.EqualFold(v, matchVar) || !isSimpleIdentifier(alias) {
 			return nil, false
 		}
-		out = append(out, fabricReturnItem{prop: p, alias: alias})
+		out = append(out, fabricReturnItem{expr: strings.TrimSpace(expr), prop: p, alias: alias})
 	}
 	return out, true
+}
+
+func buildResultModifierAliasMap(items []fabricReturnItem) map[string]string {
+	out := make(map[string]string, len(items)*2)
+	for _, item := range items {
+		if strings.TrimSpace(item.alias) != "" {
+			out[item.alias] = item.alias
+		}
+		if strings.TrimSpace(item.expr) != "" {
+			out[item.expr] = item.alias
+		}
+	}
+	return out
 }
 
 func aliasesFromReturnItems(items []fabricReturnItem) []string {
@@ -1605,6 +1607,185 @@ func zeroCountValues(n int) []interface{} {
 		out = append(out, int64(0))
 	}
 	return out
+}
+
+func parseSimpleCollectReturnItem(returnPart string) (collectExpr string, alias string, ok bool) {
+	parts := splitTopLevelCSV(strings.TrimSpace(returnPart))
+	if len(parts) != 1 {
+		return "", "", false
+	}
+	item := strings.TrimSpace(parts[0])
+	asIdx := lastAsIndexFold(item)
+	if asIdx < 0 {
+		return "", "", false
+	}
+	expr := strings.TrimSpace(item[:asIdx])
+	alias = strings.TrimSpace(item[asIdx+4:])
+	if !isSimpleIdentifier(alias) {
+		return "", "", false
+	}
+	if !startsWithFold(expr, "collect(") || !strings.HasSuffix(expr, ")") {
+		return "", "", false
+	}
+	inner := strings.TrimSpace(expr[len("collect(") : len(expr)-1])
+	if inner == "" {
+		return "", "", false
+	}
+	return inner, alias, true
+}
+
+func parseApplyCorrelatedLookupSubquery(query string) (applyCorrelatedLookupSpec, bool) {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(query), ";"))
+	if !startsWithFold(trimmed, "WITH ") {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	rest := strings.TrimSpace(trimmed[len("WITH "):])
+	if rest == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+	if commaIdx := strings.Index(rest, ","); commaIdx >= 0 && commaIdx < strings.Index(rest+" ", " ") {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	importCol, remainder := firstToken(rest)
+	if importCol == "" || !isSimpleIdentifier(importCol) {
+		return applyCorrelatedLookupSpec{}, false
+	}
+	rest = strings.TrimSpace(remainder)
+	if rest == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	useClause := ""
+	if startsWithFold(rest, "USE ") {
+		matchIdx := indexTopLevelKeyword(rest, "MATCH")
+		if matchIdx <= 0 {
+			return applyCorrelatedLookupSpec{}, false
+		}
+		useClause = strings.TrimSpace(rest[:matchIdx])
+		if !startsWithFold(useClause, "USE ") {
+			return applyCorrelatedLookupSpec{}, false
+		}
+		rest = strings.TrimSpace(rest[matchIdx:])
+	}
+
+	if !startsWithFold(rest, "MATCH ") {
+		return applyCorrelatedLookupSpec{}, false
+	}
+	rest = strings.TrimSpace(rest[len("MATCH "):])
+	if rest == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	returnIdx := indexTopLevelKeyword(rest, "RETURN")
+	if returnIdx < 0 {
+		return applyCorrelatedLookupSpec{}, false
+	}
+	beforeReturn := strings.TrimSpace(rest[:returnIdx])
+	if beforeReturn == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+	returnClause := strings.TrimSpace(rest[returnIdx+len("RETURN"):])
+	if returnClause == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	matchPart := beforeReturn
+	wherePart := ""
+	if whereIdx := indexTopLevelKeyword(beforeReturn, "WHERE"); whereIdx >= 0 {
+		matchPart = strings.TrimSpace(beforeReturn[:whereIdx])
+		wherePart = strings.TrimSpace(beforeReturn[whereIdx+len("WHERE"):])
+		if matchPart == "" {
+			return applyCorrelatedLookupSpec{}, false
+		}
+	}
+
+	projection, modifiers := splitTopLevelResultModifiers(returnClause)
+	if strings.TrimSpace(projection) == "" {
+		return applyCorrelatedLookupSpec{}, false
+	}
+
+	return applyCorrelatedLookupSpec{
+		importCol:        importCol,
+		useClause:        strings.TrimSpace(useClause),
+		matchPart:        matchPart,
+		wherePart:        wherePart,
+		returnProjection: strings.TrimSpace(projection),
+		returnModifiers:  strings.TrimSpace(modifiers),
+	}, true
+}
+
+func firstToken(s string) (token string, rest string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i:])
+		}
+	}
+	return s, ""
+}
+
+func indexTopLevelKeyword(s string, keyword string) int {
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if hasKeywordAt(s, i, keyword) {
+			return i
+		}
+	}
+	return -1
 }
 
 func extractApplyCorrelationWhere(whereClause string, importCol string) (matchVar string, matchProp string, otherWhere string, ok bool) {

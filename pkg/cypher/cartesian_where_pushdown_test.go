@@ -1,0 +1,159 @@
+package cypher
+
+import (
+	"context"
+	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
+)
+
+func TestCartesianWherePushdown_InAndEqualityJoin(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	for _, k := range []string{"k1", "k2", "k3"} {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID("nornic:o-" + k),
+			Labels: []string{"OriginalText"},
+			Properties: map[string]interface{}{
+				"joinKey": k,
+			},
+		})
+		require.NoError(t, err)
+	}
+	for _, row := range []struct {
+		id   string
+		key  string
+		lang string
+	}{
+		{"t-k1-es", "k1", "es"},
+		{"t-k1-fr", "k1", "fr"},
+		{"t-k2-es", "k2", "es"},
+		{"t-k9-es", "k9", "es"},
+	} {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID("nornic:" + row.id),
+			Labels: []string{"TranslatedText"},
+			Properties: map[string]interface{}{
+				"joinKey": row.key,
+				"lang":    row.lang,
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	res, err := exec.Execute(ctx, `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE o.joinKey IN ['k1','k2'] AND t.joinKey = o.joinKey
+RETURN count(*) AS c
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(3), res.Rows[0][0])
+
+	res, err = exec.Execute(ctx, `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE t.joinKey = o.joinKey AND o.joinKey IN ['k1','k2']
+RETURN o.joinKey AS k, count(*) AS c
+ORDER BY k
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"k", "c"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	got := map[string]int64{}
+	for _, row := range res.Rows {
+		got[row[0].(string)] = row[1].(int64)
+	}
+	require.Equal(t, int64(2), got["k1"])
+	require.Equal(t, int64(1), got["k2"])
+}
+
+func TestMatchCreate_BatchJoinWithDualInFilters(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	for _, k := range []string{"k1", "k2", "k3"} {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID("nornic:o-" + k),
+			Labels: []string{"OriginalText"},
+			Properties: map[string]interface{}{
+				"joinKey": k,
+			},
+		})
+		require.NoError(t, err)
+		_, err = store.CreateNode(&storage.Node{
+			ID:     storage.NodeID("nornic:t-" + k),
+			Labels: []string{"TranslatedText"},
+			Properties: map[string]interface{}{
+				"joinKey": k,
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	params := map[string]interface{}{"keys": []interface{}{"k1", "k2"}}
+	res, err := exec.Execute(ctx, `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE o.joinKey IN $keys
+  AND t.joinKey IN $keys
+  AND o.joinKey = t.joinKey
+  AND NOT (o)-[:TRANSLATES_TO]->(t)
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS created_pairs
+`, params)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	require.Equal(t, int64(2), res.Rows[0][0])
+
+	res2, err := exec.Execute(ctx, `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE o.joinKey IN $keys
+  AND t.joinKey IN $keys
+  AND o.joinKey = t.joinKey
+  AND NOT (o)-[:TRANSLATES_TO]->(t)
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS created_pairs
+`, params)
+	require.NoError(t, err)
+	require.Len(t, res2.Rows, 1)
+	require.Len(t, res2.Rows[0], 1)
+	require.Equal(t, int64(0), res2.Rows[0][0])
+}
+
+func TestBuildCombinationsUsingWhereJoin_TwoVarEquality(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+
+	o1 := &storage.Node{ID: "nornic:o1", Labels: []string{"OriginalText"}, Properties: map[string]interface{}{"joinKey": "k1"}}
+	o2 := &storage.Node{ID: "nornic:o2", Labels: []string{"OriginalText"}, Properties: map[string]interface{}{"joinKey": "k2"}}
+	t1 := &storage.Node{ID: "nornic:t1", Labels: []string{"TranslatedText"}, Properties: map[string]interface{}{"joinKey": "k1"}}
+	t2 := &storage.Node{ID: "nornic:t2", Labels: []string{"TranslatedText"}, Properties: map[string]interface{}{"joinKey": "k2"}}
+	t3 := &storage.Node{ID: "nornic:t3", Labels: []string{"TranslatedText"}, Properties: map[string]interface{}{"joinKey": "k3"}}
+
+	patternMatches := []struct {
+		variable string
+		nodes    []*storage.Node
+	}{
+		{variable: "o", nodes: []*storage.Node{o1, o2}},
+		{variable: "t", nodes: []*storage.Node{t1, t2, t3}},
+	}
+
+	joined, ok := exec.buildCombinationsUsingWhereJoin(
+		patternMatches,
+		"o.joinKey IN ['k1','k2'] AND t.joinKey IN ['k1','k2'] AND o.joinKey = t.joinKey",
+	)
+	require.True(t, ok)
+	require.Len(t, joined, 2)
+
+	got := map[string]string{}
+	for _, row := range joined {
+		require.Contains(t, row, "o")
+		require.Contains(t, row, "t")
+		got[string(row["o"].ID)] = string(row["t"].ID)
+	}
+	require.Equal(t, "nornic:t1", got["nornic:o1"])
+	require.Equal(t, "nornic:t2", got["nornic:o2"])
+}

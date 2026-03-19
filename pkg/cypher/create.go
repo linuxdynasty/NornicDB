@@ -6,6 +6,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1375,13 +1376,14 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 					numPatternsInSegment++
 				}
 			}
-			applyWherePerNode := whereForClause != "" && numPatternsInSegment == 1
+			addedClauseWhereToPostFilter := false
 			if whereForClause != "" && numPatternsInSegment > 1 {
 				if postFilterWhere != "" {
 					postFilterWhere = postFilterWhere + " AND " + whereForClause
 				} else {
 					postFilterWhere = whereForClause
 				}
+				addedClauseWhereToPostFilter = true
 			}
 
 			// Collect ALL matched nodes from this MATCH clause (for cartesian product)
@@ -1453,7 +1455,22 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 					matchingNodes = filtered
 				}
 
-				// Apply this segment's WHERE when it applies to this single variable
+				// Apply per-node WHERE only when the predicate references this variable.
+				// Predicates involving other variables must be evaluated post-cartesian.
+				applyWherePerNode := false
+				if whereForClause != "" && numPatternsInSegment == 1 {
+					if whereClauseReferencesOnlyVariable(whereForClause, nodeInfo.variable) {
+						applyWherePerNode = true
+					} else if !addedClauseWhereToPostFilter {
+						if postFilterWhere != "" {
+							postFilterWhere = postFilterWhere + " AND " + whereForClause
+						} else {
+							postFilterWhere = whereForClause
+						}
+						addedClauseWhereToPostFilter = true
+					}
+				}
+
 				if applyWherePerNode {
 					var filtered []*storage.Node
 					for _, node := range matchingNodes {
@@ -1478,11 +1495,23 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 		}
 
-		// Build cartesian product of all pattern matches
+		// Build combinations of all pattern matches.
+		// Prefer a join-aware construction for common equality-join WHERE shapes
+		// to avoid full cartesian expansion in MATCH...CREATE hot paths.
 		if anyPatternUnmatched {
 			allCombinations = []map[string]*storage.Node{}
 		} else {
-			allCombinations = e.buildCartesianProduct(patternMatches)
+			// Push down selective multi-variable WHERE predicates before
+			// cartesian expansion to avoid combinatorial blow-ups on join-shapes.
+			if postFilterWhere != "" && len(patternMatches) > 1 {
+				patternMatches = e.applyCartesianWherePushdown(patternMatches, postFilterWhere)
+				if joined, ok := e.buildCombinationsUsingWhereJoin(patternMatches, postFilterWhere); ok {
+					allCombinations = joined
+				}
+			}
+			if allCombinations == nil {
+				allCombinations = e.buildCartesianProduct(patternMatches)
+			}
 		}
 
 		// Apply WITH LIMIT/SKIP if present (from MATCH ... WITH ... LIMIT ... CREATE pattern)
@@ -1505,9 +1534,55 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 
 		// Apply post-filter WHERE (multi-variable conditions from a single MATCH segment) if present
 		if postFilterWhere != "" {
+			relChecks := make([]struct {
+				startVar string
+				edgeType string
+				endVar   string
+			}, 0, 2)
+			remainingTerms := make([]string, 0, 4)
+			for _, term := range splitTopLevelAndCartesian(postFilterWhere) {
+				term = strings.TrimSpace(term)
+				if term == "" {
+					continue
+				}
+				if sv, et, ev, ok := parseNotRelationshipExistenceTerm(term); ok {
+					relChecks = append(relChecks, struct {
+						startVar string
+						edgeType string
+						endVar   string
+					}{startVar: sv, edgeType: et, endVar: ev})
+					continue
+				}
+				remainingTerms = append(remainingTerms, term)
+			}
+			remainingWhere := strings.Join(remainingTerms, " AND ")
+
 			var filtered []map[string]*storage.Node
 			for _, combination := range allCombinations {
-				if e.evaluateWhereForContext(postFilterWhere, combination) {
+				keep := true
+				if remainingWhere != "" {
+					keep = e.evaluateWhereForContext(remainingWhere, combination)
+				}
+				if keep && len(relChecks) > 0 {
+					for _, rc := range relChecks {
+						startNode := combination[rc.startVar]
+						endNode := combination[rc.endVar]
+						if startNode == nil || endNode == nil {
+							keep = false
+							break
+						}
+						exists, err := hasRelationshipOfType(store, startNode.ID, endNode.ID, rc.edgeType)
+						if err != nil {
+							keep = false
+							break
+						}
+						if exists {
+							keep = false
+							break
+						}
+					}
+				}
+				if keep {
 					filtered = append(filtered, combination)
 				}
 			}
@@ -1517,27 +1592,35 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		// If no combinations, fall back to using existing nodeVars
 		if len(allCombinations) == 0 {
 			// openCypher semantics: MATCH producing zero rows short-circuits the CREATE path
-			// and returns an empty result set (with RETURN columns if requested).
+			// and returns no rows unless RETURN is aggregation-only (then one row).
 			if hadMatchPatterns {
 				if returnPart != "" {
 					returnItems := e.parseReturnItems(returnPart)
 					result.Columns = make([]string, len(returnItems))
-					row := make([]interface{}, len(returnItems))
-					hasAggregate := false
 					for i, item := range returnItems {
 						if item.alias != "" {
 							result.Columns[i] = item.alias
 						} else {
 							result.Columns[i] = item.expr
 						}
-						upperExpr := strings.ToUpper(strings.TrimSpace(item.expr))
-						if strings.HasPrefix(upperExpr, "COUNT(") {
-							row[i] = int64(0)
-							hasAggregate = true
-						}
 					}
-					if hasAggregate {
-						result.Rows = [][]interface{}{row}
+					if len(returnItems) > 0 {
+						allAggregates := true
+						row := make([]interface{}, len(returnItems))
+						for i, item := range returnItems {
+							if !isAggregateFunc(item.expr) {
+								allAggregates = false
+								break
+							}
+							if isAggregateFuncName(item.expr, "count") {
+								row[i] = int64(0)
+							} else {
+								row[i] = nil
+							}
+						}
+						if allAggregates {
+							result.Rows = [][]interface{}{row}
+						}
 					}
 				}
 				return result, nil
@@ -1798,7 +1881,18 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				continue
 			}
 			if strings.HasPrefix(upperExpr, "COUNT(") {
-				row[i] = int64(len(allCombinations))
+				inner := strings.TrimSpace(extractFuncInner(item.expr))
+				if inner == "" || inner == "*" {
+					row[i] = int64(len(allCombinations))
+					continue
+				}
+				var cnt int64
+				for _, combination := range allCombinations {
+					if e.evaluateExpressionWithContext(inner, combination, edgeVars) != nil {
+						cnt++
+					}
+				}
+				row[i] = cnt
 				continue
 			}
 
@@ -2601,3 +2695,143 @@ func (e *StorageExecutor) executeMultipleCreates(ctx context.Context, cypher str
 // 1. Try to find an existing node matching the pattern
 // 2. If found, apply ON MATCH SET if present
 // 3. If not found, create the node and apply ON CREATE SET if present
+
+func whereClauseReferencesOnlyVariable(whereClause string, variable string) bool {
+	clause := strings.TrimSpace(whereClause)
+	variable = strings.TrimSpace(variable)
+	if clause == "" || variable == "" {
+		return false
+	}
+	for i := 0; i < len(clause); {
+		if !isIdentByte(clause[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(clause) && isIdentByte(clause[i]) {
+			i++
+		}
+		if i < len(clause) && clause[i] == '.' {
+			refVar := clause[start:i]
+			if !strings.EqualFold(refVar, variable) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+var notRelationshipExistencePattern = regexp.MustCompile(`(?i)^NOT\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$`)
+
+func parseNotRelationshipExistenceTerm(term string) (startVar, edgeType, endVar string, ok bool) {
+	m := notRelationshipExistencePattern.FindStringSubmatch(strings.TrimSpace(term))
+	if len(m) != 4 {
+		return "", "", "", false
+	}
+	return strings.TrimSpace(m[1]), strings.TrimSpace(m[2]), strings.TrimSpace(m[3]), true
+}
+
+func hasRelationshipOfType(store storage.Engine, startID, endID storage.NodeID, edgeType string) (bool, error) {
+	edges, err := store.GetEdgesBetween(startID, endID)
+	if err != nil {
+		return false, err
+	}
+	for _, edge := range edges {
+		if edge != nil && strings.EqualFold(edge.Type, edgeType) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (e *StorageExecutor) buildCombinationsUsingWhereJoin(
+	patternMatches []struct {
+		variable string
+		nodes    []*storage.Node
+	},
+	whereClause string,
+) ([]map[string]*storage.Node, bool) {
+	if len(patternMatches) != 2 || strings.TrimSpace(whereClause) == "" {
+		return nil, false
+	}
+	if patternMatches[0].variable == "" || patternMatches[1].variable == "" {
+		return nil, false
+	}
+
+	terms := splitTopLevelAndCartesian(whereClause)
+	var join cartesianEqConstraint
+	foundJoin := false
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		lv, lp, rv, rp, ok := parseCartesianVarPropEqualityTerm(term)
+		if !ok {
+			continue
+		}
+		if (lv == patternMatches[0].variable && rv == patternMatches[1].variable) ||
+			(lv == patternMatches[1].variable && rv == patternMatches[0].variable) {
+			join = cartesianEqConstraint{leftVar: lv, leftProp: lp, rightVar: rv, rightProp: rp}
+			foundJoin = true
+			break
+		}
+	}
+	if !foundJoin {
+		return nil, false
+	}
+
+	left := patternMatches[0]
+	right := patternMatches[1]
+	leftVar := left.variable
+	rightVar := right.variable
+	leftProp := ""
+	rightProp := ""
+	switch {
+	case join.leftVar == leftVar && join.rightVar == rightVar:
+		leftProp, rightProp = join.leftProp, join.rightProp
+	case join.leftVar == rightVar && join.rightVar == leftVar:
+		leftProp, rightProp = join.rightProp, join.leftProp
+	default:
+		return nil, false
+	}
+	if leftProp == "" || rightProp == "" {
+		return nil, false
+	}
+
+	rightByJoinValue := make(map[string][]*storage.Node, len(right.nodes))
+	for _, n := range right.nodes {
+		if n == nil || n.Properties == nil {
+			continue
+		}
+		v, ok := n.Properties[rightProp]
+		if !ok {
+			continue
+		}
+		key := cartesianValueKey(v)
+		rightByJoinValue[key] = append(rightByJoinValue[key], n)
+	}
+
+	if len(rightByJoinValue) == 0 {
+		return []map[string]*storage.Node{}, true
+	}
+
+	out := make([]map[string]*storage.Node, 0, len(left.nodes))
+	for _, ln := range left.nodes {
+		if ln == nil || ln.Properties == nil {
+			continue
+		}
+		lv, ok := ln.Properties[leftProp]
+		if !ok {
+			continue
+		}
+		matches := rightByJoinValue[cartesianValueKey(lv)]
+		for _, rn := range matches {
+			out = append(out, map[string]*storage.Node{
+				leftVar:  ln,
+				rightVar: rn,
+			})
+		}
+	}
+	return out, true
+}

@@ -4335,6 +4335,103 @@ func TestTryExecuteApplyBatchedLookupRows_NoCorrelation(t *testing.T) {
 	}
 }
 
+func TestParseApplyCorrelatedLookupSubquery_WithModifiersAndOptionalWhere(t *testing.T) {
+	spec, ok := parseApplyCorrelatedLookupSubquery(
+		"WITH sourceId USE translations.txr MATCH (tt:MongoDocument) WHERE tt.translationId = sourceId RETURN tt.language AS language, tt.translatedText AS translatedText ORDER BY tt.language DESC LIMIT 1",
+	)
+	if !ok {
+		t.Fatal("expected parse to succeed")
+	}
+	if spec.importCol != "sourceId" {
+		t.Fatalf("unexpected import column: %q", spec.importCol)
+	}
+	if spec.useClause != "USE translations.txr" {
+		t.Fatalf("unexpected use clause: %q", spec.useClause)
+	}
+	if spec.matchPart != "(tt:MongoDocument)" {
+		t.Fatalf("unexpected match part: %q", spec.matchPart)
+	}
+	if spec.wherePart != "tt.translationId = sourceId" {
+		t.Fatalf("unexpected where part: %q", spec.wherePart)
+	}
+	if spec.returnProjection != "tt.language AS language, tt.translatedText AS translatedText" {
+		t.Fatalf("unexpected return projection: %q", spec.returnProjection)
+	}
+	if spec.returnModifiers != "ORDER BY tt.language DESC LIMIT 1" {
+		t.Fatalf("unexpected return modifiers: %q", spec.returnModifiers)
+	}
+
+	spec, ok = parseApplyCorrelatedLookupSubquery(
+		"WITH sourceId USE translations.txr MATCH (tt:MongoDocument) RETURN tt.language AS language",
+	)
+	if !ok {
+		t.Fatal("expected parse without WHERE to succeed")
+	}
+	if spec.wherePart != "" {
+		t.Fatalf("expected empty where part, got %q", spec.wherePart)
+	}
+}
+
+func TestFabricExecutor_ApplyBatchedLookupRows_ModifiersPerOuterKey(t *testing.T) {
+	catalog := NewCatalog()
+	catalog.Register("db1", &LocationLocal{DBName: "db1"})
+
+	outerQuery := "MATCH (n) RETURN n.id AS sourceId"
+	batchedInnerQuery := "USE translations.txr MATCH (tt:MongoDocument) WHERE tt.translationId IN $__fabric_apply_keys AND tt.language IS NOT NULL AND tt.translatedText IS NOT NULL RETURN tt.translationId AS __fabric_apply_key, tt.language AS language, tt.translatedText AS translatedText"
+
+	mock := &mockCypherExecutor{
+		calls: map[string]int{},
+		results: map[string]*ResultStream{
+			outerQuery: {
+				Columns: []string{"sourceId"},
+				Rows:    [][]interface{}{{"id1"}, {"id2"}},
+			},
+			batchedInnerQuery: {
+				Columns: []string{"__fabric_apply_key", "language", "translatedText"},
+				Rows: [][]interface{}{
+					{"id1", "en", "hello"},
+					{"id1", "es", "hola"},
+					{"id2", "de", "hallo"},
+					{"id2", "fr", "bonjour"},
+				},
+			},
+		},
+	}
+
+	exec := NewFabricExecutor(catalog, newTestLocalExecutor(mock), nil)
+	ctx := context.Background()
+
+	outer := &FragmentExec{
+		Input: &FragmentInit{}, Query: outerQuery, GraphName: "db1", Columns: []string{"sourceId"},
+	}
+	inner := &FragmentExec{
+		Input:     &FragmentInit{Columns: []string{"sourceId"}, ImportColumns: []string{"sourceId"}},
+		Query:     "WITH sourceId USE translations.txr MATCH (tt:MongoDocument) WHERE tt.translationId = sourceId AND tt.language IS NOT NULL AND tt.translatedText IS NOT NULL RETURN tt.language AS language, tt.translatedText AS translatedText ORDER BY tt.language DESC LIMIT 1",
+		GraphName: "db1",
+		Columns:   []string{"language", "translatedText"},
+	}
+	apply := &FragmentApply{
+		Input: outer, Inner: inner, Columns: []string{"sourceId", "language", "translatedText"},
+	}
+
+	result, err := exec.Execute(ctx, nil, apply, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RowCount() != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.RowCount())
+	}
+	if got := mock.calls[batchedInnerQuery]; got != 1 {
+		t.Fatalf("expected single batched lookup, got %d", got)
+	}
+	if result.Rows[0][0] != "id1" || result.Rows[0][1] != "es" {
+		t.Fatalf("unexpected first row: %v", result.Rows[0])
+	}
+	if result.Rows[1][0] != "id2" || result.Rows[1][1] != "fr" {
+		t.Fatalf("unexpected second row: %v", result.Rows[1])
+	}
+}
+
 func TestTryExecuteApplyBatchedLookupRows_NonSimpleReturnItems(t *testing.T) {
 	exec := NewFabricExecutor(NewCatalog(), nil, nil)
 	input := &ResultStream{Columns: []string{"k"}, Rows: [][]interface{}{{"v"}}}
