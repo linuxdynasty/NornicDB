@@ -9,6 +9,107 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+// tryCollectNodesFromIDEquality attempts to satisfy:
+//
+//	MATCH (n[:Label]) WHERE id(n) = <id>
+//	MATCH (n[:Label]) WHERE elementId(n) = <element-id>
+//
+// via a direct node lookup instead of scanning all nodes.
+func (e *StorageExecutor) tryCollectNodesFromIDEquality(nodePattern nodePatternInfo, whereClause string) ([]*storage.Node, bool, error) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return nil, false, nil
+	}
+
+	upper := strings.ToUpper(clause)
+	if strings.Contains(upper, " AND ") || strings.Contains(upper, " OR ") || strings.Contains(upper, " IN ") {
+		return nil, false, nil
+	}
+
+	eqIdx := strings.Index(clause, "=")
+	if eqIdx <= 0 {
+		return nil, false, nil
+	}
+	// Ignore >=, <=, !=, <>
+	if eqIdx > 0 {
+		prev := clause[eqIdx-1]
+		if prev == '!' || prev == '<' || prev == '>' {
+			return nil, false, nil
+		}
+	}
+	if eqIdx+1 < len(clause) {
+		next := clause[eqIdx+1]
+		if next == '=' {
+			return nil, false, nil
+		}
+	}
+
+	left := strings.TrimSpace(clause[:eqIdx])
+	right := strings.TrimSpace(clause[eqIdx+1:])
+	if left == "" || right == "" {
+		return nil, false, nil
+	}
+
+	kind := ""
+	varName := ""
+	lowerLeft := strings.ToLower(left)
+	switch {
+	case strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")"):
+		kind = "id"
+		varName = strings.TrimSpace(left[3 : len(left)-1])
+	case strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")"):
+		kind = "elementId"
+		varName = strings.TrimSpace(left[10 : len(left)-1])
+	default:
+		return nil, false, nil
+	}
+
+	if varName == "" || varName != nodePattern.variable {
+		return nil, false, nil
+	}
+
+	rawVal := e.parseValue(right)
+	idValue, ok := rawVal.(string)
+	if !ok || strings.TrimSpace(idValue) == "" {
+		return []*storage.Node{}, true, nil
+	}
+	idValue = strings.TrimSpace(idValue)
+
+	lookupID := idValue
+	if kind == "elementId" {
+		// Accept canonical element IDs ("4:<db>:<id>") by extracting the ID payload.
+		parts := strings.SplitN(idValue, ":", 3)
+		if len(parts) == 3 && parts[0] == "4" {
+			lookupID = parts[2]
+		}
+	}
+	// Be permissive for id(n) lookups that accidentally pass an elementId() value.
+	if strings.HasPrefix(lookupID, "4:") {
+		if parts := strings.SplitN(lookupID, ":", 3); len(parts) == 3 {
+			lookupID = parts[2]
+		}
+	}
+
+	node, err := e.storage.GetNode(storage.NodeID(lookupID))
+	if err != nil || node == nil {
+		return []*storage.Node{}, true, nil
+	}
+
+	if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+		return []*storage.Node{}, true, nil
+	}
+
+	if len(nodePattern.properties) > 0 {
+		for k, v := range nodePattern.properties {
+			if node.Properties[k] != v {
+				return []*storage.Node{}, true, nil
+			}
+		}
+	}
+
+	return []*storage.Node{node}, true, nil
+}
+
 // tryCollectNodesFromPropertyIndex attempts to satisfy MATCH node candidates from a schema property index.
 // It only applies to simple equality predicates:
 //   - <var>.<prop> = <value>

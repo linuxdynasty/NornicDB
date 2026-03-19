@@ -533,15 +533,21 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	streamingWhereApplied := false
 	if whereIdx > 0 {
 		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		if candidates, used, idxErr := e.tryCollectNodesFromIDEquality(nodePattern, wherePart); idxErr == nil && used {
+			nodes = candidates
+			usedPropertyIndex = true
+		}
 		inWherePart := wherePart
 		if rawWherePart != "" {
 			inWherePart = rawWherePart
 		}
-		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
-			nodes = candidates
-			usedPropertyIndex = true
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
 		}
-		if !hasAggregation && hasOrderBy && skip == 0 && limit > 0 && orderExprEarly != "" {
+		if !usedPropertyIndex && !hasAggregation && hasOrderBy && skip == 0 && limit > 0 && orderExprEarly != "" {
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNullOrderLimit(nodePattern, wherePart, orderExprEarly, limit); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
@@ -549,8 +555,8 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 				e.markOuterIndexTopKUsed()
 			}
 		}
-		if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
-			if !usedPropertyIndex {
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, wherePart); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
 			}
