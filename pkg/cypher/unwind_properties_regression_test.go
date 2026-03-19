@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateParsesBacktickedPropertyKeys(t *testing.T) {
@@ -395,4 +396,15 @@ func TestReplaceVariableInQuery_ForNestedMapPropertyAccess(t *testing.T) {
 	if !strings.Contains(out, "SET n = {") {
 		t.Fatalf("expected map literal substitution in query, got: %s", out)
 	}
+}
+
+func TestReplaceVariableInQuery_ReplacesScalarAcrossNewlinesAndPunctuation(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	query := "MATCH (o:OriginalText {__tmpJoinKey: k})\nMATCH (t:TranslatedText {__tmpJoinKey: k})\nRETURN count(*) AS c"
+	out := exec.replaceVariableInQuery(query, "k", "k1")
+	require.Contains(t, out, "__tmpJoinKey: 'k1'")
+	require.NotContains(t, out, "__tmpJoinKey: k")
 }

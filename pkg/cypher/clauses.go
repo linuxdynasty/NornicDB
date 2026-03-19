@@ -2348,33 +2348,81 @@ func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, 
 
 	// Convert to a Cypher literal so maps/lists remain valid expressions.
 	valueStr := e.valueToLiteral(value)
+	return replaceIdentifierOutsideQuotes(result, variable, valueStr)
+}
 
-	// Replace standalone variable references
-	// Need to be careful not to replace variable names that are part of other identifiers
-	// Use regex to match word boundaries for more accurate replacement
-	words := strings.Split(result, " ")
-	for i, word := range words {
-		// Remove common punctuation for comparison - include braces for property patterns like {name: name}
-		trimmed := strings.TrimRight(word, ",;)}]")
-		trimmed = strings.TrimLeft(trimmed, "({[")
-		if trimmed == variable {
-			// Replace the variable but preserve surrounding punctuation
-			prefix := ""
-			suffix := ""
-			// Find where the variable actually starts/ends in the word
-			varIdx := strings.Index(word, variable)
-			if varIdx > 0 {
-				prefix = word[:varIdx]
+func replaceIdentifierOutsideQuotes(input string, ident string, replacement string) string {
+	if ident == "" {
+		return input
+	}
+	var b strings.Builder
+	b.Grow(len(input) + 16)
+
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	for i := 0; i < len(input); {
+		ch := input[i]
+		switch {
+		case inSingle:
+			b.WriteByte(ch)
+			i++
+			if ch == '\'' {
+				inSingle = false
 			}
-			if varIdx >= 0 && varIdx+len(variable) < len(word) {
-				suffix = word[varIdx+len(variable):]
+			continue
+		case inDouble:
+			b.WriteByte(ch)
+			i++
+			if ch == '"' {
+				inDouble = false
 			}
-			words[i] = prefix + valueStr + suffix
+			continue
+		case inBacktick:
+			b.WriteByte(ch)
+			i++
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		if ch == '\'' {
+			inSingle = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+
+		if !isIdentByte(ch) {
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		start := i
+		for i < len(input) && isIdentByte(input[i]) {
+			i++
+		}
+		token := input[start:i]
+		if token == ident {
+			b.WriteString(replacement)
+		} else {
+			b.WriteString(token)
 		}
 	}
-	result = strings.Join(words, " ")
-
-	return result
+	return b.String()
 }
 
 func toStringAnyMap(value interface{}) (map[string]interface{}, bool) {
