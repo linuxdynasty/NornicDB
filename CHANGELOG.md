@@ -9,7 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [1.0.22] - 2026-03-19
+## [v1.0.23] - 2026-03-19
+
+### Changed
+
+- **Docker image defaults (BGE variants)**:
+  - reranking is now disabled by default in BGE-enabled image definitions to reduce unexpected startup/runtime overhead
+- **Relationship MATCH execution path**:
+  - added safer early `LIMIT` short-circuiting for eligible relationship traversal shapes
+  - improved start-node pruning via property indexes for common predicate patterns (including `IS NOT NULL`).
+
+### Fixed
+
+- **Index reliability after restart**:
+  - fixed persisted schema cache rebuild so property/composite index entries are restored on startup, not just schema metadata
+  - addresses cases where indexes appeared present (`SHOW INDEXES`) but behaved inconsistently until recreated.
+- **Cypher DDL compatibility and robustness**:
+  - fixed parsing/normalization for broader valid DDL forms, including backtick identifiers, trailing `OPTIONS`, and `DROP CONSTRAINT ... IF EXISTS` variants
+  - improved cache invalidation behavior after schema drops to prevent stale execution decisions.
+
+### Tests
+
+- Added regression tests for:
+  - relationship traversal early-limit short-circuit behavior
+  - indexed relationship start-node pruning paths
+  - DDL parsing compatibility variants
+  - index usability persistence across engine restart.
+
+### Technical Details
+
+- **Range covered**: `v1.0.22..HEAD`
+- **Commits in range**: 3 (non-merge)
+- **Repository delta**: 15 files changed, +481 / -88 lines
+- **Primary focus areas**: index persistence correctness, DDL compatibility hardening, relationship-match execution efficiency, and conservative search default behavior in BGE images.
+
+## [v1.0.22] - 2026-03-19
 
 ### Added
 
@@ -46,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Repository delta**: 15 files changed, +2,799 / -116 lines
 - **Primary focus areas**: Cypher write-path reliability, correlated `UNWIND` routing correctness, `MATCH...CREATE` join-path performance, and aggregation result-shape determinism.
 
-## [1.0.20] - 2026-03-18
+## [v1.0.20] - 2026-03-18
 
 ### Added
 
@@ -104,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 36 files
 - **Primary focus areas**: Fabric/Cypher correlated-join performance, index-driven hot paths, cache safety for remote constituents, deterministic search behavior, and roadmap/planning documentation updates.
 
-## [1.0.19] - 2026-03-17
+## [v1.0.19] - 2026-03-17
 
 ### Added
 
@@ -143,7 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 22 files
 - **Primary focus areas**: per-DB rerank correctness, Browser multi-statement UX, Cypher/Fabric hardening, storage regression coverage, and Infinigraph implementation documentation.
 
-## [1.0.18] - 2026-03-16
+## [v1.0.18] - 2026-03-16
 
 ### Added
 
@@ -181,7 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 9 files
 - **Primary focus areas**: env-var documentation, log lifecycle controls, Fabric/Cypher deterministic test expansion, truncation correctness, and release/readme metadata refresh.
 
-## [1.0.17] - 2026-03-14
+## [v1.0.17] - 2026-03-14
 
 ### Added
 
@@ -222,7 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 67 files
 - **Primary focus areas**: Fabric/composite execution, remote constituent routing, transaction/protocol parity, multidatabase stats/UI, planner/executor performance.
 
-## [1.0.16] - 2026-03-12
+## [v1.0.16] - 2026-03-12
 
 ### Changed
 
@@ -261,7 +295,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 20 files
 - **Primary focus areas**: Cypher correctness/compatibility, index semantics, deterministic coverage expansion, UI routing compatibility, Heimdall model-source resiliency.
 
-## [1.0.15] - 2026-03-10
+## [v1.0.15] - 2026-03-10
 
 ### Added
 
@@ -304,7 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-test surface changed**: 42 files, +1,257 / -490 lines
 - **Primary focus areas**: CI/CD + coverage pipeline hardening, Cypher compatibility/correctness fixes, search/build concurrency stabilization, UI embedding reliability.
 
-## [1.0.14] - 2026-03-07
+## [v1.0.14] - 2026-03-07
 
 ### Changed
 
@@ -337,7 +371,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Statistics**: 30 commits, 341 files changed, +23,539 / -4,441 lines.
 - **Primary focus areas**: Cypher procedure compatibility, CI/CD and Docker release automation, storage/MCP hardening, and large regression-coverage expansion.
 
-## [1.0.13] - 2026-03-04
+## [v1.0.13] - 2026-03-04
 
 ### Added
 
@@ -365,7 +399,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Statistics**: 7 commits.
 - **Key areas touched**: `pkg/cypher/*`, `pkg/storage/*`, `pkg/nornicdb/*`, query cache policy.
 
-## [1.0.12-hotfix] - 2026-02-28
+## [v1.0.12-hotfix] - 2026-02-28
 
 ### Added
 
@@ -381,7 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker / llama.cpp crash**: Fixed header overwrite issue that could cause SIGSEGV in Docker builds.
 - **Windows build reliability**: Fixed Windows build path issues for the hotfix release.
 
-## [1.0.12-preview] - 2026-02-20
+## [v1.0.12-preview] - 2026-02-20
 
 ### Added
 
@@ -466,7 +500,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.11] - 2026-01-27
+## [v1.0.11] - 2026-01-27
 
 ### Added
 
@@ -689,7 +723,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added: `pkg/qdrantgrpc/*`, `pkg/nornicgrpc/*`, `pkg/vectorspace/*`, `pkg/cypher/call_temporal.go`, `pkg/cypher/call_txlog.go`, `pkg/storage/receipt.go`, `pkg/storage/temporal_constraint.go`, `pkg/storage/schema_persistence.go`, `pkg/storage/wal_repair.go`, `pkg/storage/wal_segments.go`, `pkg/search/vector_pipeline.go`, `pkg/search/hnsw_config.go`, `pkg/simd/neon_simd*.go`, `docs/user-guides/qdrant-grpc.md`, `docs/user-guides/canonical-graph-ledger.md`, `docs/user-guides/property-data-types.md`
 - Modified: `pkg/cypher/*`, `pkg/storage/*`, `pkg/search/*`, `pkg/replication/*`, `pkg/auth/*`, `pkg/bolt/*`, `pkg/server/*`, `pkg/nornicdb/*`, `ui/*`
 
-## [1.0.10] - 2025-12-21
+## [v1.0.10] - 2025-12-21
 
 ### Added
 
@@ -767,7 +801,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 172 lines of new configuration tests
 - Improved WAL test reliability (increased sleep timing)
 
-## [1.0.9] - 2025-12-16 - GraphQL API & Neo4j Compatibility Improvements
+## [v1.0.9] - 2025-12-16 - GraphQL API & Neo4j Compatibility Improvements
 
 Features:
 
@@ -796,7 +830,7 @@ Docs:
 - Add GraphQL README with usage examples
 - Add QUERIES.md with sample GraphQL operations
 
-## [1.0.8] - 2025-12-15
+## [v1.0.8] - 2025-12-15
 
 ### Added
 
@@ -836,7 +870,7 @@ Docs:
 - 27,000+ lines of ANTLR-generated parser code
 - Metal shader implementation for GPU-accelerated SIMD on macOS
 
-## [1.0.7] - 2025-12-14
+## [v1.0.7] - 2025-12-14
 
 ### Added
 
@@ -855,7 +889,7 @@ Docs:
 
 - Commits included: `bc38eb3` (node/edge return serialization), `ef8f07e` (integer compatibility), `f24825a`/`436ce36` (docs/Makefile Vulkan targets and `DIY.md`).
 
-## [1.0.6] - 2025-12-12
+## [v1.0.6] - 2025-12-12
 
 ### Added
 
@@ -887,7 +921,7 @@ Docs:
 
 - All package tests pass; example test output excerpts:
 
-## [1.0.5] - 2025-12-10
+## [v1.0.5] - 2025-12-10
 
 ### Fixed
 
@@ -943,7 +977,7 @@ Docs:
 - Added comprehensive logging and debugging to trace count calculation flow
 - Production issue validated as fixed: 234 nodes now counted correctly after delete+reimport
 
-## [1.0.4] - 2025-12-10
+## [v1.0.4] - 2025-12-10
 
 ### Fixed
 
@@ -1022,7 +1056,7 @@ Docs:
 - Fixed `TestUnwindWithCreate/UNWIND_CREATE_with_RETURN` - Returns actual values, not variable names
 - Cartesian product patterns now pass all Northwind benchmark compatibility tests
 
-## [1.0.3] - 2025-12-09
+## [v1.0.3] - 2025-12-09
 
 ### Fixed
 
@@ -1055,7 +1089,7 @@ Docs:
   - Tests section extraction, boolean parsing, string parsing
   - Validates against actual `~/.nornicdb/config.yaml` file
 
-## [1.0.2] - 2025-01-27
+## [v1.0.2] - 2025-01-27
 
 ### Added
 
@@ -1084,7 +1118,7 @@ Docs:
 - CUDA Dockerfile fixes for improved GPU support
 - Documentation link fixes
 
-## [1.0.1] - 2025-12-08
+## [v1.0.1] - 2025-12-08
 
 ### Added
 
@@ -1105,7 +1139,7 @@ Docs:
 - Prevent server autostart before wizard (plist created/loaded only after wizard save/start).
 - Heimdall env override test; flexible boolean parsing for read-only; duration parsing for legacy env names.
 
-## [1.0.0] - 2024-12-06
+## [v1.0.0] - 2024-12-06
 
 ### Changed
 
@@ -1199,14 +1233,14 @@ See [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contr
 
 ---
 
-[1.0.13]: https://github.com/orneryd/NornicDB/compare/v1.0.12-hotfix...v1.0.13
-[1.0.14]: https://github.com/orneryd/NornicDB/compare/v1.0.13...v1.0.14
-[1.0.12-hotfix]: https://github.com/orneryd/NornicDB/compare/v1.0.12...v1.0.12-hotfix
-[1.0.12]: https://github.com/orneryd/NornicDB/compare/v1.0.12-preview...v1.0.12
-[1.0.12-preview]: https://github.com/orneryd/NornicDB/compare/v1.0.11...v1.0.12-preview
-[1.0.11]: https://github.com/orneryd/NornicDB/compare/v1.0.10...v1.0.11
-[1.0.10]: https://github.com/orneryd/NornicDB/compare/v1.0.9...v1.0.10
-[1.0.9]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.9
-[1.0.6]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.6
-[1.0.1]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.1
-[1.0.0]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.0
+[v1.0.13]: https://github.com/orneryd/NornicDB/compare/v1.0.12-hotfix...v1.0.13
+[v1.0.14]: https://github.com/orneryd/NornicDB/compare/v1.0.13...v1.0.14
+[v1.0.12-hotfix]: https://github.com/orneryd/NornicDB/compare/v1.0.12...v1.0.12-hotfix
+[v1.0.12]: https://github.com/orneryd/NornicDB/compare/v1.0.12-preview...v1.0.12
+[v1.0.12-preview]: https://github.com/orneryd/NornicDB/compare/v1.0.11...v1.0.12-preview
+[v1.0.11]: https://github.com/orneryd/NornicDB/compare/v1.0.10...v1.0.11
+[v1.0.10]: https://github.com/orneryd/NornicDB/compare/v1.0.9...v1.0.10
+[v1.0.9]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.9
+[v1.0.6]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.6
+[v1.0.1]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.1
+[v1.0.0]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.0
