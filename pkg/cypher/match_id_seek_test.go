@@ -37,6 +37,31 @@ func TestMatchWhereIDEquality_UsesDirectLookupWithoutAllNodesScan(t *testing.T) 
 	require.Equal(t, "prompt text", res.Rows[0][0])
 }
 
+func TestMatchWhereIDEquality_AcceptsCanonicalElementIDString(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(ns)
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "raw-id-1",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "prompt text"},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+		MATCH (n)
+		WHERE id(n) = "4:nornicdb:raw-id-1"
+		RETURN n.text AS text
+		LIMIT 1
+	`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"text"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "prompt text", res.Rows[0][0])
+}
+
 func TestMatchWhereElementIDEquality_UsesDirectLookupWithoutAllNodesScan(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	ns := storage.NewNamespacedEngine(base, "test")

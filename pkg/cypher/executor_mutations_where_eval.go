@@ -1,7 +1,6 @@
 package cypher
 
 import (
-	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -441,8 +440,8 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		// Extract variable name from id(varName)
 		idVar := strings.TrimSpace(left[3 : len(left)-1])
 		if idVar == variable {
-			// Compare node ID with expected value
-			expectedVal := e.parseValue(right)
+			// Normalize expected value once to raw internal ID for comparison.
+			expectedVal := normalizeNodeIDValue(e.parseValue(right))
 			actualId := string(node.ID)
 			switch op {
 			case "=":
@@ -461,16 +460,14 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		// Extract variable name from elementId(varName)
 		idVar := strings.TrimSpace(left[10 : len(left)-1])
 		if idVar == variable {
-			// Compare node ID with expected value
-			expectedVal := e.parseValue(right)
+			// Normalize expected value once to raw internal ID for comparison.
+			expectedVal := normalizeNodeIDValue(e.parseValue(right))
 			actualId := string(node.ID)
-			actualElementID := fmt.Sprintf("4:nornicdb:%s", actualId)
 			switch op {
 			case "=":
-				// Accept either elementId-style or raw internal ID
-				return e.compareEqual(actualElementID, expectedVal) || e.compareEqual(actualId, expectedVal)
+				return e.compareEqual(actualId, expectedVal)
 			case "<>", "!=":
-				return !e.compareEqual(actualElementID, expectedVal) && !e.compareEqual(actualId, expectedVal)
+				return !e.compareEqual(actualId, expectedVal)
 			default:
 				return true
 			}
@@ -566,6 +563,23 @@ func containsFold(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeNodeIDValue converts canonical element ID strings to raw internal IDs.
+// Examples:
+// - "4:nornicdb:abc-123" -> "abc-123"
+// - "abc-123" -> "abc-123"
+func normalizeNodeIDValue(v interface{}) interface{} {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	s = strings.TrimSpace(s)
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) == 3 && parts[0] == "4" {
+		return parts[2]
+	}
+	return s
 }
 
 // evaluateWhereAsBoolean evaluates a WHERE expression (e.g. size(n.content) > 10000, exists(n.prop))
