@@ -449,11 +449,6 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				return nil, fmt.Errorf("failed to parse UNION branches in correlated CALL subquery")
 			}
 
-			seedResult := &ExecuteResult{
-				Columns: []string{nodePattern.variable},
-				Rows:    [][]interface{}{{seedNode}},
-			}
-
 			var perSeed *ExecuteResult
 			seen := make(map[string]bool)
 			for i, branch := range branches {
@@ -469,7 +464,28 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 				var branchResult *ExecuteResult
 				if hasWith {
-					branchResult, err = subqueryExecutor.executeCorrelatedCallWithSeedRows(ctx, seedResult, innerBody, withVars)
+					branchBody := innerBody
+					branchParams := map[string]interface{}{}
+					bindClauses := make([]string, 0, len(withVars))
+					bindVars := make([]string, 0, len(withVars))
+					for _, varName := range withVars {
+						// WITH-imported vars that are never referenced in the branch body
+						// don't require correlation binds.
+						if !isIdentifierReferenced(branchBody, varName) {
+							continue
+						}
+						if varName != nodePattern.variable {
+							return nil, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", varName)
+						}
+						pname := "__seed_id_" + varName
+						branchParams[pname] = seedID
+						bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
+						bindVars = append(bindVars, varName)
+					}
+					if len(bindClauses) > 0 {
+						branchBody = strings.Join(bindClauses, " ") + " WITH " + strings.Join(bindVars, ", ") + " " + branchBody
+					}
+					branchResult, err = subqueryExecutor.executeInternal(ctx, branchBody, branchParams)
 				} else {
 					branchResult, err = subqueryExecutor.executeInternal(ctx, innerBody, nil)
 				}
@@ -1349,6 +1365,8 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 	for _, seedRow := range seedResult.Rows {
 		params := make(map[string]interface{}, len(importVars))
 		correlatedBody := innerBody
+		nodeBindClauses := make([]string, 0, len(importVars))
+		nodeBindVars := make([]string, 0, len(importVars))
 		for _, varName := range importVars {
 			idx, ok := colMap[varName]
 			if !ok {
@@ -1357,8 +1375,23 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 			if idx < 0 || idx >= len(seedRow) {
 				return nil, fmt.Errorf("CALL subquery seed row missing variable: %s", varName)
 			}
-			params[varName] = seedRow[idx]
+			seedVal := seedRow[idx]
+			if node, ok := seedVal.(*storage.Node); ok && node != nil {
+				pname := "__seed_id_" + varName
+				params[pname] = string(node.ID)
+				nodeBindClauses = append(nodeBindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
+				nodeBindVars = append(nodeBindVars, varName)
+				continue
+			}
+			params[varName] = seedVal
 			correlatedBody = replaceStandaloneCypherIdentifier(correlatedBody, varName, "$"+varName)
+		}
+		if len(nodeBindClauses) > 0 {
+			prefix := strings.Join(nodeBindClauses, " ")
+			if len(nodeBindVars) > 0 {
+				prefix += " WITH " + strings.Join(nodeBindVars, ", ")
+			}
+			correlatedBody = prefix + " " + correlatedBody
 		}
 
 		innerRes, err := e.executeInternal(ctx, correlatedBody, params)

@@ -2438,7 +2438,7 @@ func TestSubqueryHelpers_ExecuteMatchWithCallSubquery_Branches(t *testing.T) {
 	// No seed nodes branch.
 	emptyRes, err := exec.executeMatchWithCallSubquery(ctx, "MATCH (seed:Person) WHERE seed.name = 'none' CALL { WITH seed RETURN seed } RETURN seed")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"seed", "neighbors"}, emptyRes.Columns)
+	assert.Equal(t, []string{"seed"}, emptyRes.Columns)
 	assert.Empty(t, emptyRes.Rows)
 
 	_, err = eng.CreateNode(&storage.Node{ID: "p1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "alice"}})
@@ -2654,6 +2654,33 @@ RETURN systemPrompt
 	require.NoError(t, err)
 	require.Equal(t, []string{"systemPrompt"}, result.Columns)
 	require.Len(t, result.Rows, 0)
+}
+
+func TestExecute_MatchWithCallSubquery_NodeImportProjectsProperty(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'this is a system prompt'})
+	`, nil)
+	require.NoError(t, err)
+
+	query := `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN p.text AS systemPrompt
+}
+RETURN systemPrompt
+`
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"systemPrompt"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "this is a system prompt", result.Rows[0][0])
 }
 
 func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {
