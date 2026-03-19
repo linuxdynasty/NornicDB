@@ -265,6 +265,22 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 	// Extract MATCH clause
 	matchClause := strings.TrimSpace(cypher[matchIdx:mergeIdx])
 	mergeClause := strings.TrimSpace(cypher[mergeIdx:])
+	returnIdxInMerge := findKeywordIndex(mergeClause, "RETURN")
+	aggregateCountOnly := false
+	aggregateCountAlias := "count(*)"
+	if returnIdxInMerge > 0 {
+		returnPart := strings.TrimSpace(mergeClause[returnIdxInMerge+len("RETURN"):])
+		items := e.parseReturnItems(returnPart)
+		if len(items) == 1 {
+			expr := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(items[0].expr), " ", ""))
+			if expr == "COUNT(*)" {
+				aggregateCountOnly = true
+				if items[0].alias != "" {
+					aggregateCountAlias = items[0].alias
+				}
+			}
+		}
+	}
 
 	// Execute MATCH to get context
 	matchedNodes, matchedRels, err := e.executeMatchForContext(ctx, matchClause)
@@ -274,6 +290,13 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 
 	// If no matches found and not OPTIONAL MATCH, return empty
 	if len(matchedNodes) == 0 && findKeywordIndex(cypher, "OPTIONAL MATCH") == -1 {
+		if aggregateCountOnly {
+			return &ExecuteResult{
+				Columns: []string{aggregateCountAlias},
+				Rows:    [][]interface{}{{int64(0)}},
+				Stats:   result.Stats,
+			}, nil
+		}
 		return result, nil
 	}
 
@@ -295,7 +318,9 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 		if len(mergeResult.Columns) > 0 && len(result.Columns) == 0 {
 			result.Columns = mergeResult.Columns
 		}
-		result.Rows = append(result.Rows, mergeResult.Rows...)
+		if !aggregateCountOnly {
+			result.Rows = append(result.Rows, mergeResult.Rows...)
+		}
 	}
 
 	// If no matched nodes but had OPTIONAL MATCH, still try to execute MERGE
@@ -305,6 +330,26 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 			return nil, err
 		}
 		result = mergeResult
+	}
+	if aggregateCountOnly {
+		countValue := int64(len(matchedNodes))
+		countQuery := strings.TrimSpace(matchClause) + " RETURN count(*) AS " + aggregateCountAlias
+		if countRes, err := e.executeMatch(ctx, countQuery); err == nil {
+			if len(countRes.Rows) > 0 && len(countRes.Rows[0]) > 0 {
+				switch v := countRes.Rows[0][0].(type) {
+				case int:
+					countValue = int64(v)
+				case int32:
+					countValue = int64(v)
+				case int64:
+					countValue = v
+				case float64:
+					countValue = int64(v)
+				}
+			}
+		}
+		result.Columns = []string{aggregateCountAlias}
+		result.Rows = [][]interface{}{{countValue}}
 	}
 
 	return result, nil
@@ -317,10 +362,8 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 	relMatches := make(map[string]*storage.Edge)
 	store := e.getStorage(ctx)
 
-	upper := strings.ToUpper(matchClause)
-
-	// Find WHERE clause if present
-	whereIdx := strings.Index(upper, " WHERE ")
+	// Find WHERE clause if present (newline/tab tolerant).
+	whereIdx := findKeywordIndex(matchClause, "WHERE")
 	var patternPart string
 
 	if whereIdx > 0 {
@@ -389,25 +432,10 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 
 	// Apply WHERE clause to each combination
 	if whereIdx > 0 {
-		wherePart := matchClause[whereIdx+7:]
+		wherePart := strings.TrimSpace(matchClause[whereIdx+len("WHERE"):])
 		var filtered []map[string]*storage.Node
 		for _, nodeMap := range allMatches {
-			matches := true
-			for varName, node := range nodeMap {
-				if !e.evaluateWhere(node, varName, wherePart) {
-					// Check if WHERE references this variable (property access, function call, or direct reference)
-					lowerWhere := strings.ToLower(wherePart)
-					refsVar := strings.Contains(wherePart, varName+".") ||
-						strings.Contains(wherePart, varName+" ") ||
-						strings.Contains(lowerWhere, "id("+varName+")") ||
-						strings.Contains(lowerWhere, "elementid("+varName+")")
-					if refsVar {
-						matches = false
-						break
-					}
-				}
-			}
-			if matches {
+			if e.evaluateWhereForNodeMap(nodeMap, wherePart) {
 				filtered = append(filtered, nodeMap)
 			}
 		}
@@ -415,6 +443,138 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 	}
 
 	return allMatches, relMatches, nil
+}
+
+func (e *StorageExecutor) evaluateWhereForNodeMap(nodeMap map[string]*storage.Node, wherePart string) bool {
+	wherePart = strings.Join(strings.Fields(strings.TrimSpace(wherePart)), " ")
+	if wherePart == "" {
+		return true
+	}
+	if andIdx := findTopLevelKeyword(wherePart, " AND "); andIdx > 0 {
+		left := strings.TrimSpace(wherePart[:andIdx])
+		right := strings.TrimSpace(wherePart[andIdx+5:])
+		return e.evaluateWhereForNodeMap(nodeMap, left) && e.evaluateWhereForNodeMap(nodeMap, right)
+	}
+	if handled, ok := e.evaluateSimpleWhereClauseForNodeMap(nodeMap, wherePart); handled {
+		return ok
+	}
+	for varName, node := range nodeMap {
+		if node == nil {
+			continue
+		}
+		if !e.evaluateWhere(node, varName, wherePart) {
+			lowerWhere := strings.ToLower(wherePart)
+			refsVar := strings.Contains(wherePart, varName+".") ||
+				strings.Contains(wherePart, varName+" ") ||
+				strings.Contains(lowerWhere, "id("+varName+")") ||
+				strings.Contains(lowerWhere, "elementid("+varName+")")
+			if refsVar {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (e *StorageExecutor) evaluateSimpleWhereClauseForNodeMap(nodeMap map[string]*storage.Node, clause string) (bool, bool) {
+	clause = strings.TrimSpace(clause)
+	if clause == "" {
+		return true, true
+	}
+	upper := strings.ToUpper(clause)
+	if inIdx := strings.Index(upper, " IN "); inIdx > 0 {
+		left := strings.TrimSpace(clause[:inIdx])
+		right := strings.TrimSpace(clause[inIdx+4:])
+		lv, lok := lookupNodeMapProperty(nodeMap, left)
+		if !lok {
+			return false, false
+		}
+		rv := e.evaluateExpressionWithContext(right, nodeMap, make(map[string]*storage.Edge))
+		items, ok := normalizeWhereList(rv)
+		if !ok {
+			return true, false
+		}
+		for _, it := range items {
+			if e.compareEqual(lv, it) {
+				return true, true
+			}
+		}
+		return true, false
+	}
+	if eqIdx := strings.Index(clause, "="); eqIdx > 0 &&
+		!strings.Contains(clause, ">=") &&
+		!strings.Contains(clause, "<=") &&
+		!strings.Contains(clause, "!=") &&
+		!strings.Contains(clause, "<>") {
+		left := strings.TrimSpace(clause[:eqIdx])
+		right := strings.TrimSpace(clause[eqIdx+1:])
+		lv, lok := lookupNodeMapProperty(nodeMap, left)
+		rv, rok := lookupNodeMapProperty(nodeMap, right)
+		switch {
+		case lok && rok:
+			return true, e.compareEqual(lv, rv)
+		case lok:
+			rvExpr := e.evaluateExpressionWithContext(right, nodeMap, make(map[string]*storage.Edge))
+			return true, e.compareEqual(lv, rvExpr)
+		case rok:
+			lvExpr := e.evaluateExpressionWithContext(left, nodeMap, make(map[string]*storage.Edge))
+			return true, e.compareEqual(lvExpr, rv)
+		default:
+			return false, false
+		}
+	}
+	return false, false
+}
+
+func lookupNodeMapProperty(nodeMap map[string]*storage.Node, expr string) (interface{}, bool) {
+	parts := strings.SplitN(strings.TrimSpace(expr), ".", 2)
+	if len(parts) != 2 {
+		return nil, false
+	}
+	v := strings.TrimSpace(parts[0])
+	p := strings.TrimSpace(parts[1])
+	n, ok := nodeMap[v]
+	if !ok || n == nil {
+		return nil, false
+	}
+	val, exists := n.Properties[p]
+	if !exists {
+		return nil, false
+	}
+	return val, true
+}
+
+func normalizeWhereList(v interface{}) ([]interface{}, bool) {
+	switch t := v.(type) {
+	case []interface{}:
+		return t, true
+	case []string:
+		out := make([]interface{}, 0, len(t))
+		for _, x := range t {
+			out = append(out, x)
+		}
+		return out, true
+	case []int:
+		out := make([]interface{}, 0, len(t))
+		for _, x := range t {
+			out = append(out, x)
+		}
+		return out, true
+	case []int64:
+		out := make([]interface{}, 0, len(t))
+		for _, x := range t {
+			out = append(out, x)
+		}
+		return out, true
+	case []float64:
+		out := make([]interface{}, 0, len(t))
+		for _, x := range t {
+			out = append(out, x)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // executeMatchForContextWithRelationships handles MATCH patterns that include relationships.

@@ -1322,6 +1322,303 @@ func TestRemoveWithReturn(t *testing.T) {
 	t.Logf("REMOVE with RETURN result: %d rows", len(result.Rows))
 }
 
+func TestSetThenRemoveLabel_SameQuery(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	node := &storage.Node{
+		ID:     "set-remove-label",
+		Labels: []string{"Base", "MongoDocument"},
+		Properties: map[string]interface{}{
+			"name": "x",
+		},
+	}
+	if _, err := store.CreateNode(node); err != nil {
+		t.Fatalf("Failed to create node: %v", err)
+	}
+
+	_, err := e.Execute(ctx, "MATCH (n:Base) SET n:OriginalText REMOVE n:MongoDocument RETURN n", nil)
+	if err != nil {
+		t.Fatalf("SET ... REMOVE label failed: %v", err)
+	}
+
+	updated, err := store.GetNode("set-remove-label")
+	if err != nil {
+		t.Fatalf("Failed to reload node: %v", err)
+	}
+	hasOriginal := false
+	hasLegacy := false
+	for _, l := range updated.Labels {
+		if l == "OriginalText" {
+			hasOriginal = true
+		}
+		if l == "MongoDocument" {
+			hasLegacy = true
+		}
+	}
+	if !hasOriginal {
+		t.Fatalf("expected OriginalText label to be present, got labels=%v", updated.Labels)
+	}
+	if hasLegacy {
+		t.Fatalf("expected MongoDocument label to be removed, got labels=%v", updated.Labels)
+	}
+}
+
+func TestRemoveLabelOnly(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	node := &storage.Node{
+		ID:     "remove-label-only",
+		Labels: []string{"OriginalText", "MongoDocument"},
+		Properties: map[string]interface{}{
+			"originalText": "hello",
+		},
+	}
+	if _, err := store.CreateNode(node); err != nil {
+		t.Fatalf("Failed to create node: %v", err)
+	}
+
+	_, err := e.Execute(ctx, "MATCH (n:OriginalText) REMOVE n:MongoDocument RETURN n", nil)
+	if err != nil {
+		t.Fatalf("REMOVE label failed: %v", err)
+	}
+
+	updated, err := store.GetNode("remove-label-only")
+	if err != nil {
+		t.Fatalf("Failed to reload node: %v", err)
+	}
+	for _, l := range updated.Labels {
+		if l == "MongoDocument" {
+			t.Fatalf("MongoDocument label should be removed, got labels=%v", updated.Labels)
+		}
+	}
+}
+
+func TestBatchRelationshipMergeWithUnwindKeys(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o-2",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o-2 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t-2",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t-2 failed: %v", err)
+	}
+
+	query := `
+UNWIND $keys AS join_key
+MATCH (o:OriginalText)
+WHERE o.__tmpJoinKey = join_key
+MATCH (t:TranslatedText)
+WHERE t.__tmpJoinKey = join_key
+MERGE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS c
+`
+	params := map[string]interface{}{"keys": []interface{}{"k1", "k2"}}
+	if _, err := e.Execute(ctx, query, params); err != nil {
+		t.Fatalf("batch unwind merge failed: %v", err)
+	}
+
+	verify, err := e.Execute(ctx, "MATCH (:OriginalText)-[r:TRANSLATES_TO]->(:TranslatedText) RETURN count(r) AS c", nil)
+	if err != nil {
+		t.Fatalf("verify relationship count failed: %v", err)
+	}
+	if len(verify.Rows) != 1 || len(verify.Rows[0]) != 1 {
+		t.Fatalf("unexpected verify shape: %+v", verify.Rows)
+	}
+	if got, ok := verify.Rows[0][0].(int64); !ok || got != 2 {
+		t.Fatalf("expected 2 TRANSLATES_TO edges, got %#v", verify.Rows[0][0])
+	}
+}
+
+func TestBatchRelationshipMergeWithMatchInKeys(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o2-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o2-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o2-2",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o2-2 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t2-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t2-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t2-2",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t2-2 failed: %v", err)
+	}
+
+	query := `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE o.__tmpJoinKey IN $keys
+  AND t.__tmpJoinKey = o.__tmpJoinKey
+MERGE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS matched_pairs
+`
+	params := map[string]interface{}{"keys": []interface{}{"k1", "k2"}}
+	if _, err := e.Execute(ctx, query, params); err != nil {
+		t.Fatalf("batch match-in merge failed: %v", err)
+	}
+
+	verify, err := e.Execute(ctx, "MATCH (:OriginalText)-[r:TRANSLATES_TO]->(:TranslatedText) RETURN count(r) AS c", nil)
+	if err != nil {
+		t.Fatalf("verify relationship count failed: %v", err)
+	}
+	if len(verify.Rows) != 1 || len(verify.Rows[0]) != 1 {
+		t.Fatalf("unexpected verify shape: %+v", verify.Rows)
+	}
+	if got, ok := verify.Rows[0][0].(int64); !ok || got != 2 {
+		t.Fatalf("expected 2 TRANSLATES_TO edges, got %#v", verify.Rows[0][0])
+	}
+}
+
+func TestBatchRelationshipCreateWithMatchInKeys(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o3-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o3-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o3-2",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create o3-2 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t3-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t3-1 failed: %v", err)
+	}
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t3-2",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"__tmpJoinKey": "k2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create t3-2 failed: %v", err)
+	}
+
+	query := `
+MATCH (o:OriginalText), (t:TranslatedText)
+WHERE o.__tmpJoinKey IN $keys
+  AND t.__tmpJoinKey = o.__tmpJoinKey
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS matched_pairs
+`
+	params := map[string]interface{}{"keys": []interface{}{"k1", "k2"}}
+	if _, err := e.Execute(ctx, query, params); err != nil {
+		t.Fatalf("batch match-in create failed: %v", err)
+	}
+
+	verify, err := e.Execute(ctx, "MATCH (:OriginalText)-[r:TRANSLATES_TO]->(:TranslatedText) RETURN count(r) AS c", nil)
+	if err != nil {
+		t.Fatalf("verify relationship count failed: %v", err)
+	}
+	if len(verify.Rows) != 1 || len(verify.Rows[0]) != 1 {
+		t.Fatalf("unexpected verify shape: %+v", verify.Rows)
+	}
+	if got, ok := verify.Rows[0][0].(int64); !ok || got != 2 {
+		t.Fatalf("expected 2 TRANSLATES_TO edges, got %#v", verify.Rows[0][0])
+	}
+}
+
 // ========================================
 // UNION Tests
 // ========================================

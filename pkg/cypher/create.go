@@ -1522,12 +1522,22 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				if returnPart != "" {
 					returnItems := e.parseReturnItems(returnPart)
 					result.Columns = make([]string, len(returnItems))
+					row := make([]interface{}, len(returnItems))
+					hasAggregate := false
 					for i, item := range returnItems {
 						if item.alias != "" {
 							result.Columns[i] = item.alias
 						} else {
 							result.Columns[i] = item.expr
 						}
+						upperExpr := strings.ToUpper(strings.TrimSpace(item.expr))
+						if strings.HasPrefix(upperExpr, "COUNT(") {
+							row[i] = int64(0)
+							hasAggregate = true
+						}
+					}
+					if hasAggregate {
+						result.Rows = [][]interface{}{row}
 					}
 				}
 				return result, nil
@@ -1785,6 +1795,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			upperExpr := strings.ToUpper(item.expr)
 			if strings.HasPrefix(upperExpr, "COUNT(") && deleteTarget != "" {
 				row[i] = int64(1) // count of deleted items
+				continue
+			}
+			if strings.HasPrefix(upperExpr, "COUNT(") {
+				row[i] = int64(len(allCombinations))
 				continue
 			}
 

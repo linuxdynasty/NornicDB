@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1262,8 +1263,90 @@ func (e *StorageExecutor) executeCartesianAggregation(
 
 // evaluateWhereForContext evaluates a WHERE clause against a node context
 func (e *StorageExecutor) evaluateWhereForContext(whereClause string, nodes map[string]*storage.Node) bool {
-	// Parse the WHERE clause and evaluate against the node context
-	result := e.evaluateExpressionWithContext(whereClause, nodes, nil)
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return true
+	}
+	if hasPrefixFold(clause, "NOT ") {
+		return !e.evaluateWhereForContext(strings.TrimSpace(clause[4:]), nodes)
+	}
+
+	// Handle top-level conjunction/disjunction explicitly so each side can use
+	// the single-variable WHERE evaluator (supports relationship predicates).
+	if andIdx := findTopLevelKeyword(clause, " AND "); andIdx > 0 {
+		left := strings.TrimSpace(clause[:andIdx])
+		right := strings.TrimSpace(clause[andIdx+5:])
+		return e.evaluateWhereForContext(left, nodes) && e.evaluateWhereForContext(right, nodes)
+	}
+	if orIdx := findTopLevelKeyword(clause, " OR "); orIdx > 0 {
+		left := strings.TrimSpace(clause[:orIdx])
+		right := strings.TrimSpace(clause[orIdx+4:])
+		return e.evaluateWhereForContext(left, nodes) || e.evaluateWhereForContext(right, nodes)
+	}
+
+	// If this clause references exactly one bound variable, route through
+	// evaluateWhere to preserve semantics like NOT (n)-[:TYPE]->().
+	referenced := ""
+	for varName := range nodes {
+		if strings.Contains(clause, "("+varName+")") ||
+			strings.Contains(clause, "("+varName+":") ||
+			strings.Contains(clause, varName+".") ||
+			strings.HasPrefix(clause, varName+")") ||
+			strings.HasPrefix(clause, varName+":") {
+			if referenced != "" && referenced != varName {
+				referenced = "__multi__"
+				break
+			}
+			referenced = varName
+		}
+	}
+	if referenced != "" && referenced != "__multi__" {
+		if node := nodes[referenced]; node != nil {
+			return e.evaluateWhere(node, referenced, clause)
+		}
+	}
+
+	// Relationship existence predicate across two bound variables:
+	// (a)-[:TYPE]->(b) or (a)<-[:TYPE]-(b)
+	relForwardRe := regexp.MustCompile(`^\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$`)
+	if m := relForwardRe.FindStringSubmatch(clause); len(m) == 4 {
+		start := nodes[m[1]]
+		end := nodes[m[3]]
+		if start == nil || end == nil {
+			return false
+		}
+		outEdges, err := e.storage.GetOutgoingEdges(start.ID)
+		if err != nil {
+			return false
+		}
+		for _, edge := range outEdges {
+			if edge != nil && edge.Type == m[2] && edge.EndNode == end.ID {
+				return true
+			}
+		}
+		return false
+	}
+	relReverseRe := regexp.MustCompile(`^\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*<-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*-\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$`)
+	if m := relReverseRe.FindStringSubmatch(clause); len(m) == 4 {
+		start := nodes[m[3]]
+		end := nodes[m[1]]
+		if start == nil || end == nil {
+			return false
+		}
+		outEdges, err := e.storage.GetOutgoingEdges(start.ID)
+		if err != nil {
+			return false
+		}
+		for _, edge := range outEdges {
+			if edge != nil && edge.Type == m[2] && edge.EndNode == end.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Fallback: parse/evaluate as expression with full node context.
+	result := e.evaluateExpressionWithContext(clause, nodes, nil)
 	if b, ok := result.(bool); ok {
 		return b
 	}

@@ -1897,6 +1897,13 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		return e.executeCompoundCreateWithDelete(ctx, cypher)
 	}
 
+	// UNWIND pipelines may contain trailing DELETE/SET/REMOVE keywords.
+	// Route UNWIND before generic mutation keyword checks so
+	// `UNWIND ... MATCH ... REMOVE ...` does not get misrouted to executeRemove.
+	if findKeywordIndex(cypher, "UNWIND") == 0 {
+		return e.executeUnwind(ctx, cypher)
+	}
+
 	// Cache contains checks for DELETE - use word-boundary-aware detection
 	// Note: Can't use " DELETE " because DELETE is often followed by variable name (DELETE n)
 	// findKeywordIndex handles word boundaries properly (won't match 'ToDelete' in string literals)

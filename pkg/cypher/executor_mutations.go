@@ -647,23 +647,39 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	// If SET is followed by additional pipeline clauses (e.g. UNWIND/WITH), rerun
 	// the post-mutation read pipeline as MATCH ... <trailing clauses>.
 	if trailingPart != "" && !strings.HasPrefix(strings.ToUpper(trailingPart), "RETURN ") {
-		if strings.HasPrefix(strings.ToUpper(trailingPart), "UNWIND ") {
-			return e.executeSetTrailingUnwind(ctx, trailingPart, matchResult, result)
+		if strings.HasPrefix(strings.ToUpper(trailingPart), "REMOVE ") {
+			removeTail := strings.TrimSpace(trailingPart[len("REMOVE "):])
+			removePart := removeTail
+			nextTrailing := ""
+			if retIdx := findKeywordIndex(removeTail, "RETURN"); retIdx >= 0 {
+				removePart = strings.TrimSpace(removeTail[:retIdx])
+				nextTrailing = strings.TrimSpace(removeTail[retIdx:])
+			}
+			if err := e.applyRemoveToMatchedRows(store, matchResult, removePart, result); err != nil {
+				return nil, err
+			}
+			trailingPart = nextTrailing
 		}
-		if withResult, handled, err := e.executeSetTrailingWithReturn(ctx, trailingPart, matchResult, result); handled {
+
+		if trailingPart == "" || strings.HasPrefix(strings.ToUpper(trailingPart), "RETURN ") {
+			// Defer to common RETURN/default handling below.
+		} else if strings.HasPrefix(strings.ToUpper(trailingPart), "UNWIND ") {
+			return e.executeSetTrailingUnwind(ctx, trailingPart, matchResult, result)
+		} else if withResult, handled, err := e.executeSetTrailingWithReturn(ctx, trailingPart, matchResult, result); handled {
 			if err != nil {
 				return nil, err
 			}
 			return withResult, nil
+		} else {
+			followQuery := strings.TrimSpace(matchSegment + " " + trailingPart)
+			followResult, err := e.executeMatch(ctx, followQuery)
+			if err != nil {
+				return nil, err
+			}
+			result.Columns = followResult.Columns
+			result.Rows = followResult.Rows
+			return result, nil
 		}
-		followQuery := strings.TrimSpace(matchSegment + " " + trailingPart)
-		followResult, err := e.executeMatch(ctx, followQuery)
-		if err != nil {
-			return nil, err
-		}
-		result.Columns = followResult.Columns
-		result.Rows = followResult.Rows
-		return result, nil
 	}
 
 	// Handle RETURN
@@ -772,7 +788,7 @@ func collapseChainedSetClauses(setPart string) string {
 func firstPostSetClauseIndex(setTail string) int {
 	opts := defaultKeywordScanOpts()
 	first := -1
-	for _, kw := range []string{"UNWIND", "WITH", "RETURN", "ORDER BY", "LIMIT", "SKIP"} {
+	for _, kw := range []string{"REMOVE", "UNWIND", "WITH", "RETURN", "ORDER BY", "LIMIT", "SKIP"} {
 		if idx := keywordIndexFrom(setTail, kw, 0, opts); idx >= 0 {
 			if first == -1 || idx < first {
 				first = idx
@@ -1382,7 +1398,7 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 		return nil, err
 	}
 
-	// Parse REMOVE clause: REMOVE n.prop1, n.prop2
+	// Parse REMOVE clause: REMOVE n.prop1, n.prop2, n:Label
 	var removePart string
 	removeLen := len("REMOVE")
 	if returnIdx > 0 && returnIdx > removeIdx {
@@ -1391,8 +1407,8 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 		removePart = strings.TrimSpace(normalized[removeIdx+removeLen:])
 	}
 
-	// Split by comma and parse each property to remove
-	propsToRemove := e.parseRemoveProperties(removePart)
+	// Split by comma and parse property and label removals.
+	propsToRemove, labelsToRemove := e.parseRemoveItems(removePart)
 
 	// Update matched nodes
 	for _, row := range matchResult.Rows {
@@ -1414,6 +1430,12 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 			}
 			if invalidated {
 				invalidateManagedEmbeddings(node)
+			}
+			if len(labelsToRemove) > 0 {
+				next, removed := removeNodeLabels(node.Labels, labelsToRemove)
+				if removed > 0 {
+					node.Labels = next
+				}
 			}
 			_ = store.UpdateNode(node)
 			e.notifyNodeMutated(string(node.ID))
@@ -1451,20 +1473,103 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 	return result, nil
 }
 
-// parseRemoveProperties parses "n.prop1, n.prop2, m.prop3" into property names
-func (e *StorageExecutor) parseRemoveProperties(removePart string) []string {
+// parseRemoveItems parses "n.prop1, n:LabelA:LabelB, m.prop3" into
+// property names and label names.
+func (e *StorageExecutor) parseRemoveItems(removePart string) ([]string, []string) {
 	var props []string
+	var labels []string
 	parts := strings.Split(removePart, ",")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
 		if dotIdx := strings.Index(part, "."); dotIdx >= 0 {
 			propName := strings.TrimSpace(part[dotIdx+1:])
 			if propName != "" {
 				props = append(props, propName)
 			}
+			continue
+		}
+		if colonIdx := strings.Index(part, ":"); colonIdx >= 0 {
+			labelExpr := strings.TrimSpace(part[colonIdx+1:])
+			if labelExpr == "" {
+				continue
+			}
+			for _, label := range strings.Split(labelExpr, ":") {
+				label = strings.TrimSpace(label)
+				if label != "" {
+					labels = append(labels, label)
+				}
+			}
 		}
 	}
+	return props, labels
+}
+
+// parseRemoveProperties is kept for test and call-site compatibility.
+func (e *StorageExecutor) parseRemoveProperties(removePart string) []string {
+	props, _ := e.parseRemoveItems(removePart)
 	return props
+}
+
+func removeNodeLabels(existing []string, labelsToRemove []string) ([]string, int64) {
+	if len(existing) == 0 || len(labelsToRemove) == 0 {
+		return existing, 0
+	}
+	removeSet := make(map[string]struct{}, len(labelsToRemove))
+	for _, label := range labelsToRemove {
+		removeSet[label] = struct{}{}
+	}
+	next := make([]string, 0, len(existing))
+	var removed int64
+	for _, label := range existing {
+		if _, ok := removeSet[label]; ok {
+			removed++
+			continue
+		}
+		next = append(next, label)
+	}
+	return next, removed
+}
+
+func (e *StorageExecutor) applyRemoveToMatchedRows(
+	store storage.Engine,
+	matchResult *ExecuteResult,
+	removePart string,
+	result *ExecuteResult,
+) error {
+	propsToRemove, labelsToRemove := e.parseRemoveItems(removePart)
+	for _, row := range matchResult.Rows {
+		for _, val := range row {
+			node, ok := val.(*storage.Node)
+			if !ok || node == nil {
+				continue
+			}
+			invalidated := false
+			for _, prop := range propsToRemove {
+				if _, exists := node.Properties[prop]; exists {
+					delete(node.Properties, prop)
+					result.Stats.PropertiesSet++
+					if !isEmbeddingMetadataPropertyKey(prop) {
+						invalidated = true
+					}
+				}
+			}
+			if len(labelsToRemove) > 0 {
+				next, _ := removeNodeLabels(node.Labels, labelsToRemove)
+				node.Labels = next
+			}
+			if invalidated {
+				invalidateManagedEmbeddings(node)
+			}
+			if err := store.UpdateNode(node); err != nil {
+				return err
+			}
+			e.notifyNodeMutated(string(node.ID))
+		}
+	}
+	return nil
 }
 
 // executeCall handles CALL procedure queries.

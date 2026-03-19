@@ -559,6 +559,109 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		}
 	}
 
+	// Handle UNWIND ... MATCH ... (including MATCH...MERGE/CREATE/SET/RETURN pipelines)
+	// by executing the trailing query once per unwound value with the variable bound
+	// as a query parameter.
+	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
+		if optimized, handled, err := e.tryExecuteUnwindMatchOptimized(ctx, variable, items, restQuery); handled {
+			return optimized, err
+		}
+
+		result := &ExecuteResult{
+			Columns: []string{},
+			Rows:    [][]interface{}{},
+			Stats:   &QueryStats{},
+		}
+		matchQuery := strings.TrimSpace(restQuery)
+		returnIdx := findKeywordIndex(matchQuery, "RETURN")
+		aggregateCountOnly := false
+		aggregateCountColumn := "count(*)"
+		if returnIdx > 0 {
+			returnPart := strings.TrimSpace(matchQuery[returnIdx+len("RETURN"):])
+			retItems := e.parseReturnItems(returnPart)
+			if len(retItems) == 1 {
+				expr := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(retItems[0].expr), " ", ""))
+				if expr == "COUNT(*)" {
+					aggregateCountOnly = true
+					if retItems[0].alias != "" {
+						aggregateCountColumn = retItems[0].alias
+					}
+				}
+			}
+		}
+		var aggregateCountValue int64
+		paramName := "__unwind_value"
+		varRefRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(variable) + `\b`)
+		subQueryTemplate := varRefRe.ReplaceAllLiteralString(matchQuery, "$"+paramName)
+		baseParams := getParamsFromContext(ctx)
+		for _, item := range items {
+			callParams := make(map[string]interface{}, len(baseParams)+1)
+			for k, v := range baseParams {
+				callParams[k] = v
+			}
+			callParams[paramName] = item
+			subQuery := subQueryTemplate
+			subQuery = rewriteSequentialMatchMerge(subQuery)
+
+			subResult, err := e.executeInternal(ctx, subQuery, callParams)
+			if err != nil {
+				return nil, fmt.Errorf("UNWIND MATCH failed: %w", err)
+			}
+			if subResult == nil {
+				continue
+			}
+			if aggregateCountOnly {
+				// Normalized COUNT(*) should return one numeric row, but some
+				// write pipelines can currently return nil. Fallback to row count.
+				added := false
+				if len(subResult.Rows) > 0 && len(subResult.Rows[0]) > 0 {
+					switch v := subResult.Rows[0][0].(type) {
+					case int:
+						aggregateCountValue += int64(v)
+						added = true
+					case int32:
+						aggregateCountValue += int64(v)
+						added = true
+					case int64:
+						aggregateCountValue += v
+						added = true
+					case float64:
+						aggregateCountValue += int64(v)
+						added = true
+					}
+				}
+				if !added {
+					if subResult.Stats != nil && subResult.Stats.RelationshipsCreated > 0 {
+						aggregateCountValue += int64(subResult.Stats.RelationshipsCreated)
+						added = true
+					}
+				}
+				if !added {
+					aggregateCountValue += int64(len(subResult.Rows))
+				}
+			}
+			if len(result.Columns) == 0 {
+				result.Columns = subResult.Columns
+			}
+			if !aggregateCountOnly && len(subResult.Rows) > 0 {
+				result.Rows = append(result.Rows, subResult.Rows...)
+			}
+			if subResult.Stats != nil {
+				result.Stats.NodesCreated += subResult.Stats.NodesCreated
+				result.Stats.NodesDeleted += subResult.Stats.NodesDeleted
+				result.Stats.RelationshipsCreated += subResult.Stats.RelationshipsCreated
+				result.Stats.RelationshipsDeleted += subResult.Stats.RelationshipsDeleted
+				result.Stats.PropertiesSet += subResult.Stats.PropertiesSet
+				result.Stats.LabelsAdded += subResult.Stats.LabelsAdded
+			}
+		}
+		if aggregateCountOnly {
+			result.Columns = []string{aggregateCountColumn}
+			result.Rows = [][]interface{}{{aggregateCountValue}}
+		}
+		return result, nil
+	}
+
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "RETURN") {
 		returnClause := strings.TrimSpace(restQuery[6:])
 		returnItems := e.parseReturnItems(returnClause)
@@ -702,6 +805,141 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		result.Rows = append(result.Rows, []interface{}{item})
 	}
 	return result, nil
+}
+
+func (e *StorageExecutor) tryExecuteUnwindMatchOptimized(
+	ctx context.Context,
+	variable string,
+	items []interface{},
+	restQuery string,
+) (*ExecuteResult, bool, error) {
+	if len(items) == 0 {
+		return &ExecuteResult{
+			Columns: []string{},
+			Rows:    [][]interface{}{},
+			Stats:   &QueryStats{},
+		}, true, nil
+	}
+
+	removeRe := regexp.MustCompile(
+		`(?is)^\s*MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*REMOVE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`,
+	)
+	if m := removeRe.FindStringSubmatch(strings.TrimSpace(restQuery)); len(m) == 7 {
+		if m[4] != variable {
+			return nil, false, nil
+		}
+		if m[1] != m[5] {
+			return nil, false, nil
+		}
+		query := fmt.Sprintf(
+			"MATCH (%s:%s {%s: %%s}) REMOVE %s.%s",
+			m[1], m[2], m[3], m[1], m[6],
+		)
+		stats := &QueryStats{}
+		for _, it := range items {
+			lit := e.valueToLiteral(it)
+			out, err := e.executeInternal(ctx, fmt.Sprintf(query, lit), nil)
+			if err != nil {
+				return nil, true, err
+			}
+			if out != nil && out.Stats != nil {
+				stats.PropertiesSet += out.Stats.PropertiesSet
+				stats.LabelsAdded += out.Stats.LabelsAdded
+			}
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: stats}, true, nil
+	}
+
+	mergeWithCountRe := regexp.MustCompile(
+		`(?is)^\s*MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*` +
+			`MATCH\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*\)\s*` +
+			`MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*` +
+			`RETURN\s+count\(\*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`,
+	)
+	if m := mergeWithCountRe.FindStringSubmatch(strings.TrimSpace(restQuery)); len(m) == 13 {
+		if m[4] != variable || m[8] != variable {
+			return nil, false, nil
+		}
+		if m[1] != m[9] || m[5] != m[11] {
+			return nil, false, nil
+		}
+		writeTemplate := fmt.Sprintf(
+			"MATCH (%s:%s {%s: %%s}) MATCH (%s:%s {%s: %%s}) MERGE (%s)-[:%s]->(%s)",
+			m[1], m[2], m[3],
+			m[5], m[6], m[7],
+			m[1], m[10], m[5],
+		)
+		countTemplate := fmt.Sprintf(
+			"MATCH (%s:%s {%s: %%s}) MATCH (%s:%s {%s: %%s}) RETURN count(*) AS %s",
+			m[1], m[2], m[3],
+			m[5], m[6], m[7],
+			m[12],
+		)
+		var total int64
+		stats := &QueryStats{}
+		for _, it := range items {
+			lit := e.valueToLiteral(it)
+			writeOut, err := e.executeInternal(ctx, fmt.Sprintf(writeTemplate, lit, lit), nil)
+			if err != nil {
+				return nil, true, err
+			}
+			if writeOut != nil && writeOut.Stats != nil {
+				stats.RelationshipsCreated += writeOut.Stats.RelationshipsCreated
+				stats.PropertiesSet += writeOut.Stats.PropertiesSet
+			}
+			countOut, err := e.executeInternal(ctx, fmt.Sprintf(countTemplate, lit, lit), nil)
+			if err != nil {
+				return nil, true, err
+			}
+			if countOut != nil && len(countOut.Rows) > 0 && len(countOut.Rows[0]) > 0 {
+				switch v := countOut.Rows[0][0].(type) {
+				case int:
+					total += int64(v)
+				case int32:
+					total += int64(v)
+				case int64:
+					total += v
+				case float64:
+					total += int64(v)
+				}
+			}
+		}
+		return &ExecuteResult{
+			Columns: []string{m[12]},
+			Rows:    [][]interface{}{{total}},
+			Stats:   stats,
+		}, true, nil
+	}
+
+	return nil, false, nil
+}
+
+var sequentialMatchMergeRe = regexp.MustCompile(`(?is)^\s*MATCH\s*\(([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)\)\s*WHERE\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*MATCH\s*\(([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)\)\s*WHERE\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*(MERGE\s+.+)$`)
+
+func rewriteSequentialMatchMerge(query string) string {
+	m := sequentialMatchMergeRe.FindStringSubmatch(strings.TrimSpace(query))
+	if len(m) != 12 {
+		return query
+	}
+	rhs1 := strings.TrimSpace(m[5])
+	rhs2 := strings.TrimSpace(m[10])
+	// Ensure WHERE variables correspond to their MATCH aliases and both sides
+	// compare against the same parameter token.
+	if m[1] != m[3] || m[6] != m[8] || rhs1 != rhs2 {
+		return query
+	}
+	return fmt.Sprintf(
+		"MATCH (%s:%s {%s: %s}), (%s:%s {%s: %s}) %s",
+		strings.TrimSpace(m[1]),
+		strings.TrimSpace(m[2]),
+		strings.TrimSpace(m[4]),
+		rhs1,
+		strings.TrimSpace(m[6]),
+		strings.TrimSpace(m[7]),
+		strings.TrimSpace(m[9]),
+		rhs2,
+		strings.TrimSpace(m[11]),
+	)
 }
 
 var unwindCollectDistinctProjectionPattern = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
