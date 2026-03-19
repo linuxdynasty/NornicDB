@@ -36,422 +36,203 @@ func testUIAssetsFS() fs.FS {
 	}
 }
 
-func TestBackupInvalidJSON(t *testing.T) {
+func TestServerExtra_CoreBranches_SharedFixture(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	req := httptest.NewRequest("POST", "/admin/backup", strings.NewReader("invalid json"))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	recorder := httptest.NewRecorder()
-	server.buildRouter().ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for invalid JSON, got %d", recorder.Code)
-	}
-}
-
-func TestHandleUserByIDGet(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Get admin user by username (not ID in this case)
-	resp := makeRequest(t, server, "GET", "/auth/users/admin", nil, "Bearer "+token)
-	// May be 200 or 404 depending on if GetUser finds by username
-	if resp.Code != http.StatusOK && resp.Code != http.StatusNotFound {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDPut(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Create a user first
-	_ = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
-		"username": "updatetestuser",
-		"password": "password123",
-		"roles":    []string{"viewer"},
-	}, "Bearer "+token)
-
-	// Update the user
-	resp := makeRequest(t, server, "PUT", "/auth/users/updatetestuser", map[string]interface{}{
-		"roles": []string{"editor"},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDPutDisable(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Create a user first
-	createResp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
-		"username": "disabletestuser",
-		"password": "password123",
-		"roles":    []string{"viewer"},
-	}, "Bearer "+token)
-
-	assert.Equal(t, http.StatusCreated, createResp.Code)
-
-	// Disable the user
-	disabled := true
-	resp := makeRequest(t, server, "PUT", "/auth/users/disabletestuser", map[string]interface{}{
-		"disabled": &disabled,
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDPutEnable(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Create and disable a user first
-	createResp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
-		"username": "enabletestuser",
-		"password": "password123",
-		"roles":    []string{"viewer"},
-	}, "Bearer "+token)
-
-	assert.Equal(t, http.StatusCreated, createResp.Code)
-	// Enable the user
-	disabled := false
-	resp := makeRequest(t, server, "PUT", "/auth/users/enabletestuser", map[string]interface{}{
-		"disabled": &disabled,
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDPutInvalidJSON(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	req := httptest.NewRequest("PUT", "/auth/users/testuser", strings.NewReader("invalid json"))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	recorder := httptest.NewRecorder()
-	server.buildRouter().ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for invalid JSON, got %d", recorder.Code)
-	}
-}
-
-func TestHandleUserByIDDelete(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Create a user first
-	createResp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
-		"username": "deletetestuser",
-		"password": "password123",
-		"roles":    []string{"viewer"},
-	}, "Bearer "+token)
-
-	assert.Equal(t, http.StatusCreated, createResp.Code)
-
-	// Delete the user
-	resp := makeRequest(t, server, "DELETE", "/auth/users/deletetestuser", nil, "Bearer "+token)
-
-	if resp.Code != http.StatusOK && resp.Code != http.StatusNotFound {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDEmptyUsername(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "GET", "/auth/users/", nil, "Bearer "+token)
-	// This should route to /auth/users (list) not the by-ID handler
-	if resp.Code != http.StatusOK {
-		t.Errorf("expected status 200 for /auth/users/, got %d", resp.Code)
-	}
-}
-
-func TestHandleUsersMethodNotAllowed(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "PUT", "/auth/users", nil, "Bearer "+token)
-	if resp.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405 for PUT on /auth/users, got %d", resp.Code)
-	}
-}
-
-func TestHandleUserByIDMethodNotAllowed(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "POST", "/auth/users/admin", nil, "Bearer "+token)
-	if resp.Code != http.StatusMethodNotAllowed && resp.Code != http.StatusBadRequest {
-		t.Errorf("unexpected status %d", resp.Code)
-	}
-}
-
-func TestImplicitTransactionWithError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Send a query with syntax error
-	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "INVALID CYPHER SYNTAX HERE"},
-		},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusOK {
-		t.Errorf("expected status 200 (with errors in response), got %d", resp.Code)
-	}
-
-	// Check that response contains errors
-	var txResp map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&txResp)
-	errors, ok := txResp["errors"].([]interface{})
-	if !ok || len(errors) == 0 {
-		t.Error("expected errors in response for invalid query")
-	}
-}
-
-func TestImplicitTransactionMultipleStatementsWithError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// First statement is valid, second is invalid
-	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "MATCH (n) RETURN count(n)"},
-			{"statement": "INVALID SYNTAX"},
-		},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", resp.Code)
-	}
-
-	var txResp map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&txResp)
-	errors, ok := txResp["errors"].([]interface{})
-	if !ok || len(errors) == 0 {
-		t.Error("expected errors in response")
-	}
-}
-
-func TestOpenTransactionWithError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Open transaction with invalid statement
-	resp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "INVALID CYPHER"},
-		},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusCreated {
-		t.Errorf("expected status 201, got %d", resp.Code)
-	}
-
-	var txResp map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&txResp)
-	errors, ok := txResp["errors"].([]interface{})
-	if !ok || len(errors) == 0 {
-		t.Error("expected errors in response")
-	}
-}
-
-func TestCommitTransactionWithError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Open transaction
-	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
-		"statements": []map[string]interface{}{},
-	}, "Bearer "+token)
-
-	var openResult map[string]interface{}
-	json.NewDecoder(openResp.Body).Decode(&openResult)
-
-	commitURL := openResult["commit"].(string)
-	parts := strings.Split(commitURL, "/")
-	txID := parts[len(parts)-2]
-
-	// Commit with invalid statement
-	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "INVALID SYNTAX"},
-		},
-	}, "Bearer "+token)
-
-	if commitResp.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", commitResp.Code)
-	}
-
-	var txResp map[string]interface{}
-	json.NewDecoder(commitResp.Body).Decode(&txResp)
-	errors, ok := txResp["errors"].([]interface{})
-	if !ok || len(errors) == 0 {
-		t.Error("expected errors in response")
-	}
-}
-
-func TestTransactionMethodNotAllowedCommit(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "GET", "/db/nornic/tx/commit", nil, "Bearer "+token)
-	if resp.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405, got %d", resp.Code)
-	}
-}
-
-func TestTransactionMethodNotAllowedTxID(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "GET", "/db/nornic/tx/123456", nil, "Bearer "+token)
-	if resp.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405, got %d", resp.Code)
-	}
-}
-
-func TestTransactionMethodNotAllowedCommitID(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	resp := makeRequest(t, server, "GET", "/db/nornic/tx/123456/commit", nil, "Bearer "+token)
-	if resp.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405, got %d", resp.Code)
-	}
-}
-
-func TestTokenGrantTypeUnsupported(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	resp := makeRequest(t, server, "POST", "/auth/token", map[string]interface{}{
-		"username":   "admin",
-		"password":   "password123",
-		"grant_type": "unsupported_type",
-	}, "")
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for unsupported grant_type, got %d", resp.Code)
-	}
-}
-
-func TestCreateUserError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Try to create user with existing username
-	resp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
-		"username": "admin", // Already exists
-		"password": "password123",
-		"roles":    []string{"viewer"},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for duplicate username, got %d", resp.Code)
-	}
-}
-
-func TestUpdateUserRolesError(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Try to update non-existent user
-	resp := makeRequest(t, server, "PUT", "/auth/users/nonexistentuser", map[string]interface{}{
-		"roles": []string{"admin"},
-	}, "Bearer "+token)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for non-existent user, got %d", resp.Code)
-	}
-}
-
-func TestAuthWithNilClaims(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	// Request without any auth should fail on protected endpoint
-	resp := makeRequest(t, server, "GET", "/admin/stats", nil, "")
-
-	if resp.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401 without auth, got %d", resp.Code)
-	}
-}
-
-func TestCORSWithSpecificOrigin(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	req := httptest.NewRequest("OPTIONS", "/", nil)
-	req.Header.Set("Origin", "http://localhost:3000")
-	req.Header.Set("Access-Control-Request-Method", "POST")
-
-	recorder := httptest.NewRecorder()
-	server.buildRouter().ServeHTTP(recorder, req)
-
-	// Should have CORS headers
-	if recorder.Header().Get("Access-Control-Allow-Origin") == "" {
-		t.Error("missing Access-Control-Allow-Origin header")
-	}
-}
-
-func TestMetricsAfterRequests(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	// Make a request
-	makeRequest(t, server, "GET", "/health", nil, "")
-
-	stats := server.Stats()
-	if stats.RequestCount < 1 {
-		t.Errorf("expected request count >= 1, got %d", stats.RequestCount)
-	}
-}
-
-func TestServerStopWithoutStart(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	// Stop without starting should not error
-	err := server.Stop(ctx)
-	if err != nil {
-		t.Errorf("stop without start should not error: %v", err)
-	}
-}
-
-func TestServerStopTwice(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	go server.Start()
-	time.Sleep(50 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// First stop
-	err := server.Stop(ctx)
-	if err != nil {
-		t.Errorf("first stop error: %v", err)
-	}
-
-	// Second stop should be idempotent
-	err = server.Stop(ctx)
-	if err != nil {
-		t.Errorf("second stop should be idempotent: %v", err)
-	}
+	t.Run("backup invalid json", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/admin/backup", strings.NewReader("invalid json"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		recorder := httptest.NewRecorder()
+		server.buildRouter().ServeHTTP(recorder, req)
+		require.Equal(t, http.StatusBadRequest, recorder.Code)
+	})
+
+	t.Run("user by id variants", func(t *testing.T) {
+		resp := makeRequest(t, server, "GET", "/auth/users/admin", nil, "Bearer "+token)
+		if resp.Code != http.StatusOK && resp.Code != http.StatusNotFound {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+
+		_ = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+			"username": "updatetestuser",
+			"password": "password123",
+			"roles":    []string{"viewer"},
+		}, "Bearer "+token)
+		resp = makeRequest(t, server, "PUT", "/auth/users/updatetestuser", map[string]interface{}{
+			"roles": []string{"editor"},
+		}, "Bearer "+token)
+		if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+
+		createResp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+			"username": "disabletestuser",
+			"password": "password123",
+			"roles":    []string{"viewer"},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusCreated, createResp.Code)
+		disabled := true
+		resp = makeRequest(t, server, "PUT", "/auth/users/disabletestuser", map[string]interface{}{
+			"disabled": &disabled,
+		}, "Bearer "+token)
+		if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+
+		createResp = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+			"username": "enabletestuser",
+			"password": "password123",
+			"roles":    []string{"viewer"},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusCreated, createResp.Code)
+		disabled = false
+		resp = makeRequest(t, server, "PUT", "/auth/users/enabletestuser", map[string]interface{}{
+			"disabled": &disabled,
+		}, "Bearer "+token)
+		if resp.Code != http.StatusOK && resp.Code != http.StatusBadRequest {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+
+		req := httptest.NewRequest("PUT", "/auth/users/testuser", strings.NewReader("invalid json"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		server.buildRouter().ServeHTTP(recorder, req)
+		require.Equal(t, http.StatusBadRequest, recorder.Code)
+
+		createResp = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+			"username": "deletetestuser",
+			"password": "password123",
+			"roles":    []string{"viewer"},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusCreated, createResp.Code)
+		resp = makeRequest(t, server, "DELETE", "/auth/users/deletetestuser", nil, "Bearer "+token)
+		if resp.Code != http.StatusOK && resp.Code != http.StatusNotFound {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+
+		resp = makeRequest(t, server, "GET", "/auth/users/", nil, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code)
+
+		resp = makeRequest(t, server, "PUT", "/auth/users", nil, "Bearer "+token)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+
+		resp = makeRequest(t, server, "POST", "/auth/users/admin", nil, "Bearer "+token)
+		if resp.Code != http.StatusMethodNotAllowed && resp.Code != http.StatusBadRequest {
+			t.Fatalf("unexpected status %d", resp.Code)
+		}
+	})
+
+	t.Run("transaction error and method branches", func(t *testing.T) {
+		resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{{"statement": "INVALID CYPHER SYNTAX HERE"}},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code)
+		var txResp map[string]interface{}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&txResp))
+		errors, ok := txResp["errors"].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, errors)
+
+		resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "MATCH (n) RETURN count(n)"},
+				{"statement": "INVALID SYNTAX"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code)
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&txResp))
+		errors, ok = txResp["errors"].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, errors)
+
+		resp = makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
+			"statements": []map[string]interface{}{{"statement": "INVALID CYPHER"}},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusCreated, resp.Code)
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&txResp))
+		errors, ok = txResp["errors"].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, errors)
+
+		openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
+			"statements": []map[string]interface{}{},
+		}, "Bearer "+token)
+		var openResult map[string]interface{}
+		require.NoError(t, json.NewDecoder(openResp.Body).Decode(&openResult))
+		commitURL := openResult["commit"].(string)
+		parts := strings.Split(commitURL, "/")
+		txID := parts[len(parts)-2]
+		commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
+			"statements": []map[string]interface{}{{"statement": "INVALID SYNTAX"}},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, commitResp.Code)
+		require.NoError(t, json.NewDecoder(commitResp.Body).Decode(&txResp))
+		errors, ok = txResp["errors"].([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, errors)
+
+		resp = makeRequest(t, server, "GET", "/db/nornic/tx/commit", nil, "Bearer "+token)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+		resp = makeRequest(t, server, "GET", "/db/nornic/tx/123456", nil, "Bearer "+token)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+		resp = makeRequest(t, server, "GET", "/db/nornic/tx/123456/commit", nil, "Bearer "+token)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.Code)
+	})
+
+	t.Run("auth and misc branches", func(t *testing.T) {
+		resp := makeRequest(t, server, "POST", "/auth/token", map[string]interface{}{
+			"username":   "admin",
+			"password":   "password123",
+			"grant_type": "unsupported_type",
+		}, "")
+		require.Equal(t, http.StatusBadRequest, resp.Code)
+
+		resp = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+			"username": "admin",
+			"password": "password123",
+			"roles":    []string{"viewer"},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusBadRequest, resp.Code)
+
+		resp = makeRequest(t, server, "PUT", "/auth/users/nonexistentuser", map[string]interface{}{
+			"roles": []string{"admin"},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusBadRequest, resp.Code)
+
+		resp = makeRequest(t, server, "GET", "/admin/stats", nil, "")
+		require.Equal(t, http.StatusUnauthorized, resp.Code)
+
+		req := httptest.NewRequest("OPTIONS", "/", nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		recorder := httptest.NewRecorder()
+		server.buildRouter().ServeHTTP(recorder, req)
+		require.NotEmpty(t, recorder.Header().Get("Access-Control-Allow-Origin"))
+
+		makeRequest(t, server, "GET", "/health", nil, "")
+		require.GreaterOrEqual(t, server.Stats().RequestCount, int64(1))
+	})
+
+	t.Run("server stop without start", func(t *testing.T) {
+		s, _ := setupTestServer(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		require.NoError(t, s.Stop(ctx))
+	})
+
+	t.Run("server stop twice", func(t *testing.T) {
+		s, _ := setupTestServer(t)
+		go s.Start()
+		time.Sleep(50 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, s.Stop(ctx))
+		require.NoError(t, s.Stop(ctx))
+	})
 }
 
 // =============================================================================

@@ -1,7 +1,9 @@
 package multidb
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -946,4 +948,81 @@ func TestDatabaseManager_GetStorageSize_IncrementalTrackingMatchesExactBytes(t *
 	assert.Equal(t, wantNodeBytes+wantEdgeBytes, gotTotal)
 	assert.Equal(t, wantNodeBytes, gotNodeBytes)
 	assert.Equal(t, wantEdgeBytes, gotEdgeBytes)
+}
+
+func TestDatabaseManager_StorageSizeSnapshot_NoRaceWithListDatabases(t *testing.T) {
+	inner := storage.NewMemoryEngine()
+	defer inner.Close()
+
+	manager, err := NewDatabaseManager(inner, nil)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.CreateDatabase("tenant_race"))
+	store, err := manager.GetStorage("tenant_race")
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     storage.NodeID("n1"),
+		Labels: []string{"Item"},
+		Properties: map[string]any{
+			"name": "one",
+		},
+	})
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	errCh := make(chan string, 1)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// Force re-init writes on size cache while other goroutine snapshots metadata.
+				manager.markStorageSizeDirty("tenant_race")
+				manager.GetStorageSize("tenant_race")
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				dbs := manager.ListDatabases()
+				if len(dbs) == 0 {
+					select {
+					case errCh <- "expected non-empty database list":
+					default:
+					}
+					return
+				}
+				if _, getErr := manager.GetDatabase("tenant_race"); getErr != nil {
+					select {
+					case errCh <- getErr.Error():
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	time.Sleep(75 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	select {
+	case msg := <-errCh:
+		t.Fatalf("concurrent metadata read failed: %s", msg)
+	default:
+	}
 }

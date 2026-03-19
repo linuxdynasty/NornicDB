@@ -611,9 +611,7 @@ func (m *DatabaseManager) ListDatabases() []*DatabaseInfo {
 
 	result := make([]*DatabaseInfo, 0, len(m.databases))
 	for _, info := range m.databases {
-		// Return a copy
-		infoCopy := *info
-		result = append(result, &infoCopy)
+		result = append(result, cloneDatabaseInfo(info))
 	}
 	return result
 }
@@ -628,8 +626,45 @@ func (m *DatabaseManager) GetDatabase(name string) (*DatabaseInfo, error) {
 		return nil, ErrDatabaseNotFound
 	}
 
-	infoCopy := *info
-	return &infoCopy, nil
+	return cloneDatabaseInfo(info), nil
+}
+
+// cloneDatabaseInfo returns a deep-enough, lock-safe snapshot of DatabaseInfo.
+// Caller must hold m.mu (read or write) before invoking.
+func cloneDatabaseInfo(info *DatabaseInfo) *DatabaseInfo {
+	var limitsCopy *Limits
+	if info.Limits != nil {
+		lc := *info.Limits
+		limitsCopy = &lc
+	}
+
+	aliases := append([]string(nil), info.Aliases...)
+	constituents := append([]ConstituentRef(nil), info.Constituents...)
+
+	info.sizeMu.RLock()
+	totalSize := info.totalSize
+	nodeSize := info.nodeSize
+	edgeSize := info.edgeSize
+	sizeInitialized := info.sizeInitialized
+	info.sizeMu.RUnlock()
+
+	return &DatabaseInfo{
+		Name:            info.Name,
+		CreatedAt:       info.CreatedAt,
+		CreatedBy:       info.CreatedBy,
+		Status:          info.Status,
+		Type:            info.Type,
+		IsDefault:       info.IsDefault,
+		NodeCount:       info.NodeCount,
+		UpdatedAt:       info.UpdatedAt,
+		Aliases:         aliases,
+		Limits:          limitsCopy,
+		Constituents:    constituents,
+		totalSize:       totalSize,
+		nodeSize:        nodeSize,
+		edgeSize:        edgeSize,
+		sizeInitialized: sizeInitialized,
+	}
 }
 
 // Exists checks if a database exists.

@@ -87,6 +87,9 @@ func setupTestServer(t *testing.T) (*Server, *auth.Authenticator) {
 	// Create server config
 	serverConfig := DefaultConfig()
 	serverConfig.Port = 0 // Use random port
+	// Keep generic server tests fast and deterministic:
+	// avoid async external embedder initialization/retry loops on each setup.
+	serverConfig.EmbeddingEnabled = false
 	// Enable CORS with wildcard for tests (not recommended for production)
 	serverConfig.EnableCORS = true
 	serverConfig.CORSOrigins = []string{"*"}
@@ -3910,41 +3913,96 @@ func TestAuthHandlers_BranchExpansion(t *testing.T) {
 	})
 }
 
-func TestEmbedTriggerAndRBACHelpers_AdditionalBranches(t *testing.T) {
+func TestServer_AdditionalBranches_ReusesFixture(t *testing.T) {
 	server, _ := setupTestServer(t)
 
-	baseReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
-	sameReq := server.withBifrostRBAC(baseReq)
-	require.Equal(t, baseReq, sameReq)
-	require.Nil(t, auth.RequestPrincipalRolesFromContext(sameReq.Context()))
+	t.Run("embed trigger and rbac helpers", func(t *testing.T) {
+		baseReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
+		sameReq := server.withBifrostRBAC(baseReq)
+		require.Equal(t, baseReq, sameReq)
+		require.Nil(t, auth.RequestPrincipalRolesFromContext(sameReq.Context()))
 
-	claimedReq := baseReq.WithContext(context.WithValue(baseReq.Context(), contextKeyClaims, &auth.JWTClaims{
-		Username: "admin",
-		Roles:    []string{"admin"},
-	}))
-	enriched := server.withBifrostRBAC(claimedReq)
-	require.NotNil(t, auth.RequestPrincipalRolesFromContext(enriched.Context()))
-	require.NotNil(t, auth.RequestDatabaseAccessModeFromContext(enriched.Context()))
-	resolver := auth.RequestResolvedAccessResolverFromContext(enriched.Context())
-	require.NotNil(t, resolver)
-	_ = resolver(server.dbManager.DefaultDatabaseName())
+		claimedReq := baseReq.WithContext(context.WithValue(baseReq.Context(), contextKeyClaims, &auth.JWTClaims{
+			Username: "admin",
+			Roles:    []string{"admin"},
+		}))
+		enriched := server.withBifrostRBAC(claimedReq)
+		require.NotNil(t, auth.RequestPrincipalRolesFromContext(enriched.Context()))
+		require.NotNil(t, auth.RequestDatabaseAccessModeFromContext(enriched.Context()))
+		resolver := auth.RequestResolvedAccessResolverFromContext(enriched.Context())
+		require.NotNil(t, resolver)
+		_ = resolver(server.dbManager.DefaultDatabaseName())
 
-	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+		server.db.SetEmbedder(&countingEmbedder{dims: 1024})
 
-	req := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger?regenerate=true", nil)
-	rec := httptest.NewRecorder()
-	server.handleEmbedTrigger(rec, req)
-	require.Equal(t, http.StatusAccepted, rec.Code)
+		req := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger?regenerate=true", nil)
+		rec := httptest.NewRecorder()
+		server.handleEmbedTrigger(rec, req)
+		require.Equal(t, http.StatusAccepted, rec.Code)
 
-	req = httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil)
-	rec = httptest.NewRecorder()
-	server.handleEmbedTrigger(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+		req = httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil)
+		rec = httptest.NewRecorder()
+		server.handleEmbedTrigger(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
 
-	req = httptest.NewRequest(http.MethodDelete, "/nornicdb/embed/clear", nil)
-	rec = httptest.NewRecorder()
-	server.handleEmbedClear(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+		req = httptest.NewRequest(http.MethodDelete, "/nornicdb/embed/clear", nil)
+		rec = httptest.NewRecorder()
+		server.handleEmbedClear(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("rebuild and embed trigger error branches", func(t *testing.T) {
+		rebuildReq := httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`))
+		rebuildRec := httptest.NewRecorder()
+		server.handleSearchRebuild(rebuildRec, rebuildReq)
+		require.Equal(t, http.StatusForbidden, rebuildRec.Code)
+
+		adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+			Username: "admin",
+			Roles:    []string{"admin"},
+		})
+		cancelCtx, cancelRebuild := context.WithCancel(adminCtx)
+		cancelRebuild()
+		rebuildReq = httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`)).WithContext(cancelCtx)
+		rebuildRec = httptest.NewRecorder()
+		server.handleSearchRebuild(rebuildRec, rebuildReq)
+		require.Equal(t, http.StatusInternalServerError, rebuildRec.Code)
+
+		server.db.SetEmbedder(&countingEmbedder{dims: 1024})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		triggerReq := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil).WithContext(ctx)
+		triggerRec := httptest.NewRecorder()
+		server.handleEmbedTrigger(triggerRec, triggerReq)
+		require.Equal(t, http.StatusOK, triggerRec.Code)
+	})
+
+	t.Run("search build started known dbs includes composite branch", func(t *testing.T) {
+		ref := multidb.ConstituentRef{
+			Alias:        server.dbManager.DefaultDatabaseName(),
+			DatabaseName: server.dbManager.DefaultDatabaseName(),
+			Type:         "local",
+			AccessMode:   "read_write",
+		}
+		require.NoError(t, server.dbManager.CreateCompositeDatabase("cmp_search_cov", []multidb.ConstituentRef{ref}))
+		server.ensureSearchBuildStartedForKnownDatabases()
+		require.NoError(t, server.dbManager.DropCompositeDatabase("cmp_search_cov"))
+	})
+
+	t.Run("auth utility minor gaps", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/auth/oauth/callback?code=x&state=y", nil)
+		rec := httptest.NewRecorder()
+		server.oauthManager = nil
+		server.handleOAuthCallback(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		require.False(t, isHTTPSRequest(nil))
+
+		roleEntReq := httptest.NewRequest(http.MethodPut, "/auth/role-entitlements", strings.NewReader(`{"mappings":[{"role":"   ","entitlements":["read"]}]}`))
+		roleEntRec := httptest.NewRecorder()
+		server.handleRoleEntitlements(roleEntRec, roleEntReq)
+		require.Equal(t, http.StatusOK, roleEntRec.Code)
+	})
 }
 
 func TestNew_SearchRerankProviderBranches(t *testing.T) {
@@ -4008,64 +4066,6 @@ func TestUIAndStringHelpers_AdditionalBranches(t *testing.T) {
 	require.False(t, isUIRequest(req))
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	require.True(t, isUIRequest(req))
-}
-
-func TestNornicDBRebuildAndEmbedTrigger_ErrorBranches(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	rebuildReq := httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`))
-	rebuildRec := httptest.NewRecorder()
-	server.handleSearchRebuild(rebuildRec, rebuildReq)
-	require.Equal(t, http.StatusForbidden, rebuildRec.Code)
-
-	adminCtx := context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
-		Username: "admin",
-		Roles:    []string{"admin"},
-	})
-	cancelCtx, cancelRebuild := context.WithCancel(adminCtx)
-	cancelRebuild()
-	rebuildReq = httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`)).WithContext(cancelCtx)
-	rebuildRec = httptest.NewRecorder()
-	server.handleSearchRebuild(rebuildRec, rebuildReq)
-	require.Equal(t, http.StatusInternalServerError, rebuildRec.Code)
-
-	server.db.SetEmbedder(&countingEmbedder{dims: 1024})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	triggerReq := httptest.NewRequest(http.MethodPost, "/nornicdb/embed/trigger", nil).WithContext(ctx)
-	triggerRec := httptest.NewRecorder()
-	server.handleEmbedTrigger(triggerRec, triggerReq)
-	require.Equal(t, http.StatusOK, triggerRec.Code)
-}
-
-func TestEnsureSearchBuildStartedForKnownDatabases_CompositeStorageMissBranch(t *testing.T) {
-	server, _ := setupTestServer(t)
-	ref := multidb.ConstituentRef{
-		Alias:        server.dbManager.DefaultDatabaseName(),
-		DatabaseName: server.dbManager.DefaultDatabaseName(),
-		Type:         "local",
-		AccessMode:   "read_write",
-	}
-	require.NoError(t, server.dbManager.CreateCompositeDatabase("cmp_search_cov", []multidb.ConstituentRef{ref}))
-	server.ensureSearchBuildStartedForKnownDatabases()
-	require.NoError(t, server.dbManager.DropCompositeDatabase("cmp_search_cov"))
-}
-
-func TestAuthUtilityBranches_MinorGaps(t *testing.T) {
-	server, _ := setupTestServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/oauth/callback?code=x&state=y", nil)
-	rec := httptest.NewRecorder()
-	server.oauthManager = nil
-	server.handleOAuthCallback(rec, req)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-
-	require.False(t, isHTTPSRequest(nil))
-
-	roleEntReq := httptest.NewRequest(http.MethodPut, "/auth/role-entitlements", strings.NewReader(`{"mappings":[{"role":"   ","entitlements":["read"]}]}`))
-	roleEntRec := httptest.NewRecorder()
-	server.handleRoleEntitlements(roleEntRec, roleEntReq)
-	require.Equal(t, http.StatusOK, roleEntRec.Code)
 }
 
 func TestExplicitTransaction_OwnerIsolationAcrossCallers(t *testing.T) {

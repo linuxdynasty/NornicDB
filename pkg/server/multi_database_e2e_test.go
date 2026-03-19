@@ -855,21 +855,71 @@ ORDER BY textKey128`,
 	})
 }
 
-// TestMultiDatabase_E2E_DiscoveryEndpoint tests that the discovery endpoint returns default_database
-func TestMultiDatabase_E2E_DiscoveryEndpoint(t *testing.T) {
-	server, _ := setupTestServer(t)
+func TestMultiDatabase_E2E_DiscoveryAndCreateDatabaseScenarios_SharedFixture(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/", nil, "")
+	t.Run("discovery endpoint returns default database", func(t *testing.T) {
+		resp := makeRequest(t, server, "GET", "/", nil, "")
+		require.Equal(t, http.StatusOK, resp.Code)
 
-	require.Equal(t, http.StatusOK, resp.Code)
+		var discovery map[string]interface{}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&discovery))
+		defaultDB, ok := discovery["default_database"]
+		require.True(t, ok, "discovery endpoint should include default_database field")
+		assert.Equal(t, "nornic", defaultDB, "default database should be 'nornic'")
+	})
 
-	var discovery map[string]interface{}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&discovery))
+	t.Run("create database via default database endpoint", func(t *testing.T) {
+		resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "CREATE DATABASE animals"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code, "CREATE DATABASE animals must return 200")
 
-	// Verify default_database field exists
-	defaultDB, ok := discovery["default_database"]
-	require.True(t, ok, "discovery endpoint should include default_database field")
-	assert.Equal(t, "nornic", defaultDB, "default database should be 'nornic'")
+		var createResult TransactionResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&createResult))
+		require.Empty(t, createResult.Errors)
+
+		resp = makeRequest(t, server, "POST", "/db/animals/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "CREATE (n:Animal {name: 'test'}) RETURN n"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code)
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&createResult))
+		require.Empty(t, createResult.Errors)
+
+		_ = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "DROP DATABASE animals"},
+			},
+		}, "Bearer "+token)
+	})
+
+	t.Run("create database via system endpoint with backticks", func(t *testing.T) {
+		resp := makeRequest(t, server, "POST", "/db/system/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{
+				{"statement": "CREATE DATABASE `animals`"},
+			},
+		}, "Bearer "+token)
+		require.Equal(t, http.StatusOK, resp.Code)
+
+		var result TransactionResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		require.Empty(t, result.Errors)
+		require.Len(t, result.Results, 1)
+		require.NotEmpty(t, result.Results[0].Columns)
+		require.NotEmpty(t, result.Results[0].Data)
+		assert.Equal(t, "name", result.Results[0].Columns[0])
+		require.Len(t, result.Results[0].Data[0].Row, 1)
+		assert.Equal(t, "animals", result.Results[0].Data[0].Row[0])
+
+		_ = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+			"statements": []map[string]interface{}{{"statement": "DROP DATABASE animals"}},
+		}, "Bearer "+token)
+	})
 }
 
 func containsString(list []string, target string) bool {
@@ -1646,93 +1696,4 @@ RETURN count(n) as test_db_nodes`},
 		},
 	}, "Bearer "+token)
 	require.Equal(t, http.StatusOK, resp.Code)
-}
-
-// TestCreateDatabase_Animals_ViaHTTP verifies that "CREATE DATABASE animals" works via the
-// Neo4j HTTP API (POST /db/nornic/tx/commit). This locks in the exact statement and endpoint
-// used by scripts and would fail if CREATE DATABASE were routed to node creation.
-func TestCreateDatabase_Animals_ViaHTTP(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Create database "animals" via default database (same as scripts/test-animals-sit2.sh)
-	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "CREATE DATABASE animals"},
-		},
-	}, "Bearer "+token)
-	require.Equal(t, http.StatusOK, resp.Code, "CREATE DATABASE animals must return 200")
-
-	var createResult TransactionResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&createResult))
-	require.Empty(t, createResult.Errors, "CREATE DATABASE animals must not return errors; got %v", createResult.Errors)
-
-	// Verify database exists via SHOW DATABASES
-	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "SHOW DATABASES"},
-		},
-	}, "Bearer "+token)
-	require.Equal(t, http.StatusOK, resp.Code)
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&createResult))
-	require.Len(t, createResult.Results, 1)
-	found := false
-	for _, row := range createResult.Results[0].Data {
-		if len(row.Row) > 0 {
-			if name, ok := row.Row[0].(string); ok && name == "animals" {
-				found = true
-				break
-			}
-		}
-	}
-	require.True(t, found, "animals should appear in SHOW DATABASES")
-
-	// Use the new database (POST /db/animals/tx/commit)
-	resp = makeRequest(t, server, "POST", "/db/animals/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "CREATE (n:Animal {name: 'test'}) RETURN n"},
-		},
-	}, "Bearer "+token)
-	require.Equal(t, http.StatusOK, resp.Code)
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&createResult))
-	require.Empty(t, createResult.Errors, "insert into animals DB must not return errors")
-
-	// Cleanup
-	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "DROP DATABASE animals"},
-		},
-	}, "Bearer "+token)
-	require.Equal(t, http.StatusOK, resp.Code)
-}
-
-// TestCreateDatabase_SystemDB_Backticks reproduces the exact UI/curl request: POST /db/system/tx/commit
-// with statement "CREATE DATABASE `animals`". Ensures we return a proper result (columns + data), not empty.
-func TestCreateDatabase_SystemDB_Backticks(t *testing.T) {
-	server, auth := setupTestServer(t)
-	token := getAuthToken(t, auth, "admin")
-
-	// Exact request from UI: system database, backtick-quoted name
-	resp := makeRequest(t, server, "POST", "/db/system/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{
-			{"statement": "CREATE DATABASE `animals`"},
-		},
-	}, "Bearer "+token)
-	require.Equal(t, http.StatusOK, resp.Code)
-
-	var result TransactionResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-	require.Empty(t, result.Errors, "CREATE DATABASE must not return errors; got %v", result.Errors)
-	require.Len(t, result.Results, 1, "expected one result set")
-	// CREATE DATABASE returns columns ["name"] and one row with the database name
-	require.NotEmpty(t, result.Results[0].Columns, "CREATE DATABASE must return columns (e.g. [\"name\"]); got %v", result.Results[0].Columns)
-	require.NotEmpty(t, result.Results[0].Data, "CREATE DATABASE must return data (e.g. one row with db name); got %v", result.Results[0].Data)
-	assert.Equal(t, "name", result.Results[0].Columns[0])
-	require.Len(t, result.Results[0].Data[0].Row, 1)
-	assert.Equal(t, "animals", result.Results[0].Data[0].Row[0])
-
-	// Cleanup
-	_ = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
-		"statements": []map[string]interface{}{{"statement": "DROP DATABASE animals"}},
-	}, "Bearer "+token)
 }

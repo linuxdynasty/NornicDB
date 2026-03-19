@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+### Unreleased
+
+#### Fixed
+
+- **Concurrent metadata snapshot race in multi-database management**:
+  - made database metadata snapshots lock-safe when listing and fetching database info
+  - prevents race conditions between storage-size cache initialization and metadata reads under concurrent access.
+
+#### Changed
+
+- **Server test fixture reuse**:
+  - refactored high-frequency server test paths to share fixtures through grouped subtests where isolation was not required
+  - reduced repeated full server/bootstrap setup in hot test paths.
+- **Test startup behavior**:
+  - disabled external embedding initialization in shared server test setup to avoid unnecessary async retry work in generic tests.
+
+#### Tests
+
+- Added a dedicated race regression test for concurrent storage-size initialization vs database metadata listing.
+- Consolidated selected multi-database and server branch tests into shared-fixture suites while preserving isolated setup for lifecycle-sensitive cases.
+
+## [v1.0.24] - 2026-03-19
+
+### Changed
+
+- **CALL/YIELD pipeline execution**:
+  - generalized post-`YIELD` clause handling so `MATCH`, `WITH`, `RETURN`, `ORDER BY`, `SKIP`, and `LIMIT` pipelines execute consistently after procedure calls
+  - removed brittle fixed-shape assumptions and aligned handling with broader valid clause combinations.
+
+### Fixed
+
+- **CALL clause boundary parsing**:
+  - fixed `YIELD` parsing to respect CALL-clause boundaries instead of matching by raw string position
+  - resolved cases where downstream clauses were incorrectly parsed or skipped in multi-clause statements.
+- **N-column YIELD projection correctness**:
+  - fixed projection behavior so `YIELD` supports variable-width output columns without shape-specific fallbacks
+  - resolved incorrect/empty result sets in valid procedure-followed query pipelines.
+
+### Tests
+
+- Added regression coverage for:
+  - procedure-call pipelines with trailing clause permutations
+  - boundary-aware `YIELD` parsing in multi-clause statements
+  - multi-column `YIELD` projection with downstream `MATCH`/`WITH`/`RETURN` flows.
+
+### Technical Details
+
+- **Range covered**: `v1.0.23..HEAD`
+- **Commits in range**: 3 (non-merge)
+- **Repository delta**: 5 files changed, +806 / -108 lines
+- **Primary focus areas**: procedure pipeline correctness, parser robustness, and generalized clause compatibility for Cypher execution.
+
 ## [v1.0.23] - 2026-03-19
 
 ### Changed
