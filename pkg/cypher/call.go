@@ -89,12 +89,9 @@ func parseYieldClause(cypher string) *yieldClause {
 		afterYield = strings.TrimSpace(afterYield[1:])
 	}
 
-	// Find WHERE, RETURN, ORDER BY, LIMIT, SKIP boundaries
-	withIdx := findKeywordIndexInContext(afterYield, "WITH")
-	yieldScope := afterYield
-	if withIdx != -1 {
-		yieldScope = strings.TrimSpace(afterYield[:withIdx])
-	}
+	// Limit YIELD parsing to the CALL-clause scope only. Anything after the first
+	// outer clause boundary belongs to the subsequent query pipeline.
+	yieldScope := scopeYieldToCallClause(afterYield)
 	whereIdx := findKeywordIndexInContext(yieldScope, "WHERE")
 	returnIdx := findKeywordIndexInContext(yieldScope, "RETURN")
 	orderIdx := findKeywordIndexInContext(yieldScope, "ORDER")
@@ -278,6 +275,23 @@ func parseYieldClause(cypher string) *yieldClause {
 	}
 
 	return result
+}
+
+// scopeYieldToCallClause trims text after YIELD to the first outer query-clause
+// boundary so YIELD item parsing does not accidentally consume later clauses.
+func scopeYieldToCallClause(afterYield string) string {
+	scopeEnd := len(afterYield)
+	// Keep this list conservative and clause-oriented; ORDER/RETURN/WHERE/LIMIT/SKIP
+	// are intentionally excluded here because they are valid within the YIELD scope.
+	for _, kw := range []string{
+		"WITH", "MATCH", "OPTIONAL", "UNWIND", "CALL",
+		"CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH", "LOAD",
+	} {
+		if idx := findKeywordIndexInContext(afterYield, kw); idx != -1 && idx < scopeEnd {
+			scopeEnd = idx
+		}
+	}
+	return strings.TrimSpace(afterYield[:scopeEnd])
 }
 
 // findKeywordIndexInContext finds a keyword in context, avoiding matches inside quotes
