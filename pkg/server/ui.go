@@ -15,16 +15,26 @@ var UIAssets fs.FS
 // UIEnabled indicates if UI assets are available
 var UIEnabled bool
 
+// UIBasePath is a trusted, server-configured UI base path used when rewriting
+// static asset references in index.html for reverse-proxy deployments.
+var UIBasePath string
+
 // SetUIAssets configures the UI assets.
 func SetUIAssets(assets fs.FS) {
 	UIAssets = assets
 	UIEnabled = true
 }
 
+// SetUIBasePath configures the trusted base path used for UI asset rewriting.
+func SetUIBasePath(basePath string) {
+	UIBasePath = sanitizeUIBasePath(basePath)
+}
+
 // uiHandler serves the embedded SPA UI
 type uiHandler struct {
 	fileServer http.Handler
 	indexHTML  []byte
+	basePath   string
 }
 
 func normalizeUIBasePath(raw string) string {
@@ -156,6 +166,7 @@ func newUIHandler() (*uiHandler, error) {
 	return &uiHandler{
 		fileServer: http.FileServer(http.FS(distFS)),
 		indexHTML:  indexHTML,
+		basePath:   sanitizeUIBasePath(UIBasePath),
 	}, nil
 }
 
@@ -163,21 +174,32 @@ func newUIHandler() (*uiHandler, error) {
 func (h *uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
+	// Validate path to prevent directory traversal attacks
+	cleanPath := path.Clean(path)
+	if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
+	}
+	if strings.Contains(cleanPath, "..") || cleanPath != path {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	// Serve static assets directly
-	if strings.HasPrefix(path, "/assets/") ||
-		strings.HasSuffix(path, ".js") ||
-		strings.HasSuffix(path, ".css") ||
-		strings.HasSuffix(path, ".svg") ||
-		strings.HasSuffix(path, ".png") ||
-		strings.HasSuffix(path, ".ico") ||
-		strings.HasSuffix(path, ".woff") ||
-		strings.HasSuffix(path, ".woff2") {
+	if strings.HasPrefix(cleanPath, "/assets/") ||
+		strings.HasSuffix(cleanPath, ".js") ||
+		strings.HasSuffix(cleanPath, ".css") ||
+		strings.HasSuffix(cleanPath, ".svg") ||
+		strings.HasSuffix(cleanPath, ".png") ||
+		strings.HasSuffix(cleanPath, ".ico") ||
+		strings.HasSuffix(cleanPath, ".woff") ||
+		strings.HasSuffix(cleanPath, ".woff2") {
 		h.fileServer.ServeHTTP(w, r)
 		return
 	}
 
-	// For all other paths, serve index.html (SPA routing)
-	basePath := r.Header.Get("X-Base-Path")
+	// For all other paths, serve index.html (SPA routing).
+	// Only use trusted server-configured base path (never request headers).
+	basePath := h.basePath
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(rewriteIndexHTMLBasePath(h.indexHTML, basePath))
 }

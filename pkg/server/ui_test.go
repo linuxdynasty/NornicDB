@@ -18,7 +18,7 @@ func TestSanitizeUIBasePath(t *testing.T) {
 		require.Equal(t, "", sanitizeUIBasePath(`/" onload="alert(1)`))
 		require.Equal(t, "", sanitizeUIBasePath(`/x"><script>alert(1)</script>`))
 		require.Equal(t, "", sanitizeUIBasePath(`/../admin`))
-		require.Equal(t, "", sanitizeUIBasePath(`/foo//bar`))
+		require.Equal(t, "/foo/bar", sanitizeUIBasePath(`/foo//bar`))
 		require.Equal(t, "", sanitizeUIBasePath(`/foo\bar`))
 	})
 }
@@ -29,6 +29,7 @@ func TestUIHandler_ServeHTTP_DoesNotReflectMaliciousBasePathHeader(t *testing.T)
 			w.WriteHeader(http.StatusOK)
 		}),
 		indexHTML: []byte(`<html><head><link rel="stylesheet" href="/assets/app.css"></head><body><script src="/assets/app.js"></script></body></html>`),
+		basePath:  "/trusted",
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/app/route", nil)
@@ -39,6 +40,7 @@ func TestUIHandler_ServeHTTP_DoesNotReflectMaliciousBasePathHeader(t *testing.T)
 	require.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
 	require.NotContains(t, body, `onload="alert(1)`)
-	require.Contains(t, body, `href="/assets/app.css"`)
-	require.Contains(t, body, `src="/assets/app.js"`)
+	require.Contains(t, body, `href="/trusted/assets/app.css"`)
+	require.Contains(t, body, `src="/trusted/assets/app.js"`)
+	require.NotContains(t, body, `src="//assets/`)
 }

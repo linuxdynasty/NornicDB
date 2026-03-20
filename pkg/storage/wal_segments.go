@@ -167,6 +167,9 @@ func resolveWALSegmentPath(walDir, segmentName string) (string, error) {
 	if filepath.Base(cleanName) != cleanName || strings.Contains(cleanName, string(filepath.Separator)) {
 		return "", fmt.Errorf("wal: invalid segment path in manifest: %q", segmentName)
 	}
+	if _, _, ok := parseSegmentFilename(cleanName); !ok {
+		return "", fmt.Errorf("wal: invalid segment filename in manifest: %q", segmentName)
+	}
 
 	segmentDir := walSegmentsDir(walDir)
 	segmentPath := filepath.Join(segmentDir, cleanName)

@@ -44,6 +44,7 @@ func (s *Server) registerUIRoutes(mux *http.ServeMux) *uiHandler {
 		return nil
 	}
 
+	SetUIBasePath(s.config.BasePath)
 	uiHandler, uiErr := newUIHandler()
 	if uiErr != nil {
 		log.Printf("⚠️  UI initialization failed: %v", uiErr)

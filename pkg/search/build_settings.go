@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/envutil"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -62,7 +63,7 @@ func loadSearchBuildSettings(path string) (*searchBuildSettingsSnapshot, error) 
 	defer file.Close()
 
 	var snap searchBuildSettingsSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+	if err := util.DecodeMsgpackFile(file, &snap); err != nil {
 		return nil, nil
 	}
 	if snap.FormatVersion != searchBuildSettingsFormatVersion {

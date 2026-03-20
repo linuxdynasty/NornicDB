@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -264,7 +265,7 @@ func (e *StorageExecutor) loadPersistedProcedures() error {
 			continue
 		}
 		var record persistedProcedureRecord
-		if err := msgpack.Unmarshal(payload, &record); err != nil {
+		if err := util.DecodeMsgpackBytes(payload, &record); err != nil {
 			continue
 		}
 		spec, handler, _, err := e.compilePersistedProcedure(record)

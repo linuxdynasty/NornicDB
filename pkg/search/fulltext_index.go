@@ -10,7 +10,7 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // BM25 parameters (standard values)
@@ -151,7 +151,7 @@ func (f *FulltextIndex) Load(path string) error {
 	defer file.Close()
 
 	var snap fulltextIndexSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+	if err := util.DecodeMsgpackFile(file, &snap); err != nil {
 		// Corrupt or wrong format; clear index so caller rebuilds
 		f.mu.Lock()
 		f.documents = make(map[string]string)

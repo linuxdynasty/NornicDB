@@ -20,6 +20,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -510,7 +511,7 @@ func (v *VectorFileStore) Load() error {
 	}
 	defer f.Close()
 	var meta VectorFileStoreMeta
-	if err := msgpack.NewDecoder(f).Decode(&meta); err != nil {
+	if err := util.DecodeMsgpackFile(f, &meta); err != nil {
 		// Corrupt meta; rebuild idToOff from .vec.
 		return v.rebuildIndexFromVecLocked()
 	}

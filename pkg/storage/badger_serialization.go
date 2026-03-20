@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -194,7 +195,7 @@ func decodeWithSerializer(serializer StorageSerializer, data []byte, value any) 
 	case StorageSerializerGob:
 		return gob.NewDecoder(bytes.NewReader(data)).Decode(value)
 	case StorageSerializerMsgpack:
-		return msgpack.Unmarshal(data, value)
+		return util.DecodeMsgpackBytes(data, value)
 	default:
 		return fmt.Errorf("unsupported storage serializer: %s", serializer)
 	}

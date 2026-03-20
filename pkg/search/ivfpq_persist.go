@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 type ivfpqMetaSnapshot struct {
@@ -102,7 +102,7 @@ func decodeMsgpackFile(path string, dst any) error {
 		return err
 	}
 	defer file.Close()
-	if err := msgpack.NewDecoder(file).Decode(dst); err != nil {
+	if err := util.DecodeMsgpackFile(file, dst); err != nil {
 		return err
 	}
 	return nil

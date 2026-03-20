@@ -167,7 +167,7 @@ func TestWALSegmentPathHelpers(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, filepath.Join(walSegmentsDir(dir), "seg-7-9.wal"), resolved)
 
-		for _, name := range []string{"", "..", "../wal.log", "nested/seg-1-2.wal"} {
+		for _, name := range []string{"", "..", "../wal.log", "nested/seg-1-2.wal", "bad-name.wal"} {
 			_, err := resolveWALSegmentPath(dir, name)
 			require.Error(t, err, name)
 		}

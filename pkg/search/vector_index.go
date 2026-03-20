@@ -110,7 +110,7 @@ import (
 	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 var (
@@ -470,7 +470,7 @@ func (v *VectorIndex) Load(path string) error {
 	defer file.Close()
 
 	var snap vectorIndexSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+	if err := util.DecodeMsgpackFile(file, &snap); err != nil {
 		// Corrupt or wrong format; clear index so caller rebuilds
 		v.mu.Lock()
 		v.vectors = make(map[string][]float32)

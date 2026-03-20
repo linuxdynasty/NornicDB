@@ -33,6 +33,7 @@ import (
 	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -576,7 +577,7 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	defer file.Close()
 
 	var snap hnswIndexSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+	if err := util.DecodeMsgpackFile(file, &snap); err != nil {
 		return nil, nil
 	}
 	if snap.Dimensions <= 0 || snap.InternalToID == nil {
@@ -679,7 +680,7 @@ func loadIVFClusterMemberIDs(ivfDir string, clusterID int) ([]string, error) {
 	}
 	defer file.Close()
 	var snap hnswIndexSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+	if err := util.DecodeMsgpackFile(file, &snap); err != nil {
 		return nil, err
 	}
 	if snap.InternalToID == nil {
