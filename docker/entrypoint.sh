@@ -40,4 +40,9 @@ ARGS="$ARGS --address=${NORNICDB_ADDRESS:-0.0.0.0}"
 [ -n "$NORNICDB_EMBEDDING_DIMENSIONS" ] && ARGS="$ARGS --embedding-dim=$NORNICDB_EMBEDDING_DIMENSIONS"
 [ -n "$NORNICDB_EMBEDDING_GPU_LAYERS" ] && ARGS="$ARGS --embedding-gpu-layers=$NORNICDB_EMBEDDING_GPU_LAYERS"
 
+# Base path for reverse proxy deployment
+if [ -n "$NORNICDB_BASE_PATH" ]; then
+    ARGS="$ARGS --base-path=$NORNICDB_BASE_PATH"
+fi
+
 exec /app/nornicdb $ARGS "$@"

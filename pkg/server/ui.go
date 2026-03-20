@@ -26,6 +26,42 @@ type uiHandler struct {
 	indexHTML  []byte
 }
 
+func normalizeUIBasePath(raw string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" || base == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	base = strings.TrimSuffix(base, "/")
+	if base == "/" {
+		return ""
+	}
+	return base
+}
+
+func rewriteIndexHTMLBasePath(indexHTML []byte, basePath string) []byte {
+	base := normalizeUIBasePath(basePath)
+	if base == "" {
+		return indexHTML
+	}
+	s := string(indexHTML)
+	repl := []struct {
+		from string
+		to   string
+	}{
+		{`src="/assets/`, `src="` + base + `/assets/`},
+		{`href="/assets/`, `href="` + base + `/assets/`},
+		{`href="/nornicdb.svg"`, `href="` + base + `/nornicdb.svg"`},
+		{`href="/favicon.ico"`, `href="` + base + `/favicon.ico"`},
+	}
+	for _, r := range repl {
+		s = strings.ReplaceAll(s, r.from, r.to)
+	}
+	return []byte(s)
+}
+
 // newUIHandler creates a handler for serving embedded UI assets
 func newUIHandler() (*uiHandler, error) {
 	if !UIEnabled {
@@ -93,8 +129,9 @@ func (h *uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For all other paths, serve index.html (SPA routing)
+	basePath := r.Header.Get("X-Base-Path")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(h.indexHTML)
+	_, _ = w.Write(rewriteIndexHTMLBasePath(h.indexHTML, basePath))
 }
 
 // isUIRequest checks if request is from a browser wanting HTML
