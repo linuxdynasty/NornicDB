@@ -198,6 +198,21 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 	}
 
+	// Chained MATCH/WITH aggregation pipelines with a terminal RETURN need dedicated handling.
+	// Example:
+	// MATCH (a) WITH count(a) AS c1
+	// MATCH (b) WITH c1, count(b) AS c2
+	// RETURN c1, c2
+	if hasWith {
+		matchCount := countKeywordOccurrences(upper, "MATCH")
+		optionalMatchCount := countKeywordOccurrences(upper, "OPTIONAL MATCH")
+		if matchCount-optionalMatchCount > 1 {
+			if chainResult, ok, err := e.executeChainedMatchWithAggregations(ctx, cypher); ok || err != nil {
+				return chainResult, err
+			}
+		}
+	}
+
 	// Check for WITH clause between MATCH and RETURN
 	// This handles MATCH ... WITH (CASE WHEN) ... RETURN queries
 	// But we must avoid false positives from "STARTS WITH" or "ENDS WITH" in WHERE clauses

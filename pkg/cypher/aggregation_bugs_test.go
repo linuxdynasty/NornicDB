@@ -279,6 +279,42 @@ func TestAggregation_NullHandling(t *testing.T) {
 	})
 }
 
+func TestBug_ChainedMatchWithCountsPreserveAliases(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	seed := []string{
+		`CREATE (:FactVersion {id: 'fv1'})`,
+		`CREATE (:FactVersion {id: 'fv2'})`,
+		`CREATE (:FactVersion {id: 'fv3'})`,
+		`CREATE (:MutationEvent {id: 'me1'})`,
+		`CREATE (:MutationEvent {id: 'me2'})`,
+		`CREATE (:Commit {id: 'c1'})`,
+	}
+	for _, q := range seed {
+		_, err := exec.Execute(ctx, q, nil)
+		require.NoError(t, err)
+	}
+
+	result, err := exec.Execute(ctx, `
+		MATCH (fv:FactVersion)
+		WITH count(fv) AS fact_versions
+		MATCH (me:MutationEvent)
+		WITH fact_versions, count(me) AS mutation_events
+		MATCH (c:Commit)
+		WITH fact_versions, mutation_events, count(c) AS commits
+		RETURN fact_versions, mutation_events, commits
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Len(t, result.Rows[0], 3)
+	require.Equal(t, int64(3), result.Rows[0][0])
+	require.Equal(t, int64(2), result.Rows[0][1])
+	require.Equal(t, int64(1), result.Rows[0][2])
+}
+
 func TestAggregation_CollectDistinct(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
