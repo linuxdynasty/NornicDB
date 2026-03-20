@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.25] - 2026-03-20
+
+### Changed
+
+- **Correlated subquery execution reliability**:
+  - generalized correlated `CALL { ... }` execution handling for broader valid clause combinations, including mixed `WITH`, `UNION`, and procedure-yield pipelines
+  - improved execution consistency for multi-stage query pipelines that combine procedural and graph pattern clauses.
+- **ID-based query execution path optimization**:
+  - added direct ID-seek planning for simple `MATCH ... WHERE id(...) = ...` and `elementId(...) = ...` query shapes
+  - reduced unnecessary scan behavior for high-frequency point-lookup patterns.
+- **Container build base-image sourcing**:
+  - updated Docker build variants to use mirrored/public base-image registries for common runtime/build dependencies
+  - reduced susceptibility to upstream rate-limit failures during CI/CD image resolution.
+
+### Fixed
+
+- **`WITH` identifier substitution robustness**:
+  - fixed identifier replacement behavior to avoid accidental token corruption in downstream clauses.
+- **Empty-seed correlated subquery result shape**:
+  - fixed no-seed correlated `CALL` paths to preserve projected column schemas rather than returning fallback/internal columns.
+- **Node import projection in correlated subqueries**:
+  - fixed node-variable import binding so property projections from imported variables resolve correctly in subquery bodies.
+- **Canonical ID comparison normalization**:
+  - fixed `id(...)` / `elementId(...)` comparison handling by normalizing canonical element-ID inputs to internal IDs before evaluation.
+- **MERGE resolution under stale lookup conditions**:
+  - fixed merge-path behavior to recover correctly when fast lookup candidates are stale or conflict with already-existing rows.
+- **Cypher compatibility hardening**:
+  - fixed edge-case compatibility issues in optional pattern matching and UNWIND map-property access paths.
+
+### Tests
+
+- Added regression coverage for:
+  - correlated subquery execution variants (including `UNION` + procedure-yield + projection pipelines)
+  - empty-seed correlated subquery schema behavior
+  - node-import property projection correctness in subqueries
+  - direct ID/elements-ID point-lookup planning paths
+  - merge conflict/stale-lookup recovery behavior.
+
+### Technical Details
+
+- **Range covered**: `v1.0.24..HEAD`
+- **Commits in range**: 10 (non-merge)
+- **Repository delta**: 23 files changed, +1,768 / -291 lines
+- **Non-test surface changed**: 17 files
+- **Primary focus areas**: correlated subquery correctness, point-lookup performance, Cypher compatibility hardening, merge-path resiliency, and CI/CD container base-image reliability.
+
 ## [v1.0.24] - 2026-03-19
 
 ### Changed
