@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -2119,6 +2120,14 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 					nodeContext[varName] = node
 				}
 			}
+		} else if strings.HasPrefix(upperSeg, "MATCH") {
+			node, varName, err := e.executeMatchSegment(ctx, segment, nodeContext)
+			if err != nil {
+				return nil, fmt.Errorf("MATCH failed: %w", err)
+			}
+			if node != nil && varName != "" {
+				nodeContext[varName] = node
+			}
 		} else if strings.HasPrefix(upperSeg, "RETURN") {
 			// Build result from context
 			returnClause := strings.TrimSpace(segment[6:])
@@ -2140,44 +2149,62 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 	return result, nil
 }
 
-// splitMultipleMerges splits a query into MERGE and RETURN segments.
+// splitMultipleMerges splits a query into MERGE/MATCH/RETURN segments.
 func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 	var segments []string
 
-	// Find all MERGE positions
-	var mergePositions []int
-	searchPos := 0
-	for {
-		idx := findKeywordIndex(cypher[searchPos:], "MERGE")
-		if idx == -1 {
-			break
-		}
-		mergePositions = append(mergePositions, searchPos+idx)
-		searchPos = searchPos + idx + 5
+	type boundary struct {
+		pos int
+		kw  string
 	}
-
-	// Find RETURN position
-	returnIdx := findKeywordIndex(cypher, "RETURN")
-
-	// Build segments
-	for i, pos := range mergePositions {
-		var endPos int
-		if i+1 < len(mergePositions) {
-			endPos = mergePositions[i+1]
-		} else if returnIdx > pos {
-			endPos = returnIdx
-		} else {
-			endPos = len(cypher)
+	var boundaries []boundary
+	for _, kw := range []string{"MERGE", "MATCH", "RETURN"} {
+		searchPos := 0
+		for {
+			idx := findKeywordIndexInContext(cypher[searchPos:], kw)
+			if idx == -1 {
+				break
+			}
+			abs := searchPos + idx
+			// Skip ON MATCH SET modifier inside MERGE clauses.
+			if kw == "MATCH" && isOnMatchModifier(cypher, abs) {
+				searchPos = abs + len(kw)
+				continue
+			}
+			boundaries = append(boundaries, boundary{pos: abs, kw: kw})
+			searchPos = abs + len(kw)
 		}
-		segments = append(segments, strings.TrimSpace(cypher[pos:endPos]))
 	}
+	if len(boundaries) == 0 {
+		return []string{strings.TrimSpace(cypher)}
+	}
+	sort.Slice(boundaries, func(i, j int) bool { return boundaries[i].pos < boundaries[j].pos })
 
-	// Add RETURN segment
-	if returnIdx > 0 {
-		segments = append(segments, strings.TrimSpace(cypher[returnIdx:]))
+	lastPos := -1
+	for i, b := range boundaries {
+		if b.pos == lastPos {
+			continue
+		}
+		end := len(cypher)
+		for j := i + 1; j < len(boundaries); j++ {
+			if boundaries[j].pos > b.pos {
+				end = boundaries[j].pos
+				break
+			}
+		}
+		seg := strings.TrimSpace(cypher[b.pos:end])
+		if seg != "" {
+			segments = append(segments, seg)
+		}
+		lastPos = b.pos
 	}
 
 	return segments
+}
+
+func isOnMatchModifier(cypher string, matchPos int) bool {
+	prefix := strings.TrimSpace(cypher[:matchPos])
+	return strings.HasSuffix(strings.ToUpper(prefix), "ON")
 }
 
 // parseMergePattern parses a MERGE pattern like "(n:Label {prop: value})"
