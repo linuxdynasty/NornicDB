@@ -1,55 +1,44 @@
 package server
 
 import (
-	"strings"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizeUIBasePath(t *testing.T) {
-	t.Parallel()
+func TestSanitizeUIBasePath(t *testing.T) {
+	t.Run("allows normal prefixed path", func(t *testing.T) {
+		require.Equal(t, "/nornic-db", sanitizeUIBasePath("/nornic-db/"))
+		require.Equal(t, "/nornic-db", sanitizeUIBasePath("nornic-db"))
+	})
 
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "empty", in: "", want: ""},
-		{name: "root", in: "/", want: ""},
-		{name: "valid_no_slash", in: "nornic-db", want: "/nornic-db"},
-		{name: "valid_with_slash", in: "/nornic-db", want: "/nornic-db"},
-		{name: "trim_trailing", in: "/nornic-db/", want: "/nornic-db"},
-		{name: "collapse_double_slash", in: "/nornic-db//sub", want: "/nornic-db/sub"},
-		{name: "reject_dotdot", in: "/nornic-db/../x", want: ""},
-		{name: "reject_quote", in: `/nornic-db" onload="alert(1)`, want: ""},
-		{name: "reject_angle", in: "/nornic-db<script>", want: ""},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := normalizeUIBasePath(tc.in)
-			if got != tc.want {
-				t.Fatalf("normalizeUIBasePath(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
+	t.Run("rejects malicious header payload", func(t *testing.T) {
+		require.Equal(t, "", sanitizeUIBasePath(`/" onload="alert(1)`))
+		require.Equal(t, "", sanitizeUIBasePath(`/x"><script>alert(1)</script>`))
+		require.Equal(t, "", sanitizeUIBasePath(`/../admin`))
+		require.Equal(t, "", sanitizeUIBasePath(`/foo//bar`))
+		require.Equal(t, "", sanitizeUIBasePath(`/foo\bar`))
+	})
 }
 
-func TestRewriteIndexHTMLBasePath_RejectsUnsafeHeaderInput(t *testing.T) {
-	t.Parallel()
+func TestUIHandler_ServeHTTP_DoesNotReflectMaliciousBasePathHeader(t *testing.T) {
+	h := &uiHandler{
+		fileServer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+		indexHTML: []byte(`<html><head><link rel="stylesheet" href="/assets/app.css"></head><body><script src="/assets/app.js"></script></body></html>`),
+	}
 
-	index := []byte(`<html><head><script src="/assets/app.js"></script><link href="/assets/app.css"></head></html>`)
-	unsafeBase := `/nornic-db" onload="alert(1)`
-	out := string(rewriteIndexHTMLBasePath(index, unsafeBase))
+	req := httptest.NewRequest(http.MethodGet, "/app/route", nil)
+	req.Header.Set("X-Base-Path", `/" onload="alert(1)`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
 
-	if strings.Contains(out, "onload=") {
-		t.Fatalf("unsafe attribute injection was reflected: %s", out)
-	}
-	if strings.Contains(out, unsafeBase) {
-		t.Fatalf("unsafe base path was reflected: %s", out)
-	}
-	if !strings.Contains(out, `src="/assets/app.js"`) {
-		t.Fatalf("expected original asset path preserved for unsafe base path: %s", out)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	require.NotContains(t, body, `onload="alert(1)`)
+	require.Contains(t, body, `href="/assets/app.css"`)
+	require.Contains(t, body, `src="/assets/app.js"`)
 }

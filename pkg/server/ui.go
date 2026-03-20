@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -58,7 +59,7 @@ func normalizeUIBasePath(raw string) string {
 }
 
 func rewriteIndexHTMLBasePath(indexHTML []byte, basePath string) []byte {
-	base := normalizeUIBasePath(basePath)
+	base := sanitizeUIBasePath(basePath)
 	if base == "" {
 		return indexHTML
 	}
@@ -76,6 +77,37 @@ func rewriteIndexHTMLBasePath(indexHTML []byte, basePath string) []byte {
 		s = strings.ReplaceAll(s, r.from, r.to)
 	}
 	return []byte(s)
+}
+
+func sanitizeUIBasePath(raw string) string {
+	base := normalizeUIBasePath(raw)
+	if base == "" {
+		return ""
+	}
+	// Reject unexpected characters so untrusted header input cannot escape
+	// HTML attribute context when used for asset URL rewriting.
+	for i := 0; i < len(base); i++ {
+		c := base[i]
+		if (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '/' || c == '-' || c == '_' || c == '.' || c == '~' {
+			continue
+		}
+		return ""
+	}
+	// Disallow traversal-like inputs and normalize path shape.
+	if strings.Contains(base, "..") || strings.Contains(base, "//") || strings.Contains(base, "\\") {
+		return ""
+	}
+	clean := path.Clean(base)
+	if clean == "." || clean == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return clean
 }
 
 // newUIHandler creates a handler for serving embedded UI assets
