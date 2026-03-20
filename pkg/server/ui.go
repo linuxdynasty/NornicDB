@@ -172,14 +172,14 @@ func newUIHandler() (*uiHandler, error) {
 
 // ServeHTTP implements http.Handler for the UI
 func (h *uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+	reqPath := r.URL.Path
 
 	// Validate path to prevent directory traversal attacks
-	cleanPath := path.Clean(path)
+	cleanPath := path.Clean(reqPath)
 	if !strings.HasPrefix(cleanPath, "/") {
 		cleanPath = "/" + cleanPath
 	}
-	if strings.Contains(cleanPath, "..") || cleanPath != path {
+	if strings.Contains(cleanPath, "..") || cleanPath != reqPath {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
