@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Container build base-image sourcing**:
   - updated Docker build variants to use mirrored/public base-image registries for common runtime/build dependencies
   - reduced susceptibility to upstream rate-limit failures during CI/CD image resolution.
+- **Keyword-aware clause parsing consistency**:
+  - migrated remaining clause-routing keyword detection paths away from raw string index checks to shared keyword helpers
+  - improved robustness for mixed whitespace/newline formatting and reduced false keyword matches inside expression bodies.
 
 ### Fixed
 
@@ -37,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - fixed merge-path behavior to recover correctly when fast lookup candidates are stale or conflict with already-existing rows.
 - **Cypher compatibility hardening**:
   - fixed edge-case compatibility issues in optional pattern matching and UNWIND map-property access paths.
+- **Nested UNWIND parsing correctness**:
+  - fixed double-UNWIND `AS` parsing offsets so nested list expansion queries return expected rows under complex clause chains.
+- **COLLECT subquery WHERE rewrite stability**:
+  - fixed COLLECT-subquery rewriting when a `WHERE` clause is already present, preventing malformed query text and empty result regressions.
 
 ### Tests
 
@@ -46,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - node-import property projection correctness in subqueries
   - direct ID/elements-ID point-lookup planning paths
   - merge conflict/stale-lookup recovery behavior.
+- Restored full `pkg/cypher` regression pass after parser/executor clause-detection updates, including complex nested UNWIND/list-expression cases and COLLECT-subquery branch coverage.
 
 ### Technical Details
 
