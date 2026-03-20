@@ -57,6 +57,9 @@ func (s *Server) registerUIRoutes(mux *http.ServeMux) *uiHandler {
 
 	// Serve UI assets
 	mux.Handle("/assets/", uiHandler)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		uiHandler.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/nornicdb.svg", func(w http.ResponseWriter, r *http.Request) {
 		uiHandler.ServeHTTP(w, r)
 	})
