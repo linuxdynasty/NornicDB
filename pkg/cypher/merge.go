@@ -958,8 +958,31 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 
 	// Check if this is a relationship pattern: (a)-[r:TYPE]->(b)
 	if strings.Contains(mergePattern, "->") || strings.Contains(mergePattern, "<-") || strings.Contains(mergePattern, "]-") {
-		// Relationship MERGE - need to create relationship between nodes
-		return e.executeMergeRelationshipWithContext(ctx, cypher, mergePattern, nodeContext, relContext)
+		// Relationship MERGE - create relationship, then continue processing chained MERGE clauses.
+		relationshipResult, err := e.executeMergeRelationshipWithContext(ctx, "MERGE "+mergePattern, mergePattern, nodeContext, relContext)
+		if err != nil {
+			return nil, err
+		}
+		if secondMergeIdx > 0 {
+			secondMergePart := strings.TrimSpace(cypher[mergeIdx+5+secondMergeIdx:])
+			if !strings.HasPrefix(strings.ToUpper(secondMergePart), "MERGE ") {
+				trimmed := strings.TrimSpace(secondMergePart)
+				if strings.HasPrefix(trimmed, "(") {
+					secondMergePart = "MERGE " + trimmed
+				}
+			}
+			nextResult, err := e.executeMergeWithContext(ctx, secondMergePart, nodeContext, relContext)
+			if err != nil {
+				return nil, err
+			}
+			if relationshipResult != nil && relationshipResult.Stats != nil && nextResult != nil && nextResult.Stats != nil {
+				nextResult.Stats.RelationshipsCreated += relationshipResult.Stats.RelationshipsCreated
+				nextResult.Stats.NodesCreated += relationshipResult.Stats.NodesCreated
+				nextResult.Stats.PropertiesSet += relationshipResult.Stats.PropertiesSet
+			}
+			return nextResult, nil
+		}
+		return relationshipResult, nil
 	}
 
 	// Parse node pattern
@@ -1061,7 +1084,13 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 
 	// Handle second MERGE (usually relationship creation)
 	if secondMergeIdx > 0 {
-		secondMergePart := strings.TrimSpace(cypher[mergeIdx+5+secondMergeIdx+1:])
+		secondMergePart := strings.TrimSpace(cypher[mergeIdx+5+secondMergeIdx:])
+		if !strings.HasPrefix(strings.ToUpper(secondMergePart), "MERGE ") {
+			trimmed := strings.TrimSpace(secondMergePart)
+			if strings.HasPrefix(trimmed, "(") {
+				secondMergePart = "MERGE " + trimmed
+			}
+		}
 		_, err := e.executeMergeWithContext(ctx, secondMergePart, nodeContext, relContext)
 		if err != nil {
 			return nil, err

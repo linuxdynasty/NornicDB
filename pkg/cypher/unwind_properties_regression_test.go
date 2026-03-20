@@ -263,6 +263,71 @@ RETURN m.lang, m.full_import_name
 	require.Equal(t, "pkg.dep.shared", result.Rows[0][1])
 }
 
+func TestUnwindMergeSetMergeComplexChainShape(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (fk:FactKey {subject_entity_id: row.subject_entity_id, predicate: row.predicate})
+MERGE (fv:FactVersion {version_id: row.version_id})
+SET fv.fact_key = row.fact_key,
+    fv.tx_id = row.tx_id,
+    fv.commit_hash = row.commit_hash,
+    fv.valid_from_iso = row.valid_from_iso,
+    fv.valid_from = datetime(row.valid_from_iso),
+    fv.value_json = row.value_json,
+    fv.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+    fv.asserted_at = datetime(row.asserted_at_iso),
+    fv.asserted_by = row.asserted_by,
+    fv.semantic_type = row.semantic_type
+MERGE (fk)-[:HAS_VERSION]->(fv)
+MERGE (c:Commit {hash: row.commit_hash})
+SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+MERGE (c)-[:CHANGED]->(fv)
+MERGE (c)-[:TOUCHED_KEY]->(fk)
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"subject_entity_id": "file::internal/indexer/indexer.go",
+				"predicate":         "calls",
+				"version_id":        "fv-14e79330ba4ce24ae71d67774a4ff17226944475",
+				"fact_key":          "repo_fact|calls|file::internal/indexer/indexer.go->symbol::internal/gitreader/gitreader.go::method::CommitList",
+				"tx_id":             "tx-5671c64f-000001",
+				"commit_hash":       "5671c64fcba850a6fd01ef68f2b9d592389f41c1",
+				"valid_from_iso":    "2026-03-20T20:22:20Z",
+				"value_json":        `{"repo":"git-to-graph","source":"file::internal/indexer/indexer.go","target":"symbol::internal/gitreader/gitreader.go::method::CommitList"}`,
+				"valid_to_iso":      nil,
+				"asserted_at_iso":   "2026-03-20T20:22:20Z",
+				"asserted_by":       "TJ Sweet",
+				"semantic_type":     "CallEdgeVersion",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+MATCH (fk:FactKey {subject_entity_id: 'file::internal/indexer/indexer.go', predicate: 'calls'})
+MATCH (fv:FactVersion {version_id: 'fv-14e79330ba4ce24ae71d67774a4ff17226944475'})
+MATCH (c:Commit {hash: '5671c64fcba850a6fd01ef68f2b9d592389f41c1'})
+RETURN
+  count(fk) AS fkCount,
+  count(fv) AS fvCount,
+  count(c) AS cCount,
+  fv.semantic_type AS semanticType,
+  c.actor AS actor
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), res.Rows[0][0])
+	require.Equal(t, int64(1), res.Rows[0][1])
+	require.Equal(t, int64(1), res.Rows[0][2])
+	require.Equal(t, "CallEdgeVersion", res.Rows[0][3])
+	require.Equal(t, "TJ Sweet", res.Rows[0][4])
+}
+
 func TestUnwindCreateSetMergeFromParameterMap_LargeComplexStrings(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

@@ -530,7 +530,15 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					if returnPart != "" {
 						substitutedFull += " " + returnPart
 					}
-					mutationResult, err = e.Execute(ctx, substitutedFull, params)
+					trimmed := strings.TrimSpace(substitutedFull)
+					// Route MERGE-heavy mutation chains through context-aware MERGE execution.
+					// This avoids brittle top-level MERGE parsing for shapes like:
+					// MERGE (...) MERGE (...) SET ... MERGE (...) ...
+					if strings.HasPrefix(strings.ToUpper(trimmed), "MERGE ") {
+						mutationResult, err = e.executeMergeWithContext(ctx, trimmed, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+					} else {
+						mutationResult, err = e.Execute(ctx, substitutedFull, params)
+					}
 				}
 				if err != nil {
 					return nil, fmt.Errorf("UNWIND mutation failed: %w", err)
