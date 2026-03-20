@@ -14,6 +14,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type staleMergeLookupEngine struct {
+	storage.Engine
+	hiddenLabel string
+}
+
+func (s *staleMergeLookupEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
+	if label == s.hiddenLabel {
+		return nil, nil
+	}
+	return s.Engine.GetNodesByLabel(label)
+}
+
 // ========================================
 // Basic MERGE Node Tests
 // ========================================
@@ -708,6 +720,52 @@ func TestExecuteMerge_UnsubstitutedParamAndFallbackPatternBranches(t *testing.T)
 	require.Equal(t, []string{"n"}, fallback.Columns)
 	require.Len(t, fallback.Rows, 1)
 	require.NotNil(t, fallback.Rows[0][0])
+}
+
+func TestExecuteMerge_RecoversFromDuplicateCreateForParameterizedRepositoryMerge(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	require.NoError(t, store.GetSchema().AddUniqueConstraint("repo_path", "Repository", "path"))
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "repo-1",
+		Labels: []string{"Repository"},
+		Properties: map[string]interface{}{
+			"path":          "/Users/timothysweet/src/my-CodeGraphContext",
+			"name":          "old-name",
+			"is_dependency": true,
+		},
+	})
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(&staleMergeLookupEngine{
+		Engine:      store,
+		hiddenLabel: "Repository",
+	})
+	ctx := context.Background()
+
+	result, err := exec.Execute(ctx, `
+		MERGE (r:Repository {path: $path})
+		SET r.name = $name, r.is_dependency = $is_dependency
+		RETURN r.path, r.name, r.is_dependency
+	`, map[string]interface{}{
+		"path":          "/Users/timothysweet/src/my-CodeGraphContext",
+		"name":          "my-CodeGraphContext",
+		"is_dependency": false,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "/Users/timothysweet/src/my-CodeGraphContext", result.Rows[0][0])
+	assert.Equal(t, "my-CodeGraphContext", result.Rows[0][1])
+	assert.Equal(t, false, result.Rows[0][2])
+
+	nodes, err := store.GetNodesByLabel("Repository")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "/Users/timothysweet/src/my-CodeGraphContext", nodes[0].Properties["path"])
+	assert.Equal(t, "my-CodeGraphContext", nodes[0].Properties["name"])
+	assert.Equal(t, false, nodes[0].Properties["is_dependency"])
 }
 
 func TestExecuteCompoundMatchMerge_SecondMergeAndErrorBranches(t *testing.T) {

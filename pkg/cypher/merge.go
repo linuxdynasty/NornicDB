@@ -5,11 +5,79 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
+
+func mergeNodeHasLabels(node *storage.Node, labels []string) bool {
+	for _, label := range labels {
+		found := false
+		for _, nodeLabel := range node.Labels {
+			if nodeLabel == label {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeNodeMatches(node *storage.Node, labels []string, props map[string]interface{}) bool {
+	if node == nil {
+		return false
+	}
+	if len(labels) > 0 && !mergeNodeHasLabels(node, labels) {
+		return false
+	}
+	for key, val := range props {
+		nodeVal, ok := node.Properties[key]
+		if !ok || fmt.Sprintf("%v", nodeVal) != fmt.Sprintf("%v", val) {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeCreateConflict(err error) bool {
+	if errors.Is(err, storage.ErrAlreadyExists) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "already exists")
+}
+
+func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, props map[string]interface{}) (*storage.Node, error) {
+	if len(labels) == 0 || len(props) == 0 {
+		return nil, nil
+	}
+
+	nodes, err := store.GetNodesByLabel(labels[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		if mergeNodeMatches(node, labels, props) {
+			return node, nil
+		}
+	}
+
+	allNodes, err := store.AllNodes()
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range allNodes {
+		if mergeNodeMatches(node, labels, props) {
+			return node, nil
+		}
+	}
+
+	return nil, nil
+}
 
 func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	// Substitute parameters AFTER routing to avoid keyword detection issues
@@ -137,20 +205,9 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	// Try to find existing node
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(matchProps) > 0 {
-		// Search for node with matching label and properties
-		nodes, _ := store.GetNodesByLabel(labels[0])
-		for _, n := range nodes {
-			matches := true
-			for key, val := range matchProps {
-				if nodeVal, ok := n.Properties[key]; !ok || nodeVal != val {
-					matches = false
-					break
-				}
-			}
-			if matches {
-				existingNode = n
-				break
-			}
+		existingNode, err = e.findMergeNode(store, labels, matchProps)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -179,23 +236,38 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 		}
 		actualID, err := store.CreateNode(node)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
-		}
-		node.ID = actualID
-		e.notifyNodeMutated(string(node.ID))
-		result.Stats.NodesCreated = 1
-
-		// Apply ON CREATE SET if present
-		if onCreateIdx > 0 {
-			setEnd := len(cypher)
-			// Stop at: standalone SET, ON MATCH SET, WITH, or RETURN
-			for _, idx := range []int{setIdx, onMatchIdx, withIdx, returnIdx} {
-				if idx > onCreateIdx && idx < setEnd {
-					setEnd = idx
+			if mergeCreateConflict(err) {
+				recoveredNode, findErr := e.findMergeNode(store, labels, matchProps)
+				if findErr != nil {
+					return nil, findErr
 				}
+				if recoveredNode != nil {
+					existingNode = recoveredNode
+					node = recoveredNode
+				} else {
+					return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 			}
-			setClause := strings.TrimSpace(cypher[onCreateIdx+13 : setEnd])
-			e.applySetToNode(node, varName, setClause)
+		}
+		if existingNode == nil {
+			node.ID = actualID
+			e.notifyNodeMutated(string(node.ID))
+			result.Stats.NodesCreated = 1
+
+			// Apply ON CREATE SET if present
+			if onCreateIdx > 0 {
+				setEnd := len(cypher)
+				// Stop at: standalone SET, ON MATCH SET, WITH, or RETURN
+				for _, idx := range []int{setIdx, onMatchIdx, withIdx, returnIdx} {
+					if idx > onCreateIdx && idx < setEnd {
+						setEnd = idx
+					}
+				}
+				setClause := strings.TrimSpace(cypher[onCreateIdx+13 : setEnd])
+				e.applySetToNode(node, varName, setClause)
+			}
 		}
 	}
 
@@ -1688,19 +1760,9 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 	// Try to find existing node
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(props) > 0 {
-		nodes, _ := store.GetNodesByLabel(labels[0])
-		for _, n := range nodes {
-			matches := true
-			for key, val := range props {
-				if nodeVal, ok := n.Properties[key]; !ok || fmt.Sprintf("%v", nodeVal) != fmt.Sprintf("%v", val) {
-					matches = false
-					break
-				}
-			}
-			if matches {
-				existingNode = n
-				break
-			}
+		existingNode, err = e.findMergeNode(store, labels, props)
+		if err != nil {
+			return nil, "", err
 		}
 	}
 
@@ -1729,23 +1791,38 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 		}
 		actualID, err := store.CreateNode(node)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create node: %w", err)
-		}
-		node.ID = actualID
-		e.notifyNodeMutated(string(node.ID))
-
-		// Apply ON CREATE SET if present
-		onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
-		if onCreateIdx > 0 {
-			setEnd := len(segment)
-			onMatchIdx := findKeywordIndex(segment, "ON MATCH SET")
-			if onMatchIdx > onCreateIdx {
-				setEnd = onMatchIdx
+			if mergeCreateConflict(err) {
+				recoveredNode, findErr := e.findMergeNode(store, labels, props)
+				if findErr != nil {
+					return nil, "", findErr
+				}
+				if recoveredNode != nil {
+					existingNode = recoveredNode
+					node = recoveredNode
+				} else {
+					return nil, "", fmt.Errorf("failed to create node: %w", err)
+				}
+			} else {
+				return nil, "", fmt.Errorf("failed to create node: %w", err)
 			}
-			setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
-			e.applySetToNode(node, varName, setClause)
-			store.UpdateNode(node)
+		}
+		if existingNode == nil {
+			node.ID = actualID
 			e.notifyNodeMutated(string(node.ID))
+
+			// Apply ON CREATE SET if present
+			onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
+			if onCreateIdx > 0 {
+				setEnd := len(segment)
+				onMatchIdx := findKeywordIndex(segment, "ON MATCH SET")
+				if onMatchIdx > onCreateIdx {
+					setEnd = onMatchIdx
+				}
+				setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
+				e.applySetToNode(node, varName, setClause)
+				store.UpdateNode(node)
+				e.notifyNodeMutated(string(node.ID))
+			}
 		}
 	}
 
