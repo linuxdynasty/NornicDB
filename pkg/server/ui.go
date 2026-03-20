@@ -31,8 +31,24 @@ func normalizeUIBasePath(raw string) string {
 	if base == "" || base == "/" {
 		return ""
 	}
+	// Accept only conservative path characters to avoid reflecting attacker-controlled
+	// header content into HTML attributes.
+	for _, r := range base {
+		if !(r == '/' || r == '-' || r == '_' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return ""
+		}
+	}
 	if !strings.HasPrefix(base, "/") {
 		base = "/" + base
+	}
+	if strings.Contains(base, "..") {
+		return ""
+	}
+	for strings.Contains(base, "//") {
+		base = strings.ReplaceAll(base, "//", "/")
 	}
 	base = strings.TrimSuffix(base, "/")
 	if base == "/" {
