@@ -486,6 +486,8 @@ Special thanks to everyone who helps make NornicDB better. See [CONTRIBUTORS.md]
 
 MIT License — Originally part of the [Mimir](https://github.com/orneryd/mimir) project, now maintained as a standalone repository.
 
+Patent rights are handled via a defensive non-assertion grant in [PATENTS.md](PATENTS.md). This keeps the project open for broad use (including commercial use) while adding patent retaliation protection.
+
 See [NOTICES.md](NOTICES.md) for third-party license information, including bundled AI models (BGE-M3, Qwen2.5) and dependencies.
 
 ---
