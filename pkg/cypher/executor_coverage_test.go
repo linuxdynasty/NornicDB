@@ -2373,6 +2373,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c, CASE WHEN c IS NOT NULL THEN 1 ELSE 0 END AS hasChunk WITH COUNT(DISTINCT f) AS files, COUNT(c) AS chunks, SUM(hasChunk) AS hasEmbeddings, COLLECT(DISTINCT f.name)[..10] AS sampleFiles RETURN files, chunks, hasEmbeddings, sampleFiles",
 	)
 	require.NoError(t, err)
@@ -2387,6 +2388,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c RETURN f.name AS name",
 	)
 	require.NoError(t, err)
@@ -2398,6 +2400,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c",
 	)
 	require.Error(t, err)
@@ -2408,6 +2411,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c, CASE WHEN c IS NOT NULL THEN 1 ELSE 0 END AS chunkHasEmbedding, CASE WHEN f.embedding IS NOT NULL THEN 1 ELSE 0 END AS fileHasEmbedding WITH COUNT(DISTINCT c) AS distinctChunks, COUNT(DISTINCT z) AS distinctUnknown, COUNT(CASE WHEN c IS NOT NULL THEN 1 END) AS caseCount, COLLECT(c.text) AS texts, SUM(chunkHasEmbedding) + SUM(fileHasEmbedding) AS totalEmbeddings, f.name AS firstName, unknownExpr AS missing RETURN distinctChunks, distinctUnknown, caseCount, texts, totalEmbeddings, firstName, missing",
 	)
 	require.NoError(t, err)
@@ -2425,6 +2429,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c RETURN SUM(f.embedding) AS invalid",
 	)
 	require.Error(t, err)
@@ -2435,6 +2440,7 @@ func TestProcessWithAggregation_AdditionalBranches(t *testing.T) {
 		rows,
 		"f",
 		"c",
+		"",
 		"WITH f, c, CASE WHEN c IS NOT NULL THEN 1 ELSE 0 END AS a, CASE WHEN f.embedding IS NOT NULL THEN 2 ELSE 0 END AS b, CASE WHEN c IS NOT NULL THEN 3 ELSE 0 END AS d WITH SUM(a) + SUM(b) + SUM(d) - SUM(a) AS total RETURN total",
 	)
 	require.NoError(t, err)

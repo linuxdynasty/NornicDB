@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -1473,7 +1474,7 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 
 	for _, node := range initialNodes {
 		// Try to find related nodes via the relationship
-		relatedNodes := e.findRelatedNodes(node, relPattern)
+		relatedNodes := e.findOptionalRelatedNodes(node, optMatchPattern, relPattern)
 
 		if len(relatedNodes) == 0 {
 			// No match - add row with null for the optional part (left outer join)
@@ -1496,11 +1497,16 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 
 	// Now process WITH and RETURN clauses
 	if strings.HasPrefix(strings.ToUpper(restOfQuery), "WITH") {
-		return e.processWithAggregation(joinedRows, nodePattern.variable, relPattern.targetVar, restOfQuery)
+		optMatchAfterWith := findKeywordIndex(restOfQuery, "OPTIONAL MATCH")
+		returnAfterWith := findKeywordIndex(restOfQuery, "RETURN")
+		if optMatchAfterWith > 0 && (returnAfterWith == -1 || optMatchAfterWith < returnAfterWith) {
+			return e.executeJoinedRowsWithOptionalMatch(joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
+		}
+		return e.processWithAggregation(joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
 	}
 
 	if strings.HasPrefix(strings.ToUpper(restOfQuery), "RETURN") {
-		return e.buildJoinedResult(joinedRows, nodePattern.variable, relPattern.targetVar, restOfQuery)
+		return e.buildJoinedResult(joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
 	}
 
 	// No WITH or RETURN, just return count
@@ -1659,10 +1665,296 @@ func (e *StorageExecutor) findRelatedNodes(sourceNode *storage.Node, pattern opt
 	return results
 }
 
+func (e *StorageExecutor) findOptionalRelatedNodes(sourceNode *storage.Node, patternText string, pattern optionalRelPattern) []optionalRelResult {
+	if strings.Contains(patternText, "*") {
+		traversal := e.parseTraversalPattern(patternText)
+		if traversal == nil {
+			return nil
+		}
+		paths := e.traverseFromNode(sourceNode, traversal)
+		results := make([]optionalRelResult, 0, len(paths))
+		seen := make(map[string]bool)
+		for _, path := range paths {
+			if len(path.Nodes) == 0 {
+				continue
+			}
+			node := path.Nodes[len(path.Nodes)-1]
+			var edge *storage.Edge
+			if len(path.Relationships) > 0 {
+				edge = path.Relationships[0]
+			}
+			key := string(node.ID)
+			if edge != nil {
+				key += ":" + string(edge.ID)
+			}
+			if !seen[key] {
+				seen[key] = true
+				results = append(results, optionalRelResult{node: node, edge: edge})
+			}
+		}
+		return results
+	}
+
+	return e.findRelatedNodes(sourceNode, pattern)
+}
+
 // processWithAggregation handles WITH clauses with aggregation functions
 // It finds the WITH clause that contains aggregations and processes them
 // Also evaluates CASE WHEN expressions in WITH clauses
-func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, targetVar, restOfQuery string) (*ExecuteResult, error) {
+func buildJoinedEvaluationContext(row joinedRow, sourceVar, targetVar, relVar string) (map[string]*storage.Node, map[string]*storage.Edge) {
+	nodeCtx := make(map[string]*storage.Node, 2)
+	if sourceVar != "" {
+		nodeCtx[sourceVar] = row.initialNode
+	}
+	if targetVar != "" {
+		nodeCtx[targetVar] = row.relatedNode
+	}
+	relCtx := make(map[string]*storage.Edge, 1)
+	if relVar != "" {
+		relCtx[relVar] = row.relationship
+	}
+	return nodeCtx, relCtx
+}
+
+func stripTrailingReturnClauses(returnClause string) string {
+	returnEnd := len(returnClause)
+	for _, keyword := range []string{"ORDER BY", "SKIP", "LIMIT"} {
+		if idx := findKeywordIndex(returnClause, keyword); idx >= 0 && idx < returnEnd {
+			returnEnd = idx
+		}
+	}
+	return strings.TrimSpace(returnClause[:returnEnd])
+}
+
+func joinedValueKey(val interface{}) string {
+	switch v := val.(type) {
+	case *storage.Node:
+		if v == nil {
+			return "node:nil"
+		}
+		return "node:" + string(v.ID)
+	case *storage.Edge:
+		if v == nil {
+			return "edge:nil"
+		}
+		return "edge:" + string(v.ID)
+	default:
+		return fmt.Sprintf("%#v", val)
+	}
+}
+
+func (e *StorageExecutor) executeJoinedRowsWithOptionalMatch(rows []joinedRow, sourceVar, targetVar, relVar, query string) (*ExecuteResult, error) {
+	withIdx := findKeywordIndex(query, "WITH")
+	optMatchIdx := findKeywordIndex(query, "OPTIONAL MATCH")
+	returnIdx := findKeywordIndex(query, "RETURN")
+	if withIdx == -1 || optMatchIdx == -1 || returnIdx == -1 {
+		return nil, fmt.Errorf("WITH, OPTIONAL MATCH, and RETURN clauses required")
+	}
+
+	withSection := strings.TrimSpace(query[withIdx+4 : optMatchIdx])
+	postWithWhere := ""
+	withClause := withSection
+	if postWhereIdx := findKeywordIndex(withSection, "WHERE"); postWhereIdx > 0 {
+		withClause = strings.TrimSpace(withSection[:postWhereIdx])
+		postWithWhere = strings.TrimSpace(withSection[postWhereIdx+5:])
+	}
+
+	distinct := false
+	if strings.HasPrefix(strings.ToUpper(withClause), "DISTINCT ") {
+		distinct = true
+		withClause = strings.TrimSpace(withClause[9:])
+	}
+
+	withItems := e.splitWithItems(withClause)
+	type computedRow struct {
+		values map[string]interface{}
+	}
+	computedRows := make([]computedRow, 0, len(rows))
+	withAliases := make([]string, 0, len(withItems))
+
+	for _, row := range rows {
+		nodeCtx, relCtx := buildJoinedEvaluationContext(row, sourceVar, targetVar, relVar)
+		values := make(map[string]interface{}, len(withItems))
+		for _, item := range withItems {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			upperItem := strings.ToUpper(item)
+			alias := item
+			expr := item
+			if asIdx := strings.Index(upperItem, " AS "); asIdx > 0 {
+				expr = strings.TrimSpace(item[:asIdx])
+				alias = strings.TrimSpace(item[asIdx+4:])
+			}
+			values[alias] = e.evaluateExpressionWithContext(expr, nodeCtx, relCtx)
+			if len(computedRows) == 0 {
+				withAliases = append(withAliases, alias)
+			}
+		}
+		computedRows = append(computedRows, computedRow{values: values})
+	}
+
+	if distinct {
+		seen := make(map[string]bool)
+		unique := make([]computedRow, 0, len(computedRows))
+		for _, row := range computedRows {
+			parts := make([]string, 0, len(withAliases))
+			for _, alias := range withAliases {
+				parts = append(parts, alias+"="+joinedValueKey(row.values[alias]))
+			}
+			key := strings.Join(parts, "|")
+			if !seen[key] {
+				seen[key] = true
+				unique = append(unique, row)
+			}
+		}
+		computedRows = unique
+	}
+
+	if postWithWhere != "" {
+		filtered := make([]computedRow, 0, len(computedRows))
+		for _, row := range computedRows {
+			if e.evaluateWithWhereCondition(postWithWhere, row.values) {
+				filtered = append(filtered, row)
+			}
+		}
+		computedRows = filtered
+	}
+
+	optMatchPattern := strings.TrimSpace(query[optMatchIdx+14 : returnIdx])
+	optMatchWhereClause := ""
+	if optMatchWhereIdx := findKeywordIndex(optMatchPattern, "WHERE"); optMatchWhereIdx > 0 {
+		optMatchWhereClause = strings.TrimSpace(optMatchPattern[optMatchWhereIdx+5:])
+		optMatchPattern = strings.TrimSpace(optMatchPattern[:optMatchWhereIdx])
+	}
+	relPattern := e.parseOptionalRelPattern(optMatchPattern)
+
+	type optionalRow struct {
+		computedValues map[string]interface{}
+		relatedNode    *storage.Node
+		relationship   *storage.Edge
+	}
+	joinedOptionalRows := make([]optionalRow, 0, len(computedRows))
+	for _, row := range computedRows {
+		sourceNode, _ := row.values[relPattern.sourceVar].(*storage.Node)
+		if sourceNode == nil {
+			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values})
+			continue
+		}
+		relatedNodes := e.findOptionalRelatedNodes(sourceNode, optMatchPattern, relPattern)
+		if len(relatedNodes) == 0 {
+			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values})
+			continue
+		}
+		addedAny := false
+		for _, related := range relatedNodes {
+			if optMatchWhereClause != "" && related.node != nil && !e.nodeMatchesWhereClause(related.node, optMatchWhereClause, relPattern.targetVar) {
+				continue
+			}
+			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values, relatedNode: related.node, relationship: related.edge})
+			addedAny = true
+		}
+		if !addedAny {
+			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values})
+		}
+	}
+
+	returnClause := stripTrailingReturnClauses(strings.TrimSpace(query[returnIdx+6:]))
+	returnItems := e.parseReturnItems(returnClause)
+	result := &ExecuteResult{Columns: make([]string, len(returnItems)), Rows: make([][]interface{}, 0, len(joinedOptionalRows))}
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	for _, row := range joinedOptionalRows {
+		resultRow := make([]interface{}, len(returnItems))
+		nodeMap := make(map[string]*storage.Node)
+		edgeMap := make(map[string]*storage.Edge)
+		for varName, val := range row.computedValues {
+			if node, ok := val.(*storage.Node); ok {
+				nodeMap[varName] = node
+			}
+			if edge, ok := val.(*storage.Edge); ok {
+				edgeMap[varName] = edge
+			}
+		}
+		if relPattern.targetVar != "" {
+			nodeMap[relPattern.targetVar] = row.relatedNode
+		}
+		if relPattern.relVar != "" {
+			edgeMap[relPattern.relVar] = row.relationship
+		}
+		for i, item := range returnItems {
+			if val, ok := row.computedValues[item.expr]; ok {
+				resultRow[i] = val
+				continue
+			}
+			resultRow[i] = e.evaluateExpressionWithContext(item.expr, nodeMap, edgeMap)
+		}
+		result.Rows = append(result.Rows, resultRow)
+	}
+
+	orderByIdx := findKeywordIndex(query, "ORDER")
+	if orderByIdx > 0 {
+		orderStart := orderByIdx + 5
+		for orderStart < len(query) && isWhitespace(query[orderStart]) {
+			orderStart++
+		}
+		if orderStart+2 <= len(query) && strings.EqualFold(query[orderStart:orderStart+2], "BY") {
+			orderStart += 2
+		}
+		orderPart := query[orderStart:]
+		endIdx := len(orderPart)
+		for _, kw := range []string{"SKIP", "LIMIT"} {
+			if idx := findKeywordIndex(orderPart, kw); idx >= 0 && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		orderExpr := strings.TrimSpace(orderPart[:endIdx])
+		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+	}
+
+	skipIdx := findKeywordIndex(query, "SKIP")
+	skip := 0
+	if skipIdx > 0 {
+		skipPart := strings.TrimSpace(query[skipIdx+4:])
+		skipPart = strings.Fields(skipPart)[0]
+		if s, err := strconv.Atoi(skipPart); err == nil {
+			skip = s
+		}
+	}
+
+	limitIdx := findKeywordIndex(query, "LIMIT")
+	limit := -1
+	if limitIdx > 0 {
+		limitPart := strings.TrimSpace(query[limitIdx+5:])
+		limitPart = strings.Fields(limitPart)[0]
+		if l, err := strconv.Atoi(limitPart); err == nil {
+			limit = l
+		}
+	}
+
+	if skip > 0 || limit >= 0 {
+		startIdx := skip
+		if startIdx > len(result.Rows) {
+			startIdx = len(result.Rows)
+		}
+		endIdx := len(result.Rows)
+		if limit >= 0 && startIdx+limit < endIdx {
+			endIdx = startIdx + limit
+		}
+		result.Rows = result.Rows[startIdx:endIdx]
+	}
+
+	return result, nil
+}
+
+func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, targetVar, relVar, restOfQuery string) (*ExecuteResult, error) {
 	// Find RETURN clause
 	returnIdx := findKeywordIndex(restOfQuery, "RETURN")
 	if returnIdx == -1 {
@@ -1699,14 +1991,8 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 						if computedValues[rowIdx] == nil {
 							computedValues[rowIdx] = make(map[string]interface{})
 						}
-						nodeMap := make(map[string]*storage.Node)
-						if r.initialNode != nil {
-							nodeMap[sourceVar] = r.initialNode
-						}
-						if r.relatedNode != nil {
-							nodeMap[targetVar] = r.relatedNode
-						}
-						computedValues[rowIdx][alias] = e.evaluateCaseExpression(expr, nodeMap, nil)
+						nodeMap, relMap := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
+						computedValues[rowIdx][alias] = e.evaluateCaseExpression(expr, nodeMap, relMap)
 					}
 				}
 			}
@@ -1753,7 +2039,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 		returnItems = e.parseReturnItems(withClause)
 	} else {
 		// No aggregation WITH found, use RETURN clause items
-		returnClause := strings.TrimSpace(restOfQuery[returnIdx+6:])
+		returnClause := stripTrailingReturnClauses(strings.TrimSpace(restOfQuery[returnIdx+6:]))
 		returnItems = e.parseReturnItems(returnClause)
 	}
 
@@ -1810,14 +2096,8 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 				// COUNT(CASE WHEN condition THEN 1 END) - count only non-NULL results
 				count := int64(0)
 				for _, r := range rows {
-					nodeMap := make(map[string]*storage.Node)
-					if r.initialNode != nil {
-						nodeMap[sourceVar] = r.initialNode
-					}
-					if r.relatedNode != nil {
-						nodeMap[targetVar] = r.relatedNode
-					}
-					result := e.evaluateCaseExpression(inner, nodeMap, nil)
+					nodeMap, relMap := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
+					result := e.evaluateCaseExpression(inner, nodeMap, relMap)
 					// count() only counts non-NULL values
 					if result != nil {
 						count++
@@ -1869,17 +2149,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 							}
 						}
 						if val == nil {
-							nodeCtx := make(map[string]*storage.Node)
-							relCtx := make(map[string]*storage.Edge)
-							if r.initialNode != nil {
-								nodeCtx[sourceVar] = r.initialNode
-							}
-							if r.relatedNode != nil {
-								nodeCtx[targetVar] = r.relatedNode
-							}
-							if r.relationship != nil {
-								relCtx["r"] = r.relationship
-							}
+							nodeCtx, relCtx := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
 							val = e.evaluateExpressionWithContext(strings.TrimSpace(inner), nodeCtx, relCtx)
 						}
 						if val == nil {
@@ -1961,17 +2231,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 				}
 
 				if val == nil {
-					nodeCtx := make(map[string]*storage.Node)
-					relCtx := make(map[string]*storage.Edge)
-					if r.initialNode != nil {
-						nodeCtx[sourceVar] = r.initialNode
-					}
-					if r.relatedNode != nil {
-						nodeCtx[targetVar] = r.relatedNode
-					}
-					if r.relationship != nil {
-						relCtx["r"] = r.relationship
-					}
+					nodeCtx, relCtx := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
 					val = e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
 				}
 
@@ -2027,17 +2287,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			} else {
 				// General expression (e.g., map literal): COLLECT(DISTINCT { key: value })
 				for _, r := range rows {
-					nodeCtx := make(map[string]*storage.Node)
-					relCtx := make(map[string]*storage.Edge)
-					if r.initialNode != nil {
-						nodeCtx[sourceVar] = r.initialNode
-					}
-					if r.relatedNode != nil {
-						nodeCtx[targetVar] = r.relatedNode
-					}
-					if r.relationship != nil {
-						relCtx["r"] = r.relationship
-					}
+					nodeCtx, relCtx := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
 					val := e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
 					if val != nil {
 						key := fmt.Sprintf("%v", val)
@@ -2082,17 +2332,7 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			} else {
 				// General expression (e.g., map literal): COLLECT({ key: value })
 				for _, r := range rows {
-					nodeCtx := make(map[string]*storage.Node)
-					relCtx := make(map[string]*storage.Edge)
-					if r.initialNode != nil {
-						nodeCtx[sourceVar] = r.initialNode
-					}
-					if r.relatedNode != nil {
-						nodeCtx[targetVar] = r.relatedNode
-					}
-					if r.relationship != nil {
-						relCtx["r"] = r.relationship
-					}
+					nodeCtx, relCtx := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
 					val := e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
 					if val != nil {
 						collected = append(collected, val)
@@ -2138,13 +2378,13 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 
 // buildJoinedResult builds a result from joined rows for simple RETURN
 // If RETURN contains aggregation functions, delegates to processWithAggregation
-func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetVar, restOfQuery string) (*ExecuteResult, error) {
+func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetVar, relVar, restOfQuery string) (*ExecuteResult, error) {
 	returnIdx := findKeywordIndex(restOfQuery, "RETURN")
 	if returnIdx == -1 {
 		return nil, fmt.Errorf("RETURN clause required")
 	}
 
-	returnClause := strings.TrimSpace(restOfQuery[returnIdx+6:])
+	returnClause := stripTrailingReturnClauses(strings.TrimSpace(restOfQuery[returnIdx+6:]))
 	returnItems := e.parseReturnItems(returnClause)
 
 	// Check if any return item is an aggregation function
@@ -2164,7 +2404,7 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 
 	// If there's an aggregation, delegate to processWithAggregation
 	if hasAggregation {
-		return e.processWithAggregation(rows, sourceVar, targetVar, restOfQuery)
+		return e.processWithAggregation(rows, sourceVar, targetVar, relVar, restOfQuery)
 	}
 
 	result := &ExecuteResult{
@@ -2182,26 +2422,9 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 
 	for _, joinedRow := range rows {
 		row := make([]interface{}, len(returnItems))
+		nodeCtx, relCtx := buildJoinedEvaluationContext(joinedRow, sourceVar, targetVar, relVar)
 		for i, item := range returnItems {
-			if strings.Contains(item.expr, ".") {
-				parts := strings.SplitN(item.expr, ".", 2)
-				varName := strings.TrimSpace(parts[0])
-				propName := strings.TrimSpace(parts[1])
-
-				var node *storage.Node
-				if strings.EqualFold(varName, sourceVar) {
-					node = joinedRow.initialNode
-				} else if strings.EqualFold(varName, targetVar) {
-					node = joinedRow.relatedNode
-				}
-				if node != nil {
-					row[i] = node.Properties[propName]
-				}
-			} else if strings.EqualFold(item.expr, sourceVar) {
-				row[i] = joinedRow.initialNode
-			} else if strings.EqualFold(item.expr, targetVar) {
-				row[i] = joinedRow.relatedNode
-			}
+			row[i] = e.evaluateExpressionWithContext(item.expr, nodeCtx, relCtx)
 		}
 		result.Rows = append(result.Rows, row)
 	}

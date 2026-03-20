@@ -912,7 +912,7 @@ func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cyp
 		}
 
 		// Try to find related nodes via the relationship
-		relatedNodes := e.findRelatedNodes(sourceNode, relPattern)
+		relatedNodes := e.findOptionalRelatedNodes(sourceNode, optMatchPattern, relPattern)
 
 		if len(relatedNodes) == 0 {
 			// No match - add row with null for the optional part (left outer join)

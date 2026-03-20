@@ -23,7 +23,10 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 		varName := expr[:dotIdx]
 		propName := expr[dotIdx+1:]
 
-		if node, ok := nodes[varName]; ok && node != nil {
+		if node, ok := nodes[varName]; ok {
+			if node == nil {
+				return nil
+			}
 			// Handle embedding specially:
 			// - If user stored an "embedding" property, return it.
 			// - Otherwise expose managed embedding only when present (for IS NOT NULL compatibility).
@@ -54,7 +57,10 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 			}
 			return nil
 		}
-		if rel, ok := rels[varName]; ok && rel != nil {
+		if rel, ok := rels[varName]; ok {
+			if rel == nil {
+				return nil
+			}
 			if val, ok := rel.Properties[propName]; ok {
 				return val
 			}
