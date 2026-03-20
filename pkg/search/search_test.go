@@ -2023,10 +2023,47 @@ func TestVectorQueryHelpers_ConversionsAndResolution(t *testing.T) {
 	assert.Equal(t, []float32{0, 1, 0}, embs[0])
 	assert.Nil(t, resolveCypherCandidateEmbeddings(nil, "vec", "x"))
 
+	// Missing property key (no Cypher vector index/property binding): fall through
+	// to all managed named embeddings.
+	node = &storage.Node{
+		ID:              "n2",
+		NamedEmbeddings: map[string][]float32{"managed_a": {1, 0, 0}, "managed_b": {0, 1, 0}},
+	}
+	embs = resolveCypherCandidateEmbeddings(node, "", "default")
+	require.Len(t, embs, 2)
+	assert.Contains(t, embs, []float32{1, 0, 0})
+	assert.Contains(t, embs, []float32{0, 1, 0})
+
 	query := []float32{1, 0, 0}
 	assert.InDelta(t, 1.0, cypherVectorSimilarity("dot", query, []float32{1, 0, 0}), 1e-9)
 	assert.InDelta(t, 1.0, cypherVectorSimilarity("cosine", query, []float32{1, 0, 0}), 1e-9)
 	assert.Less(t, cypherVectorSimilarity("euclidean", query, []float32{0, 1, 0}), 1.0)
+}
+
+func TestVectorQueryNodes_MissingIndexFallsThroughToManagedNamedEmbeddings(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 3)
+
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "named_non_default",
+		Labels:          []string{"Doc"},
+		NamedEmbeddings: map[string][]float32{"managed": {1, 0, 0}},
+	}))
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              "chunk_fallback",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.6, 0.4, 0}},
+	}))
+
+	hits, err := svc.VectorQueryNodes(context.Background(), []float32{1, 0, 0}, VectorQuerySpec{
+		IndexName: "missing_idx",
+		Label:     "Doc",
+		Property:  "",
+		Limit:     5,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	assert.Equal(t, "named_non_default", hits[0].ID)
 }
 
 func TestVectorQueryNodes_ErrorAndContextBranches(t *testing.T) {

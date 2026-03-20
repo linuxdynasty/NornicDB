@@ -1817,3 +1817,32 @@ func TestCallDbIndexVectorQueryNodes_AdditionalParameterBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 }
+
+func TestCallDbIndexVectorQueryNodes_MissingIndexFallsThroughToManagedEmbeddings(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:              "doc-managed",
+		Labels:          []string{"Doc"},
+		NamedEmbeddings: map[string][]float32{"managed": {1.0, 0.0, 0.0}},
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
+		ID:              "doc-chunk",
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.6, 0.4, 0.0}},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('missing_idx', 5, [1.0, 0.0, 0.0]) YIELD node, score", nil)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.Rows)
+
+	topNode, ok := res.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	assert.Equal(t, storage.NodeID("doc-managed"), topNode.ID)
+}

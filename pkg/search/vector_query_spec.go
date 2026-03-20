@@ -175,6 +175,18 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 					bestScore = float64(vector.DotProductSIMD(normalizedQuery, v))
 				}
 			}
+			// If there is no explicit Cypher property/index mapping (property key is empty),
+			// fall through to managed named embeddings (any key) before chunk fallback.
+			if bestScore < 0 && spec.Property == "" {
+				for _, vecID := range named {
+					if v, ok := s.vectorIndex.vectors[vecID]; ok {
+						score := float64(vector.DotProductSIMD(normalizedQuery, v))
+						if score > bestScore {
+							bestScore = score
+						}
+					}
+				}
+			}
 		}
 
 		if bestScore < 0 && spec.Property != "" {
@@ -268,6 +280,18 @@ func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []fl
 					bestScore = cypherVectorSimilarity(similarity, queryEmbedding, v)
 				}
 			}
+			// If there is no explicit Cypher property/index mapping (property key is empty),
+			// fall through to managed named embeddings (any key) before chunk fallback.
+			if math.IsInf(bestScore, -1) && spec.Property == "" {
+				for _, vecID := range named {
+					if v, ok := s.getVectorForCypher(vecID); ok {
+						score := cypherVectorSimilarity(similarity, queryEmbedding, v)
+						if score > bestScore {
+							bestScore = score
+						}
+					}
+				}
+			}
 		}
 
 		if math.IsInf(bestScore, -1) && spec.Property != "" {
@@ -327,6 +351,19 @@ func resolveCypherCandidateEmbeddings(node *storage.Node, propertyKey string, ve
 	if node.NamedEmbeddings != nil {
 		if emb, ok := node.NamedEmbeddings[vectorName]; ok && len(emb) > 0 {
 			return [][]float32{emb}
+		}
+		// When Cypher does not bind to a specific property/index (propertyKey empty),
+		// include all managed named embeddings as candidates.
+		if propertyKey == "" {
+			all := make([][]float32, 0, len(node.NamedEmbeddings))
+			for _, emb := range node.NamedEmbeddings {
+				if len(emb) > 0 {
+					all = append(all, emb)
+				}
+			}
+			if len(all) > 0 {
+				return all
+			}
 		}
 	}
 
