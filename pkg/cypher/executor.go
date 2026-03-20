@@ -1836,6 +1836,13 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 
 	// MERGE queries get special handling - they have their own ON CREATE SET / ON MATCH SET logic
 	if startsWithMerge {
+		// Complex MERGE pipelines that include OPTIONAL MATCH / WITH / WHERE should
+		// use the segment executor instead of the single-MERGE parser.
+		if findKeywordIndexInContext(cypher, "OPTIONAL MATCH") > 0 ||
+			findKeywordIndexInContext(cypher, "WITH") > 0 ||
+			findKeywordIndexInContext(cypher, "WHERE") > 0 {
+			return e.executeMultipleMerges(ctx, cypher)
+		}
 		// Check for MERGE ... WITH ... MATCH chain pattern (e.g., import script pattern)
 		withIdx := findKeywordIndex(cypher, "WITH")
 		if withIdx > 0 {

@@ -509,9 +509,10 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					fullQuery += " " + returnPart
 				}
 
-				// For mutation paths that depend on SET += map sources, execute with per-item parameters instead of
-				// literal substitution. This preserves complex map/string payloads and keeps
-				// map-merge sources resolvable via params context.
+				// For mutation paths that depend on map sources or preserve row alias semantics
+				// in WITH pipelines, execute with per-item parameters instead of literal substitution.
+				// This preserves complex map/string payloads and avoids corrupting clauses like
+				// `WITH cc, row, csByID` when `row` is a map.
 				useParamExecution := strings.Contains(mutationPart, "+=")
 
 				var mutationResult *ExecuteResult
@@ -525,7 +526,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					mutationResult, err = e.Execute(ctx, fullQuery, callParams)
 				} else {
 					// Replace variable references ONLY in the mutation clause
-					mutationQuerySubstituted := e.replaceVariableInQuery(mutationPart, variable, item)
+					mutationQuerySubstituted := e.replaceVariableInMutationQuery(mutationPart, variable, item)
 					substitutedFull := mutationQuerySubstituted
 					if returnPart != "" {
 						substitutedFull += " " + returnPart
@@ -2628,6 +2629,30 @@ func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, 
 
 	// Convert to a Cypher literal so maps/lists remain valid expressions.
 	valueStr := e.valueToLiteral(value)
+	return replaceIdentifierOutsideQuotes(result, variable, valueStr)
+}
+
+// replaceVariableInMutationQuery substitutes UNWIND row variables in mutation queries.
+// For map-shaped rows, standalone variable tokens inside WITH pipelines are collapsed to
+// "{}" to avoid parser ambiguity from large inline map literals, while row.property tokens
+// are still replaced with their concrete values.
+func (e *StorageExecutor) replaceVariableInMutationQuery(query string, variable string, value interface{}) string {
+	result := query
+	valueStr := e.valueToLiteral(value)
+
+	if valueMap, ok := toStringAnyMap(value); ok {
+		for key, propVal := range valueMap {
+			propValStr := e.valueToLiteral(propVal)
+			pattern := variable + "." + key
+			result = strings.ReplaceAll(result, pattern, propValStr)
+			backtickedPattern := variable + ".`" + strings.ReplaceAll(key, "`", "``") + "`"
+			result = strings.ReplaceAll(result, backtickedPattern, propValStr)
+		}
+		if findKeywordIndexInContext(query, "WITH") >= 0 {
+			valueStr = "{}"
+		}
+	}
+
 	return replaceIdentifierOutsideQuotes(result, variable, valueStr)
 }
 

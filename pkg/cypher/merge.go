@@ -2092,6 +2092,7 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 	segments := e.splitMultipleMerges(cypher)
 
 	// Process each MERGE segment
+	chainBroken := false
 	for _, segment := range segments {
 		segment = strings.TrimSpace(segment)
 		if segment == "" {
@@ -2100,6 +2101,9 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 		upperSeg := strings.ToUpper(segment)
 
 		if strings.HasPrefix(upperSeg, "MERGE") {
+			if chainBroken {
+				continue
+			}
 			mergeContent := strings.TrimSpace(segment[5:])
 
 			// Check if this is a relationship MERGE
@@ -2120,16 +2124,62 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 					nodeContext[varName] = node
 				}
 			}
+		} else if strings.HasPrefix(upperSeg, "OPTIONAL MATCH") {
+			if chainBroken {
+				continue
+			}
+			node, varName, err := e.executeMatchSegment(ctx, segment, nodeContext)
+			if err != nil {
+				return nil, fmt.Errorf("OPTIONAL MATCH failed: %w", err)
+			}
+			if varName != "" {
+				// Preserve variable even when nil (OPTIONAL semantics).
+				nodeContext[varName] = node
+			}
 		} else if strings.HasPrefix(upperSeg, "MATCH") {
+			if chainBroken {
+				continue
+			}
 			node, varName, err := e.executeMatchSegment(ctx, segment, nodeContext)
 			if err != nil {
 				return nil, fmt.Errorf("MATCH failed: %w", err)
 			}
-			if node != nil && varName != "" {
+			if node == nil {
+				chainBroken = true
+				continue
+			}
+			if varName != "" {
 				nodeContext[varName] = node
+			}
+		} else if strings.HasPrefix(upperSeg, "WITH") {
+			if chainBroken {
+				continue
+			}
+			newNodeCtx, newRelCtx := e.projectWithContext(strings.TrimSpace(segment[4:]), nodeContext, relContext)
+			nodeContext = newNodeCtx
+			relContext = newRelCtx
+		} else if strings.HasPrefix(upperSeg, "WHERE") {
+			if chainBroken {
+				continue
+			}
+			whereClause := strings.TrimSpace(segment[5:])
+			if !e.evaluateWhereForMergeContext(whereClause, nodeContext, relContext) {
+				chainBroken = true
 			}
 		} else if strings.HasPrefix(upperSeg, "RETURN") {
 			// Build result from context
+			if chainBroken {
+				returnClause := strings.TrimSpace(segment[6:])
+				items := e.parseReturnItems(returnClause)
+				for _, item := range items {
+					if item.alias != "" {
+						result.Columns = append(result.Columns, item.alias)
+					} else {
+						result.Columns = append(result.Columns, item.expr)
+					}
+				}
+				return result, nil
+			}
 			returnClause := strings.TrimSpace(segment[6:])
 			items := e.parseReturnItems(returnClause)
 
@@ -2158,7 +2208,7 @@ func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 		kw  string
 	}
 	var boundaries []boundary
-	for _, kw := range []string{"MERGE", "MATCH", "RETURN"} {
+	for _, kw := range []string{"OPTIONAL MATCH", "MERGE", "MATCH", "WITH", "WHERE", "RETURN"} {
 		searchPos := 0
 		for {
 			idx := findKeywordIndexInContext(cypher[searchPos:], kw)
@@ -2167,7 +2217,7 @@ func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 			}
 			abs := searchPos + idx
 			// Skip ON MATCH SET modifier inside MERGE clauses.
-			if kw == "MATCH" && isOnMatchModifier(cypher, abs) {
+			if kw == "MATCH" && (isOnMatchModifier(cypher, abs) || isOptionalMatchModifier(cypher, abs)) {
 				searchPos = abs + len(kw)
 				continue
 			}
@@ -2205,6 +2255,69 @@ func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 func isOnMatchModifier(cypher string, matchPos int) bool {
 	prefix := strings.TrimSpace(cypher[:matchPos])
 	return strings.HasSuffix(strings.ToUpper(prefix), "ON")
+}
+
+func isOptionalMatchModifier(cypher string, matchPos int) bool {
+	prefix := strings.TrimSpace(cypher[:matchPos])
+	return strings.HasSuffix(strings.ToUpper(prefix), "OPTIONAL")
+}
+
+func (e *StorageExecutor) projectWithContext(withClause string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) (map[string]*storage.Node, map[string]*storage.Edge) {
+	withClause = strings.TrimSpace(withClause)
+	if withClause == "" {
+		return nodeCtx, relCtx
+	}
+	if withClause == "*" {
+		return nodeCtx, relCtx
+	}
+
+	items := e.parseReturnItems(withClause)
+	if len(items) == 0 {
+		return nodeCtx, relCtx
+	}
+
+	newNodeCtx := make(map[string]*storage.Node)
+	newRelCtx := make(map[string]*storage.Edge)
+
+	for _, item := range items {
+		name := strings.TrimSpace(item.expr)
+		if item.alias != "" {
+			name = strings.TrimSpace(item.alias)
+		}
+		if name == "" {
+			continue
+		}
+		val := e.evaluateExpressionWithContext(item.expr, nodeCtx, relCtx)
+		switch v := val.(type) {
+		case *storage.Node:
+			newNodeCtx[name] = v
+		case *storage.Edge:
+			newRelCtx[name] = v
+		default:
+			// Keep passthrough bindings for simple identifiers when evaluation did not
+			// return a graph value (e.g., unresolved expressions).
+			if n, ok := nodeCtx[name]; ok {
+				newNodeCtx[name] = n
+			}
+			if r, ok := relCtx[name]; ok {
+				newRelCtx[name] = r
+			}
+		}
+	}
+
+	return newNodeCtx, newRelCtx
+}
+
+func (e *StorageExecutor) evaluateWhereForMergeContext(whereClause string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) bool {
+	whereClause = strings.TrimSpace(whereClause)
+	if whereClause == "" {
+		return true
+	}
+
+	if v, ok := e.evaluateExpressionWithContext(whereClause, nodeCtx, relCtx).(bool); ok {
+		return v
+	}
+	return e.evaluateWhereForContext(whereClause, nodeCtx)
 }
 
 // parseMergePattern parses a MERGE pattern like "(n:Label {prop: value})"

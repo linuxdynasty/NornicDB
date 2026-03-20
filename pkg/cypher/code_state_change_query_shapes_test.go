@@ -191,3 +191,115 @@ MERGE (ck)-[:HAS_STATE]->(cs);
 	require.Len(t, importRes.Rows, 1)
 	require.Equal(t, int64(1), importRes.Rows[0][0])
 }
+
+func TestCodeStateChangeQueryShapes_ImpactsWithOptionalCoalesce(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Seed states for direct-id and fallback (code_key + tx_id) matches.
+	seedQueries := []string{
+		`CREATE (:CodeState {state_id: 'state-by-id-1', code_key: 'ck-a', tx_id: 'tx-a'})`,
+		`CREATE (:CodeState {state_id: 'state-by-id-2', code_key: 'ck-b', tx_id: 'tx-b'})`,
+		`CREATE (:CodeState {state_id: 'state-by-key-1', code_key: 'ck-fallback-1', tx_id: 'tx-fb-1'})`,
+		`CREATE (:CodeState {state_id: 'state-by-key-2', code_key: 'ck-fallback-2', tx_id: 'tx-fb-2'})`,
+	}
+	for _, q := range seedQueries {
+		_, err := exec.Execute(ctx, q, nil)
+		require.NoError(t, err)
+	}
+
+	// Single-row equivalent shape
+	_, err := exec.Execute(ctx, strings.TrimSpace(`
+MERGE (cc:CodeChange {change_id: $change_id})
+SET cc.tx_id = $tx_id,
+    cc.actor = $actor,
+    cc.timestamp = datetime($timestamp_iso),
+    cc.op_type = $op_type,
+    cc.commit_hash = $commit_hash
+MERGE (c:Commit {hash: $commit_hash})
+ON CREATE SET c.timestamp = datetime($timestamp_iso), c.tx_id = $tx_id, c.actor = $actor
+MERGE (c)-[:EMITTED]->(cc)
+OPTIONAL MATCH (csByID:CodeState {state_id: $affected_state_id})
+OPTIONAL MATCH (csByKey:CodeState {code_key: $affected_code_key, tx_id: $tx_id})
+WITH cc, coalesce(csByID, csByKey) AS cs
+WHERE cs IS NOT NULL
+MERGE (cc)-[:IMPACTS]->(cs)
+`), map[string]interface{}{
+		"change_id":         "chg-single",
+		"tx_id":             "tx-a",
+		"actor":             "alice",
+		"timestamp_iso":     "2026-03-20T12:00:00Z",
+		"op_type":           "update",
+		"commit_hash":       "commit-single",
+		"affected_state_id": "state-by-id-1",
+		"affected_code_key": "does-not-matter",
+	})
+	require.NoError(t, err)
+
+	// Exact UNWIND shape with optional id/key resolution.
+	_, err = exec.Execute(ctx, strings.TrimSpace(`
+UNWIND $rows AS row
+MERGE (cc:CodeChange {change_id: row.change_id})
+SET cc.tx_id = row.tx_id,
+    cc.actor = row.actor,
+    cc.timestamp = datetime(row.timestamp_iso),
+    cc.op_type = row.op_type,
+    cc.commit_hash = row.commit_hash
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
+MERGE (c)-[:EMITTED]->(cc)
+WITH cc, row
+OPTIONAL MATCH (csByID:CodeState {state_id: row.affected_state_id})
+WITH cc, row, csByID
+OPTIONAL MATCH (csByKey:CodeState {code_key: row.affected_code_key, tx_id: row.tx_id})
+WITH cc, coalesce(csByID, csByKey) AS cs
+WHERE cs IS NOT NULL
+MERGE (cc)-[:IMPACTS]->(cs)
+`), map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"change_id":         "chg-row-id",
+				"tx_id":             "tx-b",
+				"actor":             "bob",
+				"timestamp_iso":     "2026-03-20T12:01:00Z",
+				"op_type":           "create",
+				"commit_hash":       "commit-unwind-a",
+				"affected_state_id": "state-by-id-2",
+				"affected_code_key": "not-used",
+			},
+			{
+				"change_id":         "chg-row-fallback-1",
+				"tx_id":             "tx-fb-1",
+				"actor":             "carol",
+				"timestamp_iso":     "2026-03-20T12:02:00Z",
+				"op_type":           "update",
+				"commit_hash":       "commit-unwind-b",
+				"affected_state_id": "missing-id",
+				"affected_code_key": "ck-fallback-1",
+			},
+			{
+				"change_id":         "chg-row-fallback-2",
+				"tx_id":             "tx-fb-2",
+				"actor":             "dave",
+				"timestamp_iso":     "2026-03-20T12:03:00Z",
+				"op_type":           "delete",
+				"commit_hash":       "commit-unwind-c",
+				"affected_state_id": "",
+				"affected_code_key": "ck-fallback-2",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	impactsRes, err := exec.Execute(ctx, `MATCH (:CodeChange)-[:IMPACTS]->(:CodeState) RETURN count(*) AS impacts_count`, nil)
+	require.NoError(t, err)
+	require.Len(t, impactsRes.Rows, 1)
+	require.Equal(t, int64(4), impactsRes.Rows[0][0])
+
+	emittedRes, err := exec.Execute(ctx, `MATCH (:Commit)-[:EMITTED]->(:CodeChange) RETURN count(*) AS emitted_count`, nil)
+	require.NoError(t, err)
+	require.Len(t, emittedRes.Rows, 1)
+	require.Equal(t, int64(4), emittedRes.Rows[0][0])
+}
