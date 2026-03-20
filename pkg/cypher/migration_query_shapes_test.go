@@ -295,3 +295,232 @@ func TestMigrationDDL_CreateIndexVariants_ParseAndApply(t *testing.T) {
 		})
 	}
 }
+
+func TestMigrationShape_UnwindMatchMergeSetMap_ComplexRowsAndClauses(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE (f1:File {path: '/repo/a.py'})
+CREATE (f2:File {path: '/repo/b.py'})
+`, nil)
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{
+			"file_path":   "/repo/a.py",
+			"line_number": int64(10),
+			"name":        "alpha",
+			"props": map[string]interface{}{
+				"lang":             "python",
+				"context":          "_find_classes",
+				"class_context":    "TypescriptTreeSitterParser",
+				"is_dependency":    false,
+				"text_with_braces": "payload {'a':1, 'b':{'c':[1,2,3]}} with (parentheses) should stay literal",
+			},
+		},
+		{
+			"file_path":   "/repo/a.py",
+			"line_number": int64(11),
+			"name":        "beta",
+			"props": map[string]interface{}{
+				"lang":          "python",
+				"context":       "_find_classes",
+				"is_dependency": true,
+			},
+		},
+		{
+			"file_path":   "/repo/b.py",
+			"line_number": int64(3),
+			"name":        "gamma",
+			"props": map[string]interface{}{
+				"lang":               "typescript",
+				"context":            "walk (ast)",
+				"is_dependency":      false,
+				"parenthetical_text": "example(value) and nested(call(arg))",
+			},
+		},
+	}
+
+	shape := `
+UNWIND $rows AS row
+MATCH (f:File {path: row.file_path})
+MERGE (n:Variable {name: row.name, path: row.file_path, line_number: row.line_number})
+SET n += row.props
+MERGE (f)-[:CONTAINS]->(n)
+WITH f, n
+RETURN f.path AS file_path, n.name AS variable_name, n.line_number AS line_number, n.lang AS lang
+`
+	result, err := exec.Execute(ctx, shape, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"file_path", "variable_name", "line_number", "lang"}, result.Columns)
+	require.Len(t, result.Rows, 3)
+
+	ordered, err := exec.Execute(ctx, `
+MATCH (f:File)-[:CONTAINS]->(n:Variable)
+RETURN f.path AS file_path, n.name AS variable_name, n.line_number AS line_number, n.lang AS lang
+ORDER BY file_path, line_number, variable_name
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"file_path", "variable_name", "line_number", "lang"}, ordered.Columns)
+	require.Len(t, ordered.Rows, 3)
+	require.Equal(t, []interface{}{"/repo/a.py", "alpha", int64(10), "python"}, ordered.Rows[0])
+	require.Equal(t, []interface{}{"/repo/a.py", "beta", int64(11), "python"}, ordered.Rows[1])
+	require.Equal(t, []interface{}{"/repo/b.py", "gamma", int64(3), "typescript"}, ordered.Rows[2])
+
+	verifyParens, err := exec.Execute(ctx, `
+MATCH (n:Variable {name: 'gamma'})
+RETURN n.context AS context, n.parenthetical_text AS parenthetical_text
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, verifyParens.Rows, 1)
+	require.Equal(t, "walk (ast)", verifyParens.Rows[0][0])
+	require.Equal(t, "example(value) and nested(call(arg))", verifyParens.Rows[0][1])
+
+	counts, err := exec.Execute(ctx, `
+MATCH (f:File)-[r:CONTAINS]->(n:Variable)
+RETURN count(f) AS files_joined, count(r) AS contains_edges, count(n) AS variable_nodes
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, counts.Rows, 1)
+	require.Equal(t, int64(3), counts.Rows[0][0])
+	require.Equal(t, int64(3), counts.Rows[0][1])
+	require.Equal(t, int64(3), counts.Rows[0][2])
+}
+
+func TestMigrationShape_UnwindMatchMergeSetMap_IdempotentAndPaginatedProjection(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE (f:File {path: '/repo/a.py'})
+`, nil)
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{
+			"file_path":   "/repo/a.py",
+			"line_number": int64(10),
+			"name":        "alpha",
+			"props": map[string]interface{}{
+				"lang":  "python",
+				"notes": "alpha(value)",
+			},
+		},
+		{
+			"file_path":   "/repo/a.py",
+			"line_number": int64(20),
+			"name":        "beta",
+			"props": map[string]interface{}{
+				"lang":  "python",
+				"notes": "beta(value)",
+			},
+		},
+		{
+			"file_path":   "/repo/a.py",
+			"line_number": int64(30),
+			"name":        "gamma",
+			"props": map[string]interface{}{
+				"lang":  "python",
+				"notes": "gamma(value)",
+			},
+		},
+	}
+
+	query := `
+UNWIND $rows AS row
+MATCH (f:File {path: row.file_path})
+MERGE (n:Variable {name: row.name, path: row.file_path, line_number: row.line_number})
+SET n += row.props
+MERGE (f)-[:CONTAINS]->(n)
+RETURN count(*) AS processed_rows
+`
+	first, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, first.Rows, 1)
+	require.Equal(t, int64(3), first.Rows[0][0])
+
+	second, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, second.Rows, 1)
+	require.Equal(t, int64(3), second.Rows[0][0])
+
+	edgeCount, err := exec.Execute(ctx, `
+MATCH (:File)-[r:CONTAINS]->(:Variable)
+RETURN count(r) AS edge_count
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, edgeCount.Rows, 1)
+	require.Equal(t, int64(3), edgeCount.Rows[0][0], "MERGE should keep edge creation idempotent")
+
+	paginated, err := exec.Execute(ctx, `
+MATCH (f:File)-[:CONTAINS]->(n:Variable)
+WITH f.path AS file_path, n.name AS variable_name, n.line_number AS line_number
+RETURN file_path, variable_name, line_number
+ORDER BY line_number ASC, variable_name ASC
+SKIP 1
+LIMIT 1
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"file_path", "variable_name", "line_number"}, paginated.Columns)
+	require.Len(t, paginated.Rows, 1)
+	require.Equal(t, []interface{}{"/repo/a.py", "beta", int64(20)}, paginated.Rows[0])
+
+	notes, err := exec.Execute(ctx, `
+MATCH (n:Variable)
+WHERE n.notes = 'beta(value)'
+RETURN count(n) AS c
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, notes.Rows, 1)
+	require.Equal(t, int64(1), notes.Rows[0][0])
+}
+
+func TestMigrationDDL_OpenCypherCompatibleVariants_FullStatements(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE INDEX original_text_idx IF NOT EXISTS
+FOR (o:OriginalText)
+ON (o.originalText)
+`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+CREATE INDEX translated_lang_idx IF NOT EXISTS
+FOR (t:TranslatedText)
+ON (t.language)
+`, nil)
+	require.NoError(t, err)
+
+	beforeDrop, err := exec.Execute(ctx, "SHOW INDEXES", nil)
+	require.NoError(t, err)
+	require.NotNil(t, beforeDrop)
+	require.GreaterOrEqual(t, len(beforeDrop.Rows), 2)
+
+	showRes, err := exec.Execute(ctx, `
+SHOW INDEXES
+YIELD name, state, type, entityType, labelsOrTypes, properties
+RETURN name, state, type, entityType, labelsOrTypes, properties
+ORDER BY name
+`, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, showRes.Rows)
+
+	_, err = exec.Execute(ctx, "DROP INDEX translated_lang_idx IF EXISTS", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, "DROP INDEX original_text_idx IF EXISTS", nil)
+	require.NoError(t, err)
+
+	afterDrop, err := exec.Execute(ctx, "SHOW INDEXES", nil)
+	require.NoError(t, err)
+	require.NotNil(t, afterDrop)
+	require.LessOrEqual(t, len(afterDrop.Rows), len(beforeDrop.Rows))
+}

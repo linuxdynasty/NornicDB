@@ -1213,6 +1213,18 @@ func (e *StorageExecutor) applySetToNodeWithContext(node *storage.Node, varName 
 
 	for _, assignment := range assignments {
 		assignment = strings.TrimSpace(assignment)
+
+		// Support map-merge in MERGE-with-context flows:
+		// SET n += {...} / SET n += row.props
+		if plusEqIdx := strings.Index(assignment, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(assignment[:plusEqIdx])
+			right := strings.TrimSpace(assignment[plusEqIdx+2:])
+			if left == varName {
+				e.applySetMapMergeToNode(node, varName, right, fullContext, relContext)
+			}
+			continue
+		}
+
 		if !strings.HasPrefix(assignment, varName+".") {
 			continue
 		}

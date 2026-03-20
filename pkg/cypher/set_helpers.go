@@ -73,6 +73,17 @@ func (e *StorageExecutor) applySetToNode(node *storage.Node, varName string, set
 
 	for _, assignment := range assignments {
 		assignment = strings.TrimSpace(assignment)
+
+		// Handle map merge form: SET n += {...} / SET n += row.props
+		if plusEqIdx := strings.Index(assignment, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(assignment[:plusEqIdx])
+			right := strings.TrimSpace(assignment[plusEqIdx+2:])
+			if left == varName {
+				e.applySetMapMergeToNode(node, varName, right, map[string]*storage.Node{varName: node}, nil)
+			}
+			continue
+		}
+
 		if !strings.HasPrefix(assignment, varName+".") {
 			continue
 		}
@@ -100,6 +111,27 @@ func (e *StorageExecutor) applySetToNode(node *storage.Node, varName string, set
 		}
 
 		setNodeProperty(node, propName, evaluated)
+	}
+}
+
+func (e *StorageExecutor) applySetMapMergeToNode(node *storage.Node, varName string, rightExpr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) {
+	if node == nil {
+		return
+	}
+	evaluated := e.evaluateExpressionWithContext(rightExpr, nodes, rels)
+
+	// Fallback for unresolved inline literals.
+	if s, ok := evaluated.(string); ok && strings.TrimSpace(s) == strings.TrimSpace(rightExpr) {
+		evaluated = e.parseValue(strings.TrimSpace(rightExpr))
+	}
+	if evaluated == nil {
+		evaluated = e.parseValue(strings.TrimSpace(rightExpr))
+	}
+
+	if m, ok := toStringAnyMap(evaluated); ok {
+		for k, v := range m {
+			setNodeProperty(node, k, v)
+		}
 	}
 }
 

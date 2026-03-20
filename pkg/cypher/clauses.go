@@ -93,9 +93,7 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 		cypher = e.substituteParams(cypher, params)
 	}
 
-	upper := strings.ToUpper(cypher)
-
-	withIdx := strings.Index(upper, "WITH")
+	withIdx := findKeywordIndex(cypher, "WITH")
 	if withIdx == -1 {
 		return nil, fmt.Errorf("WITH clause not found in query: %q", truncateQuery(cypher, 80))
 	}
@@ -363,7 +361,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	upper := strings.ToUpper(cypher)
 
 	// Check for double UNWIND - handle by recursively processing
-	firstUnwind := strings.Index(upper, "UNWIND")
+	firstUnwind := findKeywordIndex(cypher, "UNWIND")
 	if firstUnwind >= 0 {
 		// Find the AS clause for the first UNWIND
 		afterFirstUnwind := upper[firstUnwind+6:]
@@ -389,7 +387,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		return nil, fmt.Errorf("keys() function with UNWIND is not supported in this context")
 	}
 
-	unwindIdx := strings.Index(upper, "UNWIND")
+	unwindIdx := findKeywordIndex(cypher, "UNWIND")
 	if unwindIdx == -1 {
 		return nil, fmt.Errorf("UNWIND clause not found in query: %q", truncateQuery(cypher, 80))
 	}
@@ -594,8 +592,8 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		if retIdx := findKeywordIndex(normalizedRestQuery, "RETURN"); retIdx > 0 {
 			returnClause := strings.TrimSpace(normalizedRestQuery[retIdx+6:])
 			returnEnd := len(returnClause)
-			for _, keyword := range []string{"ORDER BY", "SKIP", "LIMIT"} {
-				if idx := findKeywordIndex(returnClause, keyword); idx >= 0 && idx < returnEnd {
+			for _, keyword := range []string{"ORDER", "SKIP", "LIMIT"} {
+				if idx := findKeywordIndexInContext(returnClause, keyword); idx >= 0 && idx < returnEnd {
 					returnEnd = idx
 				}
 			}
@@ -879,6 +877,16 @@ func canApplySetBasedUnwindRewrite(query string, items []interface{}) bool {
 		return false
 	}
 	upper := strings.ToUpper(query)
+	// Keep rewrite on read-only MATCH ... RETURN count(...) pipelines.
+	// Mutation clauses with correlated values (SET += row.props, MERGE/CREATE/DELETE/REMOVE)
+	// must execute per-row to preserve semantics.
+	if findKeywordIndex(query, "CREATE") >= 0 ||
+		findKeywordIndex(query, "MERGE") >= 0 ||
+		findKeywordIndex(query, "SET") >= 0 ||
+		findKeywordIndex(query, "DELETE") >= 0 ||
+		findKeywordIndex(query, "REMOVE") >= 0 {
+		return false
+	}
 	if !strings.Contains(upper, "RETURN") || !strings.Contains(upper, "COUNT(") {
 		return false
 	}
@@ -1031,19 +1039,23 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 	}
 
 	// Parse first UNWIND
-	firstUnwindIdx := strings.Index(upper, "UNWIND")
+	firstUnwindIdx := findKeywordIndex(cypher, "UNWIND")
 	if firstUnwindIdx == -1 {
 		return nil, fmt.Errorf("UNWIND clause not found")
 	}
 
 	afterFirst := cypher[firstUnwindIdx+6:]
-	firstAsIdx := strings.Index(strings.ToUpper(afterFirst), " AS ")
+	firstAsIdx := findKeywordNotInBrackets(afterFirst, " AS ")
 	if firstAsIdx == -1 {
 		return nil, fmt.Errorf("first UNWIND requires AS clause")
 	}
 
 	firstListExpr := strings.TrimSpace(afterFirst[:firstAsIdx])
-	afterFirstAs := strings.TrimSpace(afterFirst[firstAsIdx+4:])
+	afterFirstAsStart := firstAsIdx + len("AS")
+	for afterFirstAsStart < len(afterFirst) && isASCIISpace(afterFirst[afterFirstAsStart]) {
+		afterFirstAsStart++
+	}
+	afterFirstAs := strings.TrimSpace(afterFirst[afterFirstAsStart:])
 
 	// Get first variable name
 	varEndIdx := strings.IndexAny(afterFirstAs, " \t\n")
@@ -1059,13 +1071,17 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 	}
 
 	afterSecond := restQuery[6:]
-	secondAsIdx := strings.Index(strings.ToUpper(afterSecond), " AS ")
+	secondAsIdx := findKeywordNotInBrackets(afterSecond, " AS ")
 	if secondAsIdx == -1 {
 		return nil, fmt.Errorf("second UNWIND requires AS clause")
 	}
 
 	secondListExpr := strings.TrimSpace(afterSecond[:secondAsIdx])
-	afterSecondAs := strings.TrimSpace(afterSecond[secondAsIdx+4:])
+	afterSecondAsStart := secondAsIdx + len("AS")
+	for afterSecondAsStart < len(afterSecond) && isASCIISpace(afterSecond[afterSecondAsStart]) {
+		afterSecondAsStart++
+	}
+	afterSecondAs := strings.TrimSpace(afterSecond[afterSecondAsStart:])
 
 	var secondVar, finalRest string
 	varEndIdx2 := strings.IndexAny(afterSecondAs, " \t\n")

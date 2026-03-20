@@ -181,14 +181,13 @@ func DetectQueryPattern(query string) PatternInfo {
 }
 
 func extractMatchClause(query string) string {
-	upper := strings.ToUpper(query)
-	matchIdx := strings.Index(upper, "MATCH")
+	matchIdx := findKeywordIndex(query, "MATCH")
 	if matchIdx < 0 {
 		return ""
 	}
 	end := len(query)
 	for _, keyword := range []string{"WHERE", "RETURN", "WITH", "ORDER", "LIMIT", "SKIP"} {
-		if idx := strings.Index(upper[matchIdx:], keyword); idx > 0 {
+		if idx := findKeywordIndex(query[matchIdx:], keyword); idx > 0 {
 			if matchIdx+idx < end {
 				end = matchIdx + idx
 			}
@@ -245,7 +244,7 @@ func detectMutualRelationship(query string, info *PatternInfo) bool {
 	}
 
 	// Extract MATCH clause
-	matchIdx := strings.Index(upperQuery, "MATCH")
+	matchIdx := findKeywordIndex(query, "MATCH")
 	if matchIdx < 0 {
 		return false
 	}
@@ -253,7 +252,7 @@ func detectMutualRelationship(query string, info *PatternInfo) bool {
 	// Find end of MATCH pattern (WHERE, RETURN, WITH, etc.)
 	matchEnd := len(query)
 	for _, keyword := range []string{"WHERE", "RETURN", "WITH", "ORDER", "LIMIT"} {
-		idx := strings.Index(upperQuery[matchIdx:], keyword)
+		idx := findKeywordIndex(query[matchIdx:], keyword)
 		if idx > 0 && matchIdx+idx < matchEnd {
 			matchEnd = matchIdx + idx
 		}
@@ -342,8 +341,7 @@ func detectOutgoingCountAgg(query string, info *PatternInfo) bool {
 }
 
 func isReturnNameCountShape(query string, startVar string, endVar string) bool {
-	upperQuery := strings.ToUpper(query)
-	returnIdx := strings.Index(upperQuery, "RETURN")
+	returnIdx := findKeywordIndex(query, "RETURN")
 	if returnIdx < 0 {
 		return false
 	}
@@ -433,8 +431,7 @@ func detectEdgePropertyAgg(query string, info *PatternInfo) bool {
 }
 
 func isReturnEdgePropertyAggNameShape(query string, relVar string, propName string) bool {
-	upperQuery := strings.ToUpper(query)
-	returnIdx := strings.Index(upperQuery, "RETURN")
+	returnIdx := findKeywordIndex(query, "RETURN")
 	if returnIdx < 0 {
 		return false
 	}

@@ -527,8 +527,7 @@ func (e *StorageExecutor) callDbIndexFulltextCreateRelationshipIndex(ctx context
 // callDbIndexFulltextDrop drops a fulltext index - Neo4j db.index.fulltext.drop()
 // Syntax: CALL db.index.fulltext.drop(indexName)
 func (e *StorageExecutor) callDbIndexFulltextDrop(cypher string) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
-	idx := strings.Index(upper, "DROP")
+	idx := findKeywordIndex(cypher, "DROP")
 	if idx < 0 {
 		return nil, fmt.Errorf("invalid db.index.fulltext.drop syntax")
 	}
@@ -551,8 +550,7 @@ func (e *StorageExecutor) callDbIndexFulltextDrop(cypher string) (*ExecuteResult
 // callDbIndexVectorDrop drops a vector index - Neo4j db.index.vector.drop()
 // Syntax: CALL db.index.vector.drop(indexName)
 func (e *StorageExecutor) callDbIndexVectorDrop(cypher string) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
-	idx := strings.Index(upper, "DROP")
+	idx := findKeywordIndex(cypher, "DROP")
 	if idx < 0 {
 		return nil, fmt.Errorf("invalid db.index.vector.drop syntax")
 	}

@@ -69,8 +69,8 @@ func (e *StorageExecutor) parseShortestPathQuery(cypher string) (*ShortestPathQu
 	}
 
 	// Extract WHERE clause if present
-	whereIdx := strings.Index(upper, "WHERE")
-	returnIdx := strings.Index(upper, "RETURN")
+	whereIdx := findKeywordIndex(cypher, "WHERE")
+	returnIdx := findKeywordIndex(cypher, "RETURN")
 	if whereIdx > 0 && whereIdx < returnIdx {
 		query.whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 	}

@@ -528,7 +528,6 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 
 // splitMatchClauses splits the query into individual MATCH clause patterns
 func splitMatchClauses(cypher string, whereIdx, returnIdx int) []string {
-	upper := strings.ToUpper(cypher)
 	var clauses []string
 
 	// Find the end of MATCH patterns (before WHERE or RETURN)
@@ -561,21 +560,15 @@ func splitMatchClauses(cypher string, whereIdx, returnIdx int) []string {
 	start := 5 // After first MATCH
 	searchStart := start
 	for {
-		nextMatch := strings.Index(upper[searchStart:], "MATCH")
+		nextMatch := findKeywordIndex(cypher[searchStart:], "MATCH")
 		if nextMatch == -1 || searchStart+nextMatch >= endIdx {
 			// No more MATCH - take everything to end
 			clauses = append(clauses, strings.TrimSpace(cypher[start:endIdx]))
 			break
 		}
-		// Check if it's a real MATCH (word boundary)
 		pos := searchStart + nextMatch
-		beforeOk := pos == 0 || upper[pos-1] == ' ' || upper[pos-1] == '\n' || upper[pos-1] == '\t'
-		afterOk := pos+5 >= len(upper) || upper[pos+5] == ' ' || upper[pos+5] == '('
-
-		if beforeOk && afterOk {
-			clauses = append(clauses, strings.TrimSpace(cypher[start:pos]))
-			start = pos + 5 // Skip "MATCH"
-		}
+		clauses = append(clauses, strings.TrimSpace(cypher[start:pos]))
+		start = pos + 5 // Skip "MATCH"
 		searchStart = pos + 5
 	}
 

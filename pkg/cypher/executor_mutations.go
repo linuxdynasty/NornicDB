@@ -1895,11 +1895,11 @@ func (e *StorageExecutor) evaluateCollectSubquery(ctx context.Context, node *sto
 	if whereIdx > 0 && whereIdx < returnIdx {
 		// WHERE clause exists - add id() check to it
 		whereClause := strings.TrimSpace(subqueryBody[whereIdx+5 : returnIdx])
-		beforeWhere := subqueryBody[:whereIdx+5]
+		beforeWhere := strings.TrimSpace(subqueryBody[:whereIdx])
 		afterReturn := subqueryBody[returnIdx:]
 		// Add id() check: WHERE id(variable) = nodeID AND existing_where_clause
 		newWhere := fmt.Sprintf("WHERE id(%s) = '%s' AND %s", variable, string(node.ID), whereClause)
-		substitutedQuery = beforeWhere + newWhere + afterReturn
+		substitutedQuery = strings.TrimSpace(beforeWhere + " " + newWhere + " " + afterReturn)
 	} else if returnIdx > 0 {
 		// No WHERE clause - add one before RETURN
 		beforeReturn := subqueryBody[:returnIdx]

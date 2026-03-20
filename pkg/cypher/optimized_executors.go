@@ -403,8 +403,7 @@ func (e *StorageExecutor) executeEdgePropertyAggOptimized(ctx context.Context, q
 
 // extractReturnItemsFromQuery extracts RETURN items from a Cypher query
 func (e *StorageExecutor) extractReturnItemsFromQuery(query string) []returnItem {
-	upperQuery := strings.ToUpper(query)
-	returnIdx := strings.Index(upperQuery, "RETURN")
+	returnIdx := findKeywordIndex(query, "RETURN")
 	if returnIdx == -1 {
 		return nil
 	}

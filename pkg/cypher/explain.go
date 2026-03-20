@@ -351,10 +351,8 @@ func (e *StorageExecutor) analyzeNodeScan(query string) *PlanOperator {
 
 // analyzeWhereClause analyzes WHERE conditions
 func (e *StorageExecutor) analyzeWhereClause(query string) *PlanOperator {
-	upper := strings.ToUpper(query)
-
 	// Extract WHERE clause
-	whereIdx := strings.Index(upper, "WHERE")
+	whereIdx := findKeywordIndex(query, "WHERE")
 	if whereIdx < 0 {
 		return nil
 	}
@@ -362,7 +360,7 @@ func (e *StorageExecutor) analyzeWhereClause(query string) *PlanOperator {
 	// Find end of WHERE clause
 	endIdx := len(query)
 	for _, keyword := range []string{"RETURN", "ORDER", "LIMIT", "SKIP", "WITH", "CREATE", "SET", "REMOVE", "DETACH DELETE", "DELETE"} {
-		if idx := strings.Index(upper[whereIdx:], keyword); idx > 0 {
+		if idx := findKeywordIndex(query[whereIdx:], keyword); idx > 0 {
 			if whereIdx+idx < endIdx {
 				endIdx = whereIdx + idx
 			}
@@ -398,9 +396,8 @@ func (e *StorageExecutor) analyzeDeleteClause(query string, detach bool) *PlanOp
 	}
 
 	endIdx := len(query)
-	upperTail := strings.ToUpper(query[deleteIdx:])
 	for _, keyword := range []string{"RETURN", "WITH", "ORDER BY", "LIMIT", "SKIP"} {
-		if idx := strings.Index(upperTail, keyword); idx > 0 {
+		if idx := findKeywordIndex(query[deleteIdx:], keyword); idx > 0 {
 			candidate := deleteIdx + idx
 			if candidate < endIdx {
 				endIdx = candidate
@@ -430,9 +427,7 @@ func (e *StorageExecutor) analyzeDeleteClause(query string, detach bool) *PlanOp
 
 // analyzeReturnClause analyzes the RETURN clause
 func (e *StorageExecutor) analyzeReturnClause(query string) *PlanOperator {
-	upper := strings.ToUpper(query)
-
-	returnIdx := strings.Index(upper, "RETURN")
+	returnIdx := findKeywordIndex(query, "RETURN")
 	if returnIdx < 0 {
 		return nil
 	}
@@ -441,7 +436,7 @@ func (e *StorageExecutor) analyzeReturnClause(query string) *PlanOperator {
 	returnClause := query[returnIdx+6:]
 	// Trim ORDER BY, LIMIT, etc.
 	for _, keyword := range []string{"ORDER BY", "LIMIT", "SKIP"} {
-		if idx := strings.Index(strings.ToUpper(returnClause), keyword); idx > 0 {
+		if idx := findKeywordIndex(returnClause, keyword); idx > 0 {
 			returnClause = returnClause[:idx]
 		}
 	}

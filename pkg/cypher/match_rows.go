@@ -393,8 +393,6 @@ func (e *StorageExecutor) filterNodesByProperties(nodes []*storage.Node, props m
 // executeMatchUnwind handles MATCH ... UNWIND ... RETURN queries
 // This allows UNWIND to access variables defined in MATCH
 func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
-
 	// Find clause boundaries
 	matchIdx := findKeywordIndex(cypher, "MATCH")
 	unwindIdx := findKeywordIndex(cypher, "UNWIND")
@@ -692,21 +690,21 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 	}
 
 	// Apply ORDER BY, SKIP, LIMIT
-	orderByIdx := strings.Index(upper, "ORDER BY")
+	orderByIdx := findKeywordIndex(cypher, "ORDER BY")
 	if orderByIdx > 0 {
-		orderPart := upper[orderByIdx+8:]
+		orderPart := cypher[orderByIdx+8:]
 		endIdx := len(orderPart)
-		for _, kw := range []string{" SKIP ", " LIMIT "} {
-			if idx := strings.Index(orderPart, kw); idx >= 0 && idx < endIdx {
+		for _, kw := range []string{"SKIP", "LIMIT"} {
+			if idx := findKeywordIndex(orderPart, kw); idx >= 0 && idx < endIdx {
 				endIdx = idx
 			}
 		}
-		orderExpr := strings.TrimSpace(cypher[orderByIdx+8 : orderByIdx+8+endIdx])
+		orderExpr := strings.TrimSpace(orderPart[:endIdx])
 		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
 	}
 
 	// Apply SKIP
-	skipIdx := strings.Index(upper, "SKIP")
+	skipIdx := findKeywordIndex(cypher, "SKIP")
 	skip := 0
 	if skipIdx > 0 {
 		skipPart := strings.TrimSpace(cypher[skipIdx+4:])
@@ -717,7 +715,7 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 	}
 
 	// Apply LIMIT
-	limitIdx := strings.Index(upper, "LIMIT")
+	limitIdx := findKeywordIndex(cypher, "LIMIT")
 	limit := -1
 	if limitIdx > 0 {
 		limitPart := strings.TrimSpace(cypher[limitIdx+5:])

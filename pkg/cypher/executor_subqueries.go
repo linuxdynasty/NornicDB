@@ -964,15 +964,13 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 // This is used to determine how many batches we need before executing the actual writes.
 // Returns empty string if conversion is not possible.
 func (e *StorageExecutor) makeSubqueryReadOnly(subquery string) string {
-	upper := strings.ToUpper(subquery)
-
 	// Simple strategy: Replace write operations with RETURN of matched entities
 	// This works for common patterns like "MATCH ... SET ... RETURN"
 
 	// Check for MATCH ... SET ... RETURN pattern
-	matchIdx := strings.Index(upper, "MATCH")
-	setIdx := strings.Index(upper, "SET")
-	returnIdx := strings.Index(upper, "RETURN")
+	matchIdx := findKeywordIndex(subquery, "MATCH")
+	setIdx := findKeywordIndex(subquery, "SET")
+	returnIdx := findKeywordIndex(subquery, "RETURN")
 
 	if matchIdx >= 0 && setIdx > matchIdx && returnIdx > setIdx {
 		// Extract MATCH and RETURN parts, skip SET
@@ -982,7 +980,7 @@ func (e *StorageExecutor) makeSubqueryReadOnly(subquery string) string {
 	}
 
 	// Check for MATCH ... CREATE ... RETURN pattern
-	createIdx := strings.Index(upper, "CREATE")
+	createIdx := findKeywordIndex(subquery, "CREATE")
 	if matchIdx >= 0 && createIdx > matchIdx && returnIdx > createIdx {
 		// Extract MATCH and RETURN parts, skip CREATE
 		matchPart := strings.TrimSpace(subquery[matchIdx:createIdx])
@@ -1002,19 +1000,17 @@ func (e *StorageExecutor) makeSubqueryReadOnly(subquery string) string {
 // This ensures that batching limits the number of matched rows processed, not just
 // the number of returned rows.
 func (e *StorageExecutor) addLimitSkipToSubquery(subquery string, limit, skip int) string {
-	upper := strings.ToUpper(subquery)
-
 	// Check for MATCH ... SET/CREATE/DELETE/MERGE ... RETURN pattern
 	// For these, we want to add LIMIT/SKIP after MATCH to limit how many rows are processed
-	matchIdx := strings.Index(upper, "MATCH")
+	matchIdx := findKeywordIndex(subquery, "MATCH")
 	if matchIdx >= 0 {
 		// Find the first operation after MATCH (SET, CREATE, DELETE, MERGE, or RETURN)
-		remaining := upper[matchIdx+5:] // Skip "MATCH"
-		setIdx := strings.Index(remaining, "SET")
-		createIdx := strings.Index(remaining, "CREATE")
-		deleteIdx := strings.Index(remaining, "DELETE")
-		mergeIdx := strings.Index(remaining, "MERGE")
-		returnIdx := strings.Index(remaining, "RETURN")
+		remaining := subquery[matchIdx+5:] // Skip "MATCH"
+		setIdx := findKeywordIndex(remaining, "SET")
+		createIdx := findKeywordIndex(remaining, "CREATE")
+		deleteIdx := findKeywordIndex(remaining, "DELETE")
+		mergeIdx := findKeywordIndex(remaining, "MERGE")
+		returnIdx := findKeywordIndex(remaining, "RETURN")
 
 		// Find the earliest operation after MATCH
 		firstOpIdx := -1
@@ -1046,10 +1042,10 @@ func (e *StorageExecutor) addLimitSkipToSubquery(subquery string, limit, skip in
 			matchEnd := matchIdx + 5 + firstOpIdx // End of MATCH pattern, start of first operation
 
 			// Check if there's a WHERE clause between MATCH and the first operation
-			whereIdx := strings.Index(upper[matchIdx+5:matchIdx+5+firstOpIdx], "WHERE")
+			whereIdx := findKeywordIndex(subquery[matchIdx+5:matchIdx+5+firstOpIdx], "WHERE")
 			if whereIdx >= 0 {
 				// Find end of WHERE clause (before first operation)
-				whereEnd := strings.Index(upper[matchIdx+5+whereIdx:matchIdx+5+firstOpIdx], " "+firstOpName)
+				whereEnd := findKeywordIndex(subquery[matchIdx+5+whereIdx:matchIdx+5+firstOpIdx], firstOpName)
 				if whereEnd > 0 {
 					matchEnd = matchIdx + 5 + whereIdx + 5 + whereEnd // After WHERE clause
 				}
@@ -1076,7 +1072,7 @@ func (e *StorageExecutor) addLimitSkipToSubquery(subquery string, limit, skip in
 	}
 
 	// Fallback: Add LIMIT/SKIP before RETURN (or at end if no RETURN)
-	returnIdx := strings.LastIndex(upper, "RETURN")
+	returnIdx := findKeywordIndex(subquery, "RETURN")
 	if returnIdx == -1 {
 		// No RETURN clause - append LIMIT/SKIP at the end
 		if skip > 0 {
