@@ -768,6 +768,119 @@ func TestExecuteMerge_RecoversFromDuplicateCreateForParameterizedRepositoryMerge
 	assert.Equal(t, false, nodes[0].Properties["is_dependency"])
 }
 
+func TestExecuteMerge_CreatesNodeWhenLegacySequentialIDWouldCollide(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	require.NoError(t, store.GetSchema().AddUniqueConstraint("file_path", "File", "path"))
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "node-1",
+		Labels: []string{"Scratch"},
+		Properties: map[string]interface{}{
+			"name": "occupied-legacy-id",
+		},
+	})
+	require.NoError(t, err)
+
+	idCounter = 0
+
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	result, err := exec.Execute(ctx, `
+		MERGE (f:File {path: $path})
+		SET f.name = $name, f.relative_path = $relative_path, f.is_dependency = $is_dependency
+		RETURN f.path, f.name
+	`, map[string]interface{}{
+		"path":          "/Users/timothysweet/src/my-CodeGraphContext/cgc_entry.py",
+		"name":          "cgc_entry.py",
+		"relative_path": "cgc_entry.py",
+		"is_dependency": false,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "/Users/timothysweet/src/my-CodeGraphContext/cgc_entry.py", result.Rows[0][0])
+	assert.Equal(t, "cgc_entry.py", result.Rows[0][1])
+
+	files, err := store.GetNodesByLabel("File")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, "/Users/timothysweet/src/my-CodeGraphContext/cgc_entry.py", files[0].Properties["path"])
+	assert.NotEqual(t, storage.NodeID("node-1"), files[0].ID)
+}
+
+func TestExecuteCompoundMatchMerge_RecoversFromDuplicateCreateForParameterizedParameterMerge(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	require.NoError(t, store.GetSchema().AddConstraint(storage.Constraint{
+		Name:       "parameter_unique",
+		Type:       storage.ConstraintNodeKey,
+		Label:      "Parameter",
+		Properties: []string{"name", "path", "function_line_number"},
+	}))
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "fn-1",
+		Labels: []string{"Function"},
+		Properties: map[string]interface{}{
+			"name":        "run",
+			"path":        "/Users/timothysweet/src/my-CodeGraphContext/tests/unit/tools/test_indexing_scalability.py",
+			"line_number": int64(365),
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "param-1",
+		Labels: []string{"Parameter"},
+		Properties: map[string]interface{}{
+			"name":                 "query",
+			"path":                 "/Users/timothysweet/src/my-CodeGraphContext/tests/unit/tools/test_indexing_scalability.py",
+			"function_line_number": int64(365),
+		},
+	})
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(&staleMergeLookupEngine{
+		Engine:      store,
+		hiddenLabel: "Parameter",
+	})
+	ctx := context.Background()
+
+	result, err := exec.Execute(ctx, `
+		MATCH (fn:Function {name: $func_name, path: $path, line_number: $function_line_number})
+		MERGE (p:Parameter {name: $name, path: $path, function_line_number: $function_line_number})
+		MERGE (fn)-[:HAS_PARAMETER]->(p)
+		RETURN p.name, p.path, p.function_line_number
+	`, map[string]interface{}{
+		"func_name":            "run",
+		"path":                 "/Users/timothysweet/src/my-CodeGraphContext/tests/unit/tools/test_indexing_scalability.py",
+		"function_line_number": int64(365),
+		"name":                 "query",
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "query", result.Rows[0][0])
+	assert.Equal(t, "/Users/timothysweet/src/my-CodeGraphContext/tests/unit/tools/test_indexing_scalability.py", result.Rows[0][1])
+	assert.Equal(t, int64(365), result.Rows[0][2])
+
+	params, err := store.GetNodesByLabel("Parameter")
+	require.NoError(t, err)
+	require.Len(t, params, 1)
+	assert.Equal(t, "query", params[0].Properties["name"])
+	assert.Equal(t, int64(365), params[0].Properties["function_line_number"])
+
+	fn, err := store.GetFirstNodeByLabel("Function")
+	require.NoError(t, err)
+	param := params[0]
+	edges, err := store.GetEdgesBetween(fn.ID, param.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, "HAS_PARAMETER", edges[0].Type)
+}
+
 func TestExecuteCompoundMatchMerge_SecondMergeAndErrorBranches(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")

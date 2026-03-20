@@ -230,7 +230,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	} else {
 		// Node doesn't exist - create it
 		node = &storage.Node{
-			ID:         storage.NodeID(fmt.Sprintf("node-%d", e.idCounter())),
+			ID:         storage.NodeID(e.generateID()),
 			Labels:     labels,
 			Properties: matchProps,
 		}
@@ -973,19 +973,9 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	// Try to find existing node
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(matchProps) > 0 {
-		nodes, _ := store.GetNodesByLabel(labels[0])
-		for _, n := range nodes {
-			matches := true
-			for key, val := range matchProps {
-				if nodeVal, ok := n.Properties[key]; !ok || !e.compareEqual(nodeVal, val) {
-					matches = false
-					break
-				}
-			}
-			if matches {
-				existingNode = n
-				break
-			}
+		existingNode, err = e.findMergeNode(store, labels, matchProps)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -1006,27 +996,42 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 		}
 	} else {
 		node = &storage.Node{
-			ID:         storage.NodeID(fmt.Sprintf("node-%d", e.idCounter())),
+			ID:         storage.NodeID(e.generateID()),
 			Labels:     labels,
 			Properties: matchProps,
 		}
 		actualID, err := store.CreateNode(node)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
-		}
-		node.ID = actualID
-		e.notifyNodeMutated(string(node.ID))
-		result.Stats.NodesCreated = 1
-
-		if onCreateIdx > 0 {
-			setEnd := len(cypher)
-			for _, idx := range []int{setIdx, onMatchIdx, withIdx, returnIdx} {
-				if idx > onCreateIdx && idx < setEnd {
-					setEnd = idx
+			if mergeCreateConflict(err) {
+				recoveredNode, findErr := e.findMergeNode(store, labels, matchProps)
+				if findErr != nil {
+					return nil, findErr
 				}
+				if recoveredNode != nil {
+					existingNode = recoveredNode
+					node = recoveredNode
+				} else {
+					return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 			}
-			setClause := strings.TrimSpace(cypher[onCreateIdx+13 : setEnd])
-			e.applySetToNodeWithContext(node, varName, setClause, nodeContext, relContext)
+		}
+		if existingNode == nil {
+			node.ID = actualID
+			e.notifyNodeMutated(string(node.ID))
+			result.Stats.NodesCreated = 1
+
+			if onCreateIdx > 0 {
+				setEnd := len(cypher)
+				for _, idx := range []int{setIdx, onMatchIdx, withIdx, returnIdx} {
+					if idx > onCreateIdx && idx < setEnd {
+						setEnd = idx
+					}
+				}
+				setClause := strings.TrimSpace(cypher[onCreateIdx+13 : setEnd])
+				e.applySetToNodeWithContext(node, varName, setClause, nodeContext, relContext)
+			}
 		}
 	}
 
@@ -1785,7 +1790,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 	} else {
 		// Create new node
 		node = &storage.Node{
-			ID:         storage.NodeID(fmt.Sprintf("node-%d", e.idCounter())),
+			ID:         storage.NodeID(e.generateID()),
 			Labels:     labels,
 			Properties: props,
 		}
@@ -1963,7 +1968,7 @@ func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern st
 
 	// Create the relationship
 	edge := &storage.Edge{
-		ID:         storage.EdgeID(fmt.Sprintf("edge-%d", e.idCounter())),
+		ID:         storage.EdgeID(e.generateID()),
 		Type:       relType,
 		StartNode:  startNode.ID,
 		EndNode:    endNode.ID,
