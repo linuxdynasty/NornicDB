@@ -158,6 +158,111 @@ ORDER BY n.mongo_id
 	}
 }
 
+func TestUnwindReturnPropertyAccessFromParameterMap(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	result, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+RETURN row.path AS path, row.name AS name, row.relative_path AS relative_path, row.is_dependency AS is_dependency
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"path":          "/tmp/a.py",
+				"name":          "a.py",
+				"relative_path": "a.py",
+				"is_dependency": false,
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, []string{"path", "name", "relative_path", "is_dependency"}, result.Columns)
+	require.Equal(t, "/tmp/a.py", result.Rows[0][0])
+	require.Equal(t, "a.py", result.Rows[0][1])
+	require.Equal(t, "a.py", result.Rows[0][2])
+	require.Equal(t, false, result.Rows[0][3])
+}
+
+func TestUnwindTopLevelMergeWithPropertyAccessFromParameterMap(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (f:File {path: row.path})
+SET f.name = row.name, f.relative_path = row.relative_path, f.is_dependency = row.is_dependency
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"path":          "/tmp/b.py",
+				"name":          "b.py",
+				"relative_path": "pkg/b.py",
+				"is_dependency": true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+MATCH (f:File {path: '/tmp/b.py'})
+RETURN f.name, f.relative_path, f.is_dependency
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "b.py", result.Rows[0][0])
+	require.Equal(t, "pkg/b.py", result.Rows[0][1])
+	require.Equal(t, true, result.Rows[0][2])
+}
+
+func TestUnwindTopLevelMergeSetMergeUsesNestedMapPropertyAccess(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (m:Module {name: row.name})
+ON CREATE SET m.lang = row.lang
+ON MATCH SET m.lang = COALESCE(m.lang, row.lang)
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"name": "pkg.dep", "lang": "python"},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (m:Module {name: row.name})
+SET m += row.props
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"name": "pkg.dep",
+				"props": map[string]interface{}{
+					"full_import_name": "pkg.dep.shared",
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+MATCH (m:Module {name: 'pkg.dep'})
+RETURN m.lang, m.full_import_name
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "python", result.Rows[0][0])
+	require.Equal(t, "pkg.dep.shared", result.Rows[0][1])
+}
+
 func TestUnwindCreateSetMergeFromParameterMap_LargeComplexStrings(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

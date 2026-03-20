@@ -482,79 +482,82 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		}
 	}
 
-	// Handle UNWIND ... CREATE ... pattern
-	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "CREATE") {
-		result := &ExecuteResult{
-			Columns: []string{},
-			Rows:    [][]interface{}{},
-			Stats:   &QueryStats{},
-		}
-
-		// Split CREATE and RETURN parts
-		returnIdx := findKeywordIndex(restQuery, "RETURN")
-		var createPart, returnPart string
-		if returnIdx > 0 {
-			createPart = strings.TrimSpace(restQuery[:returnIdx])
-			returnPart = strings.TrimSpace(restQuery[returnIdx:])
-		} else {
-			createPart = restQuery
-			returnPart = ""
-		}
-
-		// Execute CREATE for each unwound item
-		for _, item := range items {
-			// Reconstruct full query with RETURN.
-			fullQuery := createPart
-			if returnPart != "" {
-				fullQuery += " " + returnPart
+	// Handle UNWIND ... CREATE/MERGE ... pattern
+	if restQuery != "" {
+		upperRest := strings.ToUpper(strings.TrimSpace(restQuery))
+		if strings.HasPrefix(upperRest, "CREATE") || strings.HasPrefix(upperRest, "MERGE") {
+			result := &ExecuteResult{
+				Columns: []string{},
+				Rows:    [][]interface{}{},
+				Stats:   &QueryStats{},
 			}
 
-			// For CREATE...SET += paths, execute with per-item parameters instead of
-			// literal substitution. This preserves complex map/string payloads and keeps
-			// map-merge sources resolvable via params context.
-			useParamExecution := strings.Contains(createPart, "+=")
-
-			var createResult *ExecuteResult
-			var err error
-			if useParamExecution {
-				callParams := make(map[string]interface{}, len(params)+1)
-				for k, v := range params {
-					callParams[k] = v
-				}
-				callParams[variable] = item
-				createResult, err = e.Execute(ctx, fullQuery, callParams)
+			// Split mutation and RETURN parts
+			returnIdx := findKeywordIndex(restQuery, "RETURN")
+			var mutationPart, returnPart string
+			if returnIdx > 0 {
+				mutationPart = strings.TrimSpace(restQuery[:returnIdx])
+				returnPart = strings.TrimSpace(restQuery[returnIdx:])
 			} else {
-				// Replace variable references ONLY in the CREATE clause
-				createQuerySubstituted := e.replaceVariableInQuery(createPart, variable, item)
-				substitutedFull := createQuerySubstituted
+				mutationPart = restQuery
+				returnPart = ""
+			}
+
+			// Execute mutation for each unwound item
+			for _, item := range items {
+				// Reconstruct full query with RETURN.
+				fullQuery := mutationPart
 				if returnPart != "" {
-					substitutedFull += " " + returnPart
+					fullQuery += " " + returnPart
 				}
-				createResult, err = e.Execute(ctx, substitutedFull, params)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("UNWIND CREATE failed: %w", err)
+
+				// For mutation paths that depend on SET += map sources, execute with per-item parameters instead of
+				// literal substitution. This preserves complex map/string payloads and keeps
+				// map-merge sources resolvable via params context.
+				useParamExecution := strings.Contains(mutationPart, "+=")
+
+				var mutationResult *ExecuteResult
+				var err error
+				if useParamExecution {
+					callParams := make(map[string]interface{}, len(params)+1)
+					for k, v := range params {
+						callParams[k] = v
+					}
+					callParams[variable] = item
+					mutationResult, err = e.Execute(ctx, fullQuery, callParams)
+				} else {
+					// Replace variable references ONLY in the mutation clause
+					mutationQuerySubstituted := e.replaceVariableInQuery(mutationPart, variable, item)
+					substitutedFull := mutationQuerySubstituted
+					if returnPart != "" {
+						substitutedFull += " " + returnPart
+					}
+					mutationResult, err = e.Execute(ctx, substitutedFull, params)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("UNWIND mutation failed: %w", err)
+				}
+
+				// Accumulate stats when available. Some execution paths can return a
+				// nil Stats pointer even when the side-effect succeeded.
+				if mutationResult != nil && mutationResult.Stats != nil {
+					result.Stats.NodesCreated += mutationResult.Stats.NodesCreated
+					result.Stats.RelationshipsCreated += mutationResult.Stats.RelationshipsCreated
+				}
+
+				// If there's a RETURN clause, collect the result rows
+				if mutationResult != nil && returnPart != "" && len(mutationResult.Rows) > 0 {
+					// First iteration: set columns
+					if len(result.Columns) == 0 {
+						result.Columns = mutationResult.Columns
+					}
+					// Append all rows from this per-item execution
+					result.Rows = append(result.Rows, mutationResult.Rows...)
+				}
 			}
 
-			// Accumulate stats when available. Some execution paths can return a
-			// nil Stats pointer even when the CREATE side-effect succeeded.
-			if createResult != nil && createResult.Stats != nil {
-				result.Stats.NodesCreated += createResult.Stats.NodesCreated
-				result.Stats.RelationshipsCreated += createResult.Stats.RelationshipsCreated
-			}
-
-			// If there's a RETURN clause, collect the result rows
-			if createResult != nil && returnPart != "" && len(createResult.Rows) > 0 {
-				// First iteration: set columns
-				if len(result.Columns) == 0 {
-					result.Columns = createResult.Columns
-				}
-				// Append all rows from this CREATE execution
-				result.Rows = append(result.Rows, createResult.Rows...)
-			}
+			return result, nil
 		}
-
-		return result, nil
 	}
 
 	// Handle UNWIND ... WITH collect(DISTINCT var.prop) AS alias RETURN alias
@@ -775,10 +778,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		}
 		for _, item := range items {
 			row := make([]interface{}, len(returnItems))
+			rowValues := map[string]interface{}{variable: item}
 			for i, ri := range returnItems {
-				if ri.expr == variable {
-					row[i] = item
-				}
+				row[i] = e.evaluateExpressionFromValues(ri.expr, rowValues)
 			}
 			result.Rows = append(result.Rows, row)
 		}
