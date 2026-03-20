@@ -1786,9 +1786,17 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 		return nil, "", fmt.Errorf("MERGE not found in segment")
 	}
 
-	// Find the pattern end (ON CREATE, ON MATCH, or end of segment)
+	// Find the pattern end (ON CREATE SET / ON MATCH SET / standalone SET / end of segment)
 	patternEnd := len(segment)
-	for _, keyword := range []string{"ON CREATE", "ON MATCH"} {
+	onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
+	onMatchIdx := findKeywordIndex(segment, "ON MATCH SET")
+	setIdx := findStandaloneSetInMergeSegment(segment)
+	for _, idx := range []int{onCreateIdx, onMatchIdx, setIdx} {
+		if idx > 0 && idx < patternEnd {
+			patternEnd = idx
+		}
+	}
+	for _, keyword := range []string{"WITH", "RETURN"} {
 		idx := findKeywordIndex(segment, keyword)
 		if idx > 0 && idx < patternEnd {
 			patternEnd = idx
@@ -1816,12 +1824,13 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 	if existingNode != nil {
 		node = existingNode
 		// Apply ON MATCH SET if present
-		onMatchIdx := findKeywordIndex(segment, "ON MATCH SET")
 		if onMatchIdx > 0 {
 			setEnd := len(segment)
-			onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
 			if onCreateIdx > onMatchIdx {
 				setEnd = onCreateIdx
+			}
+			if setIdx > onMatchIdx && setIdx < setEnd {
+				setEnd = setIdx
 			}
 			setClause := strings.TrimSpace(segment[onMatchIdx+12 : setEnd])
 			e.applySetToNode(node, varName, setClause)
@@ -1857,12 +1866,13 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			e.notifyNodeMutated(string(node.ID))
 
 			// Apply ON CREATE SET if present
-			onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
 			if onCreateIdx > 0 {
 				setEnd := len(segment)
-				onMatchIdx := findKeywordIndex(segment, "ON MATCH SET")
 				if onMatchIdx > onCreateIdx {
 					setEnd = onMatchIdx
+				}
+				if setIdx > onCreateIdx && setIdx < setEnd {
+					setEnd = setIdx
 				}
 				setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
 				e.applySetToNode(node, varName, setClause)
@@ -1872,7 +1882,40 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 		}
 	}
 
+	// Apply standalone SET (outside ON CREATE/ON MATCH), e.g.:
+	// MERGE (n:Label {k:'v'}) SET n.prop = 1
+	if setIdx > 0 {
+		setEnd := len(segment)
+		for _, idx := range []int{findKeywordIndex(segment, "WITH"), findKeywordIndex(segment, "RETURN")} {
+			if idx > setIdx && idx < setEnd {
+				setEnd = idx
+			}
+		}
+		setClause := strings.TrimSpace(segment[setIdx+3 : setEnd])
+		e.applySetToNode(node, varName, setClause)
+		store.UpdateNode(node)
+		e.notifyNodeMutated(string(node.ID))
+	}
+
 	return node, varName, nil
+}
+
+func findStandaloneSetInMergeSegment(segment string) int {
+	searchFrom := 0
+	for searchFrom < len(segment) {
+		relIdx := findKeywordIndex(segment[searchFrom:], "SET")
+		if relIdx < 0 {
+			return -1
+		}
+		idx := searchFrom + relIdx
+		prefix := strings.ToUpper(strings.TrimSpace(segment[:idx]))
+		if strings.HasSuffix(prefix, "ON CREATE") || strings.HasSuffix(prefix, "ON MATCH") {
+			searchFrom = idx + 3
+			continue
+		}
+		return idx
+	}
+	return -1
 }
 
 // executeMatchSegment executes a MATCH segment and returns the matched node.

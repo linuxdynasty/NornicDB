@@ -200,6 +200,68 @@ func TestMergeNode_Idempotent(t *testing.T) {
 	assert.Equal(t, "third", valueResult.Rows[0][0])
 }
 
+func TestMergeNode_StandaloneSetAfterMerge(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, `
+		MERGE (fv:FactVersion {version_id: 'fv-14e79330'})
+		SET fv.fact_key = 'repo_fact|import|internal/gitreader/gitreader.go->import (
+			"bufio"
+			"bytes"
+		)',
+		    fv.tx_id = 'tx-5671c64f-000001',
+		    fv.commit_hash = '5671c64fcba850a6fd01ef68f2b9d592389f41c1',
+		    fv.valid_from_iso = '2026-03-20T20:22:20Z',
+		    fv.valid_from = datetime('2026-03-20T20:22:20Z'),
+		    fv.value_json = '{"repo":"git-to-graph","source":"internal/gitreader/gitreader.go"}',
+		    fv.valid_to = CASE WHEN null IS NULL THEN null ELSE datetime(null) END,
+		    fv.asserted_at = datetime('2026-03-20T20:22:20Z'),
+		    fv.asserted_by = 'TJ Sweet',
+		    fv.semantic_type = 'ImportEdgeVersion'
+	`, nil)
+	require.NoError(t, err)
+
+	res, err := e.Execute(ctx, `
+		MATCH (fv:FactVersion {version_id: 'fv-14e79330'})
+		RETURN fv.semantic_type, fv.asserted_by, fv.valid_to, fv.tx_id
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "ImportEdgeVersion", res.Rows[0][0])
+	require.Equal(t, "TJ Sweet", res.Rows[0][1])
+	require.NotNil(t, res.Rows[0][2])
+	require.Equal(t, "tx-5671c64f-000001", res.Rows[0][3])
+}
+
+func TestMergeChain_StandaloneSetThenRelationshipMerge(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, `
+		MERGE (fk:FactKey {subject_entity_id: 'file::internal/parser/parser.go', predicate: 'calls'})
+		MERGE (fv:FactVersion {version_id: 'fv-ad70fda8'})
+		SET fv.fact_key = 'repo_fact|calls|file::internal/parser/parser.go->symbol::internal/parser/parser.go::function::parseTreeSitter',
+		    fv.semantic_type = 'CallEdgeVersion',
+		    fv.asserted_by = 'TJ Sweet'
+		MERGE (fk)-[:HAS_VERSION]->(fv)
+	`, nil)
+	require.NoError(t, err)
+
+	res, err := e.Execute(ctx, `
+		MATCH (fk:FactKey {subject_entity_id: 'file::internal/parser/parser.go', predicate: 'calls'})-[:HAS_VERSION]->(fv:FactVersion {version_id: 'fv-ad70fda8'})
+		RETURN fv.semantic_type, fv.asserted_by
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "CallEdgeVersion", res.Rows[0][0])
+	require.Equal(t, "TJ Sweet", res.Rows[0][1])
+}
+
 // ========================================
 // MERGE Relationship Tests
 // ========================================
