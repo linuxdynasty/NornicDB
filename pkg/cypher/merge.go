@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -382,6 +383,13 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 	// Extract MATCH clause
 	matchClause := strings.TrimSpace(cypher[matchIdx:mergeIdx])
 	mergeClause := strings.TrimSpace(cypher[mergeIdx:])
+	windowVar, windowSkip, windowLimit, hasWindow := parseTrailingWithWindow(matchClause)
+	if hasWindow {
+		withIdx := findKeywordIndexInContext(matchClause, "WITH")
+		if withIdx > 0 {
+			matchClause = strings.TrimSpace(matchClause[:withIdx])
+		}
+	}
 	returnIdxInMerge := findKeywordIndex(mergeClause, "RETURN")
 	aggregateCountOnly := false
 	aggregateCountAlias := "count(*)"
@@ -403,6 +411,9 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 	matchedNodes, matchedRels, err := e.executeMatchForContext(ctx, matchClause)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute MATCH: %v", err)
+	}
+	if hasWindow {
+		matchedNodes = applyContextWindow(matchedNodes, windowVar, windowSkip, windowLimit)
 	}
 
 	// If no matches found and not OPTIONAL MATCH, return empty
@@ -470,6 +481,75 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 	}
 
 	return result, nil
+}
+
+func parseTrailingWithWindow(matchClause string) (varName string, skip int, limit int, ok bool) {
+	withIdx := findKeywordIndexInContext(matchClause, "WITH")
+	if withIdx <= 0 {
+		return "", 0, 0, false
+	}
+	tail := strings.TrimSpace(matchClause[withIdx+len("WITH"):])
+	if tail == "" {
+		return "", 0, 0, false
+	}
+	tokens := strings.Fields(tail)
+	if len(tokens) == 0 || !isValidIdentifier(tokens[0]) {
+		return "", 0, 0, false
+	}
+
+	varName = tokens[0]
+	skip = 0
+	limit = -1
+	for i := 1; i < len(tokens); {
+		switch strings.ToUpper(tokens[i]) {
+		case "SKIP":
+			if i+1 >= len(tokens) {
+				return "", 0, 0, false
+			}
+			n, err := strconv.Atoi(tokens[i+1])
+			if err != nil || n < 0 {
+				return "", 0, 0, false
+			}
+			skip = n
+			i += 2
+		case "LIMIT":
+			if i+1 >= len(tokens) {
+				return "", 0, 0, false
+			}
+			n, err := strconv.Atoi(tokens[i+1])
+			if err != nil || n < 0 {
+				return "", 0, 0, false
+			}
+			limit = n
+			i += 2
+		default:
+			return "", 0, 0, false
+		}
+	}
+	if limit < 0 {
+		return "", 0, 0, false
+	}
+	return varName, skip, limit, true
+}
+
+func applyContextWindow(contexts []map[string]*storage.Node, variable string, skip int, limit int) []map[string]*storage.Node {
+	if len(contexts) == 0 || limit == 0 {
+		return nil
+	}
+	filtered := make([]map[string]*storage.Node, 0, len(contexts))
+	for _, ctx := range contexts {
+		if _, ok := ctx[variable]; ok {
+			filtered = append(filtered, ctx)
+		}
+	}
+	if skip >= len(filtered) {
+		return nil
+	}
+	end := skip + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[skip:end]
 }
 
 // executeMatchForContext executes a MATCH clause and returns matched nodes by variable name.
@@ -1037,6 +1117,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 		labels = e.extractLabels(mergePattern)
 		matchProps = make(map[string]interface{})
 	}
+	matchProps = e.resolveMergePropsWithContext(matchProps, nodeContext, relContext)
 
 	// Try to find existing node
 	var existingNode *storage.Node
@@ -1157,6 +1238,40 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	}
 
 	return result, nil
+}
+
+func (e *StorageExecutor) resolveMergePropsWithContext(props map[string]interface{}, nodeContext map[string]*storage.Node, relContext map[string]*storage.Edge) map[string]interface{} {
+	if len(props) == 0 {
+		return props
+	}
+	resolved := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		s, ok := v.(string)
+		if !ok {
+			resolved[k] = v
+			continue
+		}
+		expr := strings.TrimSpace(s)
+		if expr == "" {
+			resolved[k] = v
+			continue
+		}
+		dot := strings.Index(expr, ".")
+		if dot <= 0 {
+			resolved[k] = v
+			continue
+		}
+		root := strings.TrimSpace(expr[:dot])
+		if _, ok := nodeContext[root]; !ok {
+			if _, ok := relContext[root]; !ok {
+				resolved[k] = v
+				continue
+			}
+		}
+		evaluated := e.evaluateExpressionWithContext(expr, nodeContext, relContext)
+		resolved[k] = evaluated
+	}
+	return resolved
 }
 
 // executeMergeRelationshipWithContext handles MERGE for relationship patterns.
@@ -1519,6 +1634,13 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 			if mergedNode != nil && varName != "" {
 				nodeContext[varName] = mergedNode
 				result.Stats.NodesCreated++ // May be 0 if node existed
+			}
+		} else if strings.HasPrefix(upperSeg, "FOREACH") {
+			if chainBroken {
+				continue
+			}
+			if _, err := e.executeForeachWithContext(ctx, segment, nodeContext, relContext); err != nil {
+				return nil, fmt.Errorf("FOREACH failed: %w", err)
 			}
 		} else if strings.HasPrefix(upperSeg, "RETURN") {
 			// RETURN segment: build final result
@@ -2218,6 +2340,13 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 			if !e.evaluateWhereForMergeContext(whereClause, nodeContext, relContext) {
 				chainBroken = true
 			}
+		} else if strings.HasPrefix(upperSeg, "FOREACH") {
+			if chainBroken {
+				continue
+			}
+			if _, err := e.executeForeachWithContext(ctx, segment, nodeContext, relContext); err != nil {
+				return nil, fmt.Errorf("FOREACH failed: %w", err)
+			}
 		} else if strings.HasPrefix(upperSeg, "RETURN") {
 			// Build result from context
 			if chainBroken {
@@ -2254,29 +2383,15 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 // splitMultipleMerges splits a query into MERGE/MATCH/RETURN segments.
 func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 	var segments []string
-
-	type boundary struct {
-		pos int
-		kw  string
-	}
-	var boundaries []boundary
-	for _, kw := range []string{"OPTIONAL MATCH", "MERGE", "MATCH", "WITH", "WHERE", "RETURN"} {
-		searchPos := 0
-		for {
-			idx := findKeywordIndexInContext(cypher[searchPos:], kw)
-			if idx == -1 {
-				break
-			}
-			abs := searchPos + idx
-			// Skip ON MATCH SET modifier inside MERGE clauses.
-			if kw == "MATCH" && (isOnMatchModifier(cypher, abs) || isOptionalMatchModifier(cypher, abs)) {
-				searchPos = abs + len(kw)
-				continue
-			}
-			boundaries = append(boundaries, boundary{pos: abs, kw: kw})
-			searchPos = abs + len(kw)
-		}
-	}
+	boundaries := collectTopLevelMergeClauseBoundaries(cypher, []string{
+		"OPTIONAL MATCH",
+		"FOREACH",
+		"MERGE",
+		"MATCH",
+		"WITH",
+		"WHERE",
+		"RETURN",
+	})
 	if len(boundaries) == 0 {
 		return []string{strings.TrimSpace(cypher)}
 	}
@@ -2302,6 +2417,108 @@ func (e *StorageExecutor) splitMultipleMerges(cypher string) []string {
 	}
 
 	return segments
+}
+
+type mergeClauseBoundary struct {
+	pos int
+	kw  string
+}
+
+func collectTopLevelMergeClauseBoundaries(cypher string, keywords []string) []mergeClauseBoundary {
+	out := make([]mergeClauseBoundary, 0)
+	if strings.TrimSpace(cypher) == "" {
+		return out
+	}
+
+	// Prefer longer keywords first so OPTIONAL MATCH wins over MATCH.
+	sort.SliceStable(keywords, func(i, j int) bool { return len(keywords[i]) > len(keywords[j]) })
+
+	upper := strings.ToUpper(cypher)
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	depthParen := 0
+	depthBracket := 0
+	depthBrace := 0
+
+	for i := 0; i < len(upper); i++ {
+		ch := upper[i]
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			depthParen++
+			continue
+		case ')':
+			if depthParen > 0 {
+				depthParen--
+			}
+			continue
+		case '[':
+			depthBracket++
+			continue
+		case ']':
+			if depthBracket > 0 {
+				depthBracket--
+			}
+			continue
+		case '{':
+			depthBrace++
+			continue
+		case '}':
+			if depthBrace > 0 {
+				depthBrace--
+			}
+			continue
+		}
+
+		if depthParen != 0 || depthBracket != 0 || depthBrace != 0 {
+			continue
+		}
+
+		for _, kw := range keywords {
+			if !strings.HasPrefix(upper[i:], kw) {
+				continue
+			}
+			end := i + len(kw)
+			if (i == 0 || !isIdentByte(upper[i-1])) && (end >= len(upper) || !isIdentByte(upper[end])) {
+				// Skip ON MATCH SET modifier inside MERGE clauses.
+				if kw == "MATCH" && (isOnMatchModifier(cypher, i) || isOptionalMatchModifier(cypher, i)) {
+					break
+				}
+				out = append(out, mergeClauseBoundary{pos: i, kw: kw})
+				i = end - 1
+				break
+			}
+		}
+	}
+	return out
 }
 
 func isOnMatchModifier(cypher string, matchPos int) bool {
