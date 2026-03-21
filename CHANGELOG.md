@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.26] - 2026-03-20
+
+### Changed
+
+- **Cypher mutation pipeline compatibility**:
+  - generalized execution handling for complex mutation chains combining `UNWIND`, `MERGE`, `SET`, `OPTIONAL MATCH`, `WITH`, and `WHERE`
+  - improved clause sequencing reliability for multi-stage write statements with intermediate projections.
+- **Proxy/base-path runtime behavior**:
+  - restored and hardened proxied UI/base-path asset loading behavior for containerized deployments
+  - improved path normalization to reduce route/asset resolution drift behind reverse proxies.
+- **Managed vector/query execution safeguards**:
+  - tightened vector/search-related persistence and serialization guardrails for large payload handling
+  - improved runtime safety defaults for high-volume decode/read paths.
+
+### Fixed
+
+- **Unique-key conflict handling in batched MERGE writes**:
+  - fixed batched `UNWIND ... MERGE` paths to correctly reuse matching nodes during a statement, preventing false duplicate-create violations under unique constraints.
+- **Mutation context propagation across chained clauses**:
+  - fixed variable binding continuity so downstream relationship merges resolve correctly after intermediate `WITH` projections and optional matches.
+- **Aggregate alias continuity across chained MATCH stages**:
+  - fixed alias preservation in chained query stages to prevent dropped/incorrect projected values.
+- **UI/path security hardening**:
+  - fixed reflected path handling in UI routing flows to mitigate injection/open-redirect risk surfaces.
+- **Storage path-safety hardening**:
+  - fixed segment/file access validation in WAL-related paths to reduce traversal-style file access risk.
+- **Dependency security updates**:
+  - upgraded vulnerable transport/runtime dependencies to patched versions in security-sensitive protocol paths.
+
+### Tests
+
+- Added/expanded regression coverage for:
+  - complex Cypher mutation shape permutations (`UNWIND` + chained `MERGE`/`OPTIONAL MATCH`/`WITH`/`WHERE`)
+  - unique-constraint behavior under batched merge writes
+  - UNWIND property substitution and merge-chain execution edge cases
+  - proxy/base-path UI routing behavior
+  - storage path validation and bounded message-pack decode limits.
+
+### Documentation
+
+- Added/updated policy and project documentation for patent/licensing posture clarity.
+
+### Technical Details
+
+- **Range covered**: `v1.0.25..HEAD`
+- **Commits in range**: 14 (non-merge)
+- **Repository delta**: 35 files changed, +1,760 / -91 lines
+- **Non-test surface changed**: 25 files
+- **Primary focus areas**: Cypher write-path correctness, constraint-safe batched merges, security hardening, and proxy deployment reliability.
+
 ## [v1.0.25] - 2026-03-20
 
 ### Changed
