@@ -303,3 +303,81 @@ MERGE (cc)-[:IMPACTS]->(cs)
 	require.Len(t, emittedRes.Rows, 1)
 	require.Equal(t, int64(4), emittedRes.Rows[0][0])
 }
+
+func TestCodeStateChangeQueryShapes_UnwindVersionsWithUniqueCommitHash(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE CONSTRAINT commit_hash_unique IF NOT EXISTS FOR (c:Commit) REQUIRE c.hash IS UNIQUE`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, strings.TrimSpace(`
+UNWIND $rows AS row
+MERGE (ck:CodeKey {entity_id: row.entity_id, relation_type: row.relation_type})
+MERGE (cs:CodeState {state_id: row.state_id})
+SET cs.code_key = row.code_key,
+    cs.tx_id = row.tx_id,
+    cs.commit_hash = row.commit_hash,
+    cs.valid_from_iso = row.valid_from_iso,
+    cs.valid_from = datetime(row.valid_from_iso),
+    cs.value_json = row.value_json,
+    cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+    cs.asserted_at = datetime(row.asserted_at_iso),
+    cs.asserted_by = row.asserted_by,
+    cs.semantic_type = row.semantic_type
+MERGE (ck)-[:HAS_STATE]->(cs)
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)
+`), map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"entity_id":       "entity-1",
+				"relation_type":   "calls",
+				"state_id":        "state-1",
+				"code_key":        "repo_fact|calls|a",
+				"tx_id":           "tx-1",
+				"commit_hash":     "c3c34374e0c7a2cfb9769d56b14da648abb5b827",
+				"valid_from_iso":  "2026-03-20T20:22:20Z",
+				"value_json":      `{"repo":"git-to-graph","source":"a","target":"b"}`,
+				"valid_to_iso":    nil,
+				"asserted_at_iso": "2026-03-20T20:22:20Z",
+				"asserted_by":     "TJ Sweet",
+				"semantic_type":   "CallEdgeVersion",
+			},
+			{
+				"entity_id":       "entity-2",
+				"relation_type":   "contains",
+				"state_id":        "state-2",
+				"code_key":        "repo_fact|contains|x",
+				"tx_id":           "tx-1",
+				"commit_hash":     "c3c34374e0c7a2cfb9769d56b14da648abb5b827",
+				"valid_from_iso":  "2026-03-20T20:22:20Z",
+				"value_json":      `{"repo":"git-to-graph","parent":"x","child":"y"}`,
+				"valid_to_iso":    nil,
+				"asserted_at_iso": "2026-03-20T20:22:20Z",
+				"asserted_by":     "TJ Sweet",
+				"semantic_type":   "ContainsEdgeVersion",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	commitCount, err := exec.Execute(ctx, `MATCH (c:Commit) RETURN count(c)`, nil)
+	require.NoError(t, err)
+	require.Len(t, commitCount.Rows, 1)
+	require.Equal(t, int64(1), commitCount.Rows[0][0])
+
+	changedCount, err := exec.Execute(ctx, `MATCH (:Commit)-[:CHANGED]->(:CodeState) RETURN count(*)`, nil)
+	require.NoError(t, err)
+	require.Len(t, changedCount.Rows, 1)
+	require.Equal(t, int64(2), changedCount.Rows[0][0])
+
+	touchedCount, err := exec.Execute(ctx, `MATCH (:Commit)-[:TOUCHED]->(:CodeKey) RETURN count(*)`, nil)
+	require.NoError(t, err)
+	require.Len(t, touchedCount.Rows, 1)
+	require.Equal(t, int64(2), touchedCount.Rows[0][0])
+}

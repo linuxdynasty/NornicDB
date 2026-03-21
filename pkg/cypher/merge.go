@@ -52,9 +52,47 @@ func mergeCreateConflict(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "already exists")
 }
 
+func mergeLookupCacheKey(label, prop string, val interface{}) string {
+	return fmt.Sprintf("%s:{%s:%v}", label, prop, val)
+}
+
+func (e *StorageExecutor) findMergeNodeInCache(labels []string, props map[string]interface{}) *storage.Node {
+	if len(labels) == 0 || len(props) == 0 {
+		return nil
+	}
+	label := labels[0]
+
+	e.nodeLookupCacheMu.RLock()
+	defer e.nodeLookupCacheMu.RUnlock()
+	for prop, val := range props {
+		if cached, ok := e.nodeLookupCache[mergeLookupCacheKey(label, prop, val)]; ok {
+			if mergeNodeMatches(cached, labels, props) {
+				return cached
+			}
+		}
+	}
+	return nil
+}
+
+func (e *StorageExecutor) cacheMergeNode(labels []string, props map[string]interface{}, node *storage.Node) {
+	if node == nil || len(labels) == 0 || len(props) == 0 {
+		return
+	}
+	label := labels[0]
+	e.nodeLookupCacheMu.Lock()
+	defer e.nodeLookupCacheMu.Unlock()
+	for prop, val := range props {
+		e.nodeLookupCache[mergeLookupCacheKey(label, prop, val)] = node
+	}
+}
+
 func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, props map[string]interface{}) (*storage.Node, error) {
 	if len(labels) == 0 || len(props) == 0 {
 		return nil, nil
+	}
+
+	if cached := e.findMergeNodeInCache(labels, props); cached != nil {
+		return cached, nil
 	}
 
 	nodes, err := store.GetNodesByLabel(labels[0])
@@ -63,6 +101,7 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 	}
 	for _, node := range nodes {
 		if mergeNodeMatches(node, labels, props) {
+			e.cacheMergeNode(labels, props, node)
 			return node, nil
 		}
 	}
@@ -73,6 +112,7 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 	}
 	for _, node := range allNodes {
 		if mergeNodeMatches(node, labels, props) {
+			e.cacheMergeNode(labels, props, node)
 			return node, nil
 		}
 	}
@@ -216,6 +256,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	if existingNode != nil {
 		// Node exists - apply ON MATCH SET if present
 		node = existingNode
+		e.cacheMergeNode(labels, matchProps, node)
 		if onMatchIdx > 0 {
 			setEnd := len(cypher)
 			for _, idx := range []int{onCreateIdx, returnIdx} {
@@ -245,6 +286,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 				if recoveredNode != nil {
 					existingNode = recoveredNode
 					node = recoveredNode
+					e.cacheMergeNode(labels, matchProps, node)
 				} else {
 					return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 				}
@@ -256,6 +298,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			node.ID = actualID
 			e.notifyNodeMutated(string(node.ID))
 			result.Stats.NodesCreated = 1
+			e.cacheMergeNode(labels, matchProps, node)
 
 			// Apply ON CREATE SET if present
 			if onCreateIdx > 0 {
@@ -288,6 +331,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	if existingNode != nil || setIdx > 0 || onCreateIdx > 0 {
 		store.UpdateNode(node)
 		e.notifyNodeMutated(string(node.ID))
+		e.cacheMergeNode(labels, matchProps, node)
 	}
 
 	// Handle RETURN clause
@@ -1006,6 +1050,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	var node *storage.Node
 	if existingNode != nil {
 		node = existingNode
+		e.cacheMergeNode(labels, matchProps, node)
 		if onMatchIdx > 0 {
 			setEnd := len(cypher)
 			for _, idx := range []int{onCreateIdx, returnIdx, withIdx, setIdx} {
@@ -1034,6 +1079,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 				if recoveredNode != nil {
 					existingNode = recoveredNode
 					node = recoveredNode
+					e.cacheMergeNode(labels, matchProps, node)
 				} else {
 					return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 				}
@@ -1045,6 +1091,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			node.ID = actualID
 			e.notifyNodeMutated(string(node.ID))
 			result.Stats.NodesCreated = 1
+			e.cacheMergeNode(labels, matchProps, node)
 
 			if onCreateIdx > 0 {
 				setEnd := len(cypher)
@@ -1079,6 +1126,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	// Save updates
 	store.UpdateNode(node)
 	e.notifyNodeMutated(string(node.ID))
+	e.cacheMergeNode(labels, matchProps, node)
 
 	// Add this node to context for subsequent MERGEs
 	nodeContext[varName] = node
@@ -1824,6 +1872,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 	var node *storage.Node
 	if existingNode != nil {
 		node = existingNode
+		e.cacheMergeNode(labels, props, node)
 		// Apply ON MATCH SET if present
 		if onMatchIdx > 0 {
 			setEnd := len(segment)
@@ -1855,6 +1904,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 				if recoveredNode != nil {
 					existingNode = recoveredNode
 					node = recoveredNode
+					e.cacheMergeNode(labels, props, node)
 				} else {
 					return nil, "", fmt.Errorf("failed to create node: %w", err)
 				}
@@ -1865,6 +1915,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 		if existingNode == nil {
 			node.ID = actualID
 			e.notifyNodeMutated(string(node.ID))
+			e.cacheMergeNode(labels, props, node)
 
 			// Apply ON CREATE SET if present
 			if onCreateIdx > 0 {
@@ -1896,6 +1947,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 		e.applySetToNode(node, varName, setClause)
 		store.UpdateNode(node)
 		e.notifyNodeMutated(string(node.ID))
+		e.cacheMergeNode(labels, props, node)
 	}
 
 	return node, varName, nil
