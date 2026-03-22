@@ -102,6 +102,7 @@ Welcome to **NornicDB** - A high-performance graph database with GPU acceleratio
 - **High Availability** - Hot Standby, Raft consensus, Multi-Region
 - **Security Middleware** - CSRF/SSRF/XSS protection on all HTTP endpoints
 - **WAL Auto-Compaction** - Automatic snapshots prevent unbounded disk growth
+- **Historical Reads with MVCC** - Snapshot visibility with configurable pruning defaults
 - GDPR, HIPAA, SOC2 compliance
 - RBAC and audit logging
 - ACID transactions
@@ -119,6 +120,7 @@ Welcome to **NornicDB** - A high-performance graph database with GPU acceleratio
 - [HTTP Security Guide](security/http-security.md) ⭐ **NEW**
 - [WAL Compaction Guide](operations/wal-compaction.md) ⭐ **NEW**
 - [Durability Configuration](operations/durability.md) ⭐ **NEW**
+- [Historical Reads & MVCC Retention](user-guides/historical-reads-mvcc-retention.md) ⭐ **NEW**
 - [Clustering & High Availability](user-guides/clustering.md)
 - [GraphQL API Guide](user-guides/graphql.md) ⭐ **NEW**
 - [Vector Search Guide](user-guides/vector-search.md)

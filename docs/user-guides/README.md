@@ -7,6 +7,7 @@
 ### Core Features
 - **[Vector Search](vector-search.md)** - Semantic search with embeddings
 - **[Hybrid Search (RRF)](hybrid-search.md)** - Combine vector + BM25 search
+- **[Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md)** - Snapshot reads, pruning, and retention knobs
 - **[Neo4j-Style Infinigraph Topology](infinigraph-topology.md)** - Build a logical distributed graph with local and remote composite constituents
 - **[Canonical Graph + Mutation Log](canonical-graph-ledger.md)** - Build a canonical truth store with constraints, temporal validity, receipts, and a WAL-backed mutation log
 - **[Qdrant gRPC Endpoint](qdrant-grpc.md)** - Use Qdrant SDKs against NornicDB
@@ -53,6 +54,9 @@
 
 **Ensure data consistency**
 → [Transactions Guide](transactions.md)
+
+**Query historical state or tune MVCC history retention**
+→ [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md)
 
 **Build a distributed logical graph across local and remote databases**
 → [Neo4j-Style Infinigraph Topology](infinigraph-topology.md)
@@ -117,7 +121,8 @@ See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
 2. [Vector Search](vector-search.md)
 3. [Graph Traversal](graph-traversal.md)
 4. [Transactions](transactions.md)
-5. [Data Import/Export](data-import-export.md)
+5. [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md)
+6. [Data Import/Export](data-import-export.md)
 
 ### Advanced
 1. [Hybrid Search](hybrid-search.md)
@@ -172,6 +177,9 @@ Use [Vector Search](vector-search.md) with automatic embeddings.
 
 ### How do I ensure data consistency?
 Use [Transactions](transactions.md) for ACID guarantees.
+
+### How do I inspect older versions or control history growth?
+Use [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md).
 
 ### How do I query relationships?
 See [Graph Traversal](graph-traversal.md) for pattern matching.

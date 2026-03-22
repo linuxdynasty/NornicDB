@@ -30,6 +30,8 @@ type BadgerTransaction struct {
 	ID        string
 	StartTime time.Time
 	Status    TransactionStatus
+	// CommitVersion is assigned once for a successful commit that mutates storage.
+	CommitVersion MVCCVersion
 
 	// Badger's native transaction
 	badgerTx *badger.Txn
@@ -823,6 +825,21 @@ func (tx *BadgerTransaction) Commit() error {
 	// Log metadata
 	if len(tx.Metadata) > 0 {
 		log.Printf("[Transaction %s] Committing with metadata: %v", tx.ID, tx.Metadata)
+	}
+
+	if len(tx.operations) > 0 || len(tx.pendingWrites) > 0 || len(tx.pendingDeletes) > 0 {
+		version, err := tx.engine.allocateMVCCVersion(tx.badgerTx, time.Now())
+		if err != nil {
+			tx.badgerTx.Discard()
+			tx.Status = TxStatusRolledBack
+			return fmt.Errorf("allocating mvcc commit version: %w", err)
+		}
+		tx.CommitVersion = version
+		if err := tx.engine.materializeMVCCCommitInTxn(tx.badgerTx, version, tx.operations); err != nil {
+			tx.badgerTx.Discard()
+			tx.Status = TxStatusRolledBack
+			return fmt.Errorf("materializing mvcc commit state: %w", err)
+		}
 	}
 
 	// Flush all buffered writes before committing

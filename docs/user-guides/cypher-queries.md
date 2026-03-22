@@ -14,6 +14,7 @@
 - [Functions](#functions)
 - [Aggregations](#aggregations)
 - [Advanced Queries](#advanced-queries)
+- [Temporal Snapshot Queries](#temporal-snapshot-queries)
 
 ## Introduction
 
@@ -216,6 +217,30 @@ ORDER BY p.name
 SKIP 20
 LIMIT 10
 ```
+
+## Temporal Snapshot Queries
+
+For historical and temporal reads, use the temporal procedures rather than trying to express MVCC snapshot selection directly in plain `MATCH` syntax.
+
+```cypher
+CALL db.temporal.asOf(
+  'Account',
+  'accountId',
+  'acct-42',
+  'valid_from',
+  'valid_to',
+  datetime('2026-03-01T00:00:00Z'),
+  datetime('2026-03-15T12:30:00Z')
+) YIELD node
+RETURN node
+```
+
+The final optional argument pair is the MVCC snapshot selector:
+
+- `systemTime`
+- `systemSequence`
+
+See [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md) for pruning, retention policy, and maintenance details.
 
 ## Updating Data
 

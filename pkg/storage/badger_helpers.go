@@ -2,8 +2,10 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -19,6 +21,126 @@ func nodeKey(id NodeID) []byte {
 // edgeKey creates a key for storing an edge.
 func edgeKey(id EdgeID) []byte {
 	return append([]byte{prefixEdge}, []byte(id)...)
+}
+
+// mvccSequenceKey stores the last committed MVCC sequence.
+func mvccSequenceKey() []byte {
+	return []byte{prefixMVCCMeta, 0x01}
+}
+
+func encodeMVCCSortVersion(version MVCCVersion) []byte {
+	key := make([]byte, 16)
+	timestamp := uint64(version.CommitTimestamp.UTC().UnixNano()) ^ (1 << 63)
+	binary.BigEndian.PutUint64(key[:8], timestamp)
+	binary.BigEndian.PutUint64(key[8:], version.CommitSequence)
+	return key
+}
+
+func decodeMVCCSortVersion(encoded []byte) (MVCCVersion, error) {
+	if len(encoded) != 16 {
+		return MVCCVersion{}, fmt.Errorf("invalid mvcc version length: %d", len(encoded))
+	}
+	timestamp := int64(binary.BigEndian.Uint64(encoded[:8]) ^ (1 << 63))
+	return MVCCVersion{
+		CommitTimestamp: time.Unix(0, timestamp).UTC(),
+		CommitSequence:  binary.BigEndian.Uint64(encoded[8:]),
+	}, nil
+}
+
+func mvccNodeVersionPrefix(id NodeID) []byte {
+	key := make([]byte, 0, 1+len(id)+1)
+	key = append(key, prefixMVCCNode)
+	key = append(key, []byte(id)...)
+	key = append(key, 0x00)
+	return key
+}
+
+func mvccNodeVersionKey(id NodeID, version MVCCVersion) []byte {
+	key := mvccNodeVersionPrefix(id)
+	key = append(key, encodeMVCCSortVersion(version)...)
+	return key
+}
+
+func mvccEdgeVersionPrefix(id EdgeID) []byte {
+	key := make([]byte, 0, 1+len(id)+1)
+	key = append(key, prefixMVCCEdge)
+	key = append(key, []byte(id)...)
+	key = append(key, 0x00)
+	return key
+}
+
+func mvccEdgeVersionKey(id EdgeID, version MVCCVersion) []byte {
+	key := mvccEdgeVersionPrefix(id)
+	key = append(key, encodeMVCCSortVersion(version)...)
+	return key
+}
+
+func mvccNodeHeadKey(id NodeID) []byte {
+	return append([]byte{prefixMVCCNodeHead}, []byte(id)...)
+}
+
+func mvccEdgeHeadKey(id EdgeID) []byte {
+	return append([]byte{prefixMVCCEdgeHead}, []byte(id)...)
+}
+
+func maxMVCCVersion() MVCCVersion {
+	return MVCCVersion{
+		CommitTimestamp: time.Unix(0, int64(^uint64(0)>>1)).UTC(),
+		CommitSequence:  ^uint64(0),
+	}
+}
+
+func extractMVCCVersionFromKey(key []byte) (MVCCVersion, error) {
+	if len(key) < 17 {
+		return MVCCVersion{}, fmt.Errorf("invalid mvcc key length: %d", len(key))
+	}
+	return decodeMVCCSortVersion(key[len(key)-16:])
+}
+
+func extractNodeIDAndMVCCVersionFromVersionKey(key []byte) (NodeID, MVCCVersion, error) {
+	if len(key) < 18 || key[0] != prefixMVCCNode {
+		return "", MVCCVersion{}, fmt.Errorf("invalid mvcc node version key")
+	}
+	idEnd := len(key) - 17
+	if key[idEnd] != 0x00 {
+		return "", MVCCVersion{}, fmt.Errorf("invalid mvcc node version separator")
+	}
+	version, err := decodeMVCCSortVersion(key[len(key)-16:])
+	if err != nil {
+		return "", MVCCVersion{}, err
+	}
+	return NodeID(key[1:idEnd]), version, nil
+}
+
+func extractEdgeIDAndMVCCVersionFromVersionKey(key []byte) (EdgeID, MVCCVersion, error) {
+	if len(key) < 18 || key[0] != prefixMVCCEdge {
+		return "", MVCCVersion{}, fmt.Errorf("invalid mvcc edge version key")
+	}
+	idEnd := len(key) - 17
+	if key[idEnd] != 0x00 {
+		return "", MVCCVersion{}, fmt.Errorf("invalid mvcc edge version separator")
+	}
+	version, err := decodeMVCCSortVersion(key[len(key)-16:])
+	if err != nil {
+		return "", MVCCVersion{}, err
+	}
+	return EdgeID(key[1:idEnd]), version, nil
+}
+
+func extractMVCCLogicalKeyAndVersion(key []byte) ([]byte, MVCCVersion, error) {
+	if len(key) < 18 {
+		return nil, MVCCVersion{}, fmt.Errorf("invalid mvcc key length: %d", len(key))
+	}
+	version, err := decodeMVCCSortVersion(key[len(key)-16:])
+	if err != nil {
+		return nil, MVCCVersion{}, err
+	}
+	separatorIndex := len(key) - 17
+	if key[separatorIndex] != 0x00 {
+		return nil, MVCCVersion{}, fmt.Errorf("invalid mvcc logical key separator")
+	}
+	logical := append([]byte(nil), key[:separatorIndex]...)
+	return logical, version, nil
 }
 
 // labelIndexKey creates a key for the label index.

@@ -4,6 +4,7 @@
 
 ## 📚 Documentation
 
+- **[Configuration](configuration.md)** - YAML and runtime tuning options
 - **[CLI Commands](cli-commands.md)** - Command-line interface for database management
 - **[Deployment](deployment.md)** - Production deployment guide
 - **[Docker](docker.md)** - Docker and Kubernetes
@@ -14,6 +15,7 @@
 - **[WAL Compaction](wal-compaction.md)** - Automatic disk space management
 - **[Durability Configuration](durability.md)** - Data safety vs performance tuning
 - **[Storage Serialization](storage-serialization.md)** - gob vs msgpack and migration
+- **[Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md)** - Snapshot history, pruning, and retention policy
 - **[Scaling](scaling.md)** - Horizontal and vertical scaling
 - **[Cluster Security](cluster-security.md)** - Authentication for clusters
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions

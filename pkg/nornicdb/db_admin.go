@@ -1299,6 +1299,34 @@ func (db *DB) PruneTemporalHistory(ctx context.Context, opts storage.TemporalPru
 	return 0, nil
 }
 
+// RebuildMVCCHeads rebuilds MVCC current-head state from stored MVCC history and current records.
+func (db *DB) RebuildMVCCHeads(ctx context.Context) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+		return maint.RebuildMVCCHeads(ctx)
+	}
+	return nil
+}
+
+// PruneMVCCVersions prunes older MVCC versions according to opts.
+func (db *DB) PruneMVCCVersions(ctx context.Context, opts storage.MVCCPruneOptions) (int64, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return 0, ErrClosed
+	}
+	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+		return maint.PruneMVCCVersions(ctx, opts)
+	}
+	return 0, nil
+}
+
 // Backup creates a database backup to the specified path.
 // For BadgerDB, this creates a streaming backup that is consistent and portable.
 // For in-memory databases, it exports all data as JSON.
@@ -1410,6 +1438,12 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 	if err := db.rebuildTemporalIndexesNoLock(ctx); err != nil {
 		db.mu.Unlock()
 		return fmt.Errorf("failed to rebuild temporal indexes after restore: %w", err)
+	}
+	if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+		if err := maint.RebuildMVCCHeads(ctx); err != nil {
+			db.mu.Unlock()
+			return fmt.Errorf("failed to rebuild mvcc heads after restore: %w", err)
+		}
 	}
 	db.mu.Unlock()
 

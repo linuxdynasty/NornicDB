@@ -1481,6 +1481,27 @@ func (w *transactionStorageWrapper) GetEdgesByType(edgeType string) ([]*storage.
 	return w.underlying.GetEdgesByType(edgeType)
 }
 
+func (w *transactionStorageWrapper) GetNodesByLabelVisibleAt(label string, version storage.MVCCVersion) ([]*storage.Node, error) {
+	if provider, ok := w.underlying.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetNodesByLabelVisibleAt(label, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (w *transactionStorageWrapper) GetEdgesByTypeVisibleAt(edgeType string, version storage.MVCCVersion) ([]*storage.Edge, error) {
+	if provider, ok := w.underlying.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesByTypeVisibleAt(edgeType, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (w *transactionStorageWrapper) GetEdgesBetweenVisibleAt(startID, endID storage.NodeID, version storage.MVCCVersion) ([]*storage.Edge, error) {
+	if provider, ok := w.underlying.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesBetweenVisibleAt(startID, endID, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
 func (w *transactionStorageWrapper) AllNodes() ([]*storage.Node, error) {
 	return w.underlying.AllNodes()
 }

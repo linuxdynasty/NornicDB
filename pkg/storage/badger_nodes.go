@@ -41,13 +41,17 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		key := nodeKey(node.ID)
-		_, err := txn.Get(key)
-		if err == nil {
+		_, getErr := txn.Get(key)
+		if getErr == nil {
 			return ErrAlreadyExists
 		}
-		if err != badger.ErrKeyNotFound {
-			return err
+		if getErr != badger.ErrKeyNotFound {
+			return getErr
 		}
 		if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
 			return err
@@ -75,7 +79,13 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 				return fmt.Errorf("failed to write pending embed index: %w", err)
 			}
 		}
-		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, nil, node)
+		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, nil, node); err != nil {
+			return err
+		}
+		if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
+			return err
+		}
+		return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 	})
 	if err != nil {
 		return "", err
@@ -177,6 +187,10 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		key := nodeKey(node.ID)
 
 		// Get existing node for label index updates (if exists)
@@ -214,7 +228,10 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 					return err
 				}
 			}
-			return nil
+			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
+				return err
+			}
+			return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 		}
 		if err != nil {
 			return err
@@ -287,7 +304,13 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			txn.Delete(pendingEmbedKey(node.ID))
 		}
 
-		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, existingNode, node)
+		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, existingNode, node); err != nil {
+			return err
+		}
+		if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
+			return err
+		}
+		return b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false)
 	})
 	if err == nil && persistSeparateEmbeddings {
 		err = b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist)
@@ -353,6 +376,10 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 	var persistSeparateEmbeddings bool
 	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		key := nodeKey(node.ID)
 
 		// Get existing node - MUST exist (no upsert)
@@ -419,7 +446,10 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 		}
 
 		updated = existing
-		return nil
+		if err := b.writeNodeMVCCVersionInTxn(txn, updated, version); err != nil {
+			return err
+		}
+		return b.writeNodeMVCCHeadInTxn(txn, updated.ID, version, false)
 	})
 	if err == nil && persistSeparateEmbeddings {
 		err = b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist)
@@ -546,6 +576,10 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	var deletedNode *Node
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, allocErr := b.allocateMVCCVersion(txn, time.Now())
+		if allocErr != nil {
+			return allocErr
+		}
 		edgesDeleted, edgeIDs, node, err := b.deleteNodeInTxn(txn, id)
 		totalEdgesDeleted = edgesDeleted
 		deletedEdgeIDs = edgeIDs
@@ -561,7 +595,24 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 			return nil
 		}
 		schema := b.GetSchemaForNamespace(dbName)
-		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, deletedNode, nil)
+		if err := b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, deletedNode, nil); err != nil {
+			return err
+		}
+		if err := b.writeNodeMVCCTombstoneInTxn(txn, id, version); err != nil {
+			return err
+		}
+		if err := b.writeNodeMVCCHeadInTxn(txn, id, version, true); err != nil {
+			return err
+		}
+		for _, edgeID := range deletedEdgeIDs {
+			if err := b.writeEdgeMVCCTombstoneInTxn(txn, edgeID, version); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCHeadInTxn(txn, edgeID, version, true); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 
 	// Invalidate cache on successful delete

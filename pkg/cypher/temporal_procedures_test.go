@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -114,6 +115,46 @@ func TestTemporalAsOf(t *testing.T) {
 	default:
 		t.Fatalf("unexpected node type: %T", node)
 	}
+}
+
+func TestTemporalAsOf_WithSnapshotVersion(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	validFrom := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	validTo := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	_, err := engine.CreateNode(&storage.Node{
+		ID:     "snap-v1",
+		Labels: []string{"FactVersion"},
+		Properties: map[string]interface{}{
+			"fact_key":   "k1",
+			"valid_from": validFrom,
+			"valid_to":   validTo,
+		},
+	})
+	require.NoError(t, err)
+	head, err := engine.GetNodeCurrentHead("snap-v1")
+	require.NoError(t, err)
+
+	require.NoError(t, engine.DeleteNode("snap-v1"))
+
+	result, err := exec.Execute(ctx, "CALL db.temporal.asOf('FactVersion','fact_key','k1','valid_from','valid_to','2024-01-15T00:00:00Z') YIELD node", nil)
+	require.NoError(t, err)
+	require.Empty(t, result.Rows)
+
+	query := fmt.Sprintf(
+		"CALL db.temporal.asOf('FactVersion','fact_key','k1','valid_from','valid_to','2024-01-15T00:00:00Z','%s',%d) YIELD node",
+		head.Version.CommitTimestamp.Format(time.RFC3339Nano),
+		head.Version.CommitSequence,
+	)
+	result, err = exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	node, ok := result.Rows[0][0].(*storage.Node)
+	require.True(t, ok)
+	require.Equal(t, storage.NodeID("snap-v1"), node.ID)
 }
 
 func TestTemporalProcedures_ErrorAndSelectionBranches(t *testing.T) {

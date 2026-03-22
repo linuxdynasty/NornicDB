@@ -110,6 +110,13 @@ Auto-compaction remains enabled by default (preserves existing behavior). These
 settings are **opt-in** and only control how long sealed WAL segments are retained
 after snapshots.
 
+Do not confuse WAL retention with MVCC historical retention:
+
+- WAL retention controls how long sealed log segments are kept after snapshots
+- MVCC retention controls how many historical node/edge versions remain available for snapshot reads
+
+For MVCC history tuning, see [Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md).
+
 ## Auto-Compaction Toggle
 
 If you need a strictly append-only WAL without periodic truncation, disable auto-compaction:

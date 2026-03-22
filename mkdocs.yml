@@ -91,6 +91,7 @@ nav:
       - Overview: user-guides/README.md
       - Vector Search: user-guides/vector-search.md
       - Hybrid Search: user-guides/hybrid-search.md
+      - Historical Reads & MVCC Retention: user-guides/historical-reads-mvcc-retention.md
       - Neo4j-Style Infinigraph Topology: user-guides/infinigraph-topology.md
       - Cypher Queries: user-guides/cypher-queries.md
       - Graph Traversal: user-guides/graph-traversal.md
@@ -125,12 +126,15 @@ nav:
       - Overview: performance/README.md
   - Operations:
       - Overview: operations/README.md
+      - Configuration: operations/configuration.md
       - Deployment: operations/deployment.md
       - Docker: operations/docker.md
       - Monitoring: operations/monitoring.md
+      - Environment Variables: operations/environment-variables.md
       - Backup & Restore: operations/backup-restore.md
       - WAL Compaction: operations/wal-compaction.md
       - Durability: operations/durability.md
+      - Storage Serialization: operations/storage-serialization.md
       - Scaling: operations/scaling.md
       - Cluster Security: operations/cluster-security.md
       - Troubleshooting: operations/troubleshooting.md

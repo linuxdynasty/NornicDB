@@ -76,6 +76,110 @@ func (w *WALEngine) PruneTemporalHistory(ctx context.Context, opts TemporalPrune
 	return 0, nil
 }
 
+// RebuildMVCCHeads delegates MVCC head rebuild to the wrapped engine when supported.
+func (w *WALEngine) RebuildMVCCHeads(ctx context.Context) error {
+	if maint, ok := w.engine.(MVCCMaintenanceEngine); ok {
+		return maint.RebuildMVCCHeads(ctx)
+	}
+	return ErrNotImplemented
+}
+
+// PruneMVCCVersions delegates MVCC pruning to the wrapped engine when supported.
+func (w *WALEngine) PruneMVCCVersions(ctx context.Context, opts MVCCPruneOptions) (int64, error) {
+	if maint, ok := w.engine.(MVCCMaintenanceEngine); ok {
+		return maint.PruneMVCCVersions(ctx, opts)
+	}
+	return 0, ErrNotImplemented
+}
+
+// GetNodeLatestEffective delegates MVCC latest-effective reads to the wrapped engine when supported.
+func (w *WALEngine) GetNodeLatestEffective(id NodeID) (*Node, error) {
+	if provider, ok := w.engine.(MVCCLatestEffectiveEngine); ok {
+		return provider.GetNodeLatestEffective(id)
+	}
+	return w.engine.GetNode(id)
+}
+
+// GetEdgeLatestEffective delegates MVCC latest-effective edge reads to the wrapped engine when supported.
+func (w *WALEngine) GetEdgeLatestEffective(id EdgeID) (*Edge, error) {
+	if provider, ok := w.engine.(MVCCLatestEffectiveEngine); ok {
+		return provider.GetEdgeLatestEffective(id)
+	}
+	return w.engine.GetEdge(id)
+}
+
+// GetNodeLatestVisible delegates latest-visible node reads when supported.
+func (w *WALEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
+	if provider, ok := w.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetNodeLatestVisible(id)
+	}
+	return w.GetNodeLatestEffective(id)
+}
+
+// GetEdgeLatestVisible delegates latest-visible edge reads when supported.
+func (w *WALEngine) GetEdgeLatestVisible(id EdgeID) (*Edge, error) {
+	if provider, ok := w.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetEdgeLatestVisible(id)
+	}
+	return w.GetEdgeLatestEffective(id)
+}
+
+// GetNodeVisibleAt delegates snapshot-visible node reads when supported.
+func (w *WALEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, error) {
+	if provider, ok := w.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetNodeVisibleAt(id, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgeVisibleAt delegates snapshot-visible edge reads when supported.
+func (w *WALEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, error) {
+	if provider, ok := w.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetEdgeVisibleAt(id, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetNodesByLabelVisibleAt delegates snapshot-visible label queries when supported.
+func (w *WALEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error) {
+	if provider, ok := w.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetNodesByLabelVisibleAt(label, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgesByTypeVisibleAt delegates snapshot-visible edge-type queries when supported.
+func (w *WALEngine) GetEdgesByTypeVisibleAt(edgeType string, version MVCCVersion) ([]*Edge, error) {
+	if provider, ok := w.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesByTypeVisibleAt(edgeType, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgesBetweenVisibleAt delegates snapshot-visible topology queries when supported.
+func (w *WALEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, version MVCCVersion) ([]*Edge, error) {
+	if provider, ok := w.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesBetweenVisibleAt(startID, endID, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetNodeCurrentHead delegates node head lookup when supported.
+func (w *WALEngine) GetNodeCurrentHead(id NodeID) (MVCCHead, error) {
+	if provider, ok := w.engine.(MVCCHeadEngine); ok {
+		return provider.GetNodeCurrentHead(id)
+	}
+	return MVCCHead{}, ErrNotImplemented
+}
+
+// GetEdgeCurrentHead delegates edge head lookup when supported.
+func (w *WALEngine) GetEdgeCurrentHead(id EdgeID) (MVCCHead, error) {
+	if provider, ok := w.engine.(MVCCHeadEngine); ok {
+		return provider.GetEdgeCurrentHead(id)
+	}
+	return MVCCHead{}, ErrNotImplemented
+}
+
 // NewWALEngine creates a WAL-backed storage engine.
 func NewWALEngine(engine Engine, wal *WAL) *WALEngine {
 	return &WALEngine{

@@ -429,6 +429,63 @@ func (n *NamespacedEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
 	return filtered, nil
 }
 
+// GetNodesByLabelVisibleAt resolves snapshot-visible label queries within the namespace.
+func (n *NamespacedEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error) {
+	provider, ok := n.inner.(MVCCIndexedVisibilityEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	allNodes, err := provider.GetNodesByLabelVisibleAt(label, version)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []*Node
+	for _, node := range allNodes {
+		if n.hasNodePrefix(node.ID) {
+			filtered = append(filtered, n.toUserNode(node))
+		}
+	}
+	return filtered, nil
+}
+
+// GetEdgesByTypeVisibleAt resolves snapshot-visible edge-type queries within the namespace.
+func (n *NamespacedEngine) GetEdgesByTypeVisibleAt(edgeType string, version MVCCVersion) ([]*Edge, error) {
+	provider, ok := n.inner.(MVCCIndexedVisibilityEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	allEdges, err := provider.GetEdgesByTypeVisibleAt(edgeType, version)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []*Edge
+	for _, edge := range allEdges {
+		if n.hasEdgePrefix(edge.ID) {
+			filtered = append(filtered, n.toUserEdge(edge))
+		}
+	}
+	return filtered, nil
+}
+
+// GetEdgesBetweenVisibleAt resolves snapshot-visible topology queries within the namespace.
+func (n *NamespacedEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, version MVCCVersion) ([]*Edge, error) {
+	provider, ok := n.inner.(MVCCIndexedVisibilityEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	edges, err := provider.GetEdgesBetweenVisibleAt(n.prefixNodeID(startID), n.prefixNodeID(endID), version)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*Edge, 0, len(edges))
+	for _, edge := range edges {
+		if n.hasEdgePrefix(edge.ID) {
+			filtered = append(filtered, n.toUserEdge(edge))
+		}
+	}
+	return filtered, nil
+}
+
 func (n *NamespacedEngine) AllNodes() ([]*Node, error) {
 	allNodes, err := n.inner.AllNodes()
 	if err != nil {
@@ -515,6 +572,76 @@ func (n *NamespacedEngine) IsCurrentTemporalNode(node *Node, asOf time.Time) (bo
 		return true, nil
 	}
 	return provider.IsCurrentTemporalNodeInNamespace(n.namespace, node, asOf)
+}
+
+// GetNodeLatestVisible resolves the latest visible node within the namespace.
+func (n *NamespacedEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
+	provider, ok := n.inner.(MVCCVisibilityEngine)
+	if !ok {
+		return n.GetNode(id)
+	}
+	node, err := provider.GetNodeLatestVisible(n.prefixNodeID(id))
+	if err != nil || node == nil {
+		return node, err
+	}
+	return n.toUserNode(node), nil
+}
+
+// GetNodeVisibleAt resolves a snapshot-visible node within the namespace.
+func (n *NamespacedEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, error) {
+	provider, ok := n.inner.(MVCCVisibilityEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	node, err := provider.GetNodeVisibleAt(n.prefixNodeID(id), version)
+	if err != nil || node == nil {
+		return node, err
+	}
+	return n.toUserNode(node), nil
+}
+
+// GetEdgeLatestVisible resolves the latest visible edge within the namespace.
+func (n *NamespacedEngine) GetEdgeLatestVisible(id EdgeID) (*Edge, error) {
+	provider, ok := n.inner.(MVCCVisibilityEngine)
+	if !ok {
+		return n.GetEdge(id)
+	}
+	edge, err := provider.GetEdgeLatestVisible(n.prefixEdgeID(id))
+	if err != nil || edge == nil {
+		return edge, err
+	}
+	return n.toUserEdge(edge), nil
+}
+
+// GetEdgeVisibleAt resolves a snapshot-visible edge within the namespace.
+func (n *NamespacedEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, error) {
+	provider, ok := n.inner.(MVCCVisibilityEngine)
+	if !ok {
+		return nil, ErrNotImplemented
+	}
+	edge, err := provider.GetEdgeVisibleAt(n.prefixEdgeID(id), version)
+	if err != nil || edge == nil {
+		return edge, err
+	}
+	return n.toUserEdge(edge), nil
+}
+
+// GetNodeCurrentHead resolves node head metadata within the namespace.
+func (n *NamespacedEngine) GetNodeCurrentHead(id NodeID) (MVCCHead, error) {
+	provider, ok := n.inner.(MVCCHeadEngine)
+	if !ok {
+		return MVCCHead{}, ErrNotImplemented
+	}
+	return provider.GetNodeCurrentHead(n.prefixNodeID(id))
+}
+
+// GetEdgeCurrentHead resolves edge head metadata within the namespace.
+func (n *NamespacedEngine) GetEdgeCurrentHead(id EdgeID) (MVCCHead, error) {
+	provider, ok := n.inner.(MVCCHeadEngine)
+	if !ok {
+		return MVCCHead{}, ErrNotImplemented
+	}
+	return provider.GetEdgeCurrentHead(n.prefixEdgeID(id))
 }
 
 // ============================================================================

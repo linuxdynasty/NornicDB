@@ -3,6 +3,7 @@ package storage
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -67,44 +68,32 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 		return ErrAlreadyExists
 	}
 
-	// Serialize edge
-	data, err := encodeEdge(edge)
-	if err != nil {
-		return fmt.Errorf("failed to encode edge: %w", err)
-	}
-
-	// Use WriteBatch to batch all writes together
-	wb := b.db.NewWriteBatch()
-	defer wb.Cancel()
-
-	key := edgeKey(edge.ID)
-	// Store edge
-	if err := wb.Set(key, data); err != nil {
-		return err
-	}
-
-	// Create outgoing index
-	outKey := outgoingIndexKey(edge.StartNode, edge.ID)
-	if err := wb.Set(outKey, []byte{}); err != nil {
-		return err
-	}
-
-	// Create incoming index
-	inKey := incomingIndexKey(edge.EndNode, edge.ID)
-	if err := wb.Set(inKey, []byte{}); err != nil {
-		return err
-	}
-
-	// Create edge type index
-	edgeTypeKey := edgeTypeIndexKey(edge.Type, edge.ID)
-	if err := wb.Set(edgeTypeKey, []byte{}); err != nil {
-		return err
-	}
-
-	// Flush all writes in single batch operation (atomic)
-	if err := wb.Flush(); err != nil {
-		return err
-	}
+	err = b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
+		data, err := encodeEdge(edge)
+		if err != nil {
+			return fmt.Errorf("failed to encode edge: %w", err)
+		}
+		if err := txn.Set(edgeKey(edge.ID), data); err != nil {
+			return err
+		}
+		if err := txn.Set(outgoingIndexKey(edge.StartNode, edge.ID), []byte{}); err != nil {
+			return err
+		}
+		if err := txn.Set(incomingIndexKey(edge.EndNode, edge.ID), []byte{}); err != nil {
+			return err
+		}
+		if err := txn.Set(edgeTypeIndexKey(edge.Type, edge.ID), []byte{}); err != nil {
+			return err
+		}
+		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
+			return err
+		}
+		return b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false)
+	})
 
 	// Invalidate only this edge type (not entire cache)
 	if err == nil {
@@ -162,6 +151,10 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 
 	var oldType string
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		key := edgeKey(edge.ID)
 
 		// Get existing edge
@@ -231,7 +224,13 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 			return fmt.Errorf("failed to encode edge: %w", err)
 		}
 
-		return txn.Set(key, data)
+		if err := txn.Set(key, data); err != nil {
+			return err
+		}
+		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
+			return err
+		}
+		return b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false)
 	})
 
 	// Notify listeners on successful update
@@ -261,7 +260,17 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 	}
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		return b.deleteEdgeInTxn(txn, id)
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
+		if err := b.deleteEdgeInTxn(txn, id); err != nil {
+			return err
+		}
+		if err := b.writeEdgeMVCCTombstoneInTxn(txn, id, version); err != nil {
+			return err
+		}
+		return b.writeEdgeMVCCHeadInTxn(txn, id, version, true)
 	})
 
 	// Invalidate only this edge type (not entire cache)
@@ -408,6 +417,10 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	deletedEdgeIDs := make([]EdgeID, 0)
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		for _, id := range ids {
 			if id == "" {
 				continue // Skip invalid IDs
@@ -425,6 +438,22 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 				return err // Actual error, abort transaction
 			}
 			// ErrNotFound is ignored (node didn't exist, no count change)
+		}
+		for _, id := range deletedNodeIDs {
+			if err := b.writeNodeMVCCTombstoneInTxn(txn, id, version); err != nil {
+				return err
+			}
+			if err := b.writeNodeMVCCHeadInTxn(txn, id, version, true); err != nil {
+				return err
+			}
+		}
+		for _, edgeID := range deletedEdgeIDs {
+			if err := b.writeEdgeMVCCTombstoneInTxn(txn, edgeID, version); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCHeadInTxn(txn, edgeID, version, true); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -487,6 +516,10 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 	deletedCount := int64(0)
 	deletedIDs := make([]EdgeID, 0, len(ids))
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		for _, id := range ids {
 			if id == "" {
 				continue // Skip invalid IDs
@@ -499,6 +532,14 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 				return err // Actual error, abort transaction
 			}
 			// ErrNotFound is ignored (edge didn't exist, no count change)
+		}
+		for _, id := range deletedIDs {
+			if err := b.writeEdgeMVCCTombstoneInTxn(txn, id, version); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCHeadInTxn(txn, id, version, true); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

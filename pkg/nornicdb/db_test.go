@@ -45,12 +45,18 @@ type allNodesErrorEngine struct {
 
 type temporalMaintenanceTestEngine struct {
 	storage.Engine
-	rebuildCalls int
-	pruneCalls   int
-	rebuildErr   error
-	pruneErr     error
-	pruneResult  int64
-	lastPrune    storage.TemporalPruneOptions
+	rebuildCalls     int
+	pruneCalls       int
+	rebuildErr       error
+	pruneErr         error
+	pruneResult      int64
+	lastPrune        storage.TemporalPruneOptions
+	mvccRebuildCalls int
+	mvccPruneCalls   int
+	mvccRebuildErr   error
+	mvccPruneErr     error
+	mvccPruneResult  int64
+	lastMVCCPrune    storage.MVCCPruneOptions
 }
 
 func (e *allNodesErrorEngine) AllNodes() ([]*storage.Node, error) {
@@ -69,6 +75,17 @@ func (e *temporalMaintenanceTestEngine) PruneTemporalHistory(ctx context.Context
 	e.pruneCalls++
 	e.lastPrune = opts
 	return e.pruneResult, e.pruneErr
+}
+
+func (e *temporalMaintenanceTestEngine) RebuildMVCCHeads(ctx context.Context) error {
+	e.mvccRebuildCalls++
+	return e.mvccRebuildErr
+}
+
+func (e *temporalMaintenanceTestEngine) PruneMVCCVersions(ctx context.Context, opts storage.MVCCPruneOptions) (int64, error) {
+	e.mvccPruneCalls++
+	e.lastMVCCPrune = opts
+	return e.mvccPruneResult, e.mvccPruneErr
 }
 
 type closeErrReplicator struct {
@@ -2647,6 +2664,29 @@ func TestRestore(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "2026", e1.Properties["since"])
 	})
+
+	t.Run("rebuilds mvcc heads after restore", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{Engine: baseEngine}
+		db := &DB{
+			storage:        storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage:    maint,
+			config:         DefaultConfig(),
+			searchServices: make(map[string]*dbSearchService),
+		}
+
+		p := filepath.Join(t.TempDir(), "backup-mvcc-restore.json")
+		require.NoError(t, os.WriteFile(p, []byte(`{
+			"version":"1.0",
+			"created_at":"2026-03-10T00:00:00Z",
+			"nodes":[{"id":"n1","labels":["Person"],"properties":{"name":"Alice"}}],
+			"edges":[]
+		}`), 0644))
+
+		require.NoError(t, db.Restore(ctx, p))
+		require.Equal(t, 1, maint.mvccRebuildCalls)
+	})
 }
 
 func TestDB_TemporalMaintenance(t *testing.T) {
@@ -2706,6 +2746,67 @@ func TestDB_TemporalMaintenance(t *testing.T) {
 
 		require.ErrorIs(t, db.RebuildTemporalIndexes(ctx), ErrClosed)
 		_, err := db.PruneTemporalHistory(ctx, storage.TemporalPruneOptions{MaxVersionsPerKey: 1})
+		require.ErrorIs(t, err, ErrClosed)
+	})
+}
+
+func TestDB_MVCCMaintenance(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("delegates rebuild and prune to base storage", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{
+			Engine:          baseEngine,
+			mvccPruneResult: 4,
+		}
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage: maint,
+			config:      DefaultConfig(),
+		}
+
+		require.NoError(t, db.RebuildMVCCHeads(ctx))
+		deleted, err := db.PruneMVCCVersions(ctx, storage.MVCCPruneOptions{
+			MaxVersionsPerKey: 2,
+			MinRetentionAge:   12 * time.Hour,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, maint.mvccRebuildCalls)
+		require.Equal(t, 1, maint.mvccPruneCalls)
+		require.Equal(t, int64(4), deleted)
+		require.Equal(t, 2, maint.lastMVCCPrune.MaxVersionsPerKey)
+		require.Equal(t, 12*time.Hour, maint.lastMVCCPrune.MinRetentionAge)
+	})
+
+	t.Run("returns zero when maintenance is unsupported", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(baseEngine, "nornic"),
+			baseStorage: baseEngine,
+			config:      DefaultConfig(),
+		}
+
+		require.NoError(t, db.RebuildMVCCHeads(ctx))
+		deleted, err := db.PruneMVCCVersions(ctx, storage.MVCCPruneOptions{MaxVersionsPerKey: 1})
+		require.NoError(t, err)
+		require.Zero(t, deleted)
+	})
+
+	t.Run("returns ErrClosed", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{Engine: baseEngine}
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage: maint,
+			config:      DefaultConfig(),
+			closed:      true,
+		}
+
+		require.ErrorIs(t, db.RebuildMVCCHeads(ctx), ErrClosed)
+		_, err := db.PruneMVCCVersions(ctx, storage.MVCCPruneOptions{MaxVersionsPerKey: 1})
 		require.ErrorIs(t, err, ErrClosed)
 	})
 }

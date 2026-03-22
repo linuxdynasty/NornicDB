@@ -18,7 +18,7 @@ import (
 // callDbTemporalAssertNoOverlap implements db.temporal.assertNoOverlap
 // Syntax:
 //
-//	CALL db.temporal.assertNoOverlap(label, keyProp, validFromProp, validToProp, keyValue, newValidFrom, newValidTo)
+//	CALL db.temporal.assertNoOverlap(label, keyProp, validFromProp, validToProp, keyValue, newValidFrom, newValidTo [, systemTime [, systemSequence]])
 //
 // This returns ok=true if no overlaps are detected, otherwise returns an error.
 // newValidTo can be null to indicate an open-ended interval.
@@ -27,8 +27,8 @@ func (e *StorageExecutor) callDbTemporalAssertNoOverlap(ctx context.Context, cyp
 	if err != nil {
 		return nil, err
 	}
-	if len(args) < 7 {
-		return nil, fmt.Errorf("db.temporal.assertNoOverlap requires 7 parameters")
+	if len(args) < 7 || len(args) > 9 {
+		return nil, fmt.Errorf("db.temporal.assertNoOverlap requires 7 parameters plus optional systemTime and systemSequence")
 	}
 
 	label, err := coerceStringArg(args[0], "label")
@@ -54,8 +54,12 @@ func (e *StorageExecutor) callDbTemporalAssertNoOverlap(ctx context.Context, cyp
 		return nil, fmt.Errorf("newValidFrom must be a valid datetime")
 	}
 	newEnd, newHasEnd := coerceDateTimeOptional(args[6])
+	snapshotVersion, hasSnapshot, err := coerceOptionalMVCCVersion(args[7:])
+	if err != nil {
+		return nil, err
+	}
 
-	nodes, err := e.storage.GetNodesByLabel(label)
+	nodes, err := temporalNodesByLabel(e.storage, label, snapshotVersion, hasSnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read nodes for label %q: %w", label, err)
 	}
@@ -88,7 +92,7 @@ func (e *StorageExecutor) callDbTemporalAssertNoOverlap(ctx context.Context, cyp
 // callDbTemporalAsOf implements db.temporal.asOf
 // Syntax:
 //
-//	CALL db.temporal.asOf(label, keyProp, keyValue, validFromProp, validToProp, asOf) YIELD node
+//	CALL db.temporal.asOf(label, keyProp, keyValue, validFromProp, validToProp, asOf [, systemTime [, systemSequence]]) YIELD node
 //
 // Returns the most recent node whose [valid_from, valid_to) covers asOf.
 func (e *StorageExecutor) callDbTemporalAsOf(ctx context.Context, cypher string) (*ExecuteResult, error) {
@@ -96,8 +100,8 @@ func (e *StorageExecutor) callDbTemporalAsOf(ctx context.Context, cypher string)
 	if err != nil {
 		return nil, err
 	}
-	if len(args) < 6 {
-		return nil, fmt.Errorf("db.temporal.asOf requires 6 parameters")
+	if len(args) < 6 || len(args) > 8 {
+		return nil, fmt.Errorf("db.temporal.asOf requires 6 parameters plus optional systemTime and systemSequence")
 	}
 
 	label, err := coerceStringArg(args[0], "label")
@@ -121,8 +125,12 @@ func (e *StorageExecutor) callDbTemporalAsOf(ctx context.Context, cypher string)
 	if !ok {
 		return nil, fmt.Errorf("asOf must be a valid datetime")
 	}
+	snapshotVersion, hasSnapshot, err := coerceOptionalMVCCVersion(args[6:])
+	if err != nil {
+		return nil, err
+	}
 
-	if temporalLookup, ok := e.storage.(storage.TemporalLookupEngine); ok {
+	if temporalLookup, ok := e.storage.(storage.TemporalLookupEngine); ok && !hasSnapshot {
 		node, err := temporalLookup.GetTemporalNodeAsOf(label, keyProp, keyValue, validFromProp, validToProp, asOf)
 		if err != nil {
 			return nil, fmt.Errorf("temporal lookup failed for label %q: %w", label, err)
@@ -135,7 +143,7 @@ func (e *StorageExecutor) callDbTemporalAsOf(ctx context.Context, cypher string)
 		}
 	}
 
-	nodes, err := e.storage.GetNodesByLabel(label)
+	nodes, err := temporalNodesByLabel(e.storage, label, snapshotVersion, hasSnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read nodes for label %q: %w", label, err)
 	}
@@ -255,6 +263,63 @@ func coerceDateTimeOptional(val interface{}) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return coerceDateTime(val)
+}
+
+func coerceOptionalMVCCVersion(args []interface{}) (storage.MVCCVersion, bool, error) {
+	if len(args) == 0 {
+		return storage.MVCCVersion{}, false, nil
+	}
+	commitTime, ok := coerceDateTime(args[0])
+	if !ok {
+		return storage.MVCCVersion{}, false, fmt.Errorf("systemTime must be a valid datetime")
+	}
+	version := storage.MVCCVersion{CommitTimestamp: commitTime.UTC(), CommitSequence: ^uint64(0)}
+	if len(args) > 1 {
+		seq, err := coerceUint64Arg(args[1], "systemSequence")
+		if err != nil {
+			return storage.MVCCVersion{}, false, err
+		}
+		version.CommitSequence = seq
+	}
+	return version, true, nil
+}
+
+func coerceUint64Arg(val interface{}, name string) (uint64, error) {
+	switch v := val.(type) {
+	case int:
+		if v < 0 {
+			return 0, fmt.Errorf("%s must be non-negative", name)
+		}
+		return uint64(v), nil
+	case int64:
+		if v < 0 {
+			return 0, fmt.Errorf("%s must be non-negative", name)
+		}
+		return uint64(v), nil
+	case float64:
+		if v < 0 || v != float64(uint64(v)) {
+			return 0, fmt.Errorf("%s must be a whole non-negative number", name)
+		}
+		return uint64(v), nil
+	case string:
+		parsed, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a valid uint64", name)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("%s must be a valid uint64", name)
+	}
+}
+
+func temporalNodesByLabel(engine storage.Engine, label string, version storage.MVCCVersion, hasSnapshot bool) ([]*storage.Node, error) {
+	if !hasSnapshot {
+		return engine.GetNodesByLabel(label)
+	}
+	if provider, ok := engine.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetNodesByLabelVisibleAt(label, version)
+	}
+	return nil, storage.ErrNotImplemented
 }
 
 func coerceDateTime(val interface{}) (time.Time, bool) {

@@ -1,0 +1,481 @@
+package storage
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/require"
+)
+
+type nonMVCCEngine struct {
+	Engine
+}
+
+func createMVCCBadgerEngine(t *testing.T) *BadgerEngine {
+	t.Helper()
+	engine, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, engine.Close())
+	})
+	return engine
+}
+
+func TestBadgerEngine_MVCCNodeLatestSnapshotAndRecreate(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	nodeID := NodeID(prefixTestID("mvcc-node"))
+
+	_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Person"}, Properties: map[string]any{"name": "v1"}})
+	require.NoError(t, err)
+	v1, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Person"}, Properties: map[string]any{"name": "v2"}}))
+	v2, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "v2", mustGetNodeLatestVisible(t, engine, nodeID).Properties["name"])
+
+	require.NoError(t, engine.DeleteNode(nodeID))
+	v3, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.True(t, v3.Tombstoned)
+	_, err = engine.GetNodeLatestVisible(nodeID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	_, err = engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Person"}, Properties: map[string]any{"name": "v4"}})
+	require.NoError(t, err)
+	v4, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.False(t, v4.Tombstoned)
+	require.Equal(t, "v4", mustGetNodeLatestVisible(t, engine, nodeID).Properties["name"])
+
+	nodeAtV1, err := engine.GetNodeVisibleAt(nodeID, v1.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v1", nodeAtV1.Properties["name"])
+
+	nodeAtV2, err := engine.GetNodeVisibleAt(nodeID, v2.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v2", nodeAtV2.Properties["name"])
+
+	_, err = engine.GetNodeVisibleAt(nodeID, v3.Version)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	nodeAtV4, err := engine.GetNodeVisibleAt(nodeID, v4.Version)
+	require.NoError(t, err)
+	require.Equal(t, "v4", nodeAtV4.Properties["name"])
+
+	nodes, err := engine.AllNodes()
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, nodeID, nodes[0].ID)
+}
+
+func TestBadgerEngine_MVCCEdgeLatestSnapshotAndRecreate(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	start := NodeID(prefixTestID("mvcc-edge-start"))
+	end := NodeID(prefixTestID("mvcc-edge-end"))
+	_, err := engine.CreateNode(&Node{ID: start, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: end, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	edgeID := EdgeID(prefixTestID("mvcc-edge"))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: edgeID, StartNode: start, EndNode: end, Type: "KNOWS", Properties: map[string]any{"weight": 1}}))
+	v1, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.UpdateEdge(&Edge{ID: edgeID, StartNode: start, EndNode: end, Type: "KNOWS", Properties: map[string]any{"weight": 2}}))
+	v2, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.DeleteEdge(edgeID))
+	v3, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+	require.True(t, v3.Tombstoned)
+
+	require.NoError(t, engine.CreateEdge(&Edge{ID: edgeID, StartNode: start, EndNode: end, Type: "KNOWS", Properties: map[string]any{"weight": 4}}))
+	v4, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+
+	edgeAtV1, err := engine.GetEdgeVisibleAt(edgeID, v1.Version)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, edgeAtV1.Properties["weight"])
+
+	edgeAtV2, err := engine.GetEdgeVisibleAt(edgeID, v2.Version)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, edgeAtV2.Properties["weight"])
+
+	_, err = engine.GetEdgeVisibleAt(edgeID, v3.Version)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	edgeAtV4, err := engine.GetEdgeVisibleAt(edgeID, v4.Version)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, edgeAtV4.Properties["weight"])
+
+	latest, err := engine.GetEdgeLatestVisible(edgeID)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, latest.Properties["weight"])
+}
+
+func TestAsyncEngine_GetNodeLatestEffectiveUsesPendingState(t *testing.T) {
+	base := createMVCCBadgerEngine(t)
+	async := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour})
+	defer async.Close()
+
+	nodeID := NodeID(prefixTestID("async-mvcc-node"))
+	_, err := async.CreateNode(&Node{ID: nodeID, Labels: []string{"Person"}, Properties: map[string]any{"name": "pending"}})
+	require.NoError(t, err)
+
+	node, err := async.GetNodeLatestEffective(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", node.Properties["name"])
+
+	require.NoError(t, async.DeleteNode(nodeID))
+	_, err = async.GetNodeLatestEffective(nodeID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestBadgerEngine_RebuildAndPruneMVCC(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	nodeID := NodeID(prefixTestID("mvcc-maint-node"))
+
+	_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 1}, CreatedAt: time.Now().UTC().Add(-4 * time.Hour)})
+	require.NoError(t, err)
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 2}, UpdatedAt: time.Now().UTC().Add(-3 * time.Hour)}))
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 3}, UpdatedAt: time.Now().UTC().Add(-2 * time.Hour)}))
+
+	beforeHead, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		return txn.Delete(mvccNodeHeadKey(nodeID))
+	}))
+	_, err = engine.GetNodeCurrentHead(nodeID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, engine.RebuildMVCCHeads(context.Background()))
+	afterHead, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, 0, afterHead.Version.Compare(beforeHead.Version))
+	require.Equal(t, 3, mustGetNodeLatestVisible(t, engine, nodeID).Properties["version"])
+
+	deleted, err := engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 1})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, deleted, int64(1))
+	require.Equal(t, 3, mustGetNodeLatestVisible(t, engine, nodeID).Properties["version"])
+
+	oldVersion, err := engine.GetNodeVisibleAt(nodeID, MVCCVersion{CommitTimestamp: time.Now().UTC().Add(-24 * time.Hour), CommitSequence: ^uint64(0)})
+	if err == nil {
+		require.NotNil(t, oldVersion)
+	}
+}
+
+func TestBadgerEngine_PruneMVCCVersions_UsesRetentionPolicyDefaults(t *testing.T) {
+	engine, err := NewBadgerEngineWithOptions(BadgerOptions{
+		InMemory: true,
+		EngineOptions: EngineOptions{
+			RetentionPolicy: RetentionPolicy{MaxVersionsPerKey: 1},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, engine.Close())
+	})
+
+	nodeID := NodeID(prefixTestID("mvcc-retention-node"))
+	_, err = engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 1}})
+	require.NoError(t, err)
+	v1, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 2}}))
+	v2, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 3}}))
+	v3, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	deleted, err := engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, deleted, int64(1))
+	head, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, 0, head.FloorVersion.Compare(v2.Version))
+
+	_, err = engine.GetNodeVisibleAt(nodeID, v1.Version)
+	require.ErrorIs(t, err, ErrNotFound)
+	nodeAtV2, err := engine.GetNodeVisibleAt(nodeID, v2.Version)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, nodeAtV2.Properties["version"])
+	nodeAtV3, err := engine.GetNodeVisibleAt(nodeID, v3.Version)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, nodeAtV3.Properties["version"])
+}
+
+func TestBadgerEngine_PruneMVCCVersions_TombstoneCompactionHonorsActiveReaders(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	nodeID := NodeID(prefixTestID("mvcc-tombstone-compact"))
+
+	_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 1}})
+	require.NoError(t, err)
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"version": 2}}))
+	require.NoError(t, engine.DeleteNode(nodeID))
+	head, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.True(t, head.Tombstoned)
+
+	countVersions := func() int {
+		count := 0
+		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = mvccNodeVersionPrefix(nodeID)
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+				count++
+			}
+			return nil
+		}))
+		return count
+	}
+
+	require.Equal(t, 3, countVersions())
+	engine.activeMVCCSnapshotReaders.Add(1)
+	_, err = engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 100})
+	require.NoError(t, err)
+	engine.activeMVCCSnapshotReaders.Add(-1)
+	require.Equal(t, 3, countVersions())
+
+	deleted, err := engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 100})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), deleted)
+	require.Equal(t, 1, countVersions())
+	_, err = engine.GetNodeLatestVisible(nodeID)
+	require.ErrorIs(t, err, ErrNotFound)
+	remainingHead, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.True(t, remainingHead.Tombstoned)
+}
+
+func TestMVCCInternalRecordsAlwaysUseMsgpack(t *testing.T) {
+	prev := currentStorageSerializer()
+	require.NoError(t, SetStorageSerializer(StorageSerializerGob))
+	t.Cleanup(func() {
+		_ = SetStorageSerializer(prev)
+	})
+
+	headData, err := encodeMVCCHead(MVCCHead{Version: MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: 7}, Tombstoned: true, FloorVersion: MVCCVersion{CommitTimestamp: time.Now().UTC().Add(-time.Minute), CommitSequence: 3}})
+	require.NoError(t, err)
+	_, _, ok, err := splitSerializationHeader(headData)
+	require.NoError(t, err)
+	require.False(t, ok)
+	decodedHead, err := decodeMVCCHead(headData)
+	require.NoError(t, err)
+	require.True(t, decodedHead.Tombstoned)
+	require.False(t, decodedHead.FloorVersion.IsZero())
+
+	recordData, err := encodeMVCCNodeRecord(&Node{ID: NodeID("bench:mvcc-msgpack"), Labels: []string{"Doc"}}, false)
+	require.NoError(t, err)
+	_, _, ok, err = splitSerializationHeader(recordData)
+	require.NoError(t, err)
+	require.False(t, ok)
+	decodedRecord, err := decodeMVCCNodeRecord(recordData)
+	require.NoError(t, err)
+	require.NotNil(t, decodedRecord.Node)
+	require.Equal(t, NodeID("bench:mvcc-msgpack"), decodedRecord.Node.ID)
+}
+
+func TestNamespacedEngine_MVCCDelegation(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	namespaced := NewNamespacedEngine(engine, "test")
+
+	_, err := namespaced.CreateNode(&Node{ID: NodeID("mvcc-ns-node"), Labels: []string{"Doc"}, Properties: map[string]any{"title": "v1"}})
+	require.NoError(t, err)
+	head, err := namespaced.GetNodeCurrentHead(NodeID("mvcc-ns-node"))
+	require.NoError(t, err)
+
+	node, err := namespaced.GetNodeVisibleAt(NodeID("mvcc-ns-node"), head.Version)
+	require.NoError(t, err)
+	require.Equal(t, NodeID("mvcc-ns-node"), node.ID)
+	require.Equal(t, "v1", node.Properties["title"])
+
+	nodes, err := namespaced.GetNodesByLabelVisibleAt("Doc", head.Version)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, NodeID("mvcc-ns-node"), nodes[0].ID)
+
+	startID := NodeID("mvcc-ns-start")
+	endID := NodeID("mvcc-ns-end")
+	_, err = namespaced.CreateNode(&Node{ID: startID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = namespaced.CreateNode(&Node{ID: endID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	require.NoError(t, namespaced.CreateEdge(&Edge{ID: EdgeID("mvcc-ns-edge"), StartNode: startID, EndNode: endID, Type: "LINKS"}))
+	edgeHead, err := namespaced.GetEdgeCurrentHead(EdgeID("mvcc-ns-edge"))
+	require.NoError(t, err)
+
+	edges, err := namespaced.GetEdgesByTypeVisibleAt("LINKS", edgeHead.Version)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, EdgeID("mvcc-ns-edge"), edges[0].ID)
+
+	between, err := namespaced.GetEdgesBetweenVisibleAt(startID, endID, edgeHead.Version)
+	require.NoError(t, err)
+	require.Len(t, between, 1)
+	require.Equal(t, EdgeID("mvcc-ns-edge"), between[0].ID)
+}
+
+func TestBadgerEngine_MVCCIndexedVisibilityAtSnapshot(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+
+	nodeID := NodeID(prefixTestID("mvcc-index-node"))
+	_, err := engine.CreateNode(&Node{ID: nodeID, Labels: []string{"Draft"}, Properties: map[string]any{"title": "v1"}})
+	require.NoError(t, err)
+	v1, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.UpdateNode(&Node{ID: nodeID, Labels: []string{"Published"}, Properties: map[string]any{"title": "v2"}}))
+	v2, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+
+	draftAtV1, err := engine.GetNodesByLabelVisibleAt("Draft", v1.Version)
+	require.NoError(t, err)
+	require.Len(t, draftAtV1, 1)
+	require.Equal(t, nodeID, draftAtV1[0].ID)
+
+	draftAtV2, err := engine.GetNodesByLabelVisibleAt("Draft", v2.Version)
+	require.NoError(t, err)
+	require.Empty(t, draftAtV2)
+
+	publishedAtV2, err := engine.GetNodesByLabelVisibleAt("Published", v2.Version)
+	require.NoError(t, err)
+	require.Len(t, publishedAtV2, 1)
+	require.Equal(t, nodeID, publishedAtV2[0].ID)
+
+	start := NodeID(prefixTestID("mvcc-index-start"))
+	end := NodeID(prefixTestID("mvcc-index-end"))
+	_, err = engine.CreateNode(&Node{ID: start, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: end, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	edgeID := EdgeID(prefixTestID("mvcc-index-edge"))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: edgeID, StartNode: start, EndNode: end, Type: "DRAFT_LINK"}))
+	e1, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.UpdateEdge(&Edge{ID: edgeID, StartNode: start, EndNode: end, Type: "PUBLISHED_LINK"}))
+	e2, err := engine.GetEdgeCurrentHead(edgeID)
+	require.NoError(t, err)
+
+	draftEdgesAtV1, err := engine.GetEdgesByTypeVisibleAt("DRAFT_LINK", e1.Version)
+	require.NoError(t, err)
+	require.Len(t, draftEdgesAtV1, 1)
+	require.Equal(t, edgeID, draftEdgesAtV1[0].ID)
+
+	publishedEdgesAtV1, err := engine.GetEdgesByTypeVisibleAt("PUBLISHED_LINK", e1.Version)
+	require.NoError(t, err)
+	require.Empty(t, publishedEdgesAtV1)
+
+	publishedEdgesAtV2, err := engine.GetEdgesByTypeVisibleAt("PUBLISHED_LINK", e2.Version)
+	require.NoError(t, err)
+	require.Len(t, publishedEdgesAtV2, 1)
+
+	betweenAtV1, err := engine.GetEdgesBetweenVisibleAt(start, end, e1.Version)
+	require.NoError(t, err)
+	require.Len(t, betweenAtV1, 1)
+	require.Equal(t, "DRAFT_LINK", betweenAtV1[0].Type)
+
+	betweenAtV2, err := engine.GetEdgesBetweenVisibleAt(start, end, e2.Version)
+	require.NoError(t, err)
+	require.Len(t, betweenAtV2, 1)
+	require.Equal(t, "PUBLISHED_LINK", betweenAtV2[0].Type)
+}
+
+func TestMVCCWrappers_FallbackLatestButRejectSnapshotWhenUnsupported(t *testing.T) {
+	baseInner := NewMemoryEngine()
+	t.Cleanup(func() { _ = baseInner.Close() })
+	base := &nonMVCCEngine{Engine: baseInner}
+
+	async := NewAsyncEngine(base, &AsyncEngineConfig{FlushInterval: time.Hour})
+	defer async.Close()
+	wal := NewWALEngine(base, nil)
+	namespaced := NewNamespacedEngine(base, "test")
+
+	nodeID := NodeID("nornic:mvcc-fallback-node")
+	_, err := async.CreateNode(&Node{ID: nodeID, Labels: []string{"Doc"}, Properties: map[string]any{"title": "latest"}})
+	require.NoError(t, err)
+	require.NoError(t, async.Flush())
+	_, err = namespaced.CreateNode(&Node{ID: NodeID("mvcc-fallback-node-ns"), Labels: []string{"Doc"}, Properties: map[string]any{"title": "latest-ns"}})
+	require.NoError(t, err)
+
+	asyncNode, err := async.GetNodeLatestVisible(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "latest", asyncNode.Properties["title"])
+
+	walNode, err := wal.GetNodeLatestVisible(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "latest", walNode.Properties["title"])
+
+	nsNode, err := namespaced.GetNodeLatestVisible(NodeID("mvcc-fallback-node-ns"))
+	require.NoError(t, err)
+	require.Equal(t, "latest-ns", nsNode.Properties["title"])
+
+	version := MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: 1}
+	_, err = async.GetNodeVisibleAt(nodeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = wal.GetNodeVisibleAt(nodeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = namespaced.GetNodeVisibleAt(NodeID("mvcc-fallback-node-ns"), version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = async.GetNodesByLabelVisibleAt("Doc", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = wal.GetNodesByLabelVisibleAt("Doc", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = namespaced.GetNodesByLabelVisibleAt("Doc", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+
+	edgeID := EdgeID("nornic:mvcc-fallback-edge")
+	require.NoError(t, async.CreateEdge(&Edge{ID: edgeID, StartNode: nodeID, EndNode: nodeID, Type: "SELF"}))
+	require.NoError(t, async.Flush())
+	require.NoError(t, namespaced.CreateEdge(&Edge{ID: EdgeID("mvcc-fallback-edge-ns"), StartNode: NodeID("mvcc-fallback-node-ns"), EndNode: NodeID("mvcc-fallback-node-ns"), Type: "SELF"}))
+
+	asyncEdge, err := async.GetEdgeLatestVisible(edgeID)
+	require.NoError(t, err)
+	require.Equal(t, edgeID, asyncEdge.ID)
+
+	walEdge, err := wal.GetEdgeLatestVisible(edgeID)
+	require.NoError(t, err)
+	require.Equal(t, edgeID, walEdge.ID)
+
+	nsEdge, err := namespaced.GetEdgeLatestVisible(EdgeID("mvcc-fallback-edge-ns"))
+	require.NoError(t, err)
+	require.Equal(t, EdgeID("mvcc-fallback-edge-ns"), nsEdge.ID)
+
+	_, err = async.GetEdgeVisibleAt(edgeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = wal.GetEdgeVisibleAt(edgeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = namespaced.GetEdgeVisibleAt(EdgeID("mvcc-fallback-edge-ns"), version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = async.GetEdgesByTypeVisibleAt("SELF", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = wal.GetEdgesByTypeVisibleAt("SELF", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = namespaced.GetEdgesByTypeVisibleAt("SELF", version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = async.GetEdgesBetweenVisibleAt(nodeID, nodeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = wal.GetEdgesBetweenVisibleAt(nodeID, nodeID, version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	_, err = namespaced.GetEdgesBetweenVisibleAt(NodeID("mvcc-fallback-node-ns"), NodeID("mvcc-fallback-node-ns"), version)
+	require.ErrorIs(t, err, ErrNotImplemented)
+}
+
+func mustGetNodeLatestVisible(t *testing.T, engine *BadgerEngine, id NodeID) *Node {
+	t.Helper()
+	node, err := engine.GetNodeLatestVisible(id)
+	require.NoError(t, err)
+	return node
+}

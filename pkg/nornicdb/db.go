@@ -759,6 +759,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			LowMemory:             false,
 			NodeCacheMaxEntries:   config.Database.BadgerNodeCacheMaxEntries,
 			EdgeTypeCacheMaxTypes: config.Database.BadgerEdgeTypeCacheMaxTypes,
+			EngineOptions: storage.EngineOptions{
+				RetentionPolicy: storage.RetentionPolicy{
+					MaxVersionsPerKey: config.Database.MVCCRetentionMaxVersions,
+					TTL:               config.Database.MVCCRetentionTTL,
+				},
+			},
 		}
 		if config.Database.StorageSerializer != "" {
 			serializer, err := storage.ParseStorageSerializer(config.Database.StorageSerializer)
@@ -1172,6 +1178,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			log.Printf("🕰️ Rebuilding temporal indexes before search warmup...")
 			if err := maint.RebuildTemporalIndexes(ctx); err != nil {
 				log.Printf("⚠️  Temporal index rebuild failed: %v", err)
+			}
+		}
+		if maint, ok := db.baseStorage.(storage.MVCCMaintenanceEngine); ok {
+			log.Printf("🧾 Rebuilding MVCC heads before search warmup...")
+			if err := maint.RebuildMVCCHeads(ctx); err != nil {
+				log.Printf("⚠️  MVCC head rebuild failed: %v", err)
 			}
 		}
 

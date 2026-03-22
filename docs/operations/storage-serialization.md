@@ -29,6 +29,12 @@ NornicDB stores nodes, edges, and embeddings in BadgerDB using a pluggable seria
 
 New databases default to **msgpack**.
 
+MVCC note:
+
+- MVCC version records use Msgpack
+- MVCC head metadata uses Msgpack
+- new MVCC/internal metadata does not use gob
+
 If an existing database is detected to use gob, NornicDB will:
 1) log a warning about the mismatch  
 2) continue using gob for that database  
@@ -48,6 +54,8 @@ database:
 ```
 
 Accepted values: `gob`, `msgpack`.
+
+For current releases, `storage_serializer` controls the primary storage format for the broader storage layer, but MVCC internal hot-path metadata is always Msgpack.
 
 ---
 

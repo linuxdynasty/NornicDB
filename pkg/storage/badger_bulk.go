@@ -3,6 +3,7 @@ package storage
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -31,6 +32,10 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 	}
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		// Check for duplicates
 		for _, node := range nodes {
 			_, err := txn.Get(nodeKey(node.ID))
@@ -80,6 +85,12 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 				if err := txn.Set(labelIndexKey(label, node.ID), []byte{}); err != nil {
 					return err
 				}
+			}
+			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
+				return err
+			}
+			if err := b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false); err != nil {
+				return err
 			}
 		}
 
@@ -215,6 +226,10 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 	}
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
+		version, err := b.allocateMVCCVersion(txn, time.Now())
+		if err != nil {
+			return err
+		}
 		// Validate all edges
 		for _, edge := range edges {
 			// Check edge doesn't exist
@@ -253,6 +268,12 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 				return err
 			}
 			if err := txn.Set(edgeTypeIndexKey(edge.Type, edge.ID), []byte{}); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false); err != nil {
 				return err
 			}
 		}

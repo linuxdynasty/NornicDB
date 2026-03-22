@@ -1316,6 +1316,8 @@ func TestNewBadgerEngineWithOptions(t *testing.T) {
 		require.Equal(t, defaultBadgerNodeCacheMaxEntries, engine.nodeCacheMaxEntries)
 		require.Equal(t, defaultBadgerEdgeTypeCacheMaxTypes, engine.edgeTypeCacheMaxTypes)
 		require.Equal(t, defaultBadgerLabelFirstCacheMax, engine.labelFirstCacheMax)
+		require.Equal(t, DefaultRetentionPolicyMaxVersionsPerKey, engine.retentionPolicy.MaxVersionsPerKey)
+		require.Zero(t, engine.retentionPolicy.TTL)
 		require.NoError(t, engine.Close())
 
 		engine, err = NewBadgerEngineWithOptions(BadgerOptions{
@@ -1324,12 +1326,17 @@ func TestNewBadgerEngineWithOptions(t *testing.T) {
 			NodeCacheMaxEntries:           7,
 			EdgeTypeCacheMaxTypes:         9,
 			LabelFirstNodeCacheMaxEntries: 11,
+			EngineOptions: EngineOptions{
+				RetentionPolicy: RetentionPolicy{MaxVersionsPerKey: 7, TTL: time.Hour},
+			},
 		})
 		require.NoError(t, err)
 		defer engine.Close()
 		require.Equal(t, 7, engine.nodeCacheMaxEntries)
 		require.Equal(t, 9, engine.edgeTypeCacheMaxTypes)
 		require.Equal(t, 11, engine.labelFirstCacheMax)
+		require.Equal(t, 7, engine.retentionPolicy.MaxVersionsPerKey)
+		require.Equal(t, time.Hour, engine.retentionPolicy.TTL)
 		_, err = engine.CreateNode(testNode("hp"))
 		require.NoError(t, err)
 	})

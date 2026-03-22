@@ -243,8 +243,18 @@ type DatabaseConfig struct {
 	// Env: NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES (default: 50)
 	BadgerEdgeTypeCacheMaxTypes int
 
+	// MVCCRetentionMaxVersions keeps at most this many closed historical MVCC versions per key by default.
+	// The current head is always preserved separately.
+	// Env: NORNICDB_MVCC_RETENTION_MAX_VERSIONS (default: 1)
+	MVCCRetentionMaxVersions int
+
+	// MVCCRetentionTTL protects MVCC versions newer than now-TTL from pruning.
+	// Zero disables age-based protection.
+	// Env: NORNICDB_MVCC_RETENTION_TTL
+	MVCCRetentionTTL time.Duration
+
 	// StorageSerializer selects the storage serialization format ("gob", "msgpack").
-	// Env: NORNICDB_STORAGE_SERIALIZER (default: gob)
+	// Env: NORNICDB_STORAGE_SERIALIZER (default: msgpack)
 	StorageSerializer string
 
 	// PersistSearchIndexes (EXPERIMENTAL) when true saves BM25, vector, and HNSW indexes under DataDir and loads
@@ -927,6 +937,12 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("invalid storage serializer: %s", c.Database.StorageSerializer)
 	}
+	if c.Database.MVCCRetentionMaxVersions < 0 {
+		return fmt.Errorf("invalid mvcc retention max versions: %d", c.Database.MVCCRetentionMaxVersions)
+	}
+	if c.Database.MVCCRetentionTTL < 0 {
+		return fmt.Errorf("invalid mvcc retention ttl: %s", c.Database.MVCCRetentionTTL)
+	}
 
 	return nil
 }
@@ -994,6 +1010,8 @@ type YAMLConfig struct {
 		EncryptionPassword           string `yaml:"encryption_password"`
 		BadgerNodeCacheMaxEntries    int    `yaml:"badger_node_cache_max_entries"`
 		BadgerEdgeTypeCacheMaxTypes  int    `yaml:"badger_edge_type_cache_max_types"`
+		MVCCRetentionMaxVersions     int    `yaml:"mvcc_retention_max_versions"`
+		MVCCRetentionTTL             string `yaml:"mvcc_retention_ttl"`
 		StorageSerializer            string `yaml:"storage_serializer"`
 		PersistSearchIndexes         bool   `yaml:"persist_search_indexes"`
 	} `yaml:"database"`
@@ -1222,6 +1240,8 @@ func LoadDefaults() *Config {
 	config.Database.AsyncMaxEdgeCacheSize = 100000 // ~50MB assuming 500 bytes/edge
 	config.Database.BadgerNodeCacheMaxEntries = 10000
 	config.Database.BadgerEdgeTypeCacheMaxTypes = 50
+	config.Database.MVCCRetentionMaxVersions = 100
+	config.Database.MVCCRetentionTTL = 0
 	config.Database.StorageSerializer = "msgpack"
 
 	// Server defaults - Bolt
@@ -1490,6 +1510,12 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnvInt("NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES", -1); v >= 0 {
 		config.Database.BadgerEdgeTypeCacheMaxTypes = v
+	}
+	if v := getEnvInt("NORNICDB_MVCC_RETENTION_MAX_VERSIONS", -1); v >= 0 {
+		config.Database.MVCCRetentionMaxVersions = v
+	}
+	if v := getEnvDuration("NORNICDB_MVCC_RETENTION_TTL", 0); v > 0 {
+		config.Database.MVCCRetentionTTL = v
 	}
 	if v := getEnv("NORNICDB_STORAGE_SERIALIZER", ""); v != "" {
 		config.Database.StorageSerializer = strings.ToLower(v)
@@ -2090,6 +2116,14 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Database.BadgerEdgeTypeCacheMaxTypes > 0 {
 		config.Database.BadgerEdgeTypeCacheMaxTypes = yamlCfg.Database.BadgerEdgeTypeCacheMaxTypes
+	}
+	if yamlCfg.Database.MVCCRetentionMaxVersions > 0 {
+		config.Database.MVCCRetentionMaxVersions = yamlCfg.Database.MVCCRetentionMaxVersions
+	}
+	if yamlCfg.Database.MVCCRetentionTTL != "" {
+		if d, err := time.ParseDuration(yamlCfg.Database.MVCCRetentionTTL); err == nil {
+			config.Database.MVCCRetentionTTL = d
+		}
 	}
 	if yamlCfg.Database.StorageSerializer != "" {
 		config.Database.StorageSerializer = strings.ToLower(yamlCfg.Database.StorageSerializer)

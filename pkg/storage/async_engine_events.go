@@ -37,6 +37,104 @@ func (ae *AsyncEngine) PruneTemporalHistory(ctx context.Context, opts TemporalPr
 	return 0, nil
 }
 
+// GetNodeLatestEffective returns the merged latest-visible node across pending, in-flight, and persisted state.
+func (ae *AsyncEngine) GetNodeLatestEffective(id NodeID) (*Node, error) {
+	return ae.GetNode(id)
+}
+
+// GetEdgeLatestEffective returns the merged latest-visible edge across pending, in-flight, and persisted state.
+func (ae *AsyncEngine) GetEdgeLatestEffective(id EdgeID) (*Edge, error) {
+	return ae.GetEdge(id)
+}
+
+// GetNodeLatestVisible resolves the latest persisted-or-effective node.
+func (ae *AsyncEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
+	if provider, ok := ae.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetNodeLatestVisible(id)
+	}
+	return ae.GetNodeLatestEffective(id)
+}
+
+// GetEdgeLatestVisible resolves the latest persisted-or-effective edge.
+func (ae *AsyncEngine) GetEdgeLatestVisible(id EdgeID) (*Edge, error) {
+	if provider, ok := ae.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetEdgeLatestVisible(id)
+	}
+	return ae.GetEdgeLatestEffective(id)
+}
+
+// GetNodeVisibleAt delegates snapshot-visible node reads to the wrapped engine when supported.
+func (ae *AsyncEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, error) {
+	if provider, ok := ae.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetNodeVisibleAt(id, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgeVisibleAt delegates snapshot-visible edge reads to the wrapped engine when supported.
+func (ae *AsyncEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, error) {
+	if provider, ok := ae.engine.(MVCCVisibilityEngine); ok {
+		return provider.GetEdgeVisibleAt(id, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetNodesByLabelVisibleAt delegates snapshot-visible label queries to the wrapped engine when supported.
+func (ae *AsyncEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error) {
+	if provider, ok := ae.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetNodesByLabelVisibleAt(label, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgesByTypeVisibleAt delegates snapshot-visible edge-type queries to the wrapped engine when supported.
+func (ae *AsyncEngine) GetEdgesByTypeVisibleAt(edgeType string, version MVCCVersion) ([]*Edge, error) {
+	if provider, ok := ae.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesByTypeVisibleAt(edgeType, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetEdgesBetweenVisibleAt delegates snapshot-visible topology queries to the wrapped engine when supported.
+func (ae *AsyncEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, version MVCCVersion) ([]*Edge, error) {
+	if provider, ok := ae.engine.(MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesBetweenVisibleAt(startID, endID, version)
+	}
+	return nil, ErrNotImplemented
+}
+
+// GetNodeCurrentHead delegates node head lookup to the wrapped engine when supported.
+func (ae *AsyncEngine) GetNodeCurrentHead(id NodeID) (MVCCHead, error) {
+	if provider, ok := ae.engine.(MVCCHeadEngine); ok {
+		return provider.GetNodeCurrentHead(id)
+	}
+	return MVCCHead{}, ErrNotImplemented
+}
+
+// GetEdgeCurrentHead delegates edge head lookup to the wrapped engine when supported.
+func (ae *AsyncEngine) GetEdgeCurrentHead(id EdgeID) (MVCCHead, error) {
+	if provider, ok := ae.engine.(MVCCHeadEngine); ok {
+		return provider.GetEdgeCurrentHead(id)
+	}
+	return MVCCHead{}, ErrNotImplemented
+}
+
+// RebuildMVCCHeads delegates MVCC head rebuild to the wrapped engine when supported.
+func (ae *AsyncEngine) RebuildMVCCHeads(ctx context.Context) error {
+	if maint, ok := ae.engine.(MVCCMaintenanceEngine); ok {
+		return maint.RebuildMVCCHeads(ctx)
+	}
+	return ErrNotImplemented
+}
+
+// PruneMVCCVersions delegates MVCC pruning to the wrapped engine when supported.
+func (ae *AsyncEngine) PruneMVCCVersions(ctx context.Context, opts MVCCPruneOptions) (int64, error) {
+	if maint, ok := ae.engine.(MVCCMaintenanceEngine); ok {
+		return maint.PruneMVCCVersions(ctx, opts)
+	}
+	return 0, ErrNotImplemented
+}
+
 // OnNodeCreated sets a callback to be invoked when nodes are created.
 func (ae *AsyncEngine) OnNodeCreated(callback NodeEventCallback) {
 	ae.callbackMu.Lock()

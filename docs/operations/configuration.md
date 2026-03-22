@@ -44,7 +44,9 @@ database:
   default_database: "nornic"  # Default database name (like Neo4j's "neo4j")
   max_connections: 100
   connection_timeout: 30s
-  storage_serializer: msgpack # gob or msgpack (default: msgpack)
+  storage_serializer: msgpack # default: msgpack; MVCC metadata uses msgpack on the hot path
+  mvcc_retention_max_versions: 1
+  mvcc_retention_ttl: 168h
 ```
 
 **Multi-Database Support:**
@@ -61,6 +63,34 @@ database:
 - `NORNICDB_DEFAULT_DATABASE` - Set default database name
 - `NEO4J_dbms_default__database` - Neo4j-compatible env var (backwards compat)
 - `NORNICDB_STORAGE_SERIALIZER` - Storage serializer (`gob` or `msgpack`)
+- `NORNICDB_MVCC_RETENTION_MAX_VERSIONS` - Default historical version cap per key
+- `NORNICDB_MVCC_RETENTION_TTL` - Protect recent MVCC history from pruning
+
+### MVCC Historical Retention
+
+NornicDB keeps MVCC history for snapshot and temporal reads. The retention policy controls the default pruning behavior for that history.
+
+```yaml
+database:
+  storage_serializer: msgpack
+  mvcc_retention_max_versions: 1
+  mvcc_retention_ttl: "168h"
+```
+
+Semantics:
+
+- `mvcc_retention_max_versions` applies to closed historical versions
+- the current head is preserved separately and is never pruned
+- `mvcc_retention_ttl` protects versions newer than `now - ttl`
+- these settings define defaults for maintenance calls; they do not start background pruning on their own
+
+Recommended starting points:
+
+- default deployment: `100` versions, no TTL
+- moderate churn: `50` versions, `24h` TTL
+- audit-focused: `100` versions, `168h` TTL
+
+For query examples and maintenance usage, see [Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md).
 
 ### Per-database configuration overrides
 

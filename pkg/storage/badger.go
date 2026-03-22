@@ -5,10 +5,12 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -27,6 +29,11 @@ const (
 	prefixSchema        = byte(0x09) // schema:global -> JSON(SchemaDefinition)
 	prefixTemporalIndex = byte(0x0A) // temporal:namespace:label:keyprops:keyhash:valid_from:nodeID -> []byte{}
 	prefixTemporalHead  = byte(0x0B) // temporal_current:namespace:label:keyprops:keyhash -> nodeID
+	prefixMVCCNode      = byte(0x0C) // mvcc_node:nodeID:version -> Node version payload
+	prefixMVCCEdge      = byte(0x0D) // mvcc_edge:edgeID:version -> Edge version payload
+	prefixMVCCNodeHead  = byte(0x0E) // mvcc_node_head:nodeID -> MVCCHead
+	prefixMVCCEdgeHead  = byte(0x0F) // mvcc_edge_head:edgeID -> MVCCHead
+	prefixMVCCMeta      = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -106,6 +113,10 @@ type BadgerEngine struct {
 	// Eliminates expensive full table scans for node/edge counts
 	nodeCount atomic.Int64
 	edgeCount atomic.Int64
+	mvccSeq   atomic.Uint64
+
+	retentionPolicy           RetentionPolicy
+	activeMVCCSnapshotReaders atomic.Int64
 
 	// Cached per-namespace counts for O(1) multi-database stats.
 	// Keys are namespace prefixes like "nornic:".
@@ -294,6 +305,9 @@ type BadgerOptions struct {
 	// fast label-first lookups. When exceeded, the cache is cleared.
 	// Set to 0 to use the default.
 	LabelFirstNodeCacheMaxEntries int
+
+	// EngineOptions holds engine-wide MVCC retention defaults and similar policies.
+	EngineOptions EngineOptions
 }
 
 // NewBadgerEngine creates a new persistent storage engine with default settings.
@@ -440,6 +454,7 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if configuredSerializer == "" {
 		configuredSerializer = StorageSerializerMsgpack
 	}
+	retentionPolicy := normalizeRetentionPolicy(opts.EngineOptions.RetentionPolicy)
 	if _, err := ParseStorageSerializer(string(configuredSerializer)); err != nil {
 		return nil, err
 	}
@@ -535,9 +550,10 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	}
 
 	engine := &BadgerEngine{
-		db:       db,
-		inMemory: opts.InMemory,
-		schemas:  make(map[string]*SchemaManager),
+		db:              db,
+		inMemory:        opts.InMemory,
+		schemas:         make(map[string]*SchemaManager),
+		retentionPolicy: retentionPolicy,
 
 		nodeCacheMaxEntries:   opts.NodeCacheMaxEntries,
 		edgeTypeCacheMaxTypes: opts.EdgeTypeCacheMaxTypes,
@@ -573,6 +589,11 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 		return nil, fmt.Errorf("failed to load persisted schema: %w", err)
 	}
 
+	if err := engine.initializeMVCCSequence(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize mvcc sequence: %w", err)
+	}
+
 	return engine, nil
 }
 
@@ -595,6 +616,52 @@ func NewBadgerEngineInMemory() (*BadgerEngine, error) {
 	return NewBadgerEngineWithOptions(BadgerOptions{
 		InMemory: true,
 	})
+}
+
+func (b *BadgerEngine) initializeMVCCSequence() error {
+	seq, err := b.loadPersistedMVCCSequence()
+	if err != nil {
+		return err
+	}
+	b.mvccSeq.Store(seq)
+	return nil
+}
+
+func (b *BadgerEngine) loadPersistedMVCCSequence() (uint64, error) {
+	var seq uint64
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(mvccSequenceKey())
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if len(val) != 8 {
+				return fmt.Errorf("invalid mvcc sequence length: %d", len(val))
+			}
+			seq = binary.BigEndian.Uint64(val)
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+func (b *BadgerEngine) allocateMVCCVersion(txn *badger.Txn, commitTime time.Time) (MVCCVersion, error) {
+	seq := b.mvccSeq.Add(1)
+	encodedSeq := make([]byte, 8)
+	binary.BigEndian.PutUint64(encodedSeq, seq)
+	if err := txn.Set(mvccSequenceKey(), encodedSeq); err != nil {
+		return MVCCVersion{}, err
+	}
+	return MVCCVersion{
+		CommitTimestamp: commitTime.UTC(),
+		CommitSequence:  seq,
+	}, nil
 }
 
 // ============================================================================

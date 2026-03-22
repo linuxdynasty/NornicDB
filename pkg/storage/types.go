@@ -51,6 +51,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -60,6 +61,7 @@ var (
 	ErrAlreadyExists    = errors.New("already exists")
 	ErrInvalidID        = errors.New("invalid id")
 	ErrInvalidData      = errors.New("invalid data")
+	ErrNotImplemented   = errors.New("not implemented")
 	ErrInvalidEdge      = errors.New("invalid edge: start or end node not found")
 	ErrStorageClosed    = errors.New("storage closed")
 	ErrIterationStopped = errors.New("iteration stopped") // Sentinel to stop streaming early
@@ -491,6 +493,153 @@ type TemporalPruneOptions struct {
 type TemporalMaintenanceEngine interface {
 	RebuildTemporalIndexes(ctx context.Context) error
 	PruneTemporalHistory(ctx context.Context, opts TemporalPruneOptions) (int64, error)
+}
+
+// MVCCVersion identifies one committed storage version.
+//
+// Versions are ordered first by committed timestamp, then by a monotonic
+// sequence allocated at commit time to break same-timestamp ties.
+type MVCCVersion struct {
+	CommitTimestamp time.Time
+	CommitSequence  uint64
+}
+
+// IsZero reports whether the version is uninitialized.
+func (v MVCCVersion) IsZero() bool {
+	return v.CommitTimestamp.IsZero() && v.CommitSequence == 0
+}
+
+// Compare returns -1, 0, or 1 using MVCC ordering semantics.
+func (v MVCCVersion) Compare(other MVCCVersion) int {
+	vTime := v.CommitTimestamp.UTC().UnixNano()
+	oTime := other.CommitTimestamp.UTC().UnixNano()
+	switch {
+	case vTime < oTime:
+		return -1
+	case vTime > oTime:
+		return 1
+	case v.CommitSequence < other.CommitSequence:
+		return -1
+	case v.CommitSequence > other.CommitSequence:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// String renders a stable debug form for logs and diagnostics.
+func (v MVCCVersion) String() string {
+	if v.IsZero() {
+		return "mvcc<zero>"
+	}
+	return fmt.Sprintf("mvcc<ts=%s seq=%d>", v.CommitTimestamp.UTC().Format(time.RFC3339Nano), v.CommitSequence)
+}
+
+// MVCCReadMode selects latest-visible versus snapshot-visible reads.
+type MVCCReadMode string
+
+const (
+	MVCCReadLatest   MVCCReadMode = "latest"
+	MVCCReadSnapshot MVCCReadMode = "snapshot"
+)
+
+// MVCCReadSelector describes which committed version a read should resolve.
+type MVCCReadSelector struct {
+	Mode    MVCCReadMode
+	Version MVCCVersion
+}
+
+// MVCCHead stores the current persisted head for a logical record.
+type MVCCHead struct {
+	Version      MVCCVersion
+	Tombstoned   bool
+	FloorVersion MVCCVersion
+}
+
+const DefaultRetentionPolicyMaxVersionsPerKey = 100
+
+// RetentionPolicy controls default MVCC historical retention for a storage engine.
+// MaxVersionsPerKey applies to closed historical versions; the current head is always preserved.
+// TTL optionally protects versions newer than now-TTL from pruning.
+type RetentionPolicy struct {
+	MaxVersionsPerKey int
+	TTL               time.Duration
+}
+
+// EngineOptions contains storage-engine-wide options shared across engine implementations.
+type EngineOptions struct {
+	RetentionPolicy RetentionPolicy
+}
+
+func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {
+	if policy.MaxVersionsPerKey <= 0 {
+		policy.MaxVersionsPerKey = DefaultRetentionPolicyMaxVersionsPerKey
+	}
+	if policy.TTL < 0 {
+		policy.TTL = 0
+	}
+	return policy
+}
+
+// MVCCPruneOptions controls pruning of older MVCC versions.
+// Zero values inherit the engine's configured RetentionPolicy.
+type MVCCPruneOptions struct {
+	MaxVersionsPerKey int
+	MinRetentionAge   time.Duration
+}
+
+// MVCCVisibilityEngine is an optional extension interface for latest and
+// snapshot-visible node and edge reads.
+type MVCCVisibilityEngine interface {
+	GetNodeLatestVisible(id NodeID) (*Node, error)
+	GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, error)
+	GetEdgeLatestVisible(id EdgeID) (*Edge, error)
+	GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, error)
+}
+
+// MVCCIndexedVisibilityEngine is an optional extension interface for
+// snapshot-visible graph queries that resolve label, type, and topology against
+// MVCC history instead of only the current materialized indexes.
+type MVCCIndexedVisibilityEngine interface {
+	GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error)
+	GetEdgesByTypeVisibleAt(edgeType string, version MVCCVersion) ([]*Edge, error)
+	GetEdgesBetweenVisibleAt(startID, endID NodeID, version MVCCVersion) ([]*Edge, error)
+}
+
+// MVCCHeadEngine is an optional extension interface for persisted head lookups.
+type MVCCHeadEngine interface {
+	GetNodeCurrentHead(id NodeID) (MVCCHead, error)
+	GetEdgeCurrentHead(id EdgeID) (MVCCHead, error)
+}
+
+// MVCCAppendEngine is an optional extension interface for immutable MVCC writes.
+type MVCCAppendEngine interface {
+	AppendNodeVersion(node *Node, version MVCCVersion) error
+	AppendNodeTombstone(id NodeID, version MVCCVersion) error
+	AppendEdgeVersion(edge *Edge, version MVCCVersion) error
+	AppendEdgeTombstone(id EdgeID, version MVCCVersion) error
+	UpdateNodeCurrentHead(id NodeID, version MVCCVersion, tombstoned bool) error
+	UpdateEdgeCurrentHead(id EdgeID, version MVCCVersion, tombstoned bool) error
+}
+
+// MVCCMaintenanceEngine is an optional extension interface for rebuild and prune operations.
+type MVCCMaintenanceEngine interface {
+	RebuildMVCCHeads(ctx context.Context) error
+	PruneMVCCVersions(ctx context.Context, opts MVCCPruneOptions) (int64, error)
+}
+
+// MVCCLatestEffectiveEngine is an optional extension interface for wrapper-level
+// latest reads that merge pending, in-flight, and persisted state.
+type MVCCLatestEffectiveEngine interface {
+	GetNodeLatestEffective(id NodeID) (*Node, error)
+	GetEdgeLatestEffective(id EdgeID) (*Edge, error)
+}
+
+// MVCCEnumerationEngine is an optional extension interface for latest-visible iteration.
+type MVCCEnumerationEngine interface {
+	BatchGetNodesLatestVisible(ids []NodeID) (map[NodeID]*Node, error)
+	IterateLatestVisibleNodes(yield func(*Node) error) error
+	IterateLatestVisibleEdges(yield func(*Edge) error) error
 }
 
 // NodeEventCallback is called when storage operations complete successfully.
