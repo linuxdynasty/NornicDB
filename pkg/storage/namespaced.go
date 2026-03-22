@@ -495,6 +495,28 @@ func (n *NamespacedEngine) GetSchema() *SchemaManager {
 	return n.inner.GetSchema()
 }
 
+// GetTemporalNodeAsOf performs an efficient temporal lookup when the inner engine supports it.
+func (n *NamespacedEngine) GetTemporalNodeAsOf(label, keyProp string, keyValue interface{}, validFromProp, validToProp string, asOf time.Time) (*Node, error) {
+	provider, ok := n.inner.(NamespaceTemporalLookupProvider)
+	if !ok {
+		return nil, nil
+	}
+	node, err := provider.GetTemporalNodeAsOfInNamespace(n.namespace, label, keyProp, keyValue, validFromProp, validToProp, asOf)
+	if err != nil || node == nil {
+		return node, err
+	}
+	return n.toUserNode(node), nil
+}
+
+// IsCurrentTemporalNode reports whether node is the current/live temporal version.
+func (n *NamespacedEngine) IsCurrentTemporalNode(node *Node, asOf time.Time) (bool, error) {
+	provider, ok := n.inner.(NamespaceTemporalCurrentNodeProvider)
+	if !ok {
+		return true, nil
+	}
+	return provider.IsCurrentTemporalNodeInNamespace(n.namespace, node, asOf)
+}
+
 // ============================================================================
 // Bulk Operations
 // ============================================================================

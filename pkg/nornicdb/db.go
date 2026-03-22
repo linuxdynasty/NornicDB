@@ -1168,6 +1168,13 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		ctx, cancel := context.WithTimeout(db.buildCtx, 4*time.Hour)
 		defer cancel()
 
+		if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+			log.Printf("🕰️ Rebuilding temporal indexes before search warmup...")
+			if err := maint.RebuildTemporalIndexes(ctx); err != nil {
+				log.Printf("⚠️  Temporal index rebuild failed: %v", err)
+			}
+		}
+
 		// Collect all database names: default plus any from storage namespace listing.
 		dbNames := make(map[string]struct{})
 		dbNames[defaultDBName] = struct{}{}

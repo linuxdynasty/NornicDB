@@ -813,6 +813,13 @@ func (tx *BadgerTransaction) Commit() error {
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 
+	temporalTargets, err := tx.bufferTemporalIndexWrites()
+	if err != nil {
+		tx.badgerTx.Discard()
+		tx.Status = TxStatusRolledBack
+		return fmt.Errorf("buffering temporal index writes: %w", err)
+	}
+
 	// Log metadata
 	if len(tx.Metadata) > 0 {
 		log.Printf("[Transaction %s] Committing with metadata: %v", tx.ID, tx.Metadata)
@@ -824,6 +831,12 @@ func (tx *BadgerTransaction) Commit() error {
 		tx.badgerTx.Discard()
 		tx.Status = TxStatusRolledBack
 		return fmt.Errorf("flushing buffered writes: %w", err)
+	}
+
+	if err := tx.refreshTemporalCurrentPointers(temporalTargets); err != nil {
+		tx.badgerTx.Discard()
+		tx.Status = TxStatusRolledBack
+		return fmt.Errorf("refreshing temporal current pointers: %w", err)
 	}
 
 	// Commit Badger transaction (atomic!)

@@ -1,6 +1,9 @@
 package storage
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ListNamespaces returns known namespaces from the wrapped engine, if supported.
 func (ae *AsyncEngine) ListNamespaces() []string {
@@ -8,6 +11,30 @@ func (ae *AsyncEngine) ListNamespaces() []string {
 		return lister.ListNamespaces()
 	}
 	return nil
+}
+
+// IsCurrentTemporalNode delegates current-version checks to the wrapped engine when supported.
+func (ae *AsyncEngine) IsCurrentTemporalNode(node *Node, asOf time.Time) (bool, error) {
+	if provider, ok := ae.engine.(TemporalCurrentNodeEngine); ok {
+		return provider.IsCurrentTemporalNode(node, asOf)
+	}
+	return true, nil
+}
+
+// RebuildTemporalIndexes delegates temporal index rebuild to the wrapped engine when supported.
+func (ae *AsyncEngine) RebuildTemporalIndexes(ctx context.Context) error {
+	if maint, ok := ae.engine.(TemporalMaintenanceEngine); ok {
+		return maint.RebuildTemporalIndexes(ctx)
+	}
+	return nil
+}
+
+// PruneTemporalHistory delegates temporal pruning to the wrapped engine when supported.
+func (ae *AsyncEngine) PruneTemporalHistory(ctx context.Context, opts TemporalPruneOptions) (int64, error) {
+	if maint, ok := ae.engine.(TemporalMaintenanceEngine); ok {
+		return maint.PruneTemporalHistory(ctx, opts)
+	}
+	return 0, nil
 }
 
 // OnNodeCreated sets a callback to be invoked when nodes are created.

@@ -25,6 +25,8 @@ const (
 	prefixPendingEmbed  = byte(0x07) // pending_embed:nodeID -> []byte{} (nodes needing embedding)
 	prefixEmbedding     = byte(0x08) // embedding:nodeID:chunkIndex -> []float32 (separate storage for large embeddings)
 	prefixSchema        = byte(0x09) // schema:global -> JSON(SchemaDefinition)
+	prefixTemporalIndex = byte(0x0A) // temporal:namespace:label:keyprops:keyhash:valid_from:nodeID -> []byte{}
+	prefixTemporalHead  = byte(0x0B) // temporal_current:namespace:label:keyprops:keyhash -> nodeID
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)

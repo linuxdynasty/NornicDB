@@ -52,6 +52,30 @@ func (w *WALEngine) ListNamespaces() []string {
 	return nil
 }
 
+// IsCurrentTemporalNode delegates current-version checks to the wrapped engine when supported.
+func (w *WALEngine) IsCurrentTemporalNode(node *Node, asOf time.Time) (bool, error) {
+	if provider, ok := w.engine.(TemporalCurrentNodeEngine); ok {
+		return provider.IsCurrentTemporalNode(node, asOf)
+	}
+	return true, nil
+}
+
+// RebuildTemporalIndexes delegates temporal index rebuild to the wrapped engine when supported.
+func (w *WALEngine) RebuildTemporalIndexes(ctx context.Context) error {
+	if maint, ok := w.engine.(TemporalMaintenanceEngine); ok {
+		return maint.RebuildTemporalIndexes(ctx)
+	}
+	return nil
+}
+
+// PruneTemporalHistory delegates temporal pruning to the wrapped engine when supported.
+func (w *WALEngine) PruneTemporalHistory(ctx context.Context, opts TemporalPruneOptions) (int64, error) {
+	if maint, ok := w.engine.(TemporalMaintenanceEngine); ok {
+		return maint.PruneTemporalHistory(ctx, opts)
+	}
+	return 0, nil
+}
+
 // NewWALEngine creates a WAL-backed storage engine.
 func NewWALEngine(engine Engine, wal *WAL) *WALEngine {
 	return &WALEngine{

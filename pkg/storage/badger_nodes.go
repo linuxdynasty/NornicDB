@@ -38,89 +38,52 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	}
 	schema := b.GetSchemaForNamespace(dbName)
 
-	// PERFORMANCE OPTIMIZATION: Use WriteBatch to batch all writes (node + labels + embed index)
-	// This reduces write amplification from 3-4 separate writes to 1 batch operation
-	// WriteBatch is more efficient than individual txn.Set() calls
-
-	// First check existence and validate constraints (need transaction for reads)
-	var exists bool
-	var validationErr error
-	err := b.db.View(func(txn *badger.Txn) error {
+	var persistSeparateEmbeddings bool
+	var embeddingsToPersist [][]float32
+	err := b.withUpdate(func(txn *badger.Txn) error {
 		key := nodeKey(node.ID)
 		_, err := txn.Get(key)
 		if err == nil {
-			exists = true
-			return nil
+			return ErrAlreadyExists
 		}
 		if err != badger.ErrKeyNotFound {
 			return err
 		}
-
-		// Validate constraints
-		validationErr = b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID)
-		return validationErr
+		if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
+			return err
+		}
+		data, embeddingsSeparate, err := encodeNode(node)
+		if err != nil {
+			return fmt.Errorf("failed to encode node: %w", err)
+		}
+		if err := txn.Set(key, data); err != nil {
+			return fmt.Errorf("failed to write node: %w", err)
+		}
+		if embeddingsSeparate {
+			persistSeparateEmbeddings = true
+			embeddingsToPersist = node.ChunkEmbeddings
+		}
+		for _, label := range node.Labels {
+			if err := txn.Set(labelIndexKey(label, node.ID), []byte{}); err != nil {
+				return fmt.Errorf("failed to write label index: %w", err)
+			}
+		}
+		if !isSystemNamespaceID(string(node.ID)) &&
+			(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
+			NodeNeedsEmbedding(node) {
+			if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
+				return fmt.Errorf("failed to write pending embed index: %w", err)
+			}
+		}
+		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, nil, node)
 	})
-
 	if err != nil {
 		return "", err
 	}
-	if exists {
-		return "", ErrAlreadyExists
-	}
-	if validationErr != nil {
-		return "", validationErr
-	}
-
-	// Serialize node (may store embeddings separately if too large)
-	data, embeddingsSeparate, err := encodeNode(node)
-	if err != nil {
-		return "", fmt.Errorf("failed to encode node: %w", err)
-	}
-
-	// Use WriteBatch to batch all writes together
-	wb := b.db.NewWriteBatch()
-	defer wb.Cancel() // Cancel if we return early
-
-	key := nodeKey(node.ID)
-	// Store node
-	if err := wb.Set(key, data); err != nil {
-		return "", fmt.Errorf("failed to write node: %w", err)
-	}
-
-	// If embeddings are stored separately, add them to batch
-	if embeddingsSeparate {
-		for i, emb := range node.ChunkEmbeddings {
-			embKey := embeddingKey(node.ID, i)
-			embData, err := encodeEmbedding(emb)
-			if err != nil {
-				return "", fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
-			}
-			if err := wb.Set(embKey, embData); err != nil {
-				return "", fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
-			}
+	if persistSeparateEmbeddings {
+		if err := b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist); err != nil {
+			return "", err
 		}
-	}
-
-	// Batch all label index writes
-	for _, label := range node.Labels {
-		labelKey := labelIndexKey(label, node.ID)
-		if err := wb.Set(labelKey, []byte{}); err != nil {
-			return "", fmt.Errorf("failed to write label index: %w", err)
-		}
-	}
-
-	// Add to pending embeddings index if needed
-	if !isSystemNamespaceID(string(node.ID)) &&
-		(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
-		NodeNeedsEmbedding(node) {
-		if err := wb.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
-			return "", fmt.Errorf("failed to write pending embed index: %w", err)
-		}
-	}
-
-	// Flush all writes in single batch operation (atomic)
-	if err := wb.Flush(); err != nil {
-		return "", fmt.Errorf("failed to flush write batch: %w", err)
 	}
 
 	// On successful create, update cache and register unique constraint values
@@ -324,7 +287,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			txn.Delete(pendingEmbedKey(node.ID))
 		}
 
-		return nil
+		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, existingNode, node)
 	})
 	if err == nil && persistSeparateEmbeddings {
 		err = b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist)
@@ -587,7 +550,18 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		totalEdgesDeleted = edgesDeleted
 		deletedEdgeIDs = edgeIDs
 		deletedNode = node
-		return err
+		if err != nil {
+			return err
+		}
+		if deletedNode == nil {
+			return nil
+		}
+		dbName, _, ok := ParseDatabasePrefix(string(deletedNode.ID))
+		if !ok {
+			return nil
+		}
+		schema := b.GetSchemaForNamespace(dbName)
+		return b.applyTemporalIndexesForNodeChangeInTxn(txn, dbName, schema, deletedNode, nil)
 	})
 
 	// Invalidate cache on successful delete

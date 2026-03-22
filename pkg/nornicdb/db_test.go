@@ -43,11 +43,32 @@ type allNodesErrorEngine struct {
 	allNodesErr error
 }
 
+type temporalMaintenanceTestEngine struct {
+	storage.Engine
+	rebuildCalls int
+	pruneCalls   int
+	rebuildErr   error
+	pruneErr     error
+	pruneResult  int64
+	lastPrune    storage.TemporalPruneOptions
+}
+
 func (e *allNodesErrorEngine) AllNodes() ([]*storage.Node, error) {
 	if e.allNodesErr != nil {
 		return nil, e.allNodesErr
 	}
 	return e.Engine.AllNodes()
+}
+
+func (e *temporalMaintenanceTestEngine) RebuildTemporalIndexes(ctx context.Context) error {
+	e.rebuildCalls++
+	return e.rebuildErr
+}
+
+func (e *temporalMaintenanceTestEngine) PruneTemporalHistory(ctx context.Context, opts storage.TemporalPruneOptions) (int64, error) {
+	e.pruneCalls++
+	e.lastPrune = opts
+	return e.pruneResult, e.pruneErr
 }
 
 type closeErrReplicator struct {
@@ -2625,6 +2646,67 @@ func TestRestore(t *testing.T) {
 		e1, err := base.GetEdge("e1")
 		require.NoError(t, err)
 		require.Equal(t, "2026", e1.Properties["since"])
+	})
+}
+
+func TestDB_TemporalMaintenance(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("delegates rebuild and prune to base storage", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{
+			Engine:      baseEngine,
+			pruneResult: 3,
+		}
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage: maint,
+			config:      DefaultConfig(),
+		}
+
+		require.NoError(t, db.RebuildTemporalIndexes(ctx))
+		deleted, err := db.PruneTemporalHistory(ctx, storage.TemporalPruneOptions{
+			MaxVersionsPerKey: 2,
+			MinRetentionAge:   24 * time.Hour,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, maint.rebuildCalls)
+		require.Equal(t, 1, maint.pruneCalls)
+		require.Equal(t, int64(3), deleted)
+		require.Equal(t, 2, maint.lastPrune.MaxVersionsPerKey)
+		require.Equal(t, 24*time.Hour, maint.lastPrune.MinRetentionAge)
+	})
+
+	t.Run("returns zero when maintenance is unsupported", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(baseEngine, "nornic"),
+			baseStorage: baseEngine,
+			config:      DefaultConfig(),
+		}
+
+		require.NoError(t, db.RebuildTemporalIndexes(ctx))
+		deleted, err := db.PruneTemporalHistory(ctx, storage.TemporalPruneOptions{MaxVersionsPerKey: 1})
+		require.NoError(t, err)
+		require.Zero(t, deleted)
+	})
+
+	t.Run("returns ErrClosed", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{Engine: baseEngine}
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage: maint,
+			config:      DefaultConfig(),
+			closed:      true,
+		}
+
+		require.ErrorIs(t, db.RebuildTemporalIndexes(ctx), ErrClosed)
+		_, err := db.PruneTemporalHistory(ctx, storage.TemporalPruneOptions{MaxVersionsPerKey: 1})
+		require.ErrorIs(t, err, ErrClosed)
 	})
 }
 

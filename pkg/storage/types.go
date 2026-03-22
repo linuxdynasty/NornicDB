@@ -451,6 +451,48 @@ type NamespaceSchemaProvider interface {
 	GetSchemaForNamespace(namespace string) *SchemaManager
 }
 
+// TemporalLookupEngine is an optional extension interface for efficient temporal lookups
+// on a namespaced engine view.
+type TemporalLookupEngine interface {
+	GetTemporalNodeAsOf(label, keyProp string, keyValue interface{}, validFromProp, validToProp string, asOf time.Time) (*Node, error)
+}
+
+// NamespaceTemporalLookupProvider is an optional extension interface that provides
+// efficient temporal lookups scoped to a storage namespace.
+type NamespaceTemporalLookupProvider interface {
+	GetTemporalNodeAsOfInNamespace(namespace, label, keyProp string, keyValue interface{}, validFromProp, validToProp string, asOf time.Time) (*Node, error)
+}
+
+// TemporalCurrentNodeEngine is an optional extension interface for deciding whether
+// a temporal node represents the current/live version for indexing and query routing.
+type TemporalCurrentNodeEngine interface {
+	IsCurrentTemporalNode(node *Node, asOf time.Time) (bool, error)
+}
+
+// NamespaceTemporalCurrentNodeProvider is an optional extension interface that
+// evaluates current/live temporal versions within a namespace.
+type NamespaceTemporalCurrentNodeProvider interface {
+	IsCurrentTemporalNodeInNamespace(namespace string, node *Node, asOf time.Time) (bool, error)
+}
+
+// TemporalPruneOptions controls pruning of older temporal versions.
+type TemporalPruneOptions struct {
+	// MaxVersionsPerKey keeps at most this many closed historical versions per temporal key.
+	// Zero means unlimited.
+	MaxVersionsPerKey int
+
+	// MinRetentionAge protects versions newer than now-MinRetentionAge from pruning.
+	// Zero means no age-based protection.
+	MinRetentionAge time.Duration
+}
+
+// TemporalMaintenanceEngine is an optional extension interface for rebuilding and
+// pruning temporal index state after upgrades, restores, or operator maintenance.
+type TemporalMaintenanceEngine interface {
+	RebuildTemporalIndexes(ctx context.Context) error
+	PruneTemporalHistory(ctx context.Context, opts TemporalPruneOptions) (int64, error)
+}
+
 // NodeEventCallback is called when storage operations complete successfully.
 // This allows external services (like search indexes) to stay synchronized with storage.
 type NodeEventCallback func(node *Node)

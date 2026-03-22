@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // ========================================
@@ -118,6 +120,19 @@ func (e *StorageExecutor) callDbTemporalAsOf(ctx context.Context, cypher string)
 	asOf, ok := coerceDateTime(args[5])
 	if !ok {
 		return nil, fmt.Errorf("asOf must be a valid datetime")
+	}
+
+	if temporalLookup, ok := e.storage.(storage.TemporalLookupEngine); ok {
+		node, err := temporalLookup.GetTemporalNodeAsOf(label, keyProp, keyValue, validFromProp, validToProp, asOf)
+		if err != nil {
+			return nil, fmt.Errorf("temporal lookup failed for label %q: %w", label, err)
+		}
+		if node != nil {
+			return &ExecuteResult{
+				Columns: []string{"node"},
+				Rows:    [][]interface{}{{node}},
+			}, nil
+		}
 	}
 
 	nodes, err := e.storage.GetNodesByLabel(label)

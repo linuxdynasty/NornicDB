@@ -1267,6 +1267,38 @@ type BackupableEngine interface {
 	Backup(path string) error
 }
 
+func (db *DB) rebuildTemporalIndexesNoLock(ctx context.Context) error {
+	if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+		return maint.RebuildTemporalIndexes(ctx)
+	}
+	return nil
+}
+
+// RebuildTemporalIndexes rebuilds temporal history/current indexes from stored nodes.
+func (db *DB) RebuildTemporalIndexes(ctx context.Context) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+	return db.rebuildTemporalIndexesNoLock(ctx)
+}
+
+// PruneTemporalHistory prunes older closed temporal versions according to opts.
+func (db *DB) PruneTemporalHistory(ctx context.Context, opts storage.TemporalPruneOptions) (int64, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return 0, ErrClosed
+	}
+	if maint, ok := db.baseStorage.(storage.TemporalMaintenanceEngine); ok {
+		return maint.PruneTemporalHistory(ctx, opts)
+	}
+	return 0, nil
+}
+
 // Backup creates a database backup to the specified path.
 // For BadgerDB, this creates a streaming backup that is consistent and portable.
 // For in-memory databases, it exports all data as JSON.
@@ -1321,12 +1353,12 @@ func (db *DB) Backup(ctx context.Context, path string) error {
 //
 //	err := db.Restore(ctx, "backup-20241201.json")
 func (db *DB) Restore(ctx context.Context, path string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	db.mu.RUnlock()
 
 	// Read backup file
 	data, err := os.ReadFile(path)
@@ -1346,12 +1378,19 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 		return fmt.Errorf("failed to parse backup: %w", err)
 	}
 
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return ErrClosed
+	}
+
 	// Restore nodes
 	for _, node := range backup.Nodes {
 		_, err := db.storage.CreateNode(node)
 		if err != nil {
 			// Try update if node exists
 			if updateErr := db.storage.UpdateNode(node); updateErr != nil {
+				db.mu.Unlock()
 				return fmt.Errorf("failed to restore node %s: %w", node.ID, err)
 			}
 		}
@@ -1362,16 +1401,32 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 		if err := db.storage.CreateEdge(edge); err != nil {
 			// Try update if edge exists
 			if updateErr := db.storage.UpdateEdge(edge); updateErr != nil {
+				db.mu.Unlock()
 				return fmt.Errorf("failed to restore edge %s: %w", edge.ID, err)
 			}
 		}
 	}
 
-	// Rebuild search indexes
-	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
-		if err := svc.BuildIndexes(ctx); err != nil {
-			log.Printf("⚠️  Warning: failed to rebuild search indexes: %v", err)
+	if err := db.rebuildTemporalIndexesNoLock(ctx); err != nil {
+		db.mu.Unlock()
+		return fmt.Errorf("failed to rebuild temporal indexes after restore: %w", err)
+	}
+	db.mu.Unlock()
+
+	// Restart search indexing after releasing the DB write lock; starting the
+	// background search build while Restore still holds db.mu deadlocks via
+	// startBackgroundTask's read lock.
+	dbName := db.defaultDatabaseName()
+	db.ResetSearchService(dbName)
+	if svc, err := db.getOrCreateSearchService(dbName, db.storage); err == nil && svc != nil {
+		db.searchServicesMu.RLock()
+		entry := db.searchServices[dbName]
+		db.searchServicesMu.RUnlock()
+		if entry != nil {
+			db.startSearchIndexBuild(entry, ctx)
 		}
+	} else if err != nil {
+		log.Printf("⚠️  Warning: failed to restart search indexing after restore: %v", err)
 	}
 
 	return nil

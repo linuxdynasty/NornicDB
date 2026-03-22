@@ -273,7 +273,7 @@ func (b *BadgerEngine) scanForNodeKeyViolationInTxn(txn *badger.Txn, namespace, 
 	return nil
 }
 
-func (b *BadgerEngine) scanForTemporalOverlapInTxn(txn *badger.Txn, namespace, label, keyProp, startProp, endProp string, keyValue interface{}, start time.Time, end time.Time, hasEnd bool, excludeNodeID NodeID) error {
+func (b *BadgerEngine) legacyScanForTemporalOverlapInTxn(txn *badger.Txn, namespace, label, keyProp, startProp, endProp string, keyValue interface{}, start time.Time, end time.Time, hasEnd bool, excludeNodeID NodeID) error {
 	prefix := labelIndexPrefix(label)
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false
@@ -345,6 +345,67 @@ func (b *BadgerEngine) scanForTemporalOverlapInTxn(txn *badger.Txn, namespace, l
 				Properties: []string{keyProp, startProp, endProp},
 				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
 					existingNode.ID, keyProp, keyValue),
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BadgerEngine) scanForTemporalOverlapInTxn(txn *badger.Txn, namespace, label, keyProp, startProp, endProp string, keyValue interface{}, start time.Time, end time.Time, hasEnd bool, excludeNodeID NodeID) error {
+	constraint := Constraint{
+		Type:       ConstraintTemporal,
+		Label:      label,
+		Properties: []string{keyProp, startProp, endProp},
+	}
+	target := temporalRefreshTarget{
+		constraint: constraint,
+		desc:       makeTemporalDescriptor(namespace, constraint, keyValue),
+		keyValue:   keyValue,
+	}
+	prefix := temporalHistoryPrefix(target.desc)
+	hasIndexedEntries := false
+	it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+	for it.Rewind(); it.Valid(); it.Next() {
+		hasIndexedEntries = true
+		break
+	}
+	it.Close()
+	if !hasIndexedEntries {
+		return b.legacyScanForTemporalOverlapInTxn(txn, namespace, label, keyProp, startProp, endProp, keyValue, start, end, hasEnd, excludeNodeID)
+	}
+
+	prevNode, nextNode, err := b.temporalAdjacentNodesInTxn(txn, target, start, excludeNodeID)
+	if err != nil {
+		return err
+	}
+	if prevNode != nil {
+		_, prevStart, prevEnd, prevHasEnd, ok := temporalNodeState(prevNode, constraint)
+		if ok && intervalsOverlap(
+			temporalInterval{start: start, end: end, hasEnd: hasEnd},
+			temporalInterval{start: prevStart, end: prevEnd, hasEnd: prevHasEnd},
+		) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
+					prevNode.ID, keyProp, keyValue),
+			}
+		}
+	}
+	if nextNode != nil {
+		_, nextStart, nextEnd, nextHasEnd, ok := temporalNodeState(nextNode, constraint)
+		if ok && intervalsOverlap(
+			temporalInterval{start: start, end: end, hasEnd: hasEnd},
+			temporalInterval{start: nextStart, end: nextEnd, hasEnd: nextHasEnd},
+		) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
+					nextNode.ID, keyProp, keyValue),
 			}
 		}
 	}

@@ -1938,18 +1938,38 @@ func (s *Service) lastWriteTime() time.Time {
 	return time.Time{}
 }
 
+func (s *Service) shouldIndexNode(node *storage.Node) (bool, error) {
+	if node == nil {
+		return false, nil
+	}
+	provider, ok := s.engine.(interface {
+		IsCurrentTemporalNode(node *storage.Node, asOf time.Time) (bool, error)
+	})
+	if !ok {
+		return true, nil
+	}
+	return provider.IsCurrentTemporalNode(node, time.Now().UTC())
+}
+
 // indexNodeLocked does the work of IndexNode. Caller must hold s.indexMu.
 // When skipFulltext is true, the fulltext index block is skipped (used when BuildIndexes batches fulltext).
 // When skipFulltext is true, removeNodeLocked is also skipped so we don't remove the doc just added by IndexBatch.
 func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	nodeIDStr := string(node.ID)
 	allowLiveHNSW := s.allowLiveHNSWUpdatesLocked()
+	shouldIndex, err := s.shouldIndexNode(node)
+	if err != nil {
+		return err
+	}
 	if nodeIDStr != "" && !skipFulltext {
 		// CRITICAL: IndexNode is called for both creates and updates.
 		// When a node is re-indexed with fewer chunks or fewer named vectors,
 		// we must remove the old vector IDs first, otherwise they become orphaned
 		// in the in-memory index and EmbeddingCount() will drift upward over time.
 		s.removeNodeLocked(nodeIDStr)
+	}
+	if !shouldIndex {
+		return nil
 	}
 	if nodeIDStr != "" {
 		labelsCopy := make([]string, len(node.Labels))
@@ -2583,16 +2603,27 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	if iterator, ok := s.engine.(NodeIterator); ok {
 		count := 0
 		var fulltextBatch []*storage.Node
-		flushFulltextBatch := func(batch []*storage.Node) {
+		var flushErr error
+		flushFulltextBatch := func(batch []*storage.Node) error {
 			if len(batch) == 0 {
-				return
+				return nil
 			}
 			if count == 0 && len(batch) > 0 {
 				s.maybeAutoSetVectorDimensions(firstVectorDimensions(batch[0]))
 			}
+			filtered := make([]*storage.Node, 0, len(batch))
+			for _, n := range batch {
+				shouldIndex, err := s.shouldIndexNode(n)
+				if err != nil {
+					return err
+				}
+				if shouldIndex {
+					filtered = append(filtered, n)
+				}
+			}
 			if !skipFulltextRebuild {
-				entries := make([]FulltextBatchEntry, 0, len(batch))
-				for _, n := range batch {
+				entries := make([]FulltextBatchEntry, 0, len(filtered))
+				for _, n := range filtered {
 					text := s.extractSearchableText(n)
 					entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
 				}
@@ -2603,7 +2634,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				for i := 0; i < len(entries); i += chunkSize {
 					select {
 					case <-ctx.Done():
-						return
+						return ctx.Err()
 					default:
 					}
 					end := i + chunkSize
@@ -2615,16 +2646,17 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 					s.buildProcessed.Store(int64(count + end))
 				}
 				if ctx.Err() != nil {
-					return
+					return ctx.Err()
 				}
 			}
 			s.indexMu.Lock()
-			for _, n := range batch {
+			for _, n := range filtered {
 				_ = s.indexNodeLocked(n, true)
 			}
 			s.indexMu.Unlock()
 			count += len(batch)
 			s.buildProcessed.Store(int64(count))
+			return nil
 		}
 		err := iterator.IterateNodes(func(node *storage.Node) bool {
 			select {
@@ -2636,7 +2668,10 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				// don't appear "stuck" at 0 until the first flush completes.
 				s.buildProcessed.Store(int64(count + len(fulltextBatch)))
 				if len(fulltextBatch) >= fulltextBuildBatchSize {
-					flushFulltextBatch(fulltextBatch)
+					if err := flushFulltextBatch(fulltextBatch); err != nil {
+						flushErr = err
+						return false
+					}
 					fulltextBatch = nil
 					if count%5000 == 0 {
 						fmt.Printf("📊 Indexed %d nodes...\n", count)
@@ -2648,10 +2683,15 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if flushErr != nil {
+			return flushErr
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		flushFulltextBatch(fulltextBatch)
+		if err := flushFulltextBatch(fulltextBatch); err != nil {
+			return err
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -2680,16 +2720,26 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	count := 0
 	var fulltextBatch []*storage.Node
-	flushFulltextBatchFallback := func(batch []*storage.Node) {
+	flushFulltextBatchFallback := func(batch []*storage.Node) error {
 		if len(batch) == 0 {
-			return
+			return nil
 		}
 		if count == 0 && len(batch) > 0 {
 			s.maybeAutoSetVectorDimensions(firstVectorDimensions(batch[0]))
 		}
+		filtered := make([]*storage.Node, 0, len(batch))
+		for _, n := range batch {
+			shouldIndex, err := s.shouldIndexNode(n)
+			if err != nil {
+				return err
+			}
+			if shouldIndex {
+				filtered = append(filtered, n)
+			}
+		}
 		if !skipFulltextRebuild {
-			entries := make([]FulltextBatchEntry, 0, len(batch))
-			for _, n := range batch {
+			entries := make([]FulltextBatchEntry, 0, len(filtered))
+			for _, n := range filtered {
 				text := s.extractSearchableText(n)
 				entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
 			}
@@ -2700,7 +2750,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			for i := 0; i < len(entries); i += chunkSize {
 				select {
 				case <-ctx.Done():
-					return
+					return ctx.Err()
 				default:
 				}
 				end := i + chunkSize
@@ -2712,16 +2762,17 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				s.buildProcessed.Store(int64(count + end))
 			}
 			if ctx.Err() != nil {
-				return
+				return ctx.Err()
 			}
 		}
 		s.indexMu.Lock()
-		for _, n := range batch {
+		for _, n := range filtered {
 			_ = s.indexNodeLocked(n, true)
 		}
 		s.indexMu.Unlock()
 		count += len(batch)
 		s.buildProcessed.Store(int64(count))
+		return nil
 	}
 	err := storage.StreamNodesWithFallback(ctx, s.engine, 1000, func(node *storage.Node) error {
 		if ctx.Err() != nil {
@@ -2732,7 +2783,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		// don't appear "stuck" at 0 until the first flush completes.
 		s.buildProcessed.Store(int64(count + len(fulltextBatch)))
 		if len(fulltextBatch) >= fulltextBuildBatchSize {
-			flushFulltextBatchFallback(fulltextBatch)
+			if err := flushFulltextBatchFallback(fulltextBatch); err != nil {
+				return err
+			}
 			fulltextBatch = nil
 			if count%5000 == 0 {
 				fmt.Printf("📊 Indexed %d nodes...\n", count)
@@ -2746,7 +2799,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	flushFulltextBatchFallback(fulltextBatch)
+	if err := flushFulltextBatchFallback(fulltextBatch); err != nil {
+		return err
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
