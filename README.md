@@ -35,6 +35,18 @@
   <a href="#contributors">Contributors</a>
 </p>
 
+## Try It With One Command
+
+```bash
+# arm64 / Apple Silicon
+docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-arm64-metal-bge:latest
+
+# amd64 / CPU only
+docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-amd64-cpu-bge:latest
+```
+
+Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA CUDA hosts, use `timothyswt/nornicdb-amd64-cuda-bge:latest`. For Vulkan hosts, use `timothyswt/nornicdb-amd64-vulkan-bge:latest`.
+
 ---
 
 ## What Problem Does This Solve?
