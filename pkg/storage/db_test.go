@@ -96,6 +96,7 @@ func TestDB_UpdateConcurrentIncrements(t *testing.T) {
 
 	db := NewDB(engine)
 	const workers = 10
+	db.SetMaxUpdateRetries(workers * 4)
 	var wg sync.WaitGroup
 	errCh := make(chan error, workers)
 

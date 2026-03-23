@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -37,6 +38,19 @@ type dbSearchService struct {
 type pendingSearchMutation struct {
 	node   *storage.Node
 	remove bool
+}
+
+func (db *DB) shouldIgnoreSearchIndexingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, storage.ErrStorageClosed) || errors.Is(err, ErrClosed) {
+		return true
+	}
+	db.mu.RLock()
+	closed := db.closed
+	db.mu.RUnlock()
+	return closed
 }
 
 func (e *dbSearchService) queueIndex(node *storage.Node) {
@@ -419,6 +433,9 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 					op := ops[id]
 					if op.remove {
 						if err := entry.svc.RemoveNode(storage.NodeID(id)); err != nil {
+							if db.shouldIgnoreSearchIndexingError(err) {
+								continue
+							}
 							log.Printf("⚠️ Failed to remove node %s from deferred search mutation in db %s: %v", id, entry.dbName, err)
 						}
 						continue
@@ -427,6 +444,9 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 						continue
 					}
 					if err := entry.svc.IndexNode(op.node); err != nil {
+						if db.shouldIgnoreSearchIndexingError(err) {
+							continue
+						}
 						log.Printf("⚠️ Failed to index node %s from deferred search mutation in db %s: %v", id, entry.dbName, err)
 					}
 				}
@@ -541,6 +561,9 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 	}
 
 	if err := svc.IndexNode(userNode); err != nil {
+		if db.shouldIgnoreSearchIndexingError(err) {
+			return
+		}
 		log.Printf("⚠️ Failed to index node %s in db %s: %v", node.ID, dbName, err)
 	}
 }

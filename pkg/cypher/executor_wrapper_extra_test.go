@@ -12,9 +12,11 @@ import (
 func TestTransactionStorageWrapper_PrefixHelpers(t *testing.T) {
 	w := &transactionStorageWrapper{namespace: "tenant", separator: ":"}
 	assert.Equal(t, storage.NodeID("tenant:n1"), w.prefixNodeID("n1"))
+	assert.Equal(t, storage.NodeID("tenant:n1"), w.prefixNodeID("tenant:n1"))
 	assert.Equal(t, storage.NodeID("n1"), w.unprefixNodeID("tenant:n1"))
 	assert.Equal(t, storage.NodeID("n1"), w.unprefixNodeID("n1"))
 	assert.Equal(t, storage.EdgeID("tenant:e1"), w.prefixEdgeID("e1"))
+	assert.Equal(t, storage.EdgeID("tenant:e1"), w.prefixEdgeID("tenant:e1"))
 	assert.Equal(t, storage.EdgeID("e1"), w.unprefixEdgeID("tenant:e1"))
 	assert.Equal(t, storage.EdgeID("e1"), w.unprefixEdgeID("e1"))
 

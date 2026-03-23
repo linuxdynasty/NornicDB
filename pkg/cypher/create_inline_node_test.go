@@ -241,6 +241,53 @@ func TestMatchMatchWhereCreate_TwoMatchWithWhere(t *testing.T) {
 	assert.Equal(t, persons[1].ID, edges[0].EndNode)
 }
 
+func TestMatchCreateRelationship_CommaSeparatedElementIDWhere(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})`, nil)
+	require.NoError(t, err)
+
+	persons, err := store.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, persons, 2)
+
+	var alice, bob *storage.Node
+	for _, person := range persons {
+		if person.Properties["name"] == "Alice" {
+			alice = person
+		}
+		if person.Properties["name"] == "Bob" {
+			bob = person
+		}
+	}
+	require.NotNil(t, alice)
+	require.NotNil(t, bob)
+
+	params := map[string]interface{}{
+		"from": "4:nornicdb:" + string(alice.ID),
+		"to":   "4:nornicdb:" + string(bob.ID),
+	}
+
+	result, err := exec.Execute(ctx,
+		`MATCH (a), (b) WHERE elementId(a) = $from AND elementId(b) = $to CREATE (a)-[:KNOWS]->(b) RETURN elementId(a) AS aId, elementId(b) AS bId`,
+		params,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Stats.RelationshipsCreated)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, params["from"], fmt.Sprint(result.Rows[0][0]))
+	assert.Equal(t, params["to"], fmt.Sprint(result.Rows[0][1]))
+
+	edges, err := store.GetOutgoingEdges(alice.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, "KNOWS", edges[0].Type)
+	assert.Equal(t, bob.ID, edges[0].EndNode)
+}
+
 // =============================================================================
 // CREATE Patterns - Comprehensive Coverage
 // =============================================================================

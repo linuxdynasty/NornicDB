@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -110,6 +111,18 @@ func TestSearchServices_HelperBranches(t *testing.T) {
 		require.Equal(t, 1, count)
 		require.Equal(t, 3, dims)
 		require.Equal(t, int64(12), bytes)
+	})
+
+	t.Run("shouldIgnoreSearchIndexingError recognizes shutdown errors", func(t *testing.T) {
+		db := &DB{}
+		require.True(t, db.shouldIgnoreSearchIndexingError(context.Canceled))
+		require.True(t, db.shouldIgnoreSearchIndexingError(storage.ErrStorageClosed))
+		require.True(t, db.shouldIgnoreSearchIndexingError(ErrClosed))
+		require.False(t, db.shouldIgnoreSearchIndexingError(nil))
+		require.False(t, db.shouldIgnoreSearchIndexingError(errors.New("boom")))
+
+		db.closed = true
+		require.True(t, db.shouldIgnoreSearchIndexingError(errors.New("after close")))
 	})
 }
 

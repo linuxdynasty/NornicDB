@@ -46,6 +46,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
+
+const cypherMutationConflictRetries = 5
 
 // Embedder interface for generating embeddings (abstracts Ollama/OpenAI).
 type Embedder interface {
@@ -83,6 +86,32 @@ type Server struct {
 
 	// Tool handlers
 	handlers map[string]ToolHandler
+}
+
+func runCypherMutationWithRetry(ctx context.Context, exec *cypher.StorageExecutor, query string, params map[string]interface{}) (*cypher.ExecuteResult, error) {
+	if exec == nil {
+		return nil, fmt.Errorf("cypher executor is nil")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < cypherMutationConflictRetries; attempt++ {
+		result, err := exec.Execute(ctx, query, params)
+		if err == nil {
+			return result, nil
+		}
+		if !errors.Is(err, storage.ErrConflict) {
+			return nil, err
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, storage.ErrConflict
 }
 
 // ServerConfig holds MCP server configuration.
@@ -1050,7 +1079,7 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 		// Create the edge via Cypher to capture receipt metadata
 		edgeType := strings.ReplaceAll(strings.ToUpper(relation), "`", "")
 		query := fmt.Sprintf("MATCH (a), (b) WHERE elementId(a) = $from AND elementId(b) = $to CREATE (a)-[r:%s]->(b) SET r += $props RETURN elementId(r) AS id", edgeType)
-		result, err := exec.Execute(ctx, query, map[string]interface{}{
+		result, err := runCypherMutationWithRetry(ctx, exec, query, map[string]interface{}{
 			"from":  fromNode.ID,
 			"to":    toNode.ID,
 			"props": edgeProps,
@@ -1177,7 +1206,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 					NextAction: "Task deleted.",
 				}, nil
 			}
-			result, err := exec.Execute(ctx,
+			result, err := runCypherMutationWithRetry(ctx, exec,
 				"MATCH (t:Task) WHERE elementId(t) = $id DETACH DELETE t RETURN count(t) AS deleted",
 				map[string]interface{}{"id": taskEID},
 			)
@@ -1247,7 +1276,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 		}
 		updates["updated_at"] = time.Now().Format(time.RFC3339)
 
-		result, err := exec.Execute(ctx,
+		result, err := runCypherMutationWithRetry(ctx, exec,
 			"MATCH (t:Task) WHERE elementId(t) = $id SET t += $props RETURN elementId(t) AS id",
 			map[string]interface{}{
 				"id":    taskEID,
@@ -1312,7 +1341,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 	var receipt interface{}
 	if exec != nil {
 		query := "CREATE (t:Task) SET t += $props RETURN elementId(t) AS id"
-		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
+		result, err := runCypherMutationWithRetry(ctx, exec, query, map[string]interface{}{"props": props})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create task: %w", err)
 		}
@@ -1337,7 +1366,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 					continue
 				}
 				depElementID := normalizeNodeElementID(depID)
-				if _, err := exec.Execute(ctx,
+				if _, err := runCypherMutationWithRetry(ctx, exec,
 					`MATCH (t:Task), (d:Task)
 					 WHERE elementId(t) = $id AND elementId(d) = $dep
 					 CREATE (t)-[:DEPENDS_ON]->(d)`,

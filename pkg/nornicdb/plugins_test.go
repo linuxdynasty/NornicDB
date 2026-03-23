@@ -30,13 +30,19 @@ func buildTestPluginSO(t *testing.T, dir, baseName, source string) string {
 	return soPath
 }
 
-func TestPluginFunctionRegistry(t *testing.T) {
-	// Clear any existing state
+func resetPluginTestState() {
 	pluginsMu.Lock()
-	pluginFunctions = make(map[string]PluginFunction)
 	loadedPlugins = make(map[string]*LoadedPlugin)
+	pluginFunctions = make(map[string]PluginFunction)
+	pluginProcedures = make(map[string]PluginProcedure)
 	pluginsInitialized = false
 	pluginsMu.Unlock()
+	heimdall.ResetSubsystemManagerForTests()
+}
+
+func TestPluginFunctionRegistry(t *testing.T) {
+	// Clear any existing state
+	resetPluginTestState()
 
 	t.Run("GetPluginFunction returns false for unregistered function", func(t *testing.T) {
 		_, found := GetPluginFunction("nonexistent.function")
@@ -161,12 +167,7 @@ func TestLoadPluginsFromDir(t *testing.T) {
 	})
 
 	t.Run("heimdall plugin is skipped when context is nil", func(t *testing.T) {
-		pluginsMu.Lock()
-		loadedPlugins = make(map[string]*LoadedPlugin)
-		pluginFunctions = make(map[string]PluginFunction)
-		pluginProcedures = make(map[string]PluginProcedure)
-		pluginsInitialized = false
-		pluginsMu.Unlock()
+		resetPluginTestState()
 
 		dir := t.TempDir()
 		_ = buildTestPluginSO(t, dir, "heimdall_skip_ctx", `package main
@@ -199,12 +200,7 @@ var Plugin P
 	})
 
 	t.Run("heimdall plugin loads when context is provided", func(t *testing.T) {
-		pluginsMu.Lock()
-		loadedPlugins = make(map[string]*LoadedPlugin)
-		pluginFunctions = make(map[string]PluginFunction)
-		pluginProcedures = make(map[string]PluginProcedure)
-		pluginsInitialized = false
-		pluginsMu.Unlock()
+		resetPluginTestState()
 
 		dir := t.TempDir()
 		_ = buildTestPluginSO(t, dir, "heimdall_with_ctx", `package main
@@ -542,12 +538,7 @@ var Plugin TestPlugin
 	})
 
 	t.Run("loadPluginsFromDir tolerates bad plugin files", func(t *testing.T) {
-		pluginsMu.Lock()
-		loadedPlugins = make(map[string]*LoadedPlugin)
-		pluginFunctions = make(map[string]PluginFunction)
-		pluginProcedures = make(map[string]PluginProcedure)
-		pluginsInitialized = false
-		pluginsMu.Unlock()
+		resetPluginTestState()
 
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.so"), []byte("bad"), 0644))
@@ -557,12 +548,7 @@ var Plugin TestPlugin
 	})
 
 	t.Run("LoadPluginsFromDir loads valid function plugin from directory", func(t *testing.T) {
-		pluginsMu.Lock()
-		loadedPlugins = make(map[string]*LoadedPlugin)
-		pluginFunctions = make(map[string]PluginFunction)
-		pluginProcedures = make(map[string]PluginProcedure)
-		pluginsInitialized = false
-		pluginsMu.Unlock()
+		resetPluginTestState()
 
 		dir := t.TempDir()
 		_ = buildTestPluginSO(t, dir, "dir_function_ok", `package main

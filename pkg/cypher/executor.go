@@ -1585,6 +1585,10 @@ func (w *transactionStorageWrapper) prefixNodeID(id storage.NodeID) storage.Node
 	if w.namespace == "" {
 		return id
 	}
+	prefix := w.namespace + w.separator
+	if strings.HasPrefix(string(id), prefix) {
+		return id
+	}
 	return storage.NodeID(w.namespace + w.separator + string(id))
 }
 
@@ -1602,6 +1606,10 @@ func (w *transactionStorageWrapper) unprefixNodeID(id storage.NodeID) storage.No
 
 func (w *transactionStorageWrapper) prefixEdgeID(id storage.EdgeID) storage.EdgeID {
 	if w.namespace == "" {
+		return id
+	}
+	prefix := w.namespace + w.separator
+	if strings.HasPrefix(string(id), prefix) {
 		return id
 	}
 	return storage.EdgeID(w.namespace + w.separator + string(id))

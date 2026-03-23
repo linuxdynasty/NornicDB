@@ -76,6 +76,9 @@ func (n *NamespacedEngine) GetInnerEngine() Engine {
 // prefixNodeID adds namespace prefix to a node ID.
 // "123" → "tenant_a:123"
 func (n *NamespacedEngine) prefixNodeID(id NodeID) NodeID {
+	if n.hasNodePrefix(id) {
+		return id
+	}
 	return NodeID(n.namespace + n.separator + string(id))
 }
 
@@ -92,6 +95,9 @@ func (n *NamespacedEngine) unprefixNodeID(id NodeID) NodeID {
 
 // prefixEdgeID adds namespace prefix to an edge ID.
 func (n *NamespacedEngine) prefixEdgeID(id EdgeID) EdgeID {
+	if n.hasEdgePrefix(id) {
+		return id
+	}
 	return EdgeID(n.namespace + n.separator + string(id))
 }
 

@@ -172,6 +172,48 @@ func TestBadgerEngine_RebuildAndPruneMVCC(t *testing.T) {
 	}
 }
 
+func TestBadgerTransaction_CreateEdge_AllowsReadableNodesWithoutMVCCHead(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+
+	startID := NodeID(prefixTestID("mvcc-headless-start"))
+	endID := NodeID(prefixTestID("mvcc-headless-end"))
+	_, err := engine.CreateNode(&Node{ID: startID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: endID, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		if err := txn.Delete(mvccNodeHeadKey(startID)); err != nil {
+			return err
+		}
+		return txn.Delete(mvccNodeHeadKey(endID))
+	}))
+
+	_, err = engine.GetNodeCurrentHead(startID)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetNodeCurrentHead(endID)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetNode(startID)
+	require.NoError(t, err)
+	_, err = engine.GetNode(endID)
+	require.NoError(t, err)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	require.NoError(t, tx.CreateEdge(&Edge{
+		ID:        EdgeID(prefixTestID("mvcc-headless-edge")),
+		StartNode: startID,
+		EndNode:   endID,
+		Type:      "LINKS",
+	}))
+	require.NoError(t, tx.Commit())
+
+	stored, err := engine.GetEdge(EdgeID(prefixTestID("mvcc-headless-edge")))
+	require.NoError(t, err)
+	require.Equal(t, startID, stored.StartNode)
+	require.Equal(t, endID, stored.EndNode)
+}
+
 func TestBadgerEngine_PruneMVCCVersions_UsesRetentionPolicyDefaults(t *testing.T) {
 	engine, err := NewBadgerEngineWithOptions(BadgerOptions{
 		InMemory: true,

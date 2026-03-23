@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - transactions now anchor reads to a begin-time MVCC snapshot and keep point reads, label scans, and graph visibility checks pinned to that snapshot
   - commit-time validation now checks node, edge, endpoint, and adjacency races against the transaction snapshot.
   - what this means: storage transactions now provide standard Snapshot Isolation semantics rather than best-effort read-your-writes only behavior.
+- **Cypher and MCP write-path stability**:
+  - compound `MATCH ... CREATE` execution now reuses the standard single-clause MATCH binding path for safe query shapes, while preserving special post-filter handling for `NOT (a)-[:TYPE]->(b)` modifiers
+  - MCP relationship/task mutations now retry bounded snapshot-conflict failures instead of surfacing transient storage conflicts directly.
+  - what this means: common ID-targeted relationship creation queries are more reliable under load without regressing migration-style anti-relationship filters.
 - **Temporal/search interaction**:
   - search indexing and rebuild flows now treat historical temporal versions as non-searchable and keep indexes current-only by default
   - temporal overlap validation now uses indexed predecessor/successor checks where supported.
@@ -47,10 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - fixed sparse post-prune historical lookups by persisting a retained-floor anchor in MVCC head metadata.
 - **Conflict normalization and retryability**:
   - fixed lower-level Badger conflict leakage by normalizing commit conflicts to `ErrConflict` with clearer concurrent-modification messages.
+- **Compound MATCH...CREATE query-shape regressions**:
+  - fixed comma-separated `MATCH (a), (b) WHERE elementId(...) ... CREATE ...` relationship creation so compound CREATE blocks reuse correct MATCH bindings
+  - fixed the related regression where migration-style `AND NOT (o)-[:TRANSLATES_TO]->(t)` filters were bypassed by the single-clause fast path.
 - **Graph-consistent concurrent delete behavior**:
   - fixed transaction validation so node deletes and adjacent edge changes cannot commit into a dangling-edge state across concurrent snapshots.
+- **MVCC endpoint validation fallback behavior**:
+  - fixed transaction edge creation/commit validation to accept readable endpoint nodes even when MVCC head metadata is temporarily missing, instead of incorrectly rejecting valid edges as dangling.
 - **Startup/restore maintenance reliability**:
   - fixed temporal rebuild/search maintenance ordering and added explicit MVCC head rebuild/bootstrap flows for current stores.
+- **Namespacing and shutdown hardening**:
+  - fixed duplicate namespace prefixing in transaction and namespaced storage wrappers by making node/edge prefix helpers idempotent
+  - fixed Badger `DB Closed` panics to return `ErrStorageClosed` and suppressed benign shutdown-time search indexing errors after database close/cancel.
+- **Plugin test isolation**:
+  - fixed Heimdall plugin loader tests by resetting the global subsystem manager between test cases so plugin registrations do not leak across subtests.
 
 ### Tests
 
@@ -58,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - indexed temporal `AS OF` lookups, temporal overlap validation, rebuilds, and pruning
   - MVCC visibility, head rebuilds, pruning, retained-floor behavior, and search invariance smoke tests
   - snapshot isolation semantics including read-your-writes, repeatable label scans, write-write conflicts, edge/node delete races, snapshot-consistent edge traversal, write skew, and contention aborts
-  - closure-based transaction retries and concurrent counter increments through `DB.Update()`.
+  - closure-based transaction retries and concurrent counter increments through `DB.Update()`
+  - compound `MATCH ... CREATE` elementId relationship creation, migration `NOT` relationship filters, missing-MVCC-head edge creation fallback, shutdown hardening, namespaced prefix idempotence, and plugin loader isolation.
 
 ### Documentation
 

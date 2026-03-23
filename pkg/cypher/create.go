@@ -1353,11 +1353,38 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 
 		// Split by MATCH keyword; matchPart is left intact (includes all WHERE clauses)
 		matchClauses := matchKeywordPattern.Split(matchPart, -1)
-
+		nonEmptyMatchClauses := make([]string, 0, len(matchClauses))
 		for _, clause := range matchClauses {
 			clause = strings.TrimSpace(clause)
-			if clause == "" {
-				continue
+			if clause != "" {
+				nonEmptyMatchClauses = append(nonEmptyMatchClauses, clause)
+			}
+		}
+
+		if len(allNodeVars) == 0 && len(allEdgeVars) == 0 && len(nonEmptyMatchClauses) == 1 {
+			shortcutSafe := true
+			if whereIdx := findKeywordIndex(nonEmptyMatchClauses[0], "WHERE"); whereIdx > 0 {
+				whereClause := strings.TrimSpace(nonEmptyMatchClauses[0][whereIdx+5:])
+				for _, term := range splitTopLevelAndCartesian(whereClause) {
+					if _, _, _, ok := parseNotRelationshipExistenceTerm(strings.TrimSpace(term)); ok {
+						shortcutSafe = false
+						break
+					}
+				}
+			}
+			if shortcutSafe {
+				clauseMatches, _, err := e.executeMatchForContext(ctx, "MATCH "+nonEmptyMatchClauses[0])
+				if err != nil {
+					return nil, err
+				}
+				allCombinations = clauseMatches
+				hadMatchPatterns = true
+			}
+		}
+
+		for _, clause := range nonEmptyMatchClauses {
+			if allCombinations != nil {
+				break
 			}
 
 			// Extract this segment's WHERE (only the first WHERE in this segment)

@@ -1024,7 +1024,17 @@ func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error
 		}
 		return deserializeNode(nodeBytes)
 	}
-	return tx.engine.GetNodeVisibleAt(nodeID, tx.readTS)
+	node, err := tx.engine.GetNodeVisibleAt(nodeID, tx.readTS)
+	if err == ErrNotFound {
+		fallbackNode, fallbackErr := tx.engine.GetNode(nodeID)
+		if fallbackErr == nil {
+			return fallbackNode, nil
+		}
+		if fallbackErr != ErrNotFound {
+			return nil, fallbackErr
+		}
+	}
+	return node, err
 }
 
 func (tx *BadgerTransaction) getCommittedEdgeLocked(edgeID EdgeID) (*Edge, error) {
@@ -1176,7 +1186,13 @@ func (tx *BadgerTransaction) checkEdgeEndpointConflicts(edge *Edge) error {
 		}
 		head, err := tx.engine.GetNodeCurrentHead(nodeID)
 		if err == ErrNotFound {
-			return ErrInvalidEdge
+			if _, nodeErr := tx.engine.GetNode(nodeID); nodeErr == nil {
+				continue
+			} else if nodeErr == ErrNotFound {
+				return ErrInvalidEdge
+			} else {
+				return nodeErr
+			}
 		}
 		if err != nil {
 			return err

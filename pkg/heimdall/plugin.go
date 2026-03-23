@@ -731,6 +731,15 @@ var (
 	globalManagerMu sync.Mutex
 )
 
+// ResetSubsystemManagerForTests clears the global subsystem manager singleton.
+// It is intended for test isolation when separate test cases need a fresh
+// registration state for Heimdall plugins.
+func ResetSubsystemManagerForTests() {
+	globalManagerMu.Lock()
+	defer globalManagerMu.Unlock()
+	globalManager = nil
+}
+
 // GetSubsystemManager returns the global subsystem manager (creates if needed).
 func GetSubsystemManager() *SubsystemManager {
 	globalManagerMu.Lock()

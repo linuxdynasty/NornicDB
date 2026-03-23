@@ -1,6 +1,11 @@
 package storage
 
-import "github.com/dgraph-io/badger/v4"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/dgraph-io/badger/v4"
+)
 
 func (b *BadgerEngine) ensureOpen() error {
 	b.mu.RLock()
@@ -16,12 +21,35 @@ func (b *BadgerEngine) withView(fn func(txn *badger.Txn) error) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
-	return b.db.View(fn)
+	return recoverBadgerClosedPanic(func() error {
+		return b.db.View(fn)
+	})
 }
 
 func (b *BadgerEngine) withUpdate(fn func(txn *badger.Txn) error) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
-	return b.db.Update(fn)
+	return recoverBadgerClosedPanic(func() error {
+		return b.db.Update(fn)
+	})
+}
+
+func recoverBadgerClosedPanic(fn func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if isBadgerClosedPanic(recovered) {
+				err = ErrStorageClosed
+				return
+			}
+			panic(recovered)
+		}
+	}()
+
+	return fn()
+}
+
+func isBadgerClosedPanic(recovered interface{}) bool {
+	message := fmt.Sprint(recovered)
+	return strings.Contains(message, "DB Closed")
 }
