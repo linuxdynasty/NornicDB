@@ -2855,7 +2855,7 @@ struct FirstRunWizard: View {
                         selected: $selectedPreset,
                         title: "Standard (Recommended)",
                         subtitle: "Great for most users",
-                        features: ["All basic features", "Vector embeddings", "Search reranking (BGE reranker model)"]
+                        features: ["All basic features", "Vector embeddings", "Balanced local AI setup"]
                     )
                     
                     PresetOption(
@@ -2863,7 +2863,7 @@ struct FirstRunWizard: View {
                         selected: $selectedPreset,
                         title: "Advanced",
                         subtitle: "Full AI capabilities",
-                        features: ["All standard features", "Heimdall AI guardian", "Auto-predictions", "Embedding + reranker models"]
+                        features: ["All standard features", "Search reranking", "Heimdall AI guardian", "Auto-predictions"]
                     )
                 }
                 .padding()
@@ -3276,7 +3276,8 @@ struct FirstRunWizard: View {
                     .padding()
                 }
                 
-                // Model requirements (reranker is required for Standard/Advanced even with Apple Intelligence).
+                // Model requirements vary by preset. Standard needs embeddings only;
+                // Advanced adds the reranker and Heimdall models.
                 if needsModels() {
                     Divider()
                     
@@ -3322,7 +3323,7 @@ struct FirstRunWizard: View {
                                 )
                             }
 
-                            if selectedPreset == .standard || selectedPreset == .advanced {
+                            if selectedPreset == .advanced {
                                 ModelDownloadRow(
                                     modelName: "BGE Reranker Model",
                                     fileName: "bge-reranker-v2-m3-Q4_K_M.gguf",
@@ -3440,9 +3441,9 @@ struct FirstRunWizard: View {
     private func allRequiredModelsExist() -> Bool {
         if selectedPreset == .standard {
             if config.useAppleIntelligence {
-                return bgeRerankerModelExists
+                return true
             }
-            return bgeModelExists && bgeRerankerModelExists
+            return bgeModelExists
         } else if selectedPreset == .advanced {
             if config.useAppleIntelligence {
                 return bgeRerankerModelExists && qwenModelExists
@@ -3572,7 +3573,7 @@ struct FirstRunWizard: View {
         case .basic:
             return (false, false, false, false)
         case .standard:
-            return (true, true, false, false)
+            return (true, false, false, false)
         case .advanced:
             return (true, true, true, true)
         }

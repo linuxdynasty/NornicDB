@@ -224,7 +224,7 @@ kmeans:
   enabled: false
 
 search_rerank:
-  enabled: true
+    enabled: false
   provider: "local"
   model: "bge-reranker-v2-m3-Q4_K_M.gguf"
 
@@ -253,7 +253,7 @@ export NORNICDB_HEIMDALL_ENABLED=true
 # Embedding configuration
 export NORNICDB_EMBEDDING_PROVIDER=local
 export NORNICDB_KMEANS_CLUSTERING_ENABLED=false
-export NORNICDB_SEARCH_RERANK_ENABLED=true
+export NORNICDB_SEARCH_RERANK_ENABLED=false
 export NORNICDB_SEARCH_RERANK_PROVIDER=local
 export NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3-Q4_K_M.gguf
 EOF
