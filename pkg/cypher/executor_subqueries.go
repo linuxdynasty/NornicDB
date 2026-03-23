@@ -1,6 +1,7 @@
 package cypher
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"regexp"
@@ -53,12 +54,10 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 	// Parse WHERE clause if present
 	whereIdx := findKeywordIndex(matchPattern, "WHERE")
 	var whereClause string
-	var patternOnly string
+	patternOnly := matchPattern
 	if whereIdx > 0 {
 		patternOnly = strings.TrimSpace(matchPattern[:whereIdx])
 		whereClause = strings.TrimSpace(matchPattern[whereIdx+5:])
-	} else {
-		patternOnly = matchPattern
 	}
 
 	// Parse node pattern to get variable name
@@ -67,32 +66,46 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 		return nil, fmt.Errorf("could not parse node pattern: %s", patternOnly)
 	}
 
-	// Get matching nodes
-	var nodes []*storage.Node
-	var err error
-	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-	} else {
-		nodes, err = e.storage.AllNodes()
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nodes: %w", err)
-	}
+	hasOuterPipelineClauses := findKeywordIndex(matchPart, "WITH") >= 0 ||
+		findKeywordIndex(matchPart, "RETURN") >= 0 ||
+		findKeywordIndex(matchPart, "ORDER BY") >= 0 ||
+		findKeywordIndex(matchPart, "SKIP") >= 0 ||
+		findKeywordIndex(matchPart, "LIMIT") >= 0
 
-	// Filter by properties
-	if len(nodePattern.properties) > 0 {
-		nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
-	}
-
-	// Filter by WHERE clause
-	if whereClause != "" {
-		var filtered []*storage.Node
-		for _, node := range nodes {
-			if e.evaluateWhere(node, nodePattern.variable, whereClause) {
-				filtered = append(filtered, node)
-			}
+	var (
+		nodes []*storage.Node
+		err   error
+	)
+	if !hasOuterPipelineClauses {
+		// Preserve id/property/index seed fast paths for simple MATCH ... CALL procedure forms.
+		nodes, err = e.seedNodesFromOuterMatch(ctx, matchPart, nodePattern.variable)
+		if err != nil {
+			return nil, fmt.Errorf("failed to evaluate outer MATCH bindings: %w", err)
 		}
-		nodes = filtered
+	} else {
+		// For pre-CALL WITH/ORDER/LIMIT query shapes, keep manual node correlation.
+		// seedNodesFromOuterMatch appends RETURN <seedVar> and is not equivalent for
+		// WITH-aliased pre-call pipelines.
+		if len(nodePattern.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		} else {
+			nodes, err = e.storage.AllNodes()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get nodes: %w", err)
+		}
+		if len(nodePattern.properties) > 0 {
+			nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
+		}
+		if whereClause != "" {
+			var filtered []*storage.Node
+			for _, node := range nodes {
+				if e.evaluateWhere(node, nodePattern.variable, whereClause) {
+					filtered = append(filtered, node)
+				}
+			}
+			nodes = filtered
+		}
 	}
 
 	// If no nodes match, return empty result
@@ -316,11 +329,6 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 	// Extract the outer MATCH + WHERE part (before CALL)
 	outerPart := strings.TrimSpace(cypher[:callIdx])
-	// Allow MATCH ... WITH ... CALL {} shapes by constraining this fast-path's
-	// seed extraction to the MATCH segment before the outer WITH.
-	if outerWithIdx := findKeywordIndex(outerPart, "WITH"); outerWithIdx > 0 {
-		outerPart = strings.TrimSpace(outerPart[:outerWithIdx])
-	}
 
 	// Parse the outer MATCH to get seed variable name.
 	// Then execute the outer query through the normal executor path so index seeks,
@@ -330,17 +338,18 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		return nil, fmt.Errorf("MATCH not found before CALL")
 	}
 
-	// Extract the pattern segment (up to optional WHERE) so we can parse the
-	// correlated variable name from the node pattern.
+	// Extract the pattern segment (up to optional WHERE/WITH/RETURN/ORDER/SKIP/LIMIT)
+	// so we can parse the correlated variable name from the node pattern while still
+	// executing the full outer segment (including WITH/LIMIT) for seed extraction.
 	matchPart := strings.TrimSpace(outerPart[matchIdx+5:]) // Skip "MATCH"
-	whereIdx := findKeywordIndex(matchPart, "WHERE")
-
-	var nodePatternStr string
-	if whereIdx > 0 {
-		nodePatternStr = strings.TrimSpace(matchPart[:whereIdx])
-	} else {
-		nodePatternStr = matchPart
+	nodePatternStr := matchPart
+	patternEnd := len(matchPart)
+	for _, kw := range []string{"WHERE", "WITH", "RETURN", "ORDER BY", "SKIP", "LIMIT"} {
+		if idx := findKeywordIndex(matchPart, kw); idx >= 0 && idx < patternEnd {
+			patternEnd = idx
+		}
 	}
+	nodePatternStr = strings.TrimSpace(matchPart[:patternEnd])
 
 	// Parse node pattern to get variable name
 	nodePattern := e.parseNodePattern(nodePatternStr)
@@ -405,9 +414,12 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 	// This removes repeated branch parsing overhead per seed row.
 	hasUnion := findKeywordIndex(subqueryBody, "UNION ALL") >= 0 || findKeywordIndex(subqueryBody, "UNION") >= 0
 	type parsedUnionBranch struct {
-		withVars  []string
-		innerBody string
-		hasWith   bool
+		withVars      []string
+		innerBody     string
+		hasWith       bool
+		isPureReturn  bool // precomputed: innerBody is just RETURN (no MATCH/CALL/etc.)
+		dependsOnSeed bool // precomputed: branch body references WITH-imported vars
+		isWrite       bool // precomputed: branch contains write keywords
 	}
 	var (
 		unionModeAll bool
@@ -429,11 +441,23 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 			if parseErr != nil {
 				return nil, fmt.Errorf("failed to parse UNION branch %d WITH imports: %w", i+1, parseErr)
 			}
-			unionParsed = append(unionParsed, parsedUnionBranch{
+			pb := parsedUnionBranch{
 				withVars:  withVars,
 				innerBody: innerBody,
 				hasWith:   hasWith,
-			})
+			}
+			// Precompute per-branch metadata once to avoid repeated keyword scans per seed row.
+			if hasWith {
+				pb.isWrite = callSubqueryQueryIsWrite(innerBody)
+				for _, varName := range withVars {
+					if isIdentifierReferenced(innerBody, varName) {
+						pb.dependsOnSeed = true
+						break
+					}
+				}
+				pb.isPureReturn = isCallSubqueryPureReturn(innerBody)
+			}
+			unionParsed = append(unionParsed, pb)
 		}
 	}
 
@@ -449,14 +473,8 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 			if !branch.hasWith || len(branch.withVars) == 0 {
 				continue
 			}
-			dependsOnSeed := false
-			for _, varName := range branch.withVars {
-				if isIdentifierReferenced(branch.innerBody, varName) {
-					dependsOnSeed = true
-					break
-				}
-			}
-			if dependsOnSeed || callSubqueryQueryIsWrite(branch.innerBody) {
+			// Use precomputed flags instead of re-scanning keywords.
+			if branch.dependsOnSeed || branch.isWrite {
 				continue
 			}
 			branchResult, err := subqueryExecutor.executeInternal(ctx, branch.innerBody, nil)
@@ -504,13 +522,26 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				} else if branch.hasWith {
 					// Fast path for simple correlated projection branch:
 					// WITH seedVar RETURN ...
+					// Uses precomputed isPureReturn flag to skip redundant keyword scans.
 					seedCols := []string{nodePattern.variable}
 					seedRow := []interface{}{seedNode}
-					if fastRes, ok, ferr := e.tryExecuteCorrelatedReturnProjection(seedRow, seedCols, branch.withVars, branch.innerBody); ok || ferr != nil {
-						if ferr != nil {
-							return nil, ferr
+					if branch.isPureReturn {
+						if fastRes, ok, ferr := e.tryExecuteCorrelatedReturnProjectionPreChecked(seedRow, seedCols, branch.withVars, branch.innerBody, true); ok || ferr != nil {
+							if ferr != nil {
+								return nil, ferr
+							}
+							branchResult = fastRes
 						}
-						branchResult = fastRes
+					} else {
+						fastRes, ok, ferr := e.tryExecuteCorrelatedReturnProjection(seedRow, seedCols, branch.withVars, branch.innerBody)
+						if !(ok || ferr != nil) {
+							// no-op
+						} else {
+							if ferr != nil {
+								return nil, ferr
+							}
+							branchResult = fastRes
+						}
 					}
 					if branchResult == nil {
 						branchBody := branch.innerBody
@@ -518,8 +549,13 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 						bindClauses := make([]string, 0, len(branch.withVars))
 						bindVars := make([]string, 0, len(branch.withVars))
 						for _, varName := range branch.withVars {
-							// WITH-imported vars that are never referenced in the branch body
-							// don't require correlation binds.
+							// Use precomputed dependsOnSeed flag. If the branch doesn't
+							// depend on seed at all, no correlation binds needed.
+							if !branch.dependsOnSeed {
+								continue
+							}
+							// Individual var check — still needed when branch has
+							// multiple WITH vars and only some reference the seed.
 							if !isIdentifierReferenced(branchBody, varName) {
 								continue
 							}
@@ -542,6 +578,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				if err != nil {
 					return nil, fmt.Errorf("failed correlated UNION subquery branch %d for seed %s: %w", i+1, seedID, err)
 				}
+				e.normalizeUnionBranchColumns(branch.innerBody, branchResult)
 
 				if perSeed == nil {
 					perSeed = &ExecuteResult{
@@ -686,30 +723,62 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 	// If there's something after CALL { }, process it (e.g., RETURN)
 	if afterCall != "" {
-		return e.processAfterCallSubquery(ctx, combinedResult, afterCall)
+		res, err := e.processAfterCallSubquery(ctx, combinedResult, afterCall)
+		return res, err
 	}
 
 	return combinedResult, nil
 }
 
-func (e *StorageExecutor) tryExecuteCorrelatedReturnProjection(seedRow []interface{}, seedCols []string, withVars []string, innerBody string) (*ExecuteResult, bool, error) {
+func (e *StorageExecutor) normalizeUnionBranchColumns(query string, result *ExecuteResult) {
+	if result == nil || len(result.Columns) > 0 {
+		return
+	}
+	if inferred := e.inferTopLevelReturnColumns(query); len(inferred) > 0 {
+		result.Columns = inferred
+		return
+	}
+	if inferred := e.inferExplainColumns(query); len(inferred) > 0 {
+		result.Columns = inferred
+	}
+}
+
+// isCallSubqueryPureReturn checks whether innerBody is a pure RETURN projection
+// with no MATCH/CALL/UNWIND/write clauses. Precomputed once per branch to avoid
+// repeated keyword scans on every seed row.
+func isCallSubqueryPureReturn(innerBody string) bool {
 	trimmed := strings.TrimSpace(innerBody)
-	if !strings.HasPrefix(strings.ToUpper(trimmed), "RETURN ") {
-		return nil, false, nil
+	// Accept any valid RETURN clause start (space/newline/tab after RETURN),
+	// not just a single-space prefix.
+	if findKeywordIndex(trimmed, "RETURN") != 0 {
+		return false
 	}
-	// Keep this strict: only projection branch, no extra clauses.
-	if findKeywordIndex(trimmed, "MATCH") >= 0 ||
-		findKeywordIndex(trimmed, "CALL") >= 0 ||
-		findKeywordIndex(trimmed, "UNWIND") >= 0 ||
-		findKeywordIndex(trimmed, "MERGE") >= 0 ||
-		findKeywordIndex(trimmed, "CREATE") >= 0 ||
-		findKeywordIndex(trimmed, "DELETE") >= 0 ||
-		findKeywordIndex(trimmed, "SET") >= 0 ||
-		findKeywordIndex(trimmed, "REMOVE") >= 0 ||
-		findKeywordIndex(trimmed, "WITH") >= 0 ||
-		findKeywordIndex(trimmed, "UNION") >= 0 {
-		return nil, false, nil
+	return findKeywordIndex(trimmed, "MATCH") < 0 &&
+		findKeywordIndex(trimmed, "CALL") < 0 &&
+		findKeywordIndex(trimmed, "UNWIND") < 0 &&
+		findKeywordIndex(trimmed, "MERGE") < 0 &&
+		findKeywordIndex(trimmed, "CREATE") < 0 &&
+		findKeywordIndex(trimmed, "DELETE") < 0 &&
+		findKeywordIndex(trimmed, "SET") < 0 &&
+		findKeywordIndex(trimmed, "REMOVE") < 0 &&
+		findKeywordIndex(trimmed, "WITH") < 0 &&
+		findKeywordIndex(trimmed, "UNION") < 0
+}
+
+func (e *StorageExecutor) tryExecuteCorrelatedReturnProjection(seedRow []interface{}, seedCols []string, withVars []string, innerBody string) (*ExecuteResult, bool, error) {
+	return e.tryExecuteCorrelatedReturnProjectionPreChecked(seedRow, seedCols, withVars, innerBody, false)
+}
+
+// tryExecuteCorrelatedReturnProjectionPreChecked is the same as tryExecuteCorrelatedReturnProjection
+// but accepts a precomputed isPureReturn flag to skip redundant keyword scanning.
+func (e *StorageExecutor) tryExecuteCorrelatedReturnProjectionPreChecked(seedRow []interface{}, seedCols []string, withVars []string, innerBody string, isPureReturn bool) (*ExecuteResult, bool, error) {
+	if !isPureReturn {
+		// Caller didn't precompute — do the check now.
+		if !isCallSubqueryPureReturn(innerBody) {
+			return nil, false, nil
+		}
 	}
+	trimmed := strings.TrimSpace(innerBody)
 
 	colIdx := make(map[string]int, len(seedCols))
 	for i, c := range seedCols {
@@ -790,11 +859,112 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 		return nil, fmt.Errorf("empty correlated variable")
 	}
 
+	trimmedOuter := strings.TrimSpace(outerPart)
+	hasOuterPipelineClauses := findKeywordIndex(trimmedOuter, "WITH") >= 0 ||
+		findKeywordIndex(trimmedOuter, "RETURN") >= 0 ||
+		findKeywordIndex(trimmedOuter, "ORDER BY") >= 0 ||
+		findKeywordIndex(trimmedOuter, "SKIP") >= 0 ||
+		findKeywordIndex(trimmedOuter, "LIMIT") >= 0
+
+	// Fast path for simple seeded MATCH queries without relationship patterns:
+	//   MATCH (v[:Label] {props}) [WHERE ...]
+	// including ID/property indexed WHERE predicates.
+	if findKeywordIndex(trimmedOuter, "MATCH") == 0 &&
+		!hasOuterPipelineClauses &&
+		!strings.Contains(trimmedOuter, "-[") &&
+		!strings.Contains(trimmedOuter, "--") {
+		matchBody := strings.TrimSpace(trimmedOuter[len("MATCH"):])
+		whereClause := ""
+		if whereIdx := findKeywordIndex(matchBody, "WHERE"); whereIdx >= 0 {
+			whereClause = strings.TrimSpace(matchBody[whereIdx+len("WHERE"):])
+			// Keep WHERE-only predicate text for fast-path parsing. Trailing clauses
+			// (WITH/RETURN/ORDER/SKIP/LIMIT) belong to the outer pipeline and must not
+			// be interpreted as part of the predicate expression.
+			whereEnd := len(whereClause)
+			for _, kw := range []string{"WITH", "RETURN", "ORDER BY", "SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(whereClause, kw); idx >= 0 && idx < whereEnd {
+					whereEnd = idx
+				}
+			}
+			whereClause = strings.TrimSpace(whereClause[:whereEnd])
+			matchBody = strings.TrimSpace(matchBody[:whereIdx])
+		}
+
+		np := e.parseNodePattern(matchBody)
+		if strings.EqualFold(strings.TrimSpace(np.variable), variable) {
+			if whereClause != "" {
+				// O(1) direct ID seek path for: MATCH (v) WHERE id(v)=...
+				if nodes, ok, err := e.tryCollectNodesFromIDEquality(np, whereClause); ok || err != nil {
+					return nodes, err
+				}
+				// O(k) batched ID seek path for: MATCH (v) WHERE id(v) IN $ids
+				if params := getParamsFromContext(ctx); params != nil {
+					if nodes, ok, err := e.tryCollectNodesFromIDInParam(np, whereClause, params); ok || err != nil {
+						return nodes, err
+					}
+				}
+				// Indexed IN-list path for batched correlated lookups.
+				if params := getParamsFromContext(ctx); params != nil {
+					if nodes, ok, err := e.tryCollectNodesFromPropertyIndexIn(np, whereClause, params); ok || err != nil {
+						return nodes, err
+					}
+				}
+				// Indexed equality path.
+				if nodes, ok, err := e.tryCollectNodesFromPropertyIndex(np, whereClause); ok || err != nil {
+					return nodes, err
+				}
+			}
+
+			// Label/property-only fast path.
+			var nodes []*storage.Node
+			if len(np.labels) > 0 {
+				var err error
+				nodes, err = e.storage.GetNodesByLabel(np.labels[0])
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				nodes = e.storage.GetAllNodes()
+			}
+			if len(np.properties) == 0 {
+				// If a non-indexable WHERE exists, defer to generic executor to preserve semantics.
+				if whereClause == "" {
+					return nodes, nil
+				}
+				seedQuery := strings.TrimSpace(outerPart) + " RETURN " + variable
+				outerRes, err := e.executeInternal(ctx, seedQuery, nil)
+				if err != nil {
+					return nil, err
+				}
+				return e.extractSeedNodesFromResult(outerRes, variable)
+			}
+			filtered := make([]*storage.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if n == nil {
+					continue
+				}
+				if e.nodeMatchesProps(n, np.properties) {
+					filtered = append(filtered, n)
+				}
+			}
+			// Same rule: preserve non-indexable WHERE semantics through generic executor.
+			if whereClause != "" {
+				seedQuery := strings.TrimSpace(outerPart) + " RETURN " + variable
+				outerRes, err := e.executeInternal(ctx, seedQuery, nil)
+				if err != nil {
+					return nil, err
+				}
+				return e.extractSeedNodesFromResult(outerRes, variable)
+			}
+			return filtered, nil
+		}
+	}
+
 	// Fast path for simple node-seed queries:
 	//   MATCH (v:Label {k: val})
 	// Avoids full executeInternal round-trip for seed extraction in correlated CALL.
-	trimmedOuter := strings.TrimSpace(outerPart)
 	if findKeywordIndex(trimmedOuter, "MATCH") == 0 &&
+		!hasOuterPipelineClauses &&
 		findKeywordIndex(trimmedOuter, "WHERE") == -1 &&
 		!strings.Contains(trimmedOuter, "-[") &&
 		!strings.Contains(trimmedOuter, "--") {
@@ -832,6 +1002,10 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 	if err != nil {
 		return nil, err
 	}
+	return e.extractSeedNodesFromResult(outerRes, variable)
+}
+
+func (e *StorageExecutor) extractSeedNodesFromResult(outerRes *ExecuteResult, variable string) ([]*storage.Node, error) {
 	if outerRes == nil || len(outerRes.Rows) == 0 {
 		return []*storage.Node{}, nil
 	}
@@ -852,20 +1026,73 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 		if colIdx >= len(row) {
 			continue
 		}
-		switch v := row[colIdx].(type) {
+		val := row[colIdx]
+		switch v := val.(type) {
 		case *storage.Node:
 			if v != nil {
 				seedNodes = append(seedNodes, v)
 			}
 		case map[string]interface{}:
-			if idRaw, ok := v["_nodeId"].(string); ok && idRaw != "" {
-				if n, getErr := e.storage.GetNode(storage.NodeID(idRaw)); getErr == nil && n != nil {
-					seedNodes = append(seedNodes, n)
+			if n := e.seedNodeFromMap(v); n != nil {
+				seedNodes = append(seedNodes, n)
+			}
+		case string:
+			if n := e.seedNodeFromIDString(v); n != nil {
+				seedNodes = append(seedNodes, n)
+			}
+		case []interface{}:
+			// Defensive: some execution paths can wrap a single projected value.
+			if len(v) == 1 {
+				switch wrapped := v[0].(type) {
+				case *storage.Node:
+					if wrapped != nil {
+						seedNodes = append(seedNodes, wrapped)
+					}
+				case map[string]interface{}:
+					if n := e.seedNodeFromMap(wrapped); n != nil {
+						seedNodes = append(seedNodes, n)
+					}
+				case string:
+					if n := e.seedNodeFromIDString(wrapped); n != nil {
+						seedNodes = append(seedNodes, n)
+					}
 				}
 			}
 		}
 	}
 	return seedNodes, nil
+}
+
+func (e *StorageExecutor) seedNodeFromMap(m map[string]interface{}) *storage.Node {
+	for _, key := range []string{"_nodeId", "id", "_id", "elementId"} {
+		if raw, ok := m[key]; ok {
+			if id, ok := raw.(string); ok && id != "" {
+				if n := e.seedNodeFromIDString(id); n != nil {
+					return n
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (e *StorageExecutor) seedNodeFromIDString(id string) *storage.Node {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	// Direct NodeID lookup first.
+	if n, err := e.storage.GetNode(storage.NodeID(id)); err == nil && n != nil {
+		return n
+	}
+	// Handle elementId-style values: "<prefix>:<db>:<id>" -> "<id>"
+	if last := strings.LastIndex(id, ":"); last >= 0 && last+1 < len(id) {
+		idTail := id[last+1:]
+		if n, err := e.storage.GetNode(storage.NodeID(idTail)); err == nil && n != nil {
+			return n
+		}
+	}
+	return nil
 }
 
 // executeCallSubquery executes a CALL {} subquery
@@ -2175,17 +2402,13 @@ func splitTopLevelResultModifiersCallSubquery(returnPart string) (projection str
 }
 
 func callSubqueryQueryIsWrite(query string) bool {
-	for i := 0; i < len(query); i++ {
-		if findKeywordIndex(query[i:], "CREATE") == 0 ||
-			findKeywordIndex(query[i:], "MERGE") == 0 ||
-			findKeywordIndex(query[i:], "DELETE") == 0 ||
-			findKeywordIndex(query[i:], "DETACH DELETE") == 0 ||
-			findKeywordIndex(query[i:], "SET") == 0 ||
-			findKeywordIndex(query[i:], "REMOVE") == 0 {
-			return true
-		}
-	}
-	return false
+	// Single-pass: check each write keyword once with findKeywordIndex from position 0.
+	// Previous implementation was O(n*m) — called findKeywordIndex from every byte offset.
+	return findKeywordIndex(query, "CREATE") >= 0 ||
+		findKeywordIndex(query, "MERGE") >= 0 ||
+		findKeywordIndex(query, "DELETE") >= 0 ||
+		findKeywordIndex(query, "SET") >= 0 ||
+		findKeywordIndex(query, "REMOVE") >= 0
 }
 
 func isSimpleIdentifier(s string) bool {
@@ -2528,8 +2751,12 @@ func (e *StorageExecutor) processCallSubqueryReturn(innerResult *ExecuteResult, 
 	}
 
 	// No aggregation - Project columns
-	newColumns := make([]string, 0, len(parts))
-	colIndices := make([]int, 0, len(parts))
+	type returnProjection struct {
+		alias string
+		expr  string
+		idx   int
+	}
+	projections := make([]returnProjection, 0, len(parts))
 
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -2543,27 +2770,39 @@ func (e *StorageExecutor) processCallSubqueryReturn(innerResult *ExecuteResult, 
 			expr = strings.TrimSpace(part[:asIdx])
 		}
 
-		newColumns = append(newColumns, alias)
-
-		// Find column index
-		if idx, ok := colMap[expr]; ok {
-			colIndices = append(colIndices, idx)
-		} else {
-			// Not found in inner result, append -1 (will be nil)
-			colIndices = append(colIndices, -1)
+		idx := -1
+		if colIdx, ok := colMap[expr]; ok {
+			idx = colIdx
 		}
+		projections = append(projections, returnProjection{
+			alias: alias,
+			expr:  expr,
+			idx:   idx,
+		})
 	}
 
 	// Project rows
+	newColumns := make([]string, len(projections))
+	for i := range projections {
+		newColumns[i] = projections[i].alias
+	}
 	newRows := make([][]interface{}, 0, len(innerResult.Rows))
 	for _, row := range innerResult.Rows {
-		newRow := make([]interface{}, len(colIndices))
-		for i, idx := range colIndices {
-			if idx >= 0 && idx < len(row) {
-				newRow[i] = row[idx]
-			} else {
-				newRow[i] = nil
+		// Build expression context once per row for computed projections.
+		ctx := make(map[string]interface{}, len(innerResult.Columns))
+		for i, col := range innerResult.Columns {
+			if i < len(row) {
+				ctx[col] = row[i]
 			}
+		}
+
+		newRow := make([]interface{}, len(projections))
+		for i, p := range projections {
+			if p.idx >= 0 && p.idx < len(row) {
+				newRow[i] = row[p.idx]
+				continue
+			}
+			newRow[i] = e.evaluateReturnExprInContext(p.expr, ctx)
 		}
 		newRows = append(newRows, newRow)
 	}
@@ -2584,46 +2823,46 @@ func (e *StorageExecutor) processCallSubqueryReturn(innerResult *ExecuteResult, 
 
 // applyResultModifiers applies ORDER BY, LIMIT, SKIP to a result
 func (e *StorageExecutor) applyResultModifiers(result *ExecuteResult, modifiers string) (*ExecuteResult, error) {
-	// Apply ORDER BY
-	if orderByIdx := findKeywordIndex(modifiers, "ORDER BY"); orderByIdx != -1 {
-		result = e.applyOrderByToResult(result, modifiers[orderByIdx:])
-	}
+	orderByCol, orderByDesc, hasOrderBy := parseOrderByModifier(modifiers)
+	skip, hasSkip := parseIntModifier(modifiers, "SKIP")
+	limit, hasLimit := parseIntModifier(modifiers, "LIMIT")
 
-	// Apply SKIP
-	if skipIdx := findKeywordIndex(modifiers, "SKIP"); skipIdx != -1 {
-		skipPart := strings.TrimSpace(modifiers[skipIdx+4:])
-		// Find next keyword
-		nextKw := len(skipPart)
-		for _, kw := range []string{" LIMIT", " ORDER"} {
-			if idx := strings.Index(strings.ToUpper(skipPart), kw); idx != -1 && idx < nextKw {
-				nextKw = idx
+	if hasOrderBy && hasLimit && limit >= 0 {
+		if colIdx := findColumnIndexByName(result.Columns, orderByCol); colIdx >= 0 {
+			k := limit
+			if hasSkip && skip > 0 {
+				k += skip
 			}
-		}
-		skipStr := strings.TrimSpace(skipPart[:nextKw])
-		if skip, err := strconv.Atoi(skipStr); err == nil && skip > 0 {
-			if skip < len(result.Rows) {
-				result.Rows = result.Rows[skip:]
-			} else {
+			switch {
+			case k <= 0:
 				result.Rows = [][]interface{}{}
+				return result, nil
+			case k < len(result.Rows):
+				result.Rows = selectTopKRowsForOrder(result.Rows, colIdx, orderByDesc, k)
+			default:
+				result = e.applyOrderByToResult(result, modifiers)
 			}
+		} else {
+			// Preserve prior behavior for unknown ORDER BY columns.
+			result = e.applyOrderByToResult(result, modifiers)
+		}
+	} else if hasOrderBy {
+		result = e.applyOrderByToResult(result, modifiers)
+	}
+
+	// Apply SKIP after ORDER BY/TOP-K.
+	if hasSkip && skip > 0 {
+		if skip < len(result.Rows) {
+			result.Rows = result.Rows[skip:]
+		} else {
+			result.Rows = [][]interface{}{}
 		}
 	}
 
-	// Apply LIMIT
-	if limitIdx := findKeywordIndex(modifiers, "LIMIT"); limitIdx != -1 {
-		limitPart := strings.TrimSpace(modifiers[limitIdx+5:])
-		// Find next keyword
-		nextKw := len(limitPart)
-		for _, kw := range []string{" SKIP", " ORDER"} {
-			if idx := strings.Index(strings.ToUpper(limitPart), kw); idx != -1 && idx < nextKw {
-				nextKw = idx
-			}
-		}
-		limitStr := strings.TrimSpace(limitPart[:nextKw])
-		if limit, err := strconv.Atoi(limitStr); err == nil && limit >= 0 {
-			if limit < len(result.Rows) {
-				result.Rows = result.Rows[:limit]
-			}
+	// Apply LIMIT after ORDER BY/TOP-K.
+	if hasLimit && limit >= 0 {
+		if limit < len(result.Rows) {
+			result.Rows = result.Rows[:limit]
 		}
 	}
 
@@ -2747,4 +2986,161 @@ func compareValuesForSort(a, b interface{}) int {
 		return 1
 	}
 	return 0
+}
+
+func parseOrderByModifier(modifiers string) (column string, descending bool, ok bool) {
+	orderByIdx := findKeywordIndex(modifiers, "ORDER BY")
+	if orderByIdx == -1 {
+		return "", false, false
+	}
+	clause := strings.TrimSpace(modifiers[orderByIdx+8:])
+	// Find end of ORDER BY (before LIMIT, SKIP)
+	endIdx := len(clause)
+	for _, kw := range []string{" LIMIT", " SKIP"} {
+		if idx := strings.Index(strings.ToUpper(clause), kw); idx != -1 && idx < endIdx {
+			endIdx = idx
+		}
+	}
+	clause = strings.TrimSpace(clause[:endIdx])
+	parts := strings.Fields(clause)
+	if len(parts) == 0 {
+		return "", false, false
+	}
+	col := strings.TrimSuffix(strings.TrimSpace(parts[0]), ",")
+	descTok := ""
+	if len(parts) > 1 {
+		descTok = strings.TrimSuffix(strings.TrimSpace(parts[1]), ",")
+	}
+	desc := strings.EqualFold(descTok, "DESC")
+	return col, desc, col != ""
+}
+
+func parseIntModifier(modifiers, keyword string) (value int, ok bool) {
+	idx := findKeywordIndex(modifiers, keyword)
+	if idx == -1 {
+		return 0, false
+	}
+	kwPart := strings.TrimSpace(modifiers[idx+len(keyword):])
+	nextKw := len(kwPart)
+	for _, kw := range []string{" LIMIT", " SKIP", " ORDER"} {
+		if kw == " "+keyword {
+			continue
+		}
+		if kidx := strings.Index(strings.ToUpper(kwPart), kw); kidx != -1 && kidx < nextKw {
+			nextKw = kidx
+		}
+	}
+	vs := strings.TrimSpace(kwPart[:nextKw])
+	v, err := strconv.Atoi(vs)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+func findColumnIndexByName(cols []string, name string) int {
+	for i, col := range cols {
+		if col == name {
+			return i
+		}
+	}
+	return -1
+}
+
+type rowRefForOrder struct {
+	row []interface{}
+	idx int
+}
+
+func compareRowRefsForOrder(a, b rowRefForOrder, colIdx int, descending bool) int {
+	var av, bv interface{}
+	if colIdx >= 0 && colIdx < len(a.row) {
+		av = a.row[colIdx]
+	}
+	if colIdx >= 0 && colIdx < len(b.row) {
+		bv = b.row[colIdx]
+	}
+	cmp := compareValuesForSort(av, bv)
+	if descending {
+		cmp = -cmp
+	}
+	if cmp != 0 {
+		return cmp
+	}
+	// Stable tie-breaker by original position.
+	if a.idx < b.idx {
+		return -1
+	}
+	if a.idx > b.idx {
+		return 1
+	}
+	return 0
+}
+
+type topKRowsHeap struct {
+	items      []rowRefForOrder
+	colIdx     int
+	descending bool
+}
+
+func (h topKRowsHeap) Len() int { return len(h.items) }
+func (h topKRowsHeap) Less(i, j int) bool {
+	// Keep worst row at heap top.
+	return compareRowRefsForOrder(h.items[i], h.items[j], h.colIdx, h.descending) > 0
+}
+func (h topKRowsHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *topKRowsHeap) Push(x interface{}) {
+	h.items = append(h.items, x.(rowRefForOrder))
+}
+func (h *topKRowsHeap) Pop() interface{} {
+	n := len(h.items)
+	it := h.items[n-1]
+	h.items = h.items[:n-1]
+	return it
+}
+
+func selectTopKRowsForOrder(rows [][]interface{}, colIdx int, descending bool, k int) [][]interface{} {
+	if k <= 0 || len(rows) == 0 {
+		return [][]interface{}{}
+	}
+	if k >= len(rows) {
+		out := make([][]interface{}, len(rows))
+		copy(out, rows)
+		sort.SliceStable(out, func(i, j int) bool {
+			ri := rowRefForOrder{row: out[i], idx: i}
+			rj := rowRefForOrder{row: out[j], idx: j}
+			return compareRowRefsForOrder(ri, rj, colIdx, descending) < 0
+		})
+		return out
+	}
+
+	h := &topKRowsHeap{
+		items:      make([]rowRefForOrder, 0, k),
+		colIdx:     colIdx,
+		descending: descending,
+	}
+	for i, row := range rows {
+		ref := rowRefForOrder{row: row, idx: i}
+		if h.Len() < k {
+			heap.Push(h, ref)
+			continue
+		}
+		// Replace current worst when new row is better.
+		if compareRowRefsForOrder(ref, h.items[0], colIdx, descending) < 0 {
+			h.items[0] = ref
+			heap.Fix(h, 0)
+		}
+	}
+
+	selected := make([]rowRefForOrder, len(h.items))
+	copy(selected, h.items)
+	sort.SliceStable(selected, func(i, j int) bool {
+		return compareRowRefsForOrder(selected[i], selected[j], colIdx, descending) < 0
+	})
+
+	out := make([][]interface{}, 0, len(selected))
+	for _, it := range selected {
+		out = append(out, it.row)
+	}
+	return out
 }

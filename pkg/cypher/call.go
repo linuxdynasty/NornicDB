@@ -21,9 +21,10 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/convert"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -415,36 +416,64 @@ func (e *StorageExecutor) executeCallTail(ctx context.Context, seed *ExecuteResu
 	if strings.TrimSpace(tail) == "" {
 		return seed, nil
 	}
+	if len(seed.Rows) == 0 {
+		cols := expectedReturnColumnsFromTail(tail)
+		if len(cols) == 0 {
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+		}
+		return &ExecuteResult{Columns: cols, Rows: [][]interface{}{}}, nil
+	}
 
 	expectedCols := expectedReturnColumnsFromTail(tail)
+	usedCols := make([]int, 0, len(seed.Columns))
+	for i, col := range seed.Columns {
+		if isIdentifierReferenced(tail, col) {
+			usedCols = append(usedCols, i)
+		}
+	}
+
+	// Fast path: execute the full tail once with all seed rows bound via UNWIND
+	// or batched IN. This avoids per-row tail re-execution and preserves global
+	// ORDER/LIMIT scope. Write tails (SET/CREATE/DELETE/MERGE/REMOVE) must use
+	// the per-row path to preserve transactional write-per-row semantics.
+	if !isPotentialWriteTail(tail) {
+		if setBased, ok := e.executeCallTailSetBased(ctx, seed, tail, usedCols, expectedCols); ok {
+			return setBased, nil
+		}
+	}
+	// Fallback fast path for read-only tails: execute per-row tails concurrently.
+	// This preserves current semantics while reducing wall-clock fixed cost for
+	// CALL ... YIELD ... MATCH/RETURN tails that cannot use the set-based route.
+	if len(seed.Rows) > 1 && !isPotentialWriteTail(tail) {
+		if parallel, ok, err := e.executeCallTailParallel(ctx, seed, tail, usedCols, expectedCols); ok || err != nil {
+			return parallel, err
+		}
+	}
 
 	var combined *ExecuteResult
 	for _, row := range seed.Rows {
 		params := map[string]interface{}{}
-		prefix := make([]string, 0, len(seed.Columns)+2)
-		withBindings := make([]string, 0, len(seed.Columns))
-		predicates := make([]string, 0, len(seed.Columns))
+		prefix := make([]string, 0, len(usedCols)+2)
+		withBindings := make([]string, 0, len(usedCols))
+		predicates := make([]string, 0, len(usedCols))
 		tailIsMatch := tailStartsWithMatchClause(tail)
 
-		for i, col := range seed.Columns {
+		for _, i := range usedCols {
 			if i >= len(row) {
 				continue
 			}
-			if !isIdentifierReferenced(tail, col) {
-				continue
-			}
+			col := seed.Columns[i]
 			val := row[i]
-			if val == nil {
-				continue
-			}
-			if node, ok := val.(*storage.Node); ok && node != nil {
+			if node, ok := val.(*storage.Node); ok {
 				pname := "seed_id_" + col
-				params[pname] = string(node.ID)
+				if node != nil {
+					params[pname] = string(node.ID)
+				} else {
+					params[pname] = nil
+				}
 				if tailIsMatch {
 					predicates = append(predicates, fmt.Sprintf("id(%s) = $%s", col, pname))
 				} else {
-					// Bind yielded node variables through explicit id() matches so they can
-					// be referenced by non-MATCH trailing clause shapes (SET/CREATE/UNWIND/etc).
 					prefix = append(prefix, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", col, col, pname))
 					withBindings = append(withBindings, col)
 				}
@@ -485,12 +514,433 @@ func (e *StorageExecutor) executeCallTail(ctx context.Context, seed *ExecuteResu
 	return combined, nil
 }
 
+type callTailRowResult struct {
+	idx int
+	res *ExecuteResult
+	err error
+}
+
+func (e *StorageExecutor) executeCallTailParallel(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	usedCols []int,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	if len(usedCols) == 0 || len(seed.Rows) <= 1 {
+		return nil, false, nil
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > len(seed.Rows) {
+		workers = len(seed.Rows)
+	}
+	type job struct {
+		idx int
+		row []interface{}
+	}
+	jobs := make(chan job, len(seed.Rows))
+	results := make(chan callTailRowResult, len(seed.Rows))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				res, err := e.executeCallTailSingleRow(ctx, seed.Columns, j.row, tail, usedCols, expectedCols)
+				results <- callTailRowResult{idx: j.idx, res: res, err: err}
+			}
+		}()
+	}
+	for i, row := range seed.Rows {
+		jobs <- job{idx: i, row: row}
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	ordered := make([]*ExecuteResult, len(seed.Rows))
+	for rr := range results {
+		if rr.err != nil {
+			return nil, true, rr.err
+		}
+		ordered[rr.idx] = rr.res
+	}
+	var combined *ExecuteResult
+	for _, inner := range ordered {
+		if inner == nil {
+			continue
+		}
+		if combined == nil {
+			combined = &ExecuteResult{
+				Columns: append([]string{}, inner.Columns...),
+				Rows:    make([][]interface{}, 0, len(inner.Rows)),
+			}
+		}
+		combined.Rows = append(combined.Rows, inner.Rows...)
+	}
+	if combined == nil {
+		if len(expectedCols) > 0 {
+			return &ExecuteResult{Columns: append([]string{}, expectedCols...), Rows: [][]interface{}{}}, true, nil
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, true, nil
+	}
+	return combined, true, nil
+}
+
+func (e *StorageExecutor) executeCallTailSingleRow(
+	ctx context.Context,
+	seedCols []string,
+	row []interface{},
+	tail string,
+	usedCols []int,
+	expectedCols []string,
+) (*ExecuteResult, error) {
+	params := map[string]interface{}{}
+	prefix := make([]string, 0, len(usedCols)+2)
+	withBindings := make([]string, 0, len(usedCols))
+	predicates := make([]string, 0, len(usedCols))
+	tailIsMatch := tailStartsWithMatchClause(tail)
+
+	for _, i := range usedCols {
+		if i >= len(row) {
+			continue
+		}
+		col := seedCols[i]
+		val := row[i]
+		if node, ok := val.(*storage.Node); ok {
+			pname := "seed_id_" + col
+			if node != nil {
+				params[pname] = string(node.ID)
+			} else {
+				params[pname] = nil
+			}
+			if tailIsMatch {
+				predicates = append(predicates, fmt.Sprintf("id(%s) = $%s", col, pname))
+			} else {
+				prefix = append(prefix, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", col, col, pname))
+				withBindings = append(withBindings, col)
+			}
+			continue
+		}
+		pname := "seed_" + col
+		params[pname] = val
+		withBindings = append(withBindings, fmt.Sprintf("$%s AS %s", pname, col))
+	}
+
+	query := buildCallTailPredicateInjection(tail, predicates)
+	if len(withBindings) > 0 {
+		prefix = append(prefix, "WITH "+strings.Join(withBindings, ", "))
+	}
+	if len(prefix) > 0 {
+		query = strings.Join(prefix, " ") + " " + query
+	}
+
+	inner, err := e.executeInternal(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(inner.Columns) {
+		inner.Columns = append([]string{}, expectedCols...)
+	}
+	return inner, nil
+}
+
+func isPotentialWriteTail(tail string) bool {
+	t := strings.ToUpper(strings.TrimSpace(tail))
+	return strings.Contains(t, " CREATE ") ||
+		strings.Contains(t, " MERGE ") ||
+		strings.Contains(t, " DELETE ") ||
+		strings.Contains(t, " SET ") ||
+		strings.Contains(t, " REMOVE ")
+}
+
+func (e *StorageExecutor) executeCallTailSetBased(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	usedCols []int,
+	expectedCols []string,
+) (*ExecuteResult, bool) {
+	if len(usedCols) == 0 {
+		return nil, false
+	}
+	if !tailStartsWithMatchClause(tail) {
+		return nil, false
+	}
+	relationshipTail := strings.Contains(tail, "-[") || strings.Contains(tail, "]-")
+
+	params := map[string]interface{}{}
+	rowsParam := make([]map[string]interface{}, 0, len(seed.Rows))
+
+	nodeCols := make([]string, 0, len(usedCols))
+	scalarCols := make([]string, 0, len(usedCols))
+
+	for _, idx := range usedCols {
+		col := seed.Columns[idx]
+		isNode := false
+		for _, row := range seed.Rows {
+			if idx >= len(row) {
+				continue
+			}
+			if _, ok := row[idx].(*storage.Node); ok {
+				isNode = true
+				break
+			}
+		}
+		if isNode {
+			nodeCols = append(nodeCols, col)
+		} else {
+			scalarCols = append(scalarCols, col)
+		}
+	}
+
+	for _, row := range seed.Rows {
+		seedMap := make(map[string]interface{}, len(usedCols))
+		for _, idx := range usedCols {
+			if idx >= len(row) {
+				continue
+			}
+			col := seed.Columns[idx]
+			val := row[idx]
+			if node, ok := val.(*storage.Node); ok {
+				key := "seed_id_" + col
+				if node != nil {
+					seedMap[key] = string(node.ID)
+				} else {
+					seedMap[key] = nil
+				}
+				continue
+			}
+			seedMap["seed_"+col] = val
+		}
+		rowsParam = append(rowsParam, seedMap)
+	}
+	params["__seed_rows"] = rowsParam
+
+	if relationshipTail {
+		// Relationship-safe batched path:
+		// Inject id(nodeVar) IN $__seed_ids into the existing tail MATCH's WHERE clause
+		// instead of prepending a separate bare MATCH (node). This preserves label
+		// constraints from the original pattern (e.g. MATCH (node:OriginalText)-[...]->(...))
+		// so the engine can use label-index seeks instead of full node scan.
+		// Scalar vars (like score) are projected via CASE id(nodeVar) ... in the first WITH.
+		if len(nodeCols) != 1 {
+			return nil, false
+		}
+		nodeVar := nodeCols[0]
+		seedIDs := make([]string, 0, len(rowsParam))
+		for _, r := range rowsParam {
+			if idRaw, ok := r["seed_id_"+nodeVar]; ok {
+				if s, ok := idRaw.(string); ok && s != "" {
+					seedIDs = append(seedIDs, s)
+				}
+			}
+		}
+		if len(seedIDs) == 0 {
+			if len(expectedCols) > 0 {
+				return &ExecuteResult{Columns: append([]string{}, expectedCols...), Rows: [][]interface{}{}}, true
+			}
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, true
+		}
+		paramsRel := map[string]interface{}{
+			"__seed_ids": seedIDs,
+		}
+		rewritten := strings.TrimSpace(tail)
+		for _, scol := range scalarCols {
+			// Build CASE id(nodeVar) WHEN '<id>' THEN <value> ... END AS <scol>
+			m := make(map[string]interface{}, len(rowsParam))
+			for _, r := range rowsParam {
+				idv, okID := r["seed_id_"+nodeVar].(string)
+				if !okID || idv == "" {
+					continue
+				}
+				m[idv] = r["seed_"+scol]
+			}
+			caseExpr := buildIDCaseExpression(nodeVar, m)
+			var ok bool
+			rewritten, ok = rewriteFirstWithScalar(rewritten, scol, caseExpr)
+			if !ok {
+				return nil, false
+			}
+		}
+		// Inject the IN predicate into the tail's existing MATCH WHERE clause
+		// so label constraints are preserved. Previous approach prepended a bare
+		// MATCH (node) which caused full node scans on real datasets.
+		inPredicate := fmt.Sprintf("id(%s) IN $__seed_ids", nodeVar)
+		query := buildCallTailPredicateInjection(rewritten, []string{inPredicate})
+		res, err := e.executeInternal(ctx, query, paramsRel)
+		if err != nil {
+			return nil, false
+		}
+		if len(expectedCols) > 0 && len(expectedCols) == len(res.Columns) {
+			res.Columns = append([]string{}, expectedCols...)
+		}
+		return res, true
+	}
+
+	prefix := make([]string, 0, 3+len(scalarCols))
+	prefix = append(prefix, "WITH $__seed_rows AS __seed_rows")
+	prefix = append(prefix, "UNWIND __seed_rows AS __seed")
+	withBindings := make([]string, 0, len(scalarCols)+1)
+	withBindings = append(withBindings, "__seed")
+	for _, col := range scalarCols {
+		withBindings = append(withBindings, fmt.Sprintf("__seed.seed_%s AS %s", col, col))
+	}
+	if len(withBindings) > 0 {
+		prefix = append(prefix, "WITH "+strings.Join(withBindings, ", "))
+	}
+
+	predicates := make([]string, 0, len(nodeCols))
+	for _, col := range nodeCols {
+		predicates = append(predicates, fmt.Sprintf("id(%s) = __seed.seed_id_%s", col, col))
+	}
+	tailWithPredicates := buildCallTailPredicateInjection(strings.TrimSpace(tail), predicates)
+	query := strings.Join(prefix, " ") + " " + tailWithPredicates
+	res, err := e.executeInternal(ctx, query, params)
+	if err != nil {
+		return nil, false
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(res.Columns) {
+		res.Columns = append([]string{}, expectedCols...)
+	}
+	return res, true
+}
+
+func buildIDCaseExpression(nodeVar string, valueByID map[string]interface{}) string {
+	// Deterministic order for stable query text/testing
+	ids := make([]string, 0, len(valueByID))
+	for k := range valueByID {
+		ids = append(ids, k)
+	}
+	// simple insertion sort avoids extra imports
+	for i := 1; i < len(ids); i++ {
+		j := i
+		for j > 0 && ids[j] < ids[j-1] {
+			ids[j], ids[j-1] = ids[j-1], ids[j]
+			j--
+		}
+	}
+	var b strings.Builder
+	b.WriteString("CASE id(")
+	b.WriteString(nodeVar)
+	b.WriteString(")")
+	for _, id := range ids {
+		b.WriteString(" WHEN '")
+		b.WriteString(strings.ReplaceAll(id, "'", "\\'"))
+		b.WriteString("' THEN ")
+		b.WriteString(cypherLiteral(valueByID[id]))
+	}
+	b.WriteString(" ELSE null END")
+	return b.String()
+}
+
+func rewriteFirstWithScalar(tail, scalarVar, caseExpr string) (string, bool) {
+	withIdx := findKeywordIndexInContext(tail, "WITH")
+	if withIdx == -1 {
+		return "", false
+	}
+	afterWith := strings.TrimSpace(tail[withIdx+len("WITH"):])
+	if afterWith == "" {
+		return "", false
+	}
+	end := len(afterWith)
+	for _, kw := range []string{"WHERE", "RETURN", "ORDER", "SKIP", "LIMIT", "UNWIND", "MATCH", "OPTIONAL", "CALL", "SET", "REMOVE", "DELETE", "DETACH", "MERGE", "CREATE"} {
+		if idx := findKeywordIndexInContext(afterWith, kw); idx != -1 && idx < end {
+			end = idx
+		}
+	}
+	withClause := strings.TrimSpace(afterWith[:end])
+	items := splitReturnExpressions(withClause)
+	if len(items) == 0 {
+		return "", false
+	}
+	replaced := false
+	for i := range items {
+		item := strings.TrimSpace(items[i])
+		if item == scalarVar {
+			items[i] = caseExpr + " AS " + scalarVar
+			replaced = true
+		}
+	}
+	if !replaced {
+		return "", false
+	}
+	newWith := "WITH " + strings.Join(items, ", ")
+	rest := strings.TrimSpace(afterWith[end:])
+	prefix := strings.TrimSpace(tail[:withIdx])
+	if prefix == "" {
+		if rest == "" {
+			return newWith, true
+		}
+		return newWith + " " + rest, true
+	}
+	if rest == "" {
+		return prefix + " " + newWith, true
+	}
+	return prefix + " " + newWith + " " + rest, true
+}
+
+func cypherLiteral(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "'" + strings.ReplaceAll(t, "'", "\\'") + "'"
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'g', -1, 32)
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "\\'") + "'"
+	}
+}
+
 func isIdentifierReferenced(query, identifier string) bool {
 	if strings.TrimSpace(identifier) == "" {
 		return false
 	}
-	pat := `\b` + regexp.QuoteMeta(identifier) + `\b`
-	return regexp.MustCompile(pat).FindStringIndex(query) != nil
+	q := query
+	id := identifier
+	idLen := len(id)
+	if idLen == 0 || len(q) < idLen {
+		return false
+	}
+	for i := 0; i <= len(q)-idLen; i++ {
+		if q[i:i+idLen] != id {
+			continue
+		}
+		if i > 0 && isIdentChar(q[i-1]) {
+			continue
+		}
+		end := i + idLen
+		if end < len(q) && isIdentChar(q[end]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'A' && b <= 'Z') ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_'
 }
 
 // findKeywordIndexInContext finds a keyword in context, avoiding matches inside quotes
@@ -719,6 +1169,28 @@ func (e *StorageExecutor) applyReturnToYieldResult(result *ExecuteResult, return
 // Handles: direct references (score), property access (node.id), and functions.
 func (e *StorageExecutor) evaluateReturnExprInContext(expr string, ctx map[string]interface{}) interface{} {
 	expr = strings.TrimSpace(expr)
+
+	// Literal handling
+	if strings.EqualFold(expr, "null") {
+		return nil
+	}
+	if strings.EqualFold(expr, "true") {
+		return true
+	}
+	if strings.EqualFold(expr, "false") {
+		return false
+	}
+	if len(expr) >= 2 {
+		if (expr[0] == '\'' && expr[len(expr)-1] == '\'') || (expr[0] == '"' && expr[len(expr)-1] == '"') {
+			return expr[1 : len(expr)-1]
+		}
+	}
+	if i, err := strconv.ParseInt(expr, 10, 64); err == nil {
+		return i
+	}
+	if f, err := strconv.ParseFloat(expr, 64); err == nil {
+		return f
+	}
 
 	// Direct reference to a yielded value
 	if val, ok := ctx[expr]; ok {

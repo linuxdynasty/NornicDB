@@ -2576,6 +2576,51 @@ func TestSubqueryHelpers_BatchingAndResultModifiers_Branches(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, modified.Rows, 1)
 	assert.Equal(t, "b", modified.Rows[0][0])
+
+	// Top-k post-processing should preserve ORDER BY + LIMIT semantics.
+	topKInner := &ExecuteResult{
+		Columns: []string{"name", "age"},
+		Rows:    make([][]interface{}, 0, 200),
+		Stats:   &QueryStats{},
+	}
+	for i := 0; i < 200; i++ {
+		age := int64((i * 37) % 97)
+		topKInner.Rows = append(topKInner.Rows, []interface{}{fmt.Sprintf("p%03d", i), age})
+	}
+
+	cloneRows := func(in [][]interface{}) [][]interface{} {
+		out := make([][]interface{}, len(in))
+		for i := range in {
+			out[i] = append([]interface{}(nil), in[i]...)
+		}
+		return out
+	}
+
+	gotTopK, err := exec.applyResultModifiers(&ExecuteResult{
+		Columns: append([]string(nil), topKInner.Columns...),
+		Rows:    cloneRows(topKInner.Rows),
+		Stats:   &QueryStats{},
+	}, "ORDER BY age DESC LIMIT 10")
+	require.NoError(t, err)
+	require.Len(t, gotTopK.Rows, 10)
+	for i := 1; i < len(gotTopK.Rows); i++ {
+		prev := gotTopK.Rows[i-1][1].(int64)
+		cur := gotTopK.Rows[i][1].(int64)
+		require.GreaterOrEqual(t, prev, cur)
+	}
+
+	gotWindow, err := exec.applyResultModifiers(&ExecuteResult{
+		Columns: append([]string(nil), topKInner.Columns...),
+		Rows:    cloneRows(topKInner.Rows),
+		Stats:   &QueryStats{},
+	}, "ORDER BY age ASC SKIP 5 LIMIT 7")
+	require.NoError(t, err)
+	require.Len(t, gotWindow.Rows, 7)
+	for i := 1; i < len(gotWindow.Rows); i++ {
+		prev := gotWindow.Rows[i-1][1].(int64)
+		cur := gotWindow.Rows[i][1].(int64)
+		require.LessOrEqual(t, prev, cur)
+	}
 }
 
 func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline(t *testing.T) {
@@ -2636,6 +2681,229 @@ LIMIT 6
 	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
 }
 
+func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline_StringQuery_ReturnsCandidateRows(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered', embedding: [1.0, 0.0, 0.0]})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	// String-query vector path requires an embedder.
+	exec.SetEmbedder(&stubVectorEmbedder{vec: []float32{1.0, 0.0, 0.0}})
+
+	query := `
+MATCH (p:SystemPrompt)
+WITH p
+LIMIT 1
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, "GEt it delivered")
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.GreaterOrEqual(t, len(result.Rows), 2)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+
+	foundCandidate := false
+	for _, row := range result.Rows {
+		if len(row) > 0 {
+			if typ, ok := row[0].(string); ok && typ == "CANDIDATE" {
+				foundCandidate = true
+				break
+			}
+		}
+	}
+	assert.True(t, foundCandidate, "expected at least one CANDIDATE row")
+}
+
+func TestExecute_MatchIDSeed_WithUnionVectorPipeline(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     storage.NodeID("sp-fixed"),
+		Labels: []string{"SystemPrompt"},
+		Properties: map[string]interface{}{
+			"promptId": "prompt-id",
+			"text":     "prompt text",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered', embedding: [1.0, 0.0, 0.0]})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	query := `
+MATCH (p)
+WHERE id(p) = 'sp-fixed'
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  WITH node, score, t
+  ORDER BY score DESC, t.language
+  LIMIT 5
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.GreaterOrEqual(t, len(result.Rows), 2)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+}
+
+func TestExecute_UnionVectorTraversalShape_ReturnsSixRowsDeterministically(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})`, nil)
+	require.NoError(t, err)
+
+	// 5 candidate rows expected from vector topK + traversal.
+	for i := 1; i <= 5; i++ {
+		q := fmt.Sprintf(`
+CREATE (o:OriginalText {id: 'o%d', originalText: 'text-%d', embedding: [1.0, 0.0, 0.0]})
+CREATE (t:TranslatedText {id: 't%d', language: 'es', translatedText: 'tx-%d'})
+CREATE (o)-[:TRANSLATES_TO]->(t)
+`, i, i, i, i)
+		_, err = exec.Execute(ctx, q, nil)
+		require.NoError(t, err)
+	}
+
+	query := `
+MATCH (p:SystemPrompt)
+WITH p
+LIMIT 1
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.Len(t, result.Rows, 6)
+
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+	assert.Equal(t, "prompt text", result.Rows[0][1])
+
+	candidateCount := 0
+	for i := 1; i < len(result.Rows); i++ {
+		row := result.Rows[i]
+		require.GreaterOrEqual(t, len(row), 6)
+		assert.Equal(t, "CANDIDATE", row[0])
+		assert.NotNil(t, row[2], "candidate originalText must be present")
+		assert.NotNil(t, row[4], "candidate language must be present")
+		assert.NotNil(t, row[5], "candidate translatedText must be present")
+		candidateCount++
+	}
+	assert.Equal(t, 5, candidateCount)
+}
+
 func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline_EmptySecondArmKeepsColumns(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
@@ -2673,6 +2941,68 @@ CALL {
   WITH p
   CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
   YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+	assert.Equal(t, "prompt text", result.Rows[0][1])
+}
+
+func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline_QueryNodesNoRowsKeepsColumns(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered', embedding: [1.0, 0.0, 0.0]})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	// Regression: if queryNodes branch yields no rows, UNION must still keep second-arm
+	// RETURN column shape and not fail with "got 7 and 0".
+	query := `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
+  YIELD node, score
+  WHERE score < 0
   MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
   RETURN
     1 AS sortOrder,
@@ -2800,6 +3130,107 @@ RETURN systemPrompt
 	require.Equal(t, []string{"systemPrompt"}, result.Columns)
 	require.Len(t, result.Rows, 1)
 	require.Equal(t, "this is a system prompt", result.Rows[0][0])
+}
+
+func TestExecute_MatchWithCallSubquery_OuterWithLimitIsHonored(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (p1:SystemPrompt {promptId: 'p1', text: 'one'}),
+		       (p2:SystemPrompt {promptId: 'p2', text: 'two'}),
+		       (p3:SystemPrompt {promptId: 'p3', text: 'three'})
+	`, nil)
+	require.NoError(t, err)
+
+	query := `
+MATCH (p:SystemPrompt)
+WITH p
+ORDER BY p.promptId
+LIMIT 1
+CALL {
+  WITH p
+  RETURN p.promptId AS promptId, p.text AS systemPrompt
+}
+RETURN promptId, systemPrompt
+`
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"promptId", "systemPrompt"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "p1", result.Rows[0][0])
+	require.Equal(t, "one", result.Rows[0][1])
+}
+
+func TestSeedNodesFromOuterMatch_WithPipelineReturnProjection(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (p1:SystemPrompt {promptId: 'p1', text: 'one'}),
+		       (p2:SystemPrompt {promptId: 'p2', text: 'two'})
+	`, nil)
+	require.NoError(t, err)
+
+	nodes, err := exec.seedNodesFromOuterMatch(ctx, `
+MATCH (p:SystemPrompt)
+WITH p
+LIMIT 1
+`, "p")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.NotNil(t, nodes[0])
+}
+
+func TestSubqueryUnionBranchClassification_ReturnThenCall(t *testing.T) {
+	body := `
+WITH p
+RETURN
+  0 AS sortOrder,
+  'SYSTEM_PROMPT' AS rowType,
+  p.text AS systemPrompt,
+  null AS originalText,
+  null AS score,
+  null AS language,
+  null AS translatedText
+UNION ALL
+WITH p
+CALL db.index.vector.queryNodes('idx_original_text', 5, "GET it delivered")
+YIELD node, score
+MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+WITH node, score, t
+ORDER BY score DESC, t.language
+LIMIT 5
+RETURN
+  1 AS sortOrder,
+  'CANDIDATE' AS rowType,
+  null AS systemPrompt,
+  node.originalText AS originalText,
+  score AS score,
+  t.language AS language,
+  t.translatedText AS translatedText
+`
+
+	branches, all, ok := splitTopLevelUnionBranches(body)
+	require.True(t, ok)
+	require.True(t, all)
+	require.Len(t, branches, 2)
+
+	withVars0, inner0, hasWith0, err := parseLeadingWithImports(branches[0])
+	require.NoError(t, err)
+	require.True(t, hasWith0)
+	require.Equal(t, []string{"p"}, withVars0)
+	assert.True(t, isCallSubqueryPureReturn(inner0), "first UNION branch should be pure RETURN projection")
+
+	withVars1, inner1, hasWith1, err := parseLeadingWithImports(branches[1])
+	require.NoError(t, err)
+	require.True(t, hasWith1)
+	require.Equal(t, []string{"p"}, withVars1)
+	assert.False(t, isCallSubqueryPureReturn(inner1), "second UNION branch should not be pure RETURN")
 }
 
 func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {
@@ -3187,28 +3618,43 @@ func TestExecuteMatchWithCallProcedure_ParseAndExecErrors(t *testing.T) {
 func TestExecuteMatchWithCallProcedure_NodeLookupAndNilResultBranches(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("all nodes lookup error", func(t *testing.T) {
+	t.Run("id seek path avoids label/all-nodes scan", func(t *testing.T) {
 		base := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
 		engine := &failingNodeLookupEngine{
 			Engine:      base,
 			allNodesErr: errors.New("all nodes failed"),
+			byLabelErr:  errors.New("label lookup failed"),
 		}
 		exec := NewStorageExecutor(engine)
-		_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n) CALL db.info()")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get nodes")
-	})
 
-	t.Run("label lookup error", func(t *testing.T) {
-		base := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
-		engine := &failingNodeLookupEngine{
-			Engine:     base,
-			byLabelErr: errors.New("label lookup failed"),
-		}
-		exec := NewStorageExecutor(engine)
-		_, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (n:Person) CALL db.info()")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get nodes")
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     "sp-1",
+			Labels: []string{"SystemPrompt"},
+			Properties: map[string]interface{}{
+				"promptId": "prompt-id",
+				"text":     "system text",
+			},
+		})
+		require.NoError(t, err)
+
+		ClearUserProcedures()
+		t.Cleanup(ClearUserProcedures)
+		require.NoError(t, RegisterUserProcedure(
+			ProcedureSpec{Name: "custom.const", MinArgs: 0, MaxArgs: 0},
+			func(context.Context, *StorageExecutor, string, []interface{}) (*ExecuteResult, error) {
+				return &ExecuteResult{
+					Columns: []string{"x"},
+					Rows:    [][]interface{}{{int64(1)}},
+				}, nil
+			},
+		))
+
+		// This previously hit manual label/all-node scans in executeMatchWithCallProcedure.
+		// It should now execute the outer MATCH via the normal executor and succeed.
+		res, err := exec.executeMatchWithCallProcedure(ctx, "MATCH (p:SystemPrompt) WHERE id(p) = 'sp-1' CALL custom.const() YIELD x RETURN x")
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.NotEmpty(t, res.Rows)
 	})
 
 	t.Run("matched rows but nil call result returns empty result", func(t *testing.T) {

@@ -220,6 +220,115 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexIn(
 	return nodes, true, nil
 }
 
+// tryCollectNodesFromIDInParam attempts to satisfy simple id/elementId IN-list predicates:
+//
+//	id(<var>) IN $param
+//	elementId(<var>) IN $param
+//
+// where $param is a list from query parameters. This provides direct node seeks
+// for batched correlated lookups and avoids full scans.
+func (e *StorageExecutor) tryCollectNodesFromIDInParam(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	if params == nil || strings.TrimSpace(whereClause) == "" {
+		return nil, false, nil
+	}
+	clause := strings.TrimSpace(whereClause)
+	upper := strings.ToUpper(clause)
+	inIdx := strings.Index(upper, " IN ")
+	if inIdx <= 0 {
+		return nil, false, nil
+	}
+	// Keep this strict/simple to avoid semantic drift for complex predicates.
+	if strings.Contains(upper, " AND ") || strings.Contains(upper, " OR ") {
+		return nil, false, nil
+	}
+
+	left := strings.TrimSpace(clause[:inIdx])
+	right := strings.TrimSpace(clause[inIdx+4:])
+	if left == "" || right == "" || !strings.HasPrefix(right, "$") {
+		return nil, false, nil
+	}
+	paramName := strings.TrimSpace(strings.TrimPrefix(right, "$"))
+	if paramName == "" {
+		return nil, false, nil
+	}
+
+	kind := ""
+	varName := ""
+	lowerLeft := strings.ToLower(left)
+	switch {
+	case strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")"):
+		kind = "id"
+		varName = strings.TrimSpace(left[3 : len(left)-1])
+	case strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")"):
+		kind = "elementId"
+		varName = strings.TrimSpace(left[10 : len(left)-1])
+	default:
+		return nil, false, nil
+	}
+	if varName == "" || varName != nodePattern.variable {
+		return nil, false, nil
+	}
+
+	raw, ok := params[paramName]
+	if !ok {
+		return []*storage.Node{}, true, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		// Keep behavior explicit: IN parameter must be list-like for this path.
+		return []*storage.Node{}, true, nil
+	}
+	if len(list) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	seen := make(map[string]struct{}, len(list))
+	nodes := make([]*storage.Node, 0, len(list))
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			continue
+		}
+		lookupID := strings.TrimSpace(s)
+		if lookupID == "" {
+			continue
+		}
+		if kind == "elementId" {
+			parts := strings.SplitN(lookupID, ":", 3)
+			if len(parts) == 3 && parts[0] == "4" {
+				lookupID = parts[2]
+			}
+		}
+		if strings.HasPrefix(lookupID, "4:") {
+			if parts := strings.SplitN(lookupID, ":", 3); len(parts) == 3 {
+				lookupID = parts[2]
+			}
+		}
+		if _, exists := seen[lookupID]; exists {
+			continue
+		}
+		seen[lookupID] = struct{}{}
+
+		node, err := e.storage.GetNode(storage.NodeID(lookupID))
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		if len(nodePattern.properties) > 0 && !e.nodeMatchesProps(node, nodePattern.properties) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+
+	return nodes, true, nil
+}
+
 // tryCollectNodesFromPropertyIndexNotNullOrderLimit attempts to satisfy:
 //
 //	MATCH (n:Label) WHERE n.prop IS NOT NULL RETURN ... ORDER BY n.prop [ASC|DESC] LIMIT K

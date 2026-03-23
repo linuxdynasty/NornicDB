@@ -89,3 +89,77 @@ func TestMatchWhereElementIDEquality_UsesDirectLookupWithoutAllNodesScan(t *test
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, "prompt text", res.Rows[0][0])
 }
+
+func TestMatchWhereIDInParam_UsesDirectLookupWithoutAllNodesScan(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(&failingNodeLookupEngine{
+		Engine:      ns,
+		allNodesErr: errors.New("all-nodes scan must not be used for id IN seek"),
+	})
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "id-in-1",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "prompt text 1"},
+	})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{
+		ID:         "id-in-2",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "prompt text 2"},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+		MATCH (n:SystemPrompt)
+		WHERE id(n) IN $ids
+		RETURN n.text AS text
+		ORDER BY text
+	`, map[string]interface{}{
+		"ids": []interface{}{"id-in-2", "id-in-1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"text"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "prompt text 1", res.Rows[0][0])
+	require.Equal(t, "prompt text 2", res.Rows[1][0])
+}
+
+func TestMatchWhereElementIDInParam_UsesDirectLookupWithoutAllNodesScan(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(&failingNodeLookupEngine{
+		Engine:      ns,
+		allNodesErr: errors.New("all-nodes scan must not be used for elementId IN seek"),
+	})
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "el-in-1",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "prompt text 1"},
+	})
+	require.NoError(t, err)
+	_, err = ns.CreateNode(&storage.Node{
+		ID:         "el-in-2",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "prompt text 2"},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+		MATCH (n:SystemPrompt)
+		WHERE elementId(n) IN $ids
+		RETURN n.text AS text
+		ORDER BY text
+	`, map[string]interface{}{
+		"ids": []interface{}{"4:nornicdb:el-in-2", "4:nornicdb:el-in-1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"text"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "prompt text 1", res.Rows[0][0])
+	require.Equal(t, "prompt text 2", res.Rows[1][0])
+}

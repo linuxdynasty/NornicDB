@@ -14,6 +14,16 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+type staticBenchmarkEmbedder struct {
+	vec []float32
+}
+
+func (s staticBenchmarkEmbedder) Embed(context.Context, string) ([]float32, error) {
+	out := make([]float32, len(s.vec))
+	copy(out, s.vec)
+	return out, nil
+}
+
 const realDataUnionQueryTemplate = `
 MATCH (p:SystemPrompt)
 WITH p, %d AS __cache_bust
@@ -81,6 +91,43 @@ CALL {
 }
 RETURN t.sourceId AS sourceId, coalesce(t.textKey, t.textKey128) AS textKey, t.originalText AS originalText, language, translatedText
 ORDER BY sourceId, language
+`
+
+const realDataVectorUnionPromptQueryTemplate = `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, "GEt It delivered")
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  WITH node, score, t
+  ORDER BY score DESC, t.language
+  LIMIT 5
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
 `
 
 func openRealDataBenchmarkExecutor(b *testing.B, databaseName string) (*StorageExecutor, func()) {
@@ -215,6 +262,36 @@ func BenchmarkRealData_LocalCorrelatedJoin_CacheMiss(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		res, err := exec.Execute(ctx, realDataLocalCorrelatedJoinQueryTemplate, nil)
+		cancel()
+		if err != nil {
+			b.Fatalf("execute failed at iter %d: %v", i, err)
+		}
+		if res == nil || len(res.Columns) == 0 {
+			b.Fatalf("unexpected empty result metadata at iter %d", i)
+		}
+	}
+}
+
+// BenchmarkRealData_VectorUnionPrompt_CacheMiss runs the exact live query shape
+// reported as slow:
+// MATCH (p:SystemPrompt {promptId:"prompt-id"}) ... CALL { arm1 UNION ALL arm2(vector+traversal) } ...
+func BenchmarkRealData_VectorUnionPrompt_CacheMiss(b *testing.B) {
+	exec, cleanup := openRealDataBenchmarkExecutor(b, "caremark_translation")
+	defer cleanup()
+	exec.SetEmbedder(staticBenchmarkEmbedder{vec: []float32{1.0, 0.0, 0.0}})
+
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, _ = exec.Execute(ctx, realDataVectorUnionPromptQueryTemplate, nil)
+		cancel()
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		res, err := exec.Execute(ctx, realDataVectorUnionPromptQueryTemplate, nil)
 		cancel()
 		if err != nil {
 			b.Fatalf("execute failed at iter %d: %v", i, err)

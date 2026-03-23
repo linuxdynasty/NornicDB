@@ -557,6 +557,12 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			inWherePart = rawWherePart
 		}
 		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromIDInParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
