@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - what this means: historical state no longer pollutes current search results, and temporal writes avoid increasingly expensive validation scans.
 - **Operations and configuration surface**:
   - added MVCC retention knobs to config, environment variables, and sample YAML
+  - macOS installer defaults and first-run wizard presets now keep search reranking disabled unless the user explicitly chooses the advanced AI setup
   - clarified async-write consistency wording and documented retained-floor/MRS behavior.
   - what this means: operators have explicit controls and clearer expectations for history depth, pruning, and eventual-consistency modes.
 
