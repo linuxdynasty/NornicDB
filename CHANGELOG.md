@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Namespacing and shutdown hardening**:
   - fixed duplicate namespace prefixing in transaction and namespaced storage wrappers by making node/edge prefix helpers idempotent
   - fixed Badger `DB Closed` panics to return `ErrStorageClosed` and suppressed benign shutdown-time search indexing errors after database close/cancel.
+- **HNSW runtime transition tombstone leakage**:
+  - fixed HNSW result assembly to exclude tombstoned candidates that can survive in the search candidate heap after a delete during runtime strategy transition replay.
 - **Plugin test isolation**:
   - fixed Heimdall plugin loader tests by resetting the global subsystem manager between test cases so plugin registrations do not leak across subtests.
 
@@ -73,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - MVCC visibility, head rebuilds, pruning, retained-floor behavior, and search invariance smoke tests
   - snapshot isolation semantics including read-your-writes, repeatable label scans, write-write conflicts, edge/node delete races, snapshot-consistent edge traversal, write skew, and contention aborts
   - closure-based transaction retries and concurrent counter increments through `DB.Update()`
-  - compound `MATCH ... CREATE` elementId relationship creation, migration `NOT` relationship filters, missing-MVCC-head edge creation fallback, shutdown hardening, namespaced prefix idempotence, and plugin loader isolation.
+  - compound `MATCH ... CREATE` elementId relationship creation, migration `NOT` relationship filters, missing-MVCC-head edge creation fallback, shutdown hardening, namespaced prefix idempotence, plugin loader isolation, and deleted-entrypoint HNSW search filtering.
 
 ### Documentation
 

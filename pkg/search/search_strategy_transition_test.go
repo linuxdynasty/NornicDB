@@ -273,3 +273,23 @@ func TestRuntimeStrategyTransition_ReplayHelpers_BruteGPUAndClear(t *testing.T) 
 	svc.strategyTransitionInProgress = false
 	svc.strategyTransitionMu.Unlock()
 }
+
+func TestHNSWSearch_ExcludesDeletedEntryPointFromResults(t *testing.T) {
+	idx := NewHNSWIndex(4, DefaultHNSWConfig())
+	require.NotNil(t, idx)
+	require.NoError(t, idx.Add("a", []float32{1, 0, 0, 0}))
+	require.NoError(t, idx.Add("b", []float32{0, 1, 0, 0}))
+
+	idx.mu.Lock()
+	deletedEntryID := idx.entryPoint
+	deletedID := idx.internalToID[deletedEntryID]
+	idx.deleted[deletedEntryID] = true
+	idx.liveCount--
+	idx.mu.Unlock()
+
+	results, err := idx.Search(context.Background(), []float32{1, 0, 0, 0}, 10, 0.0)
+	require.NoError(t, err)
+	for _, result := range results {
+		require.NotEqual(t, deletedID, result.ID)
+	}
+}

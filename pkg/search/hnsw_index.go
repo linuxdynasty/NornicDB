@@ -414,6 +414,9 @@ func (h *HNSWIndex) searchWithEf(ctx context.Context, query []float32, k int, mi
 		if score < minSim32 {
 			break // remaining candidates have lower scores
 		}
+		if int(item.id) >= len(h.deleted) || h.deleted[item.id] {
+			continue
+		}
 		if int(item.id) >= len(h.internalToID) {
 			continue
 		}
