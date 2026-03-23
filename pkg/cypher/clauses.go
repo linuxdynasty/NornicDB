@@ -1283,6 +1283,17 @@ func (e *StorageExecutor) executeUnion(ctx context.Context, cypher string, union
 		if err != nil {
 			return nil, fmt.Errorf("error in UNION query %d (%q): %w", i+1, truncateQuery(query, 50), err)
 		}
+		// Some execution branches can return empty column metadata when no rows are produced,
+		// even though the query has an explicit RETURN/YIELD projection. For UNION semantics we
+		// must validate/provide branch column shapes deterministically.
+		if len(result.Columns) == 0 {
+			result.Columns = e.inferExplainColumns(query)
+			if len(result.Columns) == 0 {
+				// UNION branch execution can legitimately return zero rows; still preserve
+				// projected column shape from the branch RETURN clause.
+				result.Columns = e.inferTopLevelReturnColumns(query)
+			}
+		}
 
 		if combinedResult == nil {
 			// First query - initialize result

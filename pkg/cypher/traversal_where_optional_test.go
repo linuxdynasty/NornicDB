@@ -81,3 +81,66 @@ func TestTraversalWhere_NotRelationshipPattern_FiltersOut(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Rows, 0, "WHERE NOT (n)-[:SUPERSEDED_BY]->() should filter out superseded nodes")
 }
+
+func TestTraversalStartPropertyScanPushdown_Equality(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "db")
+	exec := NewStorageExecutor(store)
+
+	// Two starts share same label; only one matches WHERE equality.
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"originalText": "Get it delivered",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o-2",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"originalText": "Different",
+		},
+	})
+	require.NoError(t, err)
+
+	nodes, used, err := exec.tryCollectNodesFromStartPropertyScan(
+		nodePatternInfo{variable: "node", labels: []string{"OriginalText"}},
+		"node.originalText = 'Get it delivered'",
+	)
+	require.NoError(t, err)
+	require.True(t, used)
+	require.Len(t, nodes, 1)
+	require.Equal(t, storage.NodeID("o-1"), nodes[0].ID)
+}
+
+func TestTraversalStartPropertyScanPushdown_IsNotNull(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "db")
+	exec := NewStorageExecutor(store)
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"sourceId": "s1",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "o-2",
+		Labels:     []string{"OriginalText"},
+		Properties: map[string]interface{}{},
+	})
+	require.NoError(t, err)
+
+	nodes, used, err := exec.tryCollectNodesFromStartPropertyScan(
+		nodePatternInfo{variable: "node", labels: []string{"OriginalText"}},
+		"node.sourceId IS NOT NULL",
+	)
+	require.NoError(t, err)
+	require.True(t, used)
+	require.Len(t, nodes, 1)
+	require.Equal(t, storage.NodeID("o-1"), nodes[0].ID)
+}

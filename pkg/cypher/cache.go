@@ -841,9 +841,29 @@ func (pc *QueryPlanCache) Clear() {
 // normalizeQuery normalizes a Cypher query for cache key generation.
 // Collapses whitespace and lowercases keywords for consistent matching.
 func normalizeQuery(cypher string) string {
-	// Collapse multiple spaces/newlines to single space
-	normalized := strings.Join(strings.Fields(cypher), " ")
-	return normalized
+	// Collapse consecutive whitespace to a single ASCII space without allocating
+	// the intermediate []string created by strings.Fields.
+	if cypher == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(cypher))
+	prevSpace := true
+	for i := 0; i < len(cypher); i++ {
+		c := cypher[i]
+		switch c {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		default:
+			b.WriteByte(c)
+			prevSpace = false
+		}
+	}
+	out := b.String()
+	return strings.TrimSpace(out)
 }
 
 // ========================================

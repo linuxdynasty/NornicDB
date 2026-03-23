@@ -426,6 +426,16 @@ func (m *mockQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 	return m.embedding, nil
 }
 
+type countingQueryEmbedder struct {
+	embedding []float32
+	calls     int
+}
+
+func (m *countingQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	m.calls++
+	return m.embedding, nil
+}
+
 type failingOnLongQueryEmbedder struct {
 	embedding []float32
 
@@ -682,6 +692,40 @@ func TestVectorSearchQueryModes(t *testing.T) {
 		require.NotNil(t, result)
 		assert.LessOrEqual(t, len(result.Rows), 2, "Should respect limit")
 	})
+}
+
+func TestVectorQueryNodes_StringInput_EmbeddingCacheCanonicalizesCase(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "nornic")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:              storage.NodeID(storage.EnsureDatabasePrefix("nornic", "doc-1")),
+		Labels:          []string{"OriginalText"},
+		NamedEmbeddings: map[string][]float32{"embedding": {1, 0, 0}},
+		Properties:      map[string]interface{}{"originalText": "Get it delivered"},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	emb := &countingQueryEmbedder{embedding: []float32{1, 0, 0}}
+	exec.SetEmbedder(emb)
+
+	queries := []string{
+		"CALL db.index.vector.queryNodes('idx_original_text', 5, 'Get it delivered') YIELD node, score RETURN node, score",
+		"CALL db.index.vector.queryNodes('idx_original_text', 5, 'GET IT DELIVERED') YIELD node, score RETURN node, score",
+		"CALL db.index.vector.queryNodes('idx_original_text', 5, 'gEt It DeLiVeReD') YIELD node, score RETURN node, score",
+	}
+	for _, q := range queries {
+		res, qerr := exec.Execute(ctx, q, nil)
+		require.NoError(t, qerr)
+		require.NotEmpty(t, res.Rows)
+	}
+
+	require.Equal(t, 1, emb.calls, "expected canonicalized string query embedding cache to avoid repeated embedding calls")
 }
 
 // TestVectorSearchEndToEnd simulates the Mimir workflow:

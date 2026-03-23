@@ -322,23 +322,22 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		outerPart = strings.TrimSpace(outerPart[:outerWithIdx])
 	}
 
-	// Parse the outer MATCH to get seed nodes
-	// First, execute the outer query to get the seed nodes
-	// We need to add a RETURN clause to get the variables
+	// Parse the outer MATCH to get seed variable name.
+	// Then execute the outer query through the normal executor path so index seeks,
+	// ORDER/LIMIT planning, and predicate optimizations are preserved.
 	matchIdx := findKeywordIndex(outerPart, "MATCH")
 	if matchIdx == -1 {
 		return nil, fmt.Errorf("MATCH not found before CALL")
 	}
 
-	// Extract the pattern and WHERE clause
+	// Extract the pattern segment (up to optional WHERE) so we can parse the
+	// correlated variable name from the node pattern.
 	matchPart := strings.TrimSpace(outerPart[matchIdx+5:]) // Skip "MATCH"
 	whereIdx := findKeywordIndex(matchPart, "WHERE")
 
 	var nodePatternStr string
-	var whereClause string
 	if whereIdx > 0 {
 		nodePatternStr = strings.TrimSpace(matchPart[:whereIdx])
-		whereClause = strings.TrimSpace(matchPart[whereIdx+5:]) // Skip "WHERE"
 	} else {
 		nodePatternStr = matchPart
 	}
@@ -349,26 +348,9 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		return nil, fmt.Errorf("could not parse node pattern: %s", nodePatternStr)
 	}
 
-	// Get matching nodes
-	var seedNodes []*storage.Node
-	var err error
-	if len(nodePattern.labels) > 0 {
-		seedNodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-	} else {
-		seedNodes, err = e.storage.AllNodes()
-	}
+	seedNodes, err := e.seedNodesFromOuterMatch(ctx, outerPart, nodePattern.variable)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get seed nodes: %w", err)
-	}
-
-	// Filter by properties
-	if len(nodePattern.properties) > 0 {
-		seedNodes = e.filterNodesByProperties(seedNodes, nodePattern.properties)
-	}
-
-	// Filter by WHERE clause
-	if whereClause != "" {
-		seedNodes = e.filterNodesByWhereClause(seedNodes, whereClause, nodePattern.variable)
+		return nil, fmt.Errorf("failed to evaluate outer MATCH seeds: %w", err)
 	}
 
 	// Parse the CALL {} subquery and what comes after
@@ -419,6 +401,72 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		withEndIdx = len(subqueryBody)
 	}
 
+	// Parse UNION branches once (if present) so correlated execution only binds rows.
+	// This removes repeated branch parsing overhead per seed row.
+	hasUnion := findKeywordIndex(subqueryBody, "UNION ALL") >= 0 || findKeywordIndex(subqueryBody, "UNION") >= 0
+	type parsedUnionBranch struct {
+		withVars  []string
+		innerBody string
+		hasWith   bool
+	}
+	var (
+		unionModeAll bool
+		unionParsed  []parsedUnionBranch
+	)
+	if hasUnion {
+		branches, modeAll, splitOK := splitTopLevelUnionBranches(subqueryBody)
+		if !splitOK {
+			return nil, fmt.Errorf("failed to parse UNION branches in correlated CALL subquery")
+		}
+		unionModeAll = modeAll
+		unionParsed = make([]parsedUnionBranch, 0, len(branches))
+		for i, branch := range branches {
+			trimmedBranch := strings.TrimSpace(branch)
+			if trimmedBranch == "" {
+				continue
+			}
+			withVars, innerBody, hasWith, parseErr := parseLeadingWithImports(trimmedBranch)
+			if parseErr != nil {
+				return nil, fmt.Errorf("failed to parse UNION branch %d WITH imports: %w", i+1, parseErr)
+			}
+			unionParsed = append(unionParsed, parsedUnionBranch{
+				withVars:  withVars,
+				innerBody: innerBody,
+				hasWith:   hasWith,
+			})
+		}
+	}
+
+	// Precompute static UNION branches (branches whose WITH-imported vars are not
+	// referenced in branch body) once and reuse across all seeds.
+	type cachedUnionBranch struct {
+		result *ExecuteResult
+		valid  bool
+	}
+	staticBranchCache := make([]cachedUnionBranch, len(unionParsed))
+	if hasUnion {
+		for i, branch := range unionParsed {
+			if !branch.hasWith || len(branch.withVars) == 0 {
+				continue
+			}
+			dependsOnSeed := false
+			for _, varName := range branch.withVars {
+				if isIdentifierReferenced(branch.innerBody, varName) {
+					dependsOnSeed = true
+					break
+				}
+			}
+			if dependsOnSeed || callSubqueryQueryIsWrite(branch.innerBody) {
+				continue
+			}
+			branchResult, err := subqueryExecutor.executeInternal(ctx, branch.innerBody, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed static UNION subquery branch %d: %w", i+1, err)
+			}
+			staticBranchCache[i] = cachedUnionBranch{result: branchResult, valid: true}
+		}
+	}
+
 	// Execute the subquery for each seed node
 	var combinedResult *ExecuteResult
 
@@ -443,51 +491,53 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 		// UNION subqueries with WITH-imported outer variables are executed branch-by-branch
 		// using correlated seed rows to preserve CALL/YIELD tail semantics.
-		if findKeywordIndex(subqueryBody, "UNION ALL") >= 0 || findKeywordIndex(subqueryBody, "UNION") >= 0 {
-			branches, unionModeAll, splitOK := splitTopLevelUnionBranches(subqueryBody)
-			if !splitOK {
-				return nil, fmt.Errorf("failed to parse UNION branches in correlated CALL subquery")
-			}
-
+		if hasUnion {
 			var perSeed *ExecuteResult
-			seen := make(map[string]bool)
-			for i, branch := range branches {
-				trimmedBranch := strings.TrimSpace(branch)
-				if trimmedBranch == "" {
-					continue
-				}
-
-				withVars, innerBody, hasWith, parseErr := parseLeadingWithImports(trimmedBranch)
-				if parseErr != nil {
-					return nil, fmt.Errorf("failed to parse UNION branch %d WITH imports: %w", i+1, parseErr)
-				}
-
+			var seen map[string]bool
+			if !unionModeAll {
+				seen = make(map[string]bool)
+			}
+			for i, branch := range unionParsed {
 				var branchResult *ExecuteResult
-				if hasWith {
-					branchBody := innerBody
-					branchParams := map[string]interface{}{}
-					bindClauses := make([]string, 0, len(withVars))
-					bindVars := make([]string, 0, len(withVars))
-					for _, varName := range withVars {
-						// WITH-imported vars that are never referenced in the branch body
-						// don't require correlation binds.
-						if !isIdentifierReferenced(branchBody, varName) {
-							continue
+				if staticBranchCache[i].valid {
+					branchResult = staticBranchCache[i].result
+				} else if branch.hasWith {
+					// Fast path for simple correlated projection branch:
+					// WITH seedVar RETURN ...
+					seedCols := []string{nodePattern.variable}
+					seedRow := []interface{}{seedNode}
+					if fastRes, ok, ferr := e.tryExecuteCorrelatedReturnProjection(seedRow, seedCols, branch.withVars, branch.innerBody); ok || ferr != nil {
+						if ferr != nil {
+							return nil, ferr
 						}
-						if varName != nodePattern.variable {
-							return nil, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", varName)
+						branchResult = fastRes
+					}
+					if branchResult == nil {
+						branchBody := branch.innerBody
+						branchParams := map[string]interface{}{}
+						bindClauses := make([]string, 0, len(branch.withVars))
+						bindVars := make([]string, 0, len(branch.withVars))
+						for _, varName := range branch.withVars {
+							// WITH-imported vars that are never referenced in the branch body
+							// don't require correlation binds.
+							if !isIdentifierReferenced(branchBody, varName) {
+								continue
+							}
+							if varName != nodePattern.variable {
+								return nil, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", varName)
+							}
+							pname := "__seed_id_" + varName
+							branchParams[pname] = seedID
+							bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
+							bindVars = append(bindVars, varName)
 						}
-						pname := "__seed_id_" + varName
-						branchParams[pname] = seedID
-						bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
-						bindVars = append(bindVars, varName)
+						if len(bindClauses) > 0 {
+							branchBody = strings.Join(bindClauses, " ") + " WITH " + strings.Join(bindVars, ", ") + " " + branchBody
+						}
+						branchResult, err = subqueryExecutor.executeInternal(ctx, branchBody, branchParams)
 					}
-					if len(bindClauses) > 0 {
-						branchBody = strings.Join(bindClauses, " ") + " WITH " + strings.Join(bindVars, ", ") + " " + branchBody
-					}
-					branchResult, err = subqueryExecutor.executeInternal(ctx, branchBody, branchParams)
 				} else {
-					branchResult, err = subqueryExecutor.executeInternal(ctx, innerBody, nil)
+					branchResult, err = subqueryExecutor.executeInternal(ctx, branch.innerBody, nil)
 				}
 				if err != nil {
 					return nil, fmt.Errorf("failed correlated UNION subquery branch %d for seed %s: %w", i+1, seedID, err)
@@ -507,7 +557,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 					continue
 				}
 				for _, row := range branchResult.Rows {
-					key := fmt.Sprintf("%v", row)
+					key := callSubqueryRowDedupKey(row)
 					if !seen[key] {
 						perSeed.Rows = append(perSeed.Rows, row)
 						seen[key] = true
@@ -640,6 +690,182 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 	}
 
 	return combinedResult, nil
+}
+
+func (e *StorageExecutor) tryExecuteCorrelatedReturnProjection(seedRow []interface{}, seedCols []string, withVars []string, innerBody string) (*ExecuteResult, bool, error) {
+	trimmed := strings.TrimSpace(innerBody)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "RETURN ") {
+		return nil, false, nil
+	}
+	// Keep this strict: only projection branch, no extra clauses.
+	if findKeywordIndex(trimmed, "MATCH") >= 0 ||
+		findKeywordIndex(trimmed, "CALL") >= 0 ||
+		findKeywordIndex(trimmed, "UNWIND") >= 0 ||
+		findKeywordIndex(trimmed, "MERGE") >= 0 ||
+		findKeywordIndex(trimmed, "CREATE") >= 0 ||
+		findKeywordIndex(trimmed, "DELETE") >= 0 ||
+		findKeywordIndex(trimmed, "SET") >= 0 ||
+		findKeywordIndex(trimmed, "REMOVE") >= 0 ||
+		findKeywordIndex(trimmed, "WITH") >= 0 ||
+		findKeywordIndex(trimmed, "UNION") >= 0 {
+		return nil, false, nil
+	}
+
+	colIdx := make(map[string]int, len(seedCols))
+	for i, c := range seedCols {
+		colIdx[c] = i
+	}
+
+	row := make([]interface{}, 0, len(withVars))
+	cols := make([]string, 0, len(withVars))
+	for _, v := range withVars {
+		idx, ok := colIdx[v]
+		if !ok || idx < 0 || idx >= len(seedRow) {
+			return nil, true, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", v)
+		}
+		cols = append(cols, v)
+		row = append(row, seedRow[idx])
+	}
+	seedOnly := &ExecuteResult{
+		Columns: cols,
+		Rows:    [][]interface{}{row},
+	}
+	res, err := e.processCallSubqueryReturn(seedOnly, trimmed)
+	if err != nil {
+		return nil, true, err
+	}
+	return res, true, nil
+}
+
+func callSubqueryRowDedupKey(row []interface{}) string {
+	if len(row) == 0 {
+		return "<empty>"
+	}
+	var b strings.Builder
+	b.Grow(len(row) * 16)
+	for i, v := range row {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		switch x := v.(type) {
+		case nil:
+			b.WriteString("n:")
+		case string:
+			b.WriteString("s:")
+			b.WriteString(x)
+		case []byte:
+			b.WriteString("b:")
+			b.Write(x)
+		case int:
+			b.WriteString("i:")
+			b.WriteString(strconv.Itoa(x))
+		case int64:
+			b.WriteString("i64:")
+			b.WriteString(strconv.FormatInt(x, 10))
+		case float64:
+			b.WriteString("f:")
+			b.WriteString(strconv.FormatFloat(x, 'g', -1, 64))
+		case float32:
+			b.WriteString("f32:")
+			b.WriteString(strconv.FormatFloat(float64(x), 'g', -1, 32))
+		case bool:
+			if x {
+				b.WriteString("t:1")
+			} else {
+				b.WriteString("t:0")
+			}
+		default:
+			b.WriteString(fmt.Sprintf("%T:%v", v, v))
+		}
+	}
+	return b.String()
+}
+
+// seedNodesFromOuterMatch executes the outer MATCH/WHERE segment through the normal
+// execution pipeline (instead of manual scan/filter) so index/hot-path optimizations
+// apply before correlated CALL {} expansion.
+func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart, variable string) ([]*storage.Node, error) {
+	variable = strings.TrimSpace(variable)
+	if variable == "" {
+		return nil, fmt.Errorf("empty correlated variable")
+	}
+
+	// Fast path for simple node-seed queries:
+	//   MATCH (v:Label {k: val})
+	// Avoids full executeInternal round-trip for seed extraction in correlated CALL.
+	trimmedOuter := strings.TrimSpace(outerPart)
+	if findKeywordIndex(trimmedOuter, "MATCH") == 0 &&
+		findKeywordIndex(trimmedOuter, "WHERE") == -1 &&
+		!strings.Contains(trimmedOuter, "-[") &&
+		!strings.Contains(trimmedOuter, "--") {
+		matchBody := strings.TrimSpace(trimmedOuter[len("MATCH"):])
+		np := e.parseNodePattern(matchBody)
+		if strings.EqualFold(strings.TrimSpace(np.variable), variable) {
+			var nodes []*storage.Node
+			if len(np.labels) > 0 {
+				var err error
+				nodes, err = e.storage.GetNodesByLabel(np.labels[0])
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				nodes = e.storage.GetAllNodes()
+			}
+			if len(np.properties) == 0 {
+				return nodes, nil
+			}
+			filtered := make([]*storage.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if n == nil {
+					continue
+				}
+				if e.nodeMatchesProps(n, np.properties) {
+					filtered = append(filtered, n)
+				}
+			}
+			return filtered, nil
+		}
+	}
+
+	seedQuery := strings.TrimSpace(outerPart) + " RETURN " + variable
+	outerRes, err := e.executeInternal(ctx, seedQuery, nil)
+	if err != nil {
+		return nil, err
+	}
+	if outerRes == nil || len(outerRes.Rows) == 0 {
+		return []*storage.Node{}, nil
+	}
+
+	colIdx := -1
+	for i, col := range outerRes.Columns {
+		if strings.EqualFold(strings.TrimSpace(col), variable) {
+			colIdx = i
+			break
+		}
+	}
+	if colIdx < 0 {
+		return nil, fmt.Errorf("outer MATCH did not project correlated variable %q", variable)
+	}
+
+	seedNodes := make([]*storage.Node, 0, len(outerRes.Rows))
+	for _, row := range outerRes.Rows {
+		if colIdx >= len(row) {
+			continue
+		}
+		switch v := row[colIdx].(type) {
+		case *storage.Node:
+			if v != nil {
+				seedNodes = append(seedNodes, v)
+			}
+		case map[string]interface{}:
+			if idRaw, ok := v["_nodeId"].(string); ok && idRaw != "" {
+				if n, getErr := e.storage.GetNode(storage.NodeID(idRaw)); getErr == nil && n != nil {
+					seedNodes = append(seedNodes, n)
+				}
+			}
+		}
+	}
+	return seedNodes, nil
 }
 
 // executeCallSubquery executes a CALL {} subquery
@@ -1355,6 +1581,12 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 		colMap[col] = i
 	}
 
+	// Fast path: correlated equality lookups can be rewritten into a single batched
+	// IN query and hash-joined back to seed rows, eliminating per-seed re-execution.
+	if optimized, handled, err := e.tryExecuteCorrelatedBatchedLookup(ctx, seedResult, innerBody, importVars, colMap); handled || err != nil {
+		return optimized, err
+	}
+
 	combinedCols := append([]string{}, seedResult.Columns...)
 	combinedRows := make([][]interface{}, 0)
 
@@ -1425,6 +1657,617 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 	}
 
 	return &ExecuteResult{Columns: combinedCols, Rows: combinedRows}, nil
+}
+
+func (e *StorageExecutor) tryExecuteCorrelatedBatchedLookup(
+	ctx context.Context,
+	seedResult *ExecuteResult,
+	innerBody string,
+	importVars []string,
+	colMap map[string]int,
+) (*ExecuteResult, bool, error) {
+	if seedResult == nil || len(seedResult.Rows) == 0 || len(importVars) != 1 {
+		return nil, false, nil
+	}
+
+	importCol := strings.TrimSpace(importVars[0])
+	if importCol == "" {
+		return nil, false, nil
+	}
+	importIdx, ok := colMap[importCol]
+	if !ok {
+		return nil, false, nil
+	}
+
+	trimmed := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(innerBody), ";"))
+	if findKeywordIndex(trimmed, "MATCH") != 0 || !containsFold(trimmed, "RETURN ") || callSubqueryQueryIsWrite(trimmed) {
+		return nil, false, nil
+	}
+
+	returnIdx := indexTopLevelKeywordCallSubquery(trimmed, "RETURN")
+	if returnIdx < 0 {
+		return nil, false, nil
+	}
+	beforeReturn := strings.TrimSpace(trimmed[:returnIdx])
+	returnPart := strings.TrimSpace(trimmed[returnIdx+len("RETURN"):])
+	if beforeReturn == "" || returnPart == "" {
+		return nil, false, nil
+	}
+
+	matchPart := beforeReturn
+	wherePart := ""
+	if whereIdx := indexTopLevelKeywordCallSubquery(beforeReturn, "WHERE"); whereIdx >= 0 {
+		matchPart = strings.TrimSpace(beforeReturn[:whereIdx])
+		wherePart = strings.TrimSpace(beforeReturn[whereIdx+len("WHERE"):])
+	}
+	if matchPart == "" || wherePart == "" {
+		return nil, false, nil
+	}
+
+	matchVar, matchProp, otherWhere, ok := extractCallSubqueryCorrelationWhere(wherePart, importCol)
+	if !ok || matchVar == "" || matchProp == "" {
+		return nil, false, nil
+	}
+	if sanitized, ok := sanitizeCallSubqueryOtherWhere(otherWhere, importCol); ok {
+		otherWhere = sanitized
+	} else {
+		return nil, false, nil
+	}
+
+	projection, modifiers := splitTopLevelResultModifiersCallSubquery(returnPart)
+	projection = strings.TrimSpace(projection)
+	if projection == "" {
+		return nil, false, nil
+	}
+
+	// Collect unique lookup keys from seed rows.
+	keys := make([]interface{}, 0, len(seedResult.Rows))
+	seenKeys := make(map[string]struct{}, len(seedResult.Rows))
+	for _, row := range seedResult.Rows {
+		if importIdx < 0 || importIdx >= len(row) {
+			continue
+		}
+		k := row[importIdx]
+		ks := callSubqueryLookupKeyString(k)
+		if _, exists := seenKeys[ks]; exists {
+			continue
+		}
+		seenKeys[ks] = struct{}{}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return &ExecuteResult{
+			Columns: append([]string{}, seedResult.Columns...),
+			Rows:    [][]interface{}{},
+		}, true, nil
+	}
+
+	var rewritten strings.Builder
+	rewritten.Grow(len(trimmed) + len(projection) + 128)
+	rewritten.WriteString(matchPart)
+	if strings.TrimSpace(otherWhere) != "" {
+		rewritten.WriteString(" WHERE ")
+		rewritten.WriteString(otherWhere)
+		rewritten.WriteString(" AND ")
+	} else {
+		rewritten.WriteString(" WHERE ")
+	}
+	rewritten.WriteString(matchVar)
+	rewritten.WriteString(".")
+	rewritten.WriteString(matchProp)
+	rewritten.WriteString(" IN $__call_subquery_lookup_keys")
+	rewritten.WriteString(" RETURN ")
+	rewritten.WriteString(matchVar)
+	rewritten.WriteString(".")
+	rewritten.WriteString(matchProp)
+	rewritten.WriteString(" AS __call_subquery_lookup_key, ")
+	rewritten.WriteString(projection)
+	if strings.TrimSpace(modifiers) != "" {
+		rewritten.WriteString(" ")
+		rewritten.WriteString(strings.TrimSpace(modifiers))
+	}
+
+	params := map[string]interface{}{
+		"__call_subquery_lookup_keys": keys,
+	}
+	innerRes, err := e.executeInternal(ctx, rewritten.String(), params)
+	if err != nil {
+		return nil, true, fmt.Errorf("batched correlated CALL lookup failed: %w", err)
+	}
+
+	if innerRes == nil {
+		return &ExecuteResult{
+			Columns: append([]string{}, seedResult.Columns...),
+			Rows:    [][]interface{}{},
+		}, true, nil
+	}
+	if len(innerRes.Columns) == 0 || !strings.EqualFold(strings.TrimSpace(innerRes.Columns[0]), "__call_subquery_lookup_key") {
+		return nil, true, fmt.Errorf("batched correlated CALL lookup produced unexpected columns: %v", innerRes.Columns)
+	}
+
+	// Keep only inner columns not already present in seed columns and not join-key column.
+	innerKeepIdx := make([]int, 0, len(innerRes.Columns))
+	innerKeepCols := make([]string, 0, len(innerRes.Columns))
+	for i, col := range innerRes.Columns {
+		if i == 0 {
+			continue
+		}
+		if _, exists := colMap[col]; exists {
+			continue
+		}
+		innerKeepIdx = append(innerKeepIdx, i)
+		innerKeepCols = append(innerKeepCols, col)
+	}
+
+	grouped := make(map[string][][]interface{}, len(innerRes.Rows))
+	for _, r := range innerRes.Rows {
+		if len(r) == 0 {
+			continue
+		}
+		k := callSubqueryLookupKeyString(r[0])
+		vals := make([]interface{}, 0, len(innerKeepIdx))
+		for _, idx := range innerKeepIdx {
+			if idx >= 0 && idx < len(r) {
+				vals = append(vals, r[idx])
+			} else {
+				vals = append(vals, nil)
+			}
+		}
+		grouped[k] = append(grouped[k], vals)
+	}
+
+	combinedCols := append([]string{}, seedResult.Columns...)
+	combinedCols = append(combinedCols, innerKeepCols...)
+	combinedRows := make([][]interface{}, 0, len(seedResult.Rows))
+	for _, seedRow := range seedResult.Rows {
+		if importIdx < 0 || importIdx >= len(seedRow) {
+			continue
+		}
+		matches := grouped[callSubqueryLookupKeyString(seedRow[importIdx])]
+		if len(matches) == 0 {
+			continue
+		}
+		for _, m := range matches {
+			joined := append([]interface{}{}, seedRow...)
+			joined = append(joined, m...)
+			combinedRows = append(combinedRows, joined)
+		}
+	}
+
+	return &ExecuteResult{
+		Columns: combinedCols,
+		Rows:    combinedRows,
+	}, true, nil
+}
+
+func callSubqueryLookupKeyString(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return "<nil>"
+	case string:
+		return "s:" + normalizeCallSubqueryLookupString(x)
+	case []byte:
+		return "s:" + normalizeCallSubqueryLookupString(string(x))
+	case int:
+		return fmt.Sprintf("i:%d", x)
+	case int64:
+		return fmt.Sprintf("i64:%d", x)
+	case float64:
+		return fmt.Sprintf("f:%g", x)
+	case bool:
+		if x {
+			return "b:1"
+		}
+		return "b:0"
+	default:
+		return fmt.Sprintf("%T:%v", v, v)
+	}
+}
+
+func normalizeCallSubqueryLookupString(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.Trim(s, `"`)
+}
+
+func extractCallSubqueryCorrelationWhere(whereClause, importCol string) (matchVar, matchProp, otherWhere string, ok bool) {
+	terms := splitTopLevelAndCallSubquery(whereClause)
+	if len(terms) == 0 {
+		return "", "", "", false
+	}
+	correlationIdx := -1
+	for i, term := range terms {
+		lhs, rhs, isEq := splitTopLevelEqualityCallSubquery(term)
+		if !isEq {
+			continue
+		}
+		leftVar, leftProp, leftOK := parseCallSubqueryVarProp(lhs)
+		rightVar, rightProp, rightOK := parseCallSubqueryVarProp(rhs)
+		switch {
+		case leftOK && isSimpleIdentifier(strings.TrimSpace(rhs)) && strings.EqualFold(strings.TrimSpace(rhs), importCol):
+			matchVar, matchProp = leftVar, leftProp
+			correlationIdx = i
+		case rightOK && isSimpleIdentifier(strings.TrimSpace(lhs)) && strings.EqualFold(strings.TrimSpace(lhs), importCol):
+			matchVar, matchProp = rightVar, rightProp
+			correlationIdx = i
+		}
+		if correlationIdx >= 0 {
+			break
+		}
+	}
+	if correlationIdx < 0 || matchVar == "" || matchProp == "" {
+		return "", "", "", false
+	}
+	remaining := make([]string, 0, len(terms)-1)
+	for i, term := range terms {
+		if i == correlationIdx {
+			continue
+		}
+		t := strings.TrimSpace(term)
+		if t != "" {
+			remaining = append(remaining, t)
+		}
+	}
+	return matchVar, matchProp, strings.Join(remaining, " AND "), true
+}
+
+func parseCallSubqueryVarProp(expr string) (string, string, bool) {
+	expr = strings.TrimSpace(expr)
+	dot := strings.Index(expr, ".")
+	if dot <= 0 || dot >= len(expr)-1 {
+		return "", "", false
+	}
+	v := strings.Trim(expr[:dot], "`")
+	p := strings.Trim(expr[dot+1:], "`")
+	if !isSimpleIdentifier(v) || !isSimpleIdentifier(p) {
+		return "", "", false
+	}
+	return v, p, true
+}
+
+func sanitizeCallSubqueryOtherWhere(otherWhere string, importCol string) (string, bool) {
+	if strings.TrimSpace(otherWhere) == "" {
+		return "", true
+	}
+	terms := splitTopLevelAndCallSubquery(otherWhere)
+	if len(terms) == 0 {
+		return "", true
+	}
+	kept := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if isCallSubqueryImportNotNullGuardTerm(term, importCol) {
+			continue
+		}
+		if containsStandaloneIdentifier(term, importCol) {
+			return "", false
+		}
+		kept = append(kept, term)
+	}
+	if len(kept) == 0 {
+		return "", true
+	}
+	return strings.Join(kept, " AND "), true
+}
+
+func isCallSubqueryImportNotNullGuardTerm(term string, importCol string) bool {
+	parts := strings.Fields(strings.TrimSpace(term))
+	if len(parts) != 4 {
+		return false
+	}
+	left := strings.TrimSpace(parts[0])
+	left = strings.Trim(left, "`")
+	if !strings.EqualFold(left, strings.TrimSpace(importCol)) {
+		return false
+	}
+	return strings.EqualFold(parts[1], "IS") &&
+		strings.EqualFold(parts[2], "NOT") &&
+		strings.EqualFold(parts[3], "NULL")
+}
+
+func splitTopLevelAndCallSubquery(whereClause string) []string {
+	parts := make([]string, 0, 4)
+	start := 0
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(whereClause); i++ {
+		ch := whereClause[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if findKeywordIndex(whereClause[i:], "AND") == 0 {
+			parts = append(parts, strings.TrimSpace(whereClause[start:i]))
+			i += len("AND") - 1
+			start = i + 1
+		}
+	}
+	parts = append(parts, strings.TrimSpace(whereClause[start:]))
+	return parts
+}
+
+func splitTopLevelEqualityCallSubquery(expr string) (lhs, rhs string, ok bool) {
+	inSingle, inDouble, inBacktick := false, false, false
+	paren, bracket, brace := 0, 0, 0
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			paren++
+			continue
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+			continue
+		case '[':
+			bracket++
+			continue
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+			continue
+		case '{':
+			brace++
+			continue
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+			continue
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if ch == '=' {
+			left := strings.TrimSpace(expr[:i])
+			right := strings.TrimSpace(expr[i+1:])
+			if left == "" || right == "" {
+				return "", "", false
+			}
+			return left, right, true
+		}
+	}
+	return "", "", false
+}
+
+func indexTopLevelKeywordCallSubquery(s string, keyword string) int {
+	paren, bracket, brace := 0, 0, 0
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		}
+		if paren != 0 || bracket != 0 || brace != 0 {
+			continue
+		}
+		if findKeywordIndex(s[i:], keyword) == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+func splitTopLevelResultModifiersCallSubquery(returnPart string) (projection string, modifiers string) {
+	idx := indexTopLevelKeywordCallSubquery(returnPart, "ORDER BY")
+	if idx < 0 {
+		idx = indexTopLevelKeywordCallSubquery(returnPart, "SKIP")
+	}
+	if idx < 0 {
+		idx = indexTopLevelKeywordCallSubquery(returnPart, "LIMIT")
+	}
+	if idx < 0 {
+		return strings.TrimSpace(returnPart), ""
+	}
+	return strings.TrimSpace(returnPart[:idx]), strings.TrimSpace(returnPart[idx:])
+}
+
+func callSubqueryQueryIsWrite(query string) bool {
+	for i := 0; i < len(query); i++ {
+		if findKeywordIndex(query[i:], "CREATE") == 0 ||
+			findKeywordIndex(query[i:], "MERGE") == 0 ||
+			findKeywordIndex(query[i:], "DELETE") == 0 ||
+			findKeywordIndex(query[i:], "DETACH DELETE") == 0 ||
+			findKeywordIndex(query[i:], "SET") == 0 ||
+			findKeywordIndex(query[i:], "REMOVE") == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isSimpleIdentifier(s string) bool {
+	s = strings.TrimSpace(strings.Trim(s, "`"))
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if i == 0 {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_') {
+				return false
+			}
+			continue
+		}
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func containsStandaloneIdentifier(expr, ident string) bool {
+	ident = strings.TrimSpace(strings.Trim(ident, "`"))
+	if ident == "" {
+		return false
+	}
+	isWord := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	}
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		}
+		if i+len(ident) > len(expr) {
+			break
+		}
+		if !strings.EqualFold(expr[i:i+len(ident)], ident) {
+			continue
+		}
+		if i > 0 {
+			prev := expr[i-1]
+			if isWord(prev) || prev == '.' {
+				continue
+			}
+		}
+		if i+len(ident) < len(expr) {
+			next := expr[i+len(ident)]
+			if isWord(next) || next == '.' {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // replaceStandaloneCypherIdentifier replaces identifier tokens that are not part of

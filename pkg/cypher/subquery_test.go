@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -2635,6 +2636,124 @@ LIMIT 6
 	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
 }
 
+func TestExecute_MatchWithOuterWith_CallSubqueryUnionVectorPipeline_EmptySecondArmKeepsColumns(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX idx_original_text FOR (n:OriginalText) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered', embedding: [1.0, 0.0, 0.0]})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+	`, nil)
+	require.NoError(t, err)
+
+	// The second UNION arm has a full RETURN projection but produces no rows due to
+	// missing TRANSLATES_TO relationship. It must still contribute column shape.
+	query := `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  CALL db.index.vector.queryNodes('idx_original_text', 5, [1.0, 0.0, 0.0])
+  YIELD node, score
+  MATCH (node:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    node.originalText AS originalText,
+    score AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+	assert.Equal(t, "prompt text", result.Rows[0][1])
+}
+
+func TestExecute_CallSubqueryUnion_TraversalAggregationEmptyArmKeepsColumns(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (p:SystemPrompt {promptId: 'prompt-id', text: 'prompt text'})
+		CREATE (o:OriginalText {id: 'o1', originalText: 'Get it delivered'})
+		CREATE (t:TranslatedText {id: 't1', language: 'es', translatedText: 'Recibelo'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	// Second UNION arm includes traversal + aggregation and is filtered to empty.
+	// UNION must still preserve the branch's RETURN column shape.
+	query := `
+MATCH (p:SystemPrompt {promptId: "prompt-id"})
+WITH p
+CALL {
+  WITH p
+  RETURN
+    0 AS sortOrder,
+    'SYSTEM_PROMPT' AS rowType,
+    p.text AS systemPrompt,
+    null AS originalText,
+    null AS score,
+    null AS language,
+    null AS translatedText
+
+  UNION ALL
+
+  WITH p
+  MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+  WITH o, t, count(t) AS relCount
+  WHERE relCount > 99
+  RETURN
+    1 AS sortOrder,
+    'CANDIDATE' AS rowType,
+    null AS systemPrompt,
+    o.originalText AS originalText,
+    toFloat(relCount) AS score,
+    t.language AS language,
+    t.translatedText AS translatedText
+}
+RETURN rowType, systemPrompt, originalText, score, language, translatedText
+ORDER BY sortOrder, score DESC, language
+LIMIT 6
+`
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rowType", "systemPrompt", "originalText", "score", "language", "translatedText"}, result.Columns)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, "SYSTEM_PROMPT", result.Rows[0][0])
+	assert.Equal(t, "prompt text", result.Rows[0][1])
+}
+
 func TestExecute_MatchWithCallSubquery_NoSeedRows_PreservesReturnColumns(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	eng := storage.NewNamespacedEngine(base, "test")
@@ -3121,4 +3240,88 @@ func TestExecuteMatchWithCallProcedure_NodeLookupAndNilResultBranches(t *testing
 		assert.Empty(t, res.Columns)
 		assert.Empty(t, res.Rows)
 	})
+}
+
+func TestExecuteCorrelatedCallWithSeedRows_BatchedLookup(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "o1",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId":     "s1",
+			"textKey":      "k1",
+			"originalText": "one",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o2",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId":     "s2",
+			"textKey128":   "k2",
+			"originalText": "two",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "i1",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId":       "s1",
+			"language":       "en",
+			"translatedText": "one-en",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "i2",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId":       "s1",
+			"language":       "es",
+			"translatedText": "one-es",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "i3",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"sourceId":       "s2",
+			"language":       "en",
+			"translatedText": "two-en",
+		},
+	})
+	require.NoError(t, err)
+
+	seed := &ExecuteResult{
+		Columns: []string{"sourceId"},
+		Rows: [][]interface{}{
+			{"s1"},
+			{"s2"},
+		},
+	}
+	res, err := exec.executeCorrelatedCallWithSeedRows(
+		ctx,
+		seed,
+		"MATCH (tt:MongoDocument) WHERE tt.sourceId = sourceId AND tt.translatedText IS NOT NULL RETURN tt.language AS language, tt.translatedText AS translatedText",
+		[]string{"sourceId"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{"sourceId", "language", "translatedText"}, res.Columns)
+	require.Len(t, res.Rows, 3)
+
+	got := make([]string, 0, len(res.Rows))
+	for _, row := range res.Rows {
+		got = append(got, fmt.Sprintf("%v|%v|%v", row[0], row[1], row[2]))
+	}
+	require.Contains(t, got, "s1|en|one-en")
+	require.Contains(t, got, "s1|es|one-es")
+	require.Contains(t, got, "s2|en|two-en")
 }

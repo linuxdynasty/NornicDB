@@ -315,6 +315,20 @@ type StorageExecutor struct {
 	fabricRecordBindings map[string]interface{}
 
 	hotPathTraceState *hotPathTraceState
+
+	// vectorQueryEmbedCache caches server-side embeddings for db.index.vector.queryNodes/
+	// queryRelationships string-input mode to avoid repeated embedding latency.
+	// Key is canonicalized (case/whitespace normalized) query text.
+	vectorQueryEmbedCache map[string][]float32
+	// vectorQueryEmbedInflight de-duplicates concurrent embedding work per key.
+	vectorQueryEmbedInflight map[string]*vectorEmbedInflight
+	vectorQueryEmbedMu       sync.Mutex
+}
+
+type vectorEmbedInflight struct {
+	done chan struct{}
+	vec  []float32
+	err  error
 }
 
 type hotPathTraceState struct {
@@ -392,18 +406,20 @@ type InferenceManager interface {
 //	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
 func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 	exec := &StorageExecutor{
-		parser:            NewParser(),
-		storage:           store,
-		cache:             NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
-		planCache:         NewQueryPlanCache(500),   // Cache 500 parsed query plans
-		fabricPlanCache:   fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
-		analyzer:          NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
-		nodeLookupCache:   make(map[string]*storage.Node, 1000),
-		shellParams:       make(map[string]interface{}),
-		searchService:     nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
-		vectorRegistry:    vectorspace.NewIndexRegistry(),
-		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
-		hotPathTraceState: &hotPathTraceState{},
+		parser:                   NewParser(),
+		storage:                  store,
+		cache:                    NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
+		planCache:                NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		fabricPlanCache:          fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
+		analyzer:                 NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
+		nodeLookupCache:          make(map[string]*storage.Node, 1000),
+		shellParams:              make(map[string]interface{}),
+		searchService:            nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
+		vectorRegistry:           vectorspace.NewIndexRegistry(),
+		vectorIndexSpaces:        make(map[string]vectorspace.VectorSpaceKey),
+		hotPathTraceState:        &hotPathTraceState{},
+		vectorQueryEmbedCache:    make(map[string][]float32, 512),
+		vectorQueryEmbedInflight: make(map[string]*vectorEmbedInflight, 64),
 	}
 	ensureBuiltInProceduresRegistered()
 	_ = exec.loadPersistedProcedures()
@@ -436,6 +452,10 @@ func (e *StorageExecutor) SetDatabaseManager(dbManager DatabaseManagerInterface)
 //	// CALL db.index.vector.queryNodes('idx', 10, 'search query')   // String (auto-embedded)
 func (e *StorageExecutor) SetEmbedder(embedder QueryEmbedder) {
 	e.embedder = embedder
+	e.vectorQueryEmbedMu.Lock()
+	e.vectorQueryEmbedCache = make(map[string][]float32, 512)
+	e.vectorQueryEmbedInflight = make(map[string]*vectorEmbedInflight, 64)
+	e.vectorQueryEmbedMu.Unlock()
 }
 
 // SetSearchService sets the unified search service used by Cypher procedures.

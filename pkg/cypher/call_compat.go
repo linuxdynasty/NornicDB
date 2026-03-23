@@ -158,7 +158,7 @@ func (e *StorageExecutor) callDbIndexVectorQueryRelationships(ctx context.Contex
 		if e.embedder == nil {
 			return nil, fmt.Errorf("string query provided but no embedder configured; use vector array or configure embedding service")
 		}
-		embedded, embedErr := embedQueryChunked(ctx, e.embedder, input.stringQuery)
+		embedded, embedErr := e.embedVectorQueryText(ctx, input.stringQuery)
 		if embedErr != nil {
 			return nil, fmt.Errorf("failed to embed query '%s': %w", input.stringQuery, embedErr)
 		}
@@ -211,7 +211,7 @@ func (e *StorageExecutor) callDbIndexVectorQueryRelationships(ctx context.Contex
 			if e.embedder == nil {
 				return nil, fmt.Errorf("parameter $%s is a string but no embedder configured; provide vector array or configure embedding service", input.paramName)
 			}
-			embedded, embedErr := embedQueryChunked(ctx, e.embedder, val)
+			embedded, embedErr := e.embedVectorQueryText(ctx, val)
 			if embedErr != nil {
 				return nil, fmt.Errorf("failed to embed parameter $%s value '%s': %w", input.paramName, val, embedErr)
 			}

@@ -229,6 +229,16 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 					usedPropertyIndex = true
 				}
 			}
+			// Fallback optimization: even when no property index exists, pre-prune start
+			// nodes for simple start-variable predicates before traversing relationships.
+			// This preserves semantics while avoiding expensive traversal from irrelevant
+			// start nodes in patterns like:
+			//   MATCH (n:Label)-[:R]->(m) WHERE n.prop = 'x' RETURN ...
+			if !usedPropertyIndex {
+				if nodes, used, scanErr := e.tryCollectNodesFromStartPropertyScan(matches.StartNode, whereClause); scanErr == nil && used {
+					optimizedStartNodes = nodes
+				}
+			}
 		}
 
 		// Check if WHERE clause has id(startVar) = $param pattern
@@ -266,8 +276,14 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	// Execute traversal with optimized start nodes if available
 	var paths []PathResult
 	if len(optimizedStartNodes) > 0 {
-		// Use optimized start nodes (single node from WHERE clause)
-		paths = e.traverseGraphSequential(matches, optimizedStartNodes)
+		// Use optimized start nodes for non-chained traversal. Chained traversal uses
+		// segment-aware expansion; feeding it through traverseGraphSequential can break
+		// semantics because it ignores segment topology.
+		if matches.IsChained && len(matches.Segments) > 1 {
+			paths = e.traverseChainedGraph(matches)
+		} else {
+			paths = e.traverseGraphSequential(matches, optimizedStartNodes)
+		}
 		// Still need to apply WHERE clause filter (in case there are other conditions)
 		if whereClause != "" {
 			paths = e.filterPathsByWhere(paths, matches, whereClause)
@@ -500,6 +516,95 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	}
 
 	return result, nil
+}
+
+// tryCollectNodesFromStartPropertyScan applies start-node predicate pruning for
+// traversal patterns without requiring an index. It only handles simple predicates
+// on the traversal start variable:
+//   - <startVar>.<prop> = <value>
+//   - <startVar>.<prop> IS NOT NULL
+func (e *StorageExecutor) tryCollectNodesFromStartPropertyScan(nodePattern nodePatternInfo, whereClause string) ([]*storage.Node, bool, error) {
+	if strings.TrimSpace(nodePattern.variable) == "" {
+		return nil, false, nil
+	}
+
+	// Equality predicate pushdown.
+	if prop, value, ok := e.parseSimpleIndexedEquality(nodePattern.variable, whereClause); ok {
+		// Safety guard: this fallback scan-pruning path only applies literal equality.
+		// Parameterized predicates (e.g. n.id = $id) are handled elsewhere after
+		// parameter substitution. Applying compareEqual on raw "$param" here would
+		// incorrectly prune all candidates.
+		if s, isString := value.(string); isString && strings.HasPrefix(strings.TrimSpace(s), "$") {
+			return nil, false, nil
+		}
+		var candidates []*storage.Node
+		if len(nodePattern.labels) > 0 {
+			nodes, err := e.storage.GetNodesByLabel(nodePattern.labels[0])
+			if err != nil {
+				return nil, false, err
+			}
+			candidates = nodes
+		} else {
+			candidates = e.storage.GetAllNodes()
+		}
+		if len(candidates) == 0 {
+			return []*storage.Node{}, true, nil
+		}
+		filtered := make([]*storage.Node, 0, len(candidates))
+		for _, n := range candidates {
+			if n == nil {
+				continue
+			}
+			if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(n, nodePattern.labels) {
+				continue
+			}
+			if e.compareEqual(n.Properties[prop], value) {
+				filtered = append(filtered, n)
+			}
+		}
+		// Fail-open safety: if fallback parsing/value coercion is wrong, do not
+		// risk false negatives. Let the normal traversal path evaluate WHERE.
+		if len(filtered) == 0 {
+			return nil, false, nil
+		}
+		return filtered, true, nil
+	}
+
+	// IS NOT NULL predicate pushdown.
+	if prop, ok := e.parseSimpleIndexedIsNotNull(nodePattern.variable, whereClause); ok {
+		var candidates []*storage.Node
+		if len(nodePattern.labels) > 0 {
+			nodes, err := e.storage.GetNodesByLabel(nodePattern.labels[0])
+			if err != nil {
+				return nil, false, err
+			}
+			candidates = nodes
+		} else {
+			candidates = e.storage.GetAllNodes()
+		}
+		if len(candidates) == 0 {
+			return []*storage.Node{}, true, nil
+		}
+		filtered := make([]*storage.Node, 0, len(candidates))
+		for _, n := range candidates {
+			if n == nil {
+				continue
+			}
+			if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(n, nodePattern.labels) {
+				continue
+			}
+			if _, exists := n.Properties[prop]; exists && n.Properties[prop] != nil {
+				filtered = append(filtered, n)
+			}
+		}
+		// Fail-open safety to preserve semantics.
+		if len(filtered) == 0 {
+			return nil, false, nil
+		}
+		return filtered, true, nil
+	}
+
+	return nil, false, nil
 }
 
 func (e *StorageExecutor) tryFastRelationshipCount(matches *TraversalMatch, item returnItem) (count int64, ok bool, err error) {
