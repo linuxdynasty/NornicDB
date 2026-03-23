@@ -1007,26 +1007,11 @@ func (tx *BadgerTransaction) OperationCount() int {
 
 func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error) {
 	if tx.readTS.IsZero() {
-		key := nodeKey(nodeID)
-		item, err := tx.badgerTx.Get(key)
-		if err == badger.ErrKeyNotFound {
-			return nil, ErrNotFound
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading node: %w", err)
-		}
-		var nodeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return nil, fmt.Errorf("reading node value: %w", err)
-		}
-		return deserializeNode(nodeBytes)
+		return tx.getNodeFromBadgerSnapshotLocked(nodeID)
 	}
 	node, err := tx.engine.GetNodeVisibleAt(nodeID, tx.readTS)
 	if err == ErrNotFound {
-		fallbackNode, fallbackErr := tx.engine.GetNode(nodeID)
+		fallbackNode, fallbackErr := tx.getNodeFromBadgerSnapshotLocked(nodeID)
 		if fallbackErr == nil {
 			return fallbackNode, nil
 		}
@@ -1035,6 +1020,25 @@ func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error
 		}
 	}
 	return node, err
+}
+
+func (tx *BadgerTransaction) getNodeFromBadgerSnapshotLocked(nodeID NodeID) (*Node, error) {
+	key := nodeKey(nodeID)
+	item, err := tx.badgerTx.Get(key)
+	if err == badger.ErrKeyNotFound {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading node: %w", err)
+	}
+	var nodeBytes []byte
+	if err := item.Value(func(val []byte) error {
+		nodeBytes = append([]byte{}, val...)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("reading node value: %w", err)
+	}
+	return deserializeNode(nodeBytes)
 }
 
 func (tx *BadgerTransaction) getCommittedEdgeLocked(edgeID EdgeID) (*Edge, error) {

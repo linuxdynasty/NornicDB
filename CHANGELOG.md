@@ -57,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Graph-consistent concurrent delete behavior**:
   - fixed transaction validation so node deletes and adjacent edge changes cannot commit into a dangling-edge state across concurrent snapshots.
 - **MVCC endpoint validation fallback behavior**:
-  - fixed transaction edge creation/commit validation to accept readable endpoint nodes even when MVCC head metadata is temporarily missing, instead of incorrectly rejecting valid edges as dangling.
+  - fixed transaction edge creation/commit validation to accept readable endpoint nodes even when MVCC head metadata is temporarily missing, instead of incorrectly rejecting valid edges as dangling
+  - fixed the associated transaction read fallback so missing-head recovery uses the transaction's anchored Badger snapshot rather than the live engine state, preserving Snapshot Isolation.
 - **Startup/restore maintenance reliability**:
   - fixed temporal rebuild/search maintenance ordering and added explicit MVCC head rebuild/bootstrap flows for current stores.
 - **Namespacing and shutdown hardening**:
@@ -75,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - MVCC visibility, head rebuilds, pruning, retained-floor behavior, and search invariance smoke tests
   - snapshot isolation semantics including read-your-writes, repeatable label scans, write-write conflicts, edge/node delete races, snapshot-consistent edge traversal, write skew, and contention aborts
   - closure-based transaction retries and concurrent counter increments through `DB.Update()`
-  - compound `MATCH ... CREATE` elementId relationship creation, migration `NOT` relationship filters, missing-MVCC-head edge creation fallback, shutdown hardening, namespaced prefix idempotence, plugin loader isolation, and deleted-entrypoint HNSW search filtering.
+  - compound `MATCH ... CREATE` elementId relationship creation, migration `NOT` relationship filters, missing-MVCC-head edge creation fallback, snapshot-safe missing-head reads, shutdown hardening, namespaced prefix idempotence, plugin loader isolation, and deleted-entrypoint HNSW search filtering.
 
 ### Documentation
 
