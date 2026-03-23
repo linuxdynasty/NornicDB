@@ -59,6 +59,7 @@ import (
 var (
 	ErrNotFound         = errors.New("not found")
 	ErrAlreadyExists    = errors.New("already exists")
+	ErrConflict         = errors.New("conflict")
 	ErrInvalidID        = errors.New("invalid id")
 	ErrInvalidData      = errors.New("invalid data")
 	ErrNotImplemented   = errors.New("not implemented")

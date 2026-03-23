@@ -43,6 +43,20 @@ NornicDB is a high-performance graph database designed for AI agents and knowled
 
 NornicDB automatically discovers and manages relationships in your data, weaving connections that let meaning emerge from your knowledge graph.
 
+## Transactional Guarantees & Isolation
+
+NornicDB implements Snapshot Isolation at the storage layer. Every transaction is anchored to a specific MVCC version at begin time, providing a consistent point-in-time view of the graph across nodes, edges, and properties.
+
+Read consistency is repeatable within a transaction. A transaction sees its own buffered writes, but it does not observe commits from concurrent writers that land after its read snapshot. Point lookups and snapshot-visible graph scans resolve against the same anchored version, so readers do not see partial commits or mid-transaction phantom changes.
+
+Conflict detection follows first-updater-wins semantics at commit. If two transactions modify the same node or edge, or if one transaction deletes a node while another transaction changes adjacent graph structure against an older snapshot, the later committer receives a normalized `ErrConflict`.
+
+Historical lookups remain explicit. MVCC pruning preserves the current head and a retained floor per logical key, which acts as the Minimum Retained Snapshot for that key. Requests below that retained floor fail safely with `ErrNotFound` rather than scanning sparse history.
+
+Current-only search remains intentionally separate from historical MVCC state, and the MVCC prune/search benchmark is a structural integrity smoke test rather than a blanket claim about every workload. NornicDB implements standard Snapshot Isolation semantics at the storage layer.
+
+Note: As a standard Snapshot Isolation implementation, NornicDB permits write skew.
+
 ## Why NornicDB Is Different
 
 - **Neo4j-compatible by default**: Bolt + Cypher support for existing drivers and applications.

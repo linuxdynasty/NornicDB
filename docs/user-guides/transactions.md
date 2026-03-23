@@ -39,6 +39,18 @@ Transaction atomicity has been implemented for NornicDB storage operations.
 ✅ **Rollback** - Discard all buffered operations
 ✅ **Closed Transaction Detection** - Error if operating on closed tx
 
+### Isolation Semantics
+
+NornicDB storage transactions now provide snapshot isolation via MVCC:
+
+- explicit transactions capture a read snapshot when `BeginTransaction()` starts
+- all committed reads inside the transaction are filtered to that snapshot
+- uncommitted changes are not visible to other transactions
+- read-your-writes still applies for changes buffered by the current transaction
+- concurrent write-write races fail at commit with a conflict instead of silently overwriting newer state
+
+In practice, all reads within a transaction see a consistent storage-layer view of the graph as of the transaction start, plus the transaction's own pending changes.
+
 ### Usage Example
 
 ```go
@@ -111,19 +123,6 @@ BenchmarkTransaction_RollbackNodes-16    224,329    5,403 ns/op    6,776 B/op   
 --- PASS: TestTransaction_MultipleOperationTypes (0.00s)
 PASS
 ```
-
-## Future Enhancements
-
-### Phase 4.2: Bolt Integration (Not Yet Implemented)
-- [ ] Connect Transaction to Bolt `handleBegin()`, `handleCommit()`, `handleRollback()`
-- [ ] Store active transaction in Session struct
-- [ ] Route Cypher write operations through transaction
-
-### Phase 4.3: Advanced Features
-- [ ] Snapshot isolation (prevent dirty reads from other transactions)
-- [ ] Deadlock detection
-- [ ] Transaction timeouts
-- [ ] Savepoints
 
 ## ELI12 Explanation
 

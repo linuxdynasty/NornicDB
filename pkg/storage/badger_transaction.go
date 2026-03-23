@@ -5,7 +5,7 @@
 package storage
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -30,6 +30,7 @@ type BadgerTransaction struct {
 	ID        string
 	StartTime time.Time
 	Status    TransactionStatus
+	readTS    MVCCVersion
 	// CommitVersion is assigned once for a successful commit that mutates storage.
 	CommitVersion MVCCVersion
 
@@ -59,6 +60,13 @@ type BadgerTransaction struct {
 	Metadata map[string]interface{}
 }
 
+func (b *BadgerEngine) currentMVCCReadVersion() MVCCVersion {
+	return MVCCVersion{
+		CommitTimestamp: time.Now().UTC(),
+		CommitSequence:  b.mvccSeq.Load(),
+	}
+}
+
 // BeginTransaction starts a new Badger transaction with ACID guarantees.
 func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	b.mu.Lock()
@@ -68,10 +76,13 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 		return nil, fmt.Errorf("engine is closed")
 	}
 
+	readTS := b.currentMVCCReadVersion()
+
 	return &BadgerTransaction{
 		ID:             generateTxID(),
 		StartTime:      time.Now(),
 		Status:         TxStatusActive,
+		readTS:         readTS,
 		badgerTx:       b.db.NewTransaction(true), // Read-write transaction
 		engine:         b,
 		pendingNodes:   make(map[NodeID]*Node),
@@ -204,12 +215,11 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	skipExistenceCheck := tx.skipCreateExistenceCheck && shouldSkipCreateExistenceCheck(node.ID)
 	if !skipExistenceCheck {
 		if _, deleted := tx.deletedNodes[node.ID]; !deleted {
-			key := nodeKey(node.ID)
-			_, err := tx.badgerTx.Get(key)
+			_, err := tx.getCommittedNodeLocked(node.ID)
 			if err == nil {
 				return "", ErrAlreadyExists
 			}
-			if err != badger.ErrKeyNotFound {
+			if err != ErrNotFound {
 				return "", fmt.Errorf("checking node existence: %w", err)
 			}
 		}
@@ -289,27 +299,13 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	if pending, exists := tx.pendingNodes[node.ID]; exists {
 		oldNode = copyNode(pending)
 	} else {
-		// Read from Badger
-		key := nodeKey(node.ID)
-		item, err := tx.badgerTx.Get(key)
-		if err == badger.ErrKeyNotFound {
+		var err error
+		oldNode, err = tx.getCommittedNodeLocked(node.ID)
+		if err == ErrNotFound {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("reading node: %w", err)
-		}
-
-		var nodeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return fmt.Errorf("reading node value: %w", err)
-		}
-
-		oldNode, err = deserializeNode(nodeBytes)
-		if err != nil {
-			return fmt.Errorf("deserializing node: %w", err)
 		}
 	}
 
@@ -501,21 +497,11 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 	if pending, exists := tx.pendingNodes[nodeID]; exists {
 		oldNode = copyNode(pending)
 	} else {
-		item, err := tx.badgerTx.Get(nodeKey(nodeID))
-		if err == badger.ErrKeyNotFound {
+		var err error
+		oldNode, err = tx.getCommittedNodeLocked(nodeID)
+		if err == ErrNotFound {
 			return ErrNotFound
 		}
-		if err != nil {
-			return err
-		}
-		var nodeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return err
-		}
-		oldNode, err = deserializeNode(nodeBytes)
 		if err != nil {
 			return err
 		}
@@ -627,26 +613,13 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 	if pending, exists := tx.pendingEdges[edge.ID]; exists {
 		oldEdge = copyEdge(pending)
 	} else {
-		key := edgeKey(edge.ID)
-		item, err := tx.badgerTx.Get(key)
-		if err == badger.ErrKeyNotFound {
+		var err error
+		oldEdge, err = tx.getCommittedEdgeLocked(edge.ID)
+		if err == ErrNotFound {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("reading edge: %w", err)
-		}
-
-		var edgeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			edgeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return fmt.Errorf("reading edge value: %w", err)
-		}
-
-		oldEdge, err = deserializeEdge(edgeBytes)
-		if err != nil {
-			return fmt.Errorf("deserializing edge: %w", err)
 		}
 	}
 
@@ -711,26 +684,13 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 	if pending, exists := tx.pendingEdges[edgeID]; exists {
 		edge = pending
 	} else {
-		key := edgeKey(edgeID)
-		item, err := tx.badgerTx.Get(key)
-		if err == badger.ErrKeyNotFound {
+		var err error
+		edge, err = tx.getCommittedEdgeLocked(edgeID)
+		if err == ErrNotFound {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("reading edge: %w", err)
-		}
-
-		var edgeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			edgeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return fmt.Errorf("reading edge value: %w", err)
-		}
-
-		edge, err = deserializeEdge(edgeBytes)
-		if err != nil {
-			return fmt.Errorf("deserializing edge: %w", err)
 		}
 	}
 
@@ -777,25 +737,7 @@ func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 		return copyNode(node), nil
 	}
 
-	// Read from Badger
-	key := nodeKey(nodeID)
-	item, err := tx.badgerTx.Get(key)
-	if err == badger.ErrKeyNotFound {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading node: %w", err)
-	}
-
-	var nodeBytes []byte
-	if err := item.Value(func(val []byte) error {
-		nodeBytes = append([]byte{}, val...)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("reading node value: %w", err)
-	}
-
-	return deserializeNode(nodeBytes)
+	return tx.getCommittedNodeLocked(nodeID)
 }
 
 // Commit applies all changes atomically with full constraint validation.
@@ -813,6 +755,12 @@ func (tx *BadgerTransaction) Commit() error {
 		tx.badgerTx.Discard()
 		tx.Status = TxStatusRolledBack
 		return fmt.Errorf("constraint violation: %w", err)
+	}
+
+	if err := tx.validateSnapshotIsolationConflicts(); err != nil {
+		tx.badgerTx.Discard()
+		tx.Status = TxStatusRolledBack
+		return err
 	}
 
 	temporalTargets, err := tx.bufferTemporalIndexWrites()
@@ -859,7 +807,7 @@ func (tx *BadgerTransaction) Commit() error {
 	// Commit Badger transaction (atomic!)
 	if err := tx.badgerTx.Commit(); err != nil {
 		tx.Status = TxStatusRolledBack
-		return fmt.Errorf("badger commit failed: %w", err)
+		return normalizeTransactionCommitError(err)
 	}
 
 	// Apply cache/count updates and fire callbacks after commit.
@@ -981,6 +929,13 @@ func (tx *BadgerTransaction) Commit() error {
 	return nil
 }
 
+func normalizeTransactionCommitError(err error) error {
+	if errors.Is(err, ErrConflict) || errors.Is(err, badger.ErrConflict) {
+		return fmt.Errorf("%w: concurrent transaction modified data before commit: %w", ErrConflict, err)
+	}
+	return fmt.Errorf("badger commit failed: %w", err)
+}
+
 // Rollback discards all changes.
 func (tx *BadgerTransaction) Rollback() error {
 	tx.mu.Lock()
@@ -1050,6 +1005,57 @@ func (tx *BadgerTransaction) OperationCount() int {
 	return len(tx.operations)
 }
 
+func (tx *BadgerTransaction) getCommittedNodeLocked(nodeID NodeID) (*Node, error) {
+	if tx.readTS.IsZero() {
+		key := nodeKey(nodeID)
+		item, err := tx.badgerTx.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading node: %w", err)
+		}
+		var nodeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			nodeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("reading node value: %w", err)
+		}
+		return deserializeNode(nodeBytes)
+	}
+	return tx.engine.GetNodeVisibleAt(nodeID, tx.readTS)
+}
+
+func (tx *BadgerTransaction) getCommittedEdgeLocked(edgeID EdgeID) (*Edge, error) {
+	if tx.readTS.IsZero() {
+		key := edgeKey(edgeID)
+		item, err := tx.badgerTx.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading edge: %w", err)
+		}
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("reading edge value: %w", err)
+		}
+		return deserializeEdge(edgeBytes)
+	}
+	return tx.engine.GetEdgeVisibleAt(edgeID, tx.readTS)
+}
+
+func (tx *BadgerTransaction) getNodesByLabelLocked(label string) ([]*Node, error) {
+	if tx.readTS.IsZero() {
+		return tx.engine.GetNodesByLabel(label)
+	}
+	return tx.engine.GetNodesByLabelVisibleAt(label, tx.readTS)
+}
+
 // nodeExists checks if a node exists (pending or storage).
 func (tx *BadgerTransaction) nodeExists(nodeID NodeID) bool {
 	if _, deleted := tx.deletedNodes[nodeID]; deleted {
@@ -1059,10 +1065,159 @@ func (tx *BadgerTransaction) nodeExists(nodeID NodeID) bool {
 		return true
 	}
 
-	// Check Badger
-	key := nodeKey(nodeID)
-	_, err := tx.badgerTx.Get(key)
+	_, err := tx.getCommittedNodeLocked(nodeID)
 	return err == nil
+}
+
+func (tx *BadgerTransaction) validateSnapshotIsolationConflicts() error {
+	for _, op := range tx.operations {
+		switch op.Type {
+		case OpCreateNode:
+			if err := tx.checkNodeCreateConflict(op.NodeID); err != nil {
+				return err
+			}
+		case OpUpdateNode, OpDeleteNode, OpUpdateEmbedding:
+			if err := tx.checkNodeWriteConflict(op.NodeID); err != nil {
+				return err
+			}
+			if op.Type == OpDeleteNode {
+				if err := tx.checkNodeAdjacencyConflict(op.NodeID); err != nil {
+					return err
+				}
+			}
+		case OpCreateEdge:
+			if err := tx.checkEdgeCreateConflict(op.EdgeID); err != nil {
+				return err
+			}
+			if err := tx.checkEdgeEndpointConflicts(op.Edge); err != nil {
+				return err
+			}
+		case OpUpdateEdge:
+			if err := tx.checkEdgeWriteConflict(op.EdgeID); err != nil {
+				return err
+			}
+			if err := tx.checkEdgeEndpointConflicts(op.Edge); err != nil {
+				return err
+			}
+		case OpDeleteEdge:
+			if err := tx.checkEdgeWriteConflict(op.EdgeID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkNodeCreateConflict(nodeID NodeID) error {
+	head, err := tx.engine.GetNodeCurrentHead(nodeID)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if head.Version.Compare(tx.readTS) > 0 {
+		return fmt.Errorf("%w: node %s changed after transaction start", ErrConflict, nodeID)
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkNodeWriteConflict(nodeID NodeID) error {
+	head, err := tx.engine.GetNodeCurrentHead(nodeID)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if head.Version.Compare(tx.readTS) > 0 {
+		return fmt.Errorf("%w: node %s changed after transaction start", ErrConflict, nodeID)
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkEdgeCreateConflict(edgeID EdgeID) error {
+	head, err := tx.engine.GetEdgeCurrentHead(edgeID)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if head.Version.Compare(tx.readTS) > 0 {
+		return fmt.Errorf("%w: edge %s changed after transaction start", ErrConflict, edgeID)
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkEdgeWriteConflict(edgeID EdgeID) error {
+	head, err := tx.engine.GetEdgeCurrentHead(edgeID)
+	if err == ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if head.Version.Compare(tx.readTS) > 0 {
+		return fmt.Errorf("%w: edge %s changed after transaction start", ErrConflict, edgeID)
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkEdgeEndpointConflicts(edge *Edge) error {
+	if edge == nil {
+		return nil
+	}
+	for _, nodeID := range []NodeID{edge.StartNode, edge.EndNode} {
+		if pending, exists := tx.pendingNodes[nodeID]; exists {
+			if pending != nil {
+				continue
+			}
+		}
+		head, err := tx.engine.GetNodeCurrentHead(nodeID)
+		if err == ErrNotFound {
+			return ErrInvalidEdge
+		}
+		if err != nil {
+			return err
+		}
+		if head.Tombstoned {
+			if head.Version.Compare(tx.readTS) > 0 {
+				return fmt.Errorf("%w: endpoint node %s was deleted after transaction start", ErrConflict, nodeID)
+			}
+			return ErrInvalidEdge
+		}
+	}
+	return nil
+}
+
+func (tx *BadgerTransaction) checkNodeAdjacencyConflict(nodeID NodeID) error {
+	return tx.engine.withView(func(viewTx *badger.Txn) error {
+		prefixes := [][]byte{outgoingIndexPrefix(nodeID), incomingIndexPrefix(nodeID)}
+		for _, prefix := range prefixes {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			opts.PrefetchValues = false
+			it := viewTx.NewIterator(opts)
+			for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+				edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+				head, err := tx.engine.loadEdgeMVCCHeadInTxn(viewTx, edgeID)
+				if err == ErrNotFound {
+					continue
+				}
+				if err != nil {
+					it.Close()
+					return err
+				}
+				if head.Version.Compare(tx.readTS) > 0 {
+					it.Close()
+					return fmt.Errorf("%w: node %s has adjacent edge %s changed after transaction start", ErrConflict, nodeID, edgeID)
+				}
+			}
+			it.Close()
+		}
+		return nil
+	})
 }
 
 // shouldSkipCreateExistenceCheck avoids a read-before-write for UUID-based IDs.
@@ -1168,59 +1323,23 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 // scanForUniqueViolation performs a full database scan to check for UNIQUE violations
 // within a single namespace (database).
 func (tx *BadgerTransaction) scanForUniqueViolation(namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
-	// Scan all nodes with this label
-	prefix := labelIndexKey(label, "")
-	opts := badger.DefaultIteratorOptions
-	opts.PrefetchValues = false // Only need keys first
-
-	iter := tx.badgerTx.NewIterator(opts)
-	defer iter.Close()
-
-	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
-		item := iter.Item()
-		key := item.Key()
-
-		// Extract nodeID from label index key
-		// Format: prefixLabelIndex + label (lowercase) + 0x00 + nodeID
-		parts := bytes.Split(key[1:], []byte{0x00})
-		if len(parts) != 2 {
+	nodes, err := tx.getNodesByLabelLocked(label)
+	if err != nil {
+		return err
+	}
+	for _, existingNode := range nodes {
+		if existingNode == nil || existingNode.ID == excludeNodeID {
 			continue
 		}
-		nodeID := NodeID(parts[1])
-
-		if nodeID == excludeNodeID {
-			continue // Skip the node being validated
-		}
-
-		// Load the node to check property value
-		nodeKey := nodeKey(nodeID)
-		nodeItem, err := tx.badgerTx.Get(nodeKey)
-		if err != nil {
-			continue // Node might have been deleted
-		}
-
-		var nodeBytes []byte
-		if err := nodeItem.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
+		if namespace != "" && !strings.HasPrefix(string(existingNode.ID), namespace+":") {
 			continue
 		}
-
-		existingNode, err := deserializeNode(nodeBytes)
-		if err != nil {
-			continue
-		}
-
-		// Check if property value matches
-		if existingValue, ok := existingNode.Properties[property]; ok {
-			if compareValues(existingValue, value) {
-				return &ConstraintViolationError{
-					Type:       ConstraintUnique,
-					Label:      label,
-					Properties: []string{property},
-					Message:    fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", property, value, existingNode.ID),
-				}
+		if existingValue, ok := existingNode.Properties[property]; ok && compareValues(existingValue, value) {
+			return &ConstraintViolationError{
+				Type:       ConstraintUnique,
+				Label:      label,
+				Properties: []string{property},
+				Message:    fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", property, value, existingNode.ID),
 			}
 		}
 	}
@@ -1290,55 +1409,18 @@ func (tx *BadgerTransaction) checkNodeKeyConstraint(node *Node, c Constraint) er
 // scanForNodeKeyViolation performs a full database scan to check for NODE KEY violations
 // within a single namespace (database).
 func (tx *BadgerTransaction) scanForNodeKeyViolation(namespace, label string, properties []string, values []interface{}, excludeNodeID NodeID) error {
-	prefix := labelIndexKey(label, "")
-	opts := badger.DefaultIteratorOptions
-	opts.PrefetchValues = false
-
-	iter := tx.badgerTx.NewIterator(opts)
-	defer iter.Close()
-
-	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
-		item := iter.Item()
-		key := item.Key()
-
-		// Extract nodeID
-		parts := bytes.Split(key[1:], []byte{0x00})
-		if len(parts) != 2 {
+	nodes, err := tx.getNodesByLabelLocked(label)
+	if err != nil {
+		return err
+	}
+	for _, existingNode := range nodes {
+		if existingNode == nil || existingNode.ID == excludeNodeID {
 			continue
 		}
-		nodeID := NodeID(parts[1])
-
-		if nodeID == excludeNodeID {
-			continue
-		}
-		if namespace != "" && !strings.HasPrefix(string(nodeID), namespace+":") {
-			continue
-		}
-		if namespace != "" && !strings.HasPrefix(string(nodeID), namespace+":") {
+		if namespace != "" && !strings.HasPrefix(string(existingNode.ID), namespace+":") {
 			continue
 		}
 
-		// Load node
-		nodeKey := nodeKey(nodeID)
-		nodeItem, err := tx.badgerTx.Get(nodeKey)
-		if err != nil {
-			continue
-		}
-
-		var nodeBytes []byte
-		if err := nodeItem.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			continue
-		}
-
-		existingNode, err := deserializeNode(nodeBytes)
-		if err != nil {
-			continue
-		}
-
-		// Check if all property values match
 		match := true
 		for i, prop := range properties {
 			existingValue, ok := existingNode.Properties[prop]
@@ -1462,7 +1544,45 @@ func (tx *BadgerTransaction) checkTemporalConstraint(node *Node, c Constraint) e
 	}
 
 	// Check overlaps against committed storage using the label index scan.
-	return tx.engine.scanForTemporalOverlapInTxn(tx.badgerTx, dbName, c.Label, keyProp, startProp, endProp, keyVal, start, end, hasEnd, node.ID)
+	visibleNodes, err := tx.getNodesByLabelLocked(c.Label)
+	if err != nil {
+		return err
+	}
+	for _, other := range visibleNodes {
+		if other == nil || other.ID == node.ID {
+			continue
+		}
+		if !strings.HasPrefix(string(other.ID), nsPrefix) {
+			continue
+		}
+		otherKey := other.Properties[keyProp]
+		if otherKey == nil || !compareValues(otherKey, keyVal) {
+			continue
+		}
+		otherStart, ok := coerceTemporalTime(other.Properties[startProp])
+		if !ok {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message:    fmt.Sprintf("TEMPORAL constraint requires %s for node %s", startProp, other.ID),
+			}
+		}
+		otherEnd, otherHasEnd := coerceTemporalTime(other.Properties[endProp])
+		if intervalsOverlap(
+			temporalInterval{start: start, end: end, hasEnd: hasEnd},
+			temporalInterval{start: otherStart, end: otherEnd, hasEnd: otherHasEnd},
+		) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
+					other.ID, keyProp, keyVal),
+			}
+		}
+	}
+	return nil
 }
 
 // validateAllConstraints performs final validation before commit.

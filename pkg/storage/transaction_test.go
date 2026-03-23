@@ -30,6 +30,9 @@ func TestNewTransaction(t *testing.T) {
 	if tx.StartTime.IsZero() {
 		t.Error("StartTime should be set")
 	}
+	if tx.readTS.IsZero() {
+		t.Error("readTS should be anchored at transaction begin")
+	}
 }
 
 func TestTransaction_CreateNode_Basic(t *testing.T) {
@@ -1166,14 +1169,140 @@ func TestTransaction_Isolation(t *testing.T) {
 	}
 
 	// Commit TX1
-	tx1.Commit()
+	require.NoError(t, tx1.Commit())
 
-	// TX2 still shouldn't see it (snapshot isolation would require this)
-	// But our basic implementation will see it now - this is acceptable
-	// for the current implementation level
+	// TX2 must remain pinned to its start snapshot.
+	_, err = tx2.GetNode(NodeID(prefixTestID("isolated-node")))
+	require.ErrorIs(t, err, ErrNotFound)
+
+	// A new transaction started after the commit should see the node.
+	tx3, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	defer tx3.Rollback()
+	_, err = tx3.GetNode(NodeID(prefixTestID("isolated-node")))
+	require.NoError(t, err)
 
 	// Close TX2
-	tx2.Rollback()
+	require.NoError(t, tx2.Rollback())
+}
+
+func TestTransaction_WriteWriteConflict(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	nodeID := NodeID(prefixTestID("ww-conflict-node"))
+	_, err := engine.CreateNode(&Node{
+		ID:         nodeID,
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"version": 1},
+	})
+	require.NoError(t, err)
+
+	tx1, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	tx2, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	require.NoError(t, tx1.UpdateNode(&Node{
+		ID:         nodeID,
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"version": 2},
+	}))
+	require.NoError(t, tx2.UpdateNode(&Node{
+		ID:         nodeID,
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"version": 3},
+	}))
+
+	require.NoError(t, tx1.Commit())
+	require.ErrorIs(t, tx2.Commit(), ErrConflict)
+
+	stored, err := engine.GetNode(nodeID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, stored.Properties["version"])
+}
+
+func TestTransaction_WriteWriteConflict_OnEdge(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	start := NodeID(prefixTestID("ww-edge-start"))
+	end := NodeID(prefixTestID("ww-edge-end"))
+	_, err := engine.CreateNode(&Node{ID: start, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: end, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	edgeID := EdgeID(prefixTestID("ww-conflict-edge"))
+	require.NoError(t, engine.CreateEdge(&Edge{
+		ID:         edgeID,
+		StartNode:  start,
+		EndNode:    end,
+		Type:       "LINKS",
+		Properties: map[string]interface{}{"weight": 1},
+	}))
+
+	tx1, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	tx2, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	require.NoError(t, tx1.UpdateEdge(&Edge{
+		ID:         edgeID,
+		StartNode:  start,
+		EndNode:    end,
+		Type:       "LINKS",
+		Properties: map[string]interface{}{"weight": 2},
+	}))
+	require.NoError(t, tx2.UpdateEdge(&Edge{
+		ID:         edgeID,
+		StartNode:  start,
+		EndNode:    end,
+		Type:       "LINKS",
+		Properties: map[string]interface{}{"weight": 3},
+	}))
+
+	require.NoError(t, tx1.Commit())
+	require.ErrorIs(t, tx2.Commit(), ErrConflict)
+
+	stored, err := engine.GetEdge(edgeID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, stored.Properties["weight"])
+}
+
+func TestTransaction_DeleteNodeConflictsWithConcurrentEdgeCreate(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	start := NodeID(prefixTestID("delete-node-start"))
+	target := NodeID(prefixTestID("delete-node-target"))
+	_, err := engine.CreateNode(&Node{ID: start, Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: target, Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	txDelete, err := engine.BeginTransaction()
+	require.NoError(t, err)
+	txCreateEdge, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	require.NoError(t, txDelete.DeleteNode(target))
+	require.NoError(t, txCreateEdge.CreateEdge(&Edge{
+		ID:        EdgeID(prefixTestID("created-after-delete-snapshot")),
+		StartNode: start,
+		EndNode:   target,
+		Type:      "LINKS",
+	}))
+
+	require.NoError(t, txCreateEdge.Commit())
+	require.ErrorIs(t, txDelete.Commit(), ErrConflict)
+
+	node, err := engine.GetNode(target)
+	require.NoError(t, err)
+	require.Equal(t, target, node.ID)
+	edge, err := engine.GetEdge(EdgeID(prefixTestID("created-after-delete-snapshot")))
+	require.NoError(t, err)
+	require.Equal(t, target, edge.EndNode)
 }
 
 func TestTransaction_MultipleOperationTypes(t *testing.T) {

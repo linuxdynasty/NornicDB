@@ -91,7 +91,7 @@ All constraint types enforced: UNIQUE (with full database scan), NODE KEY (compo
 Full ACID guarantees via BadgerDB:
 - **Atomicity:** All operations commit together or none
 - **Consistency:** Constraint validation before commit
-- **Isolation:** Read-your-writes, serializable (MVCC)
+- **Isolation:** Snapshot isolation via MVCC at the storage transaction layer, including read-your-writes and write-write conflict detection at commit
 - **Durability:** WAL-based crash recovery
 
 Supports: BEGIN/COMMIT/ROLLBACK, implicit transactions, automatic rollback on error, transaction metadata.

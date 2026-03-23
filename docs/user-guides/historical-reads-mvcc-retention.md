@@ -25,6 +25,41 @@ Important behavior:
 - search indexes stay current-only; pruning historical versions does not change current search results
 - retention settings define the default pruning policy, but they do not start a background pruning job by themselves
 
+## Isolation and Snapshot Semantics
+
+NornicDB uses MVCC in two related ways:
+
+- explicit MVCC snapshot selectors let callers read historical committed state by commit time and commit sequence
+- storage transactions capture a read snapshot at `BeginTransaction()` and keep committed reads pinned to that snapshot for the life of the transaction
+
+That means:
+
+- MVCC snapshot reads resolve against committed versions only
+- storage transactions provide snapshot isolation, atomic commit, rollback, and read-your-writes
+- uncommitted changes from one transaction are not visible to other transactions
+- repeated point reads and label scans inside one transaction stay on the same committed graph snapshot
+
+Use explicit MVCC snapshot selectors when you need a specific historical view. Use storage transactions when you need a stable current snapshot across a unit of work.
+
+## Graph Snapshot Consistency
+
+MVCC applies to both nodes and edges. When you read nodes, labels, edge types, and traversals with the **same** MVCC version selector, NornicDB resolves them against the same commit-order view of the graph.
+
+That means:
+
+- node and edge visibility are evaluated against the same `MVCCVersion`
+- transactional commits assign one commit version to all node, edge, and property mutations in that commit
+- label scans, edge-type scans, and edge-between scans have snapshot-visible APIs, not just point lookups
+
+This is the intended consistency model for graph snapshots: pick one snapshot version, then use that same selector across all node and edge reads involved in the query.
+
+Atomic commit visibility contract:
+
+- a single MVCC Version ID covers all node, edge, and property mutations produced by one committed transaction
+- snapshot queries that use one selector are guaranteed to be cross-entity consistent for that committed version
+
+If a requested object was tombstoned at that snapshot, or if the requested snapshot predates the retained floor for that logical key, the read returns not found.
+
 ## Querying Historical State
 
 ### Cypher Temporal Procedure
@@ -104,6 +139,33 @@ Semantics:
 - `TTL` protects versions newer than `now - TTL` from pruning
 - pruning is head-safe and tombstone-aware
 
+## Pruning Guarantees
+
+Pruning is designed to reduce history without corrupting the visible head state.
+
+NornicDB tracks a retained floor per logical key. In documentation and operations terms, treat this as the **Minimum Retained Snapshot (MRS)** for that key: older history is no longer guaranteed to exist.
+
+Guaranteed behavior:
+
+- the current head is always preserved
+- pruning rewrites the persisted head metadata with a retained floor anchor
+- snapshot reads at or above the retained floor continue to resolve correctly
+- tombstone-chain compaction is only allowed when there are no active MVCC snapshot readers and no age-based protection keeping older tombstones alive
+
+Important non-guarantees:
+
+- pruning does **not** preserve every historical snapshot forever
+- a long-running query that depends on versions older than the retained floor may fail with `ErrNotFound` after pruning
+- retention settings define the default pruning policy, but they do not reserve an independent per-query historical snapshot window
+
+Reader-aware grace period:
+
+- active snapshot readers prevent the most aggressive physical tombstone compaction path
+- active readers do **not** indefinitely delay version pruning beyond the configured retention policy
+- once a version falls behind the Minimum Retained Snapshot for a key, `ErrNotFound` is the expected and safe result
+
+Operationally, this means you should size `mvcc_retention_max_versions` and `mvcc_retention_ttl` for the longest historical lookback you actually need, and schedule prune maintenance accordingly.
+
 ### YAML Configuration
 
 ```yaml
@@ -174,6 +236,34 @@ if err := db.RebuildMVCCHeads(ctx); err != nil {
 }
 ```
 
+## Failure Modes and Operational Limits
+
+The main failure and degradation modes to plan for are:
+
+1. snapshots older than the retained floor
+  Reads below the Minimum Retained Snapshot for a logical key return `ErrNotFound`. This is expected after pruning and should be treated as history no longer being retained.
+
+2. long-running historical queries during aggressive pruning
+  Active snapshot readers prevent the most aggressive tombstone compaction path, but pruning still enforces retention policy. If a query depends on versions outside the retained window, it can still lose access to those older versions.
+
+3. startup and restore rebuild cost
+  `RebuildMVCCHeads` is correctness-first. The current implementation scans stored MVCC version records and then current records to restore missing head state. On large stores, that can increase startup or restore time.
+
+4. async write visibility
+  Async writes are an eventual-consistency mode. They improve throughput, but they are a separate visibility model from explicit MVCC historical reads.
+
+## Startup and Recovery Behavior
+
+NornicDB rebuilds MVCC heads during startup warmup and after restore so search and snapshot reads have consistent head metadata available.
+
+Current implementation characteristics:
+
+- rebuild is a foreground correctness step before search warmup completes
+- rebuild is based on scanning existing MVCC version records, then bootstrapping from current records where needed
+- rebuild cost is $O(N)$ in the number of versioned records that must be scanned
+
+This is safe, but it means startup cost can scale directly with stored MVCC history. On very large datasets, full MVCC head reconstruction can become a material startup or restore event. If you operate very large stores with deep history, treat MVCC head rebuild time as an operational budget item and benchmark it in your environment.
+
 ## Search Behavior
 
 Search indexing remains current-only.
@@ -185,6 +275,8 @@ That means:
 - HNSW and current candidate selection continue to operate on the latest visible graph state
 
 This separation is intentional: MVCC history is for temporal correctness and historical inspection, not for duplicating search corpus entries.
+
+The current search benchmark and prune regression should be read as a **structural integrity smoke test**: they verify that adding history depth and pruning retained history do not perturb current-only search candidate selection in the tested fixture. They are not a blanket claim about every workload, corpus, or ranking metric.
 
 ## Serialization Notes
 

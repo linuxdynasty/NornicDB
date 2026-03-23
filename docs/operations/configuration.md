@@ -157,7 +157,7 @@ async_writes:
   max_edge_cache_size: 200000
 ```
 
-**For Strong Consistency:**
+**For Lower Staleness Window (still eventual consistency):**
 ```yaml
 async_writes:
   enabled: true
