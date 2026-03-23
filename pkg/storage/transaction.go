@@ -91,6 +91,9 @@ type Operation struct {
 	OldEdge *Edge // Old state (for update/delete rollback)
 }
 
+// Transaction is the public closure-facing transaction type used by DB.Update and DB.View.
+type Transaction = BadgerTransaction
+
 // copyNode creates a deep copy of a node.
 // Used by transactions to preserve state for rollback.
 func copyNode(node *Node) *Node {
