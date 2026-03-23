@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.27] - 2026-03-22
+
+### Added
+
+- **Indexed temporal `AS OF` lookups and current-version tracking**:
+  - added storage-backed temporal indexes keyed by namespace, label, temporal key, and validity window so point-in-time lookups no longer depend on full label scans
+  - added current-pointer tracking for open/current temporal intervals and wired rebuild/prune maintenance through DB admin flows.
+  - what this means: temporal queries scale with ordered index lookups instead of broad scans, and restore/startup flows can rebuild temporal state deterministically.
+- **MVCC historical reads and retention controls**:
+  - added committed node/edge version records, persisted MVCC head metadata, snapshot-visible reads, and wrapper delegation for namespaced, WAL, and async engines
+  - added retention policy controls, pruning, retained-floor anchoring, and historical-read maintenance APIs.
+  - what this means: NornicDB now supports explicit historical graph reads with predictable retention behavior instead of only current-state inspection.
+- **Closure-based transaction helper API**:
+  - added `DB.Begin`, `DB.Update`, and `DB.View` wrappers for closure-scoped transaction execution
+  - exported `Transaction` as the public closure-facing transaction type.
+  - what this means: callers can use transaction-scoped closures without manually juggling rollback/commit boilerplate.
+
+### Changed
+
+- **Storage transaction isolation model**:
+  - transactions now anchor reads to a begin-time MVCC snapshot and keep point reads, label scans, and graph visibility checks pinned to that snapshot
+  - commit-time validation now checks node, edge, endpoint, and adjacency races against the transaction snapshot.
+  - what this means: storage transactions now provide standard Snapshot Isolation semantics rather than best-effort read-your-writes only behavior.
+- **Temporal/search interaction**:
+  - search indexing and rebuild flows now treat historical temporal versions as non-searchable and keep indexes current-only by default
+  - temporal overlap validation now uses indexed predecessor/successor checks where supported.
+  - what this means: historical state no longer pollutes current search results, and temporal writes avoid increasingly expensive validation scans.
+- **Operations and configuration surface**:
+  - added MVCC retention knobs to config, environment variables, and sample YAML
+  - clarified async-write consistency wording and documented retained-floor/MRS behavior.
+  - what this means: operators have explicit controls and clearer expectations for history depth, pruning, and eventual-consistency modes.
+
+### Fixed
+
+- **Historical lookup performance cliffs**:
+  - fixed sparse post-prune historical lookups by persisting a retained-floor anchor in MVCC head metadata.
+- **Conflict normalization and retryability**:
+  - fixed lower-level Badger conflict leakage by normalizing commit conflicts to `ErrConflict` with clearer concurrent-modification messages.
+- **Graph-consistent concurrent delete behavior**:
+  - fixed transaction validation so node deletes and adjacent edge changes cannot commit into a dangling-edge state across concurrent snapshots.
+- **Startup/restore maintenance reliability**:
+  - fixed temporal rebuild/search maintenance ordering and added explicit MVCC head rebuild/bootstrap flows for current stores.
+
+### Tests
+
+- Added/expanded regression and benchmark coverage for:
+  - indexed temporal `AS OF` lookups, temporal overlap validation, rebuilds, and pruning
+  - MVCC visibility, head rebuilds, pruning, retained-floor behavior, and search invariance smoke tests
+  - snapshot isolation semantics including read-your-writes, repeatable label scans, write-write conflicts, edge/node delete races, snapshot-consistent edge traversal, write skew, and contention aborts
+  - closure-based transaction retries and concurrent counter increments through `DB.Update()`.
+
+### Documentation
+
+- Added/updated documentation for:
+  - historical reads, MVCC retention, pruning guarantees, startup/recovery behavior, and retained-floor semantics
+  - storage transaction isolation guarantees and feature parity language
+  - temporal query usage, serialization expectations, and operational configuration examples.
+
+### Technical Details
+
+- **Range covered**: `v1.0.26..HEAD`
+- **Commits in range**: 4 (non-merge)
+- **Repository delta**: 47 files changed, +6,819 / -362 lines
+- **Non-test surface changed**: 35 files
+- **Primary focus areas**: indexed temporal lookups, MVCC historical storage, Snapshot Isolation correctness, and retry-friendly transaction ergonomics.
+
 ## [v1.0.26] - 2026-03-20
 
 ### Changed
