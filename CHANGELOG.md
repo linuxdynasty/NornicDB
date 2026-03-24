@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Cypher mutation and grouped-query compatibility for translation flows**:
-  - fixed chained `MATCH ... WHERE ... MATCH ... SET ... RETURN` handling for update queries that join `OriginalText` to `TranslatedText`
+- **Cypher mutation and grouped-query compatibility for multi-entity update flows**:
+  - fixed chained `MATCH ... WHERE ... MATCH ... SET ... RETURN` handling for update queries that join source/target entity sets
   - fixed multi-MATCH WHERE extraction to use the correct terminal WHERE before RETURN, preventing false `expected multiple MATCH clauses` errors
   - fixed `SET ... RETURN count(...)` aggregation semantics so update-count projections return deterministic values (`count(t)` now behaves correctly in mutation returns)
   - fixed chained MATCH normalization so queries containing `OPTIONAL MATCH` are not rewritten into incompatible required-MATCH forms
@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - fixed DELETE/DETACH DELETE mutation stats under repeated OPTIONAL MATCH row expansion by deduplicating per-entity deletes
   - fixed branch regression where some SET/DELETE/CALL-IN-TRANSACTIONS paths returned nil projection values instead of expected results.
 - **Indexed OR-IN lookup path for key-list reads**:
-  - added index-backed planning for predicates shaped like `propA IN $keys OR propB IN $keys` (for example `textKey`/`textKey128`)
+  - added index-backed planning for predicates shaped like `propA IN $keys OR propB IN $keys` across alternate key fields
   - avoids full label scans for large key-list lookups and cleanup/read query patterns.
 
 ### Tests
@@ -51,14 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added regression coverage for:
   - Bolt DB-scoped executor embedder inheritance and string vector query execution
   - async CREATE fast-path optimistic ID metadata propagation.
-  - correlated subquery create-or-update translation shape (`OPTIONAL MATCH + CALL { WITH ... UNION ... }`)
+  - correlated subquery create-or-update shape (`OPTIONAL MATCH + CALL { WITH ... UNION ... }`)
   - CALL subquery write-path regression cases (`WITH ... CREATE`, `WITH ... MERGE`)
   - delete deduplication under OPTIONAL MATCH row multiplication
   - parser/import handling for `WITH ... WHERE ...` correlated subquery clauses
-  - exact `UNWIND + OPTIONAL MATCH + collect(CASE...)` translation lookup shape (per-key grouped rows and null-arm behavior)
+  - exact `UNWIND + OPTIONAL MATCH + collect(CASE...)` key-lookup shape (per-key grouped rows and null-arm behavior)
   - `DETACH DELETE` with `WHERE elementId(...)` + `OPTIONAL MATCH` cleanup shape
   - OR-combined indexed `IN` predicate planning without scan fallback
-  - exact translation mutation shapes:
+  - exact mutation query shapes:
     - `MATCH ... WHERE ... OR (...) CREATE ... CREATE ... RETURN ...`
     - `MATCH ... WHERE ... OR (...) MATCH ... SET ... RETURN ...`
     - `MATCH ... WHERE elementId(...) SET ... RETURN count(...) AS updated`
