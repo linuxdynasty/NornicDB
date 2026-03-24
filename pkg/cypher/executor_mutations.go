@@ -160,6 +160,8 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	e.normalizeSetMatchRowsToNodes(matchResult, store)
 
 	// Delete matched nodes and/or relationships
+	deletedNodeIDs := make(map[string]struct{})
+	deletedEdgeIDs := make(map[string]struct{})
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
 			// Try to extract node ID or edge ID
@@ -188,14 +190,21 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 			// Handle relationship deletion
 			if edgeID != "" {
+				if _, seen := deletedEdgeIDs[edgeID]; seen {
+					continue
+				}
 				if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
 					result.Stats.RelationshipsDeleted++
+					deletedEdgeIDs[edgeID] = struct{}{}
 				}
 				continue
 			}
 
 			// Handle node deletion
 			if nodeID == "" {
+				continue
+			}
+			if _, seen := deletedNodeIDs[nodeID]; seen {
 				continue
 			}
 
@@ -211,12 +220,14 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 					result.Stats.RelationshipsDeleted += edgesCount
+					deletedNodeIDs[nodeID] = struct{}{}
 					e.removeNodeFromSearch(nodeID)
 				}
 			} else {
 				// Non-detach delete - just delete the node (will fail if edges exist)
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
+					deletedNodeIDs[nodeID] = struct{}{}
 					e.removeNodeFromSearch(nodeID)
 				}
 			}

@@ -226,3 +226,38 @@ func TestDeleteContentWithCypherKeywords(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), countResult.Rows[0][0].(int64))
 }
+
+func TestDetachDelete_DeduplicatesRepeatedRowsFromOptionalMatch(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := executor.Execute(ctx, `
+		CREATE (o:OriginalText {id: 'o-1'})
+		CREATE (t1:TranslatedText {id: 't-1'})
+		CREATE (t2:TranslatedText {id: 't-2'})
+		CREATE (t3:TranslatedText {id: 't-3'})
+		CREATE (o)-[:TRANSLATES_TO]->(t1)
+		CREATE (o)-[:TRANSLATES_TO]->(t2)
+		CREATE (o)-[:TRANSLATES_TO]->(t3)
+	`, nil)
+	require.NoError(t, err)
+
+	// OPTIONAL MATCH produces repeated rows for `o`; delete executor must dedupe
+	// node and edge deletes so each entity is deleted once.
+	deleteResult, err := executor.Execute(ctx, `
+		MATCH (o:OriginalText)
+		OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText)
+		DETACH DELETE o, t
+	`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, deleteResult.Stats)
+	assert.Equal(t, 4, deleteResult.Stats.NodesDeleted, "expected unique node deletes only")
+	assert.GreaterOrEqual(t, deleteResult.Stats.RelationshipsDeleted, 3)
+
+	remaining, err := executor.Execute(ctx, `MATCH (n) RETURN count(n)`, nil)
+	require.NoError(t, err)
+	require.Len(t, remaining.Rows, 1)
+	assert.Equal(t, int64(0), remaining.Rows[0][0].(int64))
+}

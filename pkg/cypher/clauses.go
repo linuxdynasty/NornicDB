@@ -2392,9 +2392,67 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			}
 
 		default:
-			if strings.Contains(item.expr, ".") {
+			expr := strings.TrimSpace(item.expr)
+			found := false
+
+			// Prefer previously computed WITH aliases/values for this row set.
+			for rowIdx := range rows {
+				if cv, ok := computedValues[rowIdx]; ok {
+					if val, exists := cv[expr]; exists {
+						row[i] = val
+						found = true
+						break
+					}
+				}
+			}
+			if found {
+				break
+			}
+
+			// Bare variable projections from WITH (e.g., RETURN o, t, r).
+			if strings.EqualFold(expr, sourceVar) {
+				for _, r := range rows {
+					if r.initialNode != nil {
+						row[i] = r.initialNode
+						found = true
+						break
+					}
+				}
+				if !found {
+					row[i] = nil
+				}
+				break
+			}
+			if strings.EqualFold(expr, targetVar) {
+				for _, r := range rows {
+					if r.relatedNode != nil {
+						row[i] = r.relatedNode
+						found = true
+						break
+					}
+				}
+				if !found {
+					row[i] = nil
+				}
+				break
+			}
+			if strings.EqualFold(expr, relVar) {
+				for _, r := range rows {
+					if r.relationship != nil {
+						row[i] = r.relationship
+						found = true
+						break
+					}
+				}
+				if !found {
+					row[i] = nil
+				}
+				break
+			}
+
+			if strings.Contains(expr, ".") {
 				// Handle simple property access: seed.name, connected.property, etc.
-				parts := strings.SplitN(item.expr, ".", 2)
+				parts := strings.SplitN(expr, ".", 2)
 				varName := strings.TrimSpace(parts[0])
 				propName := strings.TrimSpace(parts[1])
 
@@ -2412,7 +2470,11 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 					}
 				}
 			} else {
-				row[i] = nil
+				// Try evaluating a non-aggregate expression with first available row context.
+				if len(rows) > 0 {
+					nodeCtx, relCtx := buildJoinedEvaluationContext(rows[0], sourceVar, targetVar, relVar)
+					row[i] = e.evaluateExpressionWithContext(expr, nodeCtx, relCtx)
+				}
 			}
 		}
 	}

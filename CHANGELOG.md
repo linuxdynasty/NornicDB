@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.29] - 2026-03-23
+
+### Added
+
+- **Optimistic mutation metadata for async CREATE paths**:
+  - added Cypher-side optimistic metadata tracking for created node/relationship IDs
+  - async CREATE fast-path now records created IDs up-front for client response usage.
+
+### Fixed
+
+- **Correlated CALL/UNION correctness and performance**:
+  - restored correct UNION subquery result behavior for correlated execution paths
+  - reduced fixed overhead in correlated query routing/execution to improve hot-path latency.
+- **Correlated CALL subquery write semantics (`WITH ... CREATE/MERGE/...`)**:
+  - fixed correlated `CALL { WITH ... }` execution so imported node variables bind correctly across `CREATE`/`MERGE` write branches
+  - fixed write-tail fallback rewriting to avoid dropping side effects for valid `MATCH ... CALL { WITH p MERGE ... }` shapes
+  - fixed `WITH`-import boundary parsing so write clauses after `WITH` are preserved and executed.
+- **Bolt parity for text-based vector queries**:
+  - fixed Bolt database-scoped executor wiring so `db.index.vector.queryNodes(..., $text)` works when an embedder is configured
+  - aligned Bolt behavior with HTTP/GraphQL execution paths for string query input.
+- **Async transaction response metadata shape**:
+  - surfaced optimistic metadata in transaction responses alongside receipt metadata when available.
+- **Mutation stats and deduplication correctness**:
+  - fixed DELETE/DETACH DELETE mutation stats under repeated OPTIONAL MATCH row expansion by deduplicating per-entity deletes
+  - fixed branch regression where some SET/DELETE/CALL-IN-TRANSACTIONS paths returned nil projection values instead of expected results.
+
+### Tests
+
+- Added/updated regression and benchmark coverage for correlated UNION/call-subquery behavior and real-data execution profiles.
+- Added regression coverage for:
+  - Bolt DB-scoped executor embedder inheritance and string vector query execution
+  - async CREATE fast-path optimistic ID metadata propagation.
+  - correlated subquery create-or-update translation shape (`OPTIONAL MATCH + CALL { WITH ... UNION ... }`)
+  - CALL subquery write-path regression cases (`WITH ... CREATE`, `WITH ... MERGE`)
+  - delete deduplication under OPTIONAL MATCH row multiplication
+  - parser/import handling for `WITH ... WHERE ...` correlated subquery clauses.
+
+### Technical Details
+
+- **Range covered**: `v1.0.28..HEAD`
+- **Commits in range**: 1 (non-merge)
+- **Files changed in range**: 8
+- **Primary focus areas**: correlated UNION subquery correctness and hot-path performance.
+- **Additional staged delta (not including changelog edits)**: 9 files, +208 / -11
+- **Additional staged delta (not including changelog edits)**: 17 files, +952 / -56
+
 ## [v1.0.28] - 2026-03-23
 
 ### Added

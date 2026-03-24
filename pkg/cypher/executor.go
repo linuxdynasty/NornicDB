@@ -1126,6 +1126,7 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 
 	for _, node := range nodes {
 		e.notifyNodeMutated(string(node.ID))
+		addOptimisticNodeID(result, node.ID)
 	}
 	result.Stats.NodesCreated += len(nodes)
 
@@ -1883,6 +1884,13 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	startsWithCreate := strings.HasPrefix(upperQuery, "CREATE")
 	startsWithMerge := strings.HasPrefix(upperQuery, "MERGE")
 
+	// Correlated MATCH ... CALL { ... } must route before generic MATCH...CREATE/MERGE
+	// detection, because CREATE/MERGE/SET tokens can legally appear inside the
+	// CALL subquery body and should not trigger outer compound handlers.
+	if startsWithMatch && hasSubqueryPattern(cypher, callSubqueryRe) {
+		return e.executeMatchWithCallSubquery(ctx, cypher)
+	}
+
 	// MERGE queries get special handling - they have their own ON CREATE SET / ON MATCH SET logic
 	if startsWithMerge {
 		// Complex MERGE pipelines that include OPTIONAL MATCH / WITH / WHERE should
@@ -2013,11 +2021,6 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			return e.executeMatchWithOptionalMatch(ctx, cypher)
 		}
 		return e.executeCompoundMatchOptionalMatch(ctx, cypher)
-	}
-
-	// Compound queries: MATCH ... CALL {} ... (correlated subquery)
-	if startsWithMatch && hasSubqueryPattern(cypher, callSubqueryRe) {
-		return e.executeMatchWithCallSubquery(ctx, cypher)
 	}
 
 	// Compound queries: MATCH ... CALL procedure() ... (procedure with bound variables)

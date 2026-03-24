@@ -130,7 +130,9 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 	//   - CompositeEngine.CreateNode returns unprefixed ID (user-facing API)
 	//   - The node.ID must match what storage returns for correct edge creation
 	// This ensures node IDs are consistent when used in subsequent operations (edge creation, etc.)
-	node.ID = actualID
+	if actualID != "" {
+		node.ID = actualID
+	}
 
 	e.notifyNodeMutated(string(node.ID))
 
@@ -224,6 +226,7 @@ func (e *StorageExecutor) executeCreateRelSegment(ctx context.Context, createStm
 	}
 
 	result.Stats.RelationshipsCreated++
+	addOptimisticRelationshipID(result, edge.ID)
 	return nil
 }
 
@@ -351,9 +354,18 @@ func (e *StorageExecutor) executeMatchWithPipelineToRows(ctx context.Context, ma
 	if nodeInfo.variable == "" {
 		return nil, fmt.Errorf("MATCH pattern must have a variable")
 	}
-	nodes, err := store.GetNodesByLabel(nodeInfo.labels[0])
-	if err != nil {
-		nodes, _ = store.AllNodes()
+	var nodes []*storage.Node
+	var err error
+	if len(nodeInfo.labels) > 0 {
+		nodes, err = store.GetNodesByLabel(nodeInfo.labels[0])
+		if err != nil {
+			nodes, _ = store.AllNodes()
+		}
+	} else {
+		nodes, err = store.AllNodes()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(nodeInfo.labels) > 1 {
 		var filtered []*storage.Node

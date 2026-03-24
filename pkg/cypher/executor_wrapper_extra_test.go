@@ -310,6 +310,12 @@ func TestTryAsyncCreateNodeBatch_Branches(t *testing.T) {
 	assert.Equal(t, "bob", res.Rows[0][1])
 	require.NotNil(t, res.Stats)
 	assert.Equal(t, 2, res.Stats.NodesCreated)
+	require.NotNil(t, res.Metadata)
+	optimisticRaw, ok := res.Metadata["optimistic"]
+	require.True(t, ok)
+	optimistic, ok := optimisticRaw.(*optimisticMutationMeta)
+	require.True(t, ok)
+	require.Len(t, optimistic.CreatedNodeIDs, 2)
 
 	// Invalid identifiers should return handled errors (strict parsing).
 	_, err, handled = exec.tryAsyncCreateNodeBatch(ctx, "CREATE (n:123bad {name:'x'}) RETURN n")

@@ -828,6 +828,41 @@ func (e *DBQueryExecutor) NewSessionExecutor() bolt.QueryExecutor {
 	return NewDBQueryExecutor(e.db)
 }
 
+// BaseCypherExecutor exposes the base executor used by DBQueryExecutor so
+// protocol adapters (for example Bolt database-scoped executors) can inherit
+// shared runtime services such as embedder/search configuration.
+func (e *DBQueryExecutor) BaseCypherExecutor() *cypher.StorageExecutor {
+	if e == nil || e.db == nil {
+		return nil
+	}
+	return e.db.GetCypherExecutor()
+}
+
+// ConfigureDatabaseExecutor applies production runtime wiring to a DB-scoped
+// executor created by protocol adapters (for example Bolt multi-database
+// sessions), keeping behavior aligned with HTTP/GraphQL execution paths.
+func (e *DBQueryExecutor) ConfigureDatabaseExecutor(exec *cypher.StorageExecutor, dbName string, storageEngine storage.Engine) {
+	if e == nil || e.db == nil || exec == nil {
+		return
+	}
+	if baseExec := e.db.GetCypherExecutor(); baseExec != nil {
+		if emb := baseExec.GetEmbedder(); emb != nil {
+			exec.SetEmbedder(emb)
+		}
+		if inferMgr := baseExec.GetInferenceManager(); inferMgr != nil {
+			exec.SetInferenceManager(inferMgr)
+		}
+	}
+	if searchSvc, err := e.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+		exec.SetSearchService(searchSvc)
+	}
+	if q := e.db.GetEmbedQueue(); q != nil {
+		exec.SetNodeMutatedCallback(func(nodeID string) {
+			q.Enqueue(nodeID)
+		})
+	}
+}
+
 // Execute runs a Cypher query against the database.
 func (e *DBQueryExecutor) Execute(ctx context.Context, query string, params map[string]any) (*bolt.QueryResult, error) {
 	e.txMu.Lock()

@@ -653,11 +653,11 @@ func (e *StorageExecutor) executeCallTailSingleRow(
 
 func isPotentialWriteTail(tail string) bool {
 	t := strings.ToUpper(strings.TrimSpace(tail))
-	return strings.Contains(t, " CREATE ") ||
-		strings.Contains(t, " MERGE ") ||
-		strings.Contains(t, " DELETE ") ||
-		strings.Contains(t, " SET ") ||
-		strings.Contains(t, " REMOVE ")
+	return findKeywordIndexInContext(t, "CREATE") >= 0 ||
+		findKeywordIndexInContext(t, "MERGE") >= 0 ||
+		findKeywordIndexInContext(t, "DELETE") >= 0 ||
+		findKeywordIndexInContext(t, "SET") >= 0 ||
+		findKeywordIndexInContext(t, "REMOVE") >= 0
 }
 
 func (e *StorageExecutor) executeCallTailSetBased(

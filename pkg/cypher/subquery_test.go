@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -3231,6 +3232,18 @@ RETURN
 	require.True(t, hasWith1)
 	require.Equal(t, []string{"p"}, withVars1)
 	assert.False(t, isCallSubqueryPureReturn(inner1), "second UNION branch should not be pure RETURN")
+}
+
+func TestParseLeadingWithImports_WithWherePredicate(t *testing.T) {
+	withVars, inner, hasWith, err := parseLeadingWithImports(`
+WITH o, t
+WHERE t IS NULL
+CREATE (n:Tmp)
+RETURN n`)
+	require.NoError(t, err)
+	require.True(t, hasWith)
+	require.Equal(t, []string{"o", "t"}, withVars)
+	require.True(t, strings.HasPrefix(strings.TrimSpace(inner), "WITH o, t WHERE t IS NULL CREATE"), "inner body should preserve WITH ... WHERE clause semantics")
 }
 
 func TestSubqueryHelpers_IterativeCallInTransactionsBranch(t *testing.T) {

@@ -401,13 +401,30 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		return subqueryExecutor.executeCallSubquery(ctx, "CALL { "+subqueryBody+" }")
 	}
 
-	// Find where the WITH clause ends (at MATCH or RETURN)
-	withEndIdx := findKeywordIndex(subqueryBody, "MATCH")
-	if withEndIdx == -1 {
-		withEndIdx = findKeywordIndex(subqueryBody, "RETURN")
+	// Find where the WITH imports end (at the next query clause).
+	// This must include write clauses (CREATE/MERGE/SET/DELETE/REMOVE) for
+	// unit subqueries like:
+	//   CALL { WITH p CREATE ... }
+	// otherwise restOfSubquery becomes empty and side effects are skipped.
+	withEndIdx := len(subqueryBody)
+	clauseStarts := []int{
+		findKeywordIndex(subqueryBody, "WHERE"),
+		findMultiWordKeywordIndex(subqueryBody, "OPTIONAL", "MATCH"),
+		findKeywordIndex(subqueryBody, "MATCH"),
+		findKeywordIndex(subqueryBody, "UNWIND"),
+		findKeywordIndex(subqueryBody, "MERGE"),
+		findKeywordIndex(subqueryBody, "CREATE"),
+		findKeywordIndex(subqueryBody, "SET"),
+		findKeywordIndex(subqueryBody, "DELETE"),
+		findKeywordIndex(subqueryBody, "REMOVE"),
+		findKeywordIndex(subqueryBody, "CALL"),
+		findKeywordIndex(subqueryBody, "RETURN"),
+		findKeywordIndex(subqueryBody, "WITH"),
 	}
-	if withEndIdx == -1 {
-		withEndIdx = len(subqueryBody)
+	for _, idx := range clauseStarts {
+		if idx > 0 && idx < withEndIdx {
+			withEndIdx = idx
+		}
 	}
 
 	// Parse UNION branches once (if present) so correlated execution only binds rows.
@@ -455,6 +472,11 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 						break
 					}
 				}
+				// Defensive correctness: branches like "WITH o,t WHERE ... SET ... RETURN ..."
+				// are always correlated even if identifier detection misses a tokenization edge.
+				if !pb.dependsOnSeed && findKeywordIndex(strings.TrimSpace(innerBody), "WHERE") == 0 {
+					pb.dependsOnSeed = true
+				}
 				pb.isPureReturn = isCallSubqueryPureReturn(innerBody)
 			}
 			unionParsed = append(unionParsed, pb)
@@ -487,6 +509,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 
 	// Execute the subquery for each seed node
 	var combinedResult *ExecuteResult
+	correlatedImportCache := make(map[string]map[string]interface{}, 32)
 
 	// Use a unique parameter name to avoid collision with user-provided parameters
 	seedIDParamName := "__internal_seed_id"
@@ -547,30 +570,79 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 						branchBody := branch.innerBody
 						branchParams := map[string]interface{}{}
 						bindClauses := make([]string, 0, len(branch.withVars))
-						bindVars := make([]string, 0, len(branch.withVars))
+						withItems := make([]string, 0, len(branch.withVars))
+						resolvedVars := make(map[string]interface{}, len(branch.withVars))
 						for _, varName := range branch.withVars {
-							// Use precomputed dependsOnSeed flag. If the branch doesn't
-							// depend on seed at all, no correlation binds needed.
-							if !branch.dependsOnSeed {
+							if varName == nodePattern.variable {
+								pname := "__seed_id_" + varName
+								branchParams[pname] = seedID
+								resolvedVars[varName] = seedNode
+								bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
+								withItems = append(withItems, varName)
 								continue
 							}
-							// Individual var check — still needed when branch has
-							// multiple WITH vars and only some reference the seed.
-							if !isIdentifierReferenced(branchBody, varName) {
+
+							// Additional WITH imports (for example OPTIONAL MATCH values)
+							// are resolved from the outer query and bound as parameters.
+							resolvedValue, _, resolveErr := e.resolveCorrelatedImportValue(ctx, outerPart, nodePattern.variable, seedID, varName, correlatedImportCache)
+							if resolveErr != nil {
+								return nil, resolveErr
+							}
+							if resolvedNode, ok := resolvedValue.(*storage.Node); ok && resolvedNode != nil {
+								pname := "__seed_id_" + varName
+								branchParams[pname] = string(resolvedNode.ID)
+								resolvedVars[varName] = resolvedNode
+								bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
+								withItems = append(withItems, varName)
 								continue
 							}
-							if varName != nodePattern.variable {
-								return nil, fmt.Errorf("CALL subquery WITH imports unknown variable: %s", varName)
+							pname := "__seed_val_" + varName
+							branchParams[pname] = resolvedValue
+							resolvedVars[varName] = resolvedValue
+							withItems = append(withItems, fmt.Sprintf("$%s AS %s", pname, varName))
+						}
+						// For correlated write branches with leading WHERE null-guards, avoid
+						// MATCH ... WITH ... WHERE ... CREATE/SET parser edge cases by
+						// evaluating the null predicate locally and running a direct rewritten query.
+						if whereExpr, whereRest, ok := splitLeadingWhereNullGuard(branchBody); ok && callSubqueryQueryIsWrite(whereRest) {
+							if pass, handled := evalWhereNullGuard(whereExpr, resolvedVars); handled {
+								if !pass {
+									branchResult = &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}
+								} else {
+									rewrite := whereRest
+									matchPrefix := make([]string, 0, len(resolvedVars))
+									for varName, val := range resolvedVars {
+										n, ok := val.(*storage.Node)
+										if !ok || n == nil {
+											continue
+										}
+										if !isIdentifierReferenced(rewrite, varName) {
+											continue
+										}
+										matchPrefix = append(matchPrefix, fmt.Sprintf("MATCH (%s) WHERE id(%s) = '%s'", varName, varName, n.ID))
+									}
+									if len(matchPrefix) > 0 {
+										rewrite = strings.Join(matchPrefix, " ") + " " + rewrite
+									}
+									branchResult, err = subqueryExecutor.executeInternal(ctx, rewrite, nil)
+								}
 							}
-							pname := "__seed_id_" + varName
-							branchParams[pname] = seedID
-							bindClauses = append(bindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
-							bindVars = append(bindVars, varName)
 						}
-						if len(bindClauses) > 0 {
-							branchBody = strings.Join(bindClauses, " ") + " WITH " + strings.Join(bindVars, ", ") + " " + branchBody
+						if branchResult != nil {
+							// handled by rewritten correlated branch path
+						} else {
+							if len(bindClauses) > 0 || len(withItems) > 0 {
+								prefix := ""
+								if len(bindClauses) > 0 {
+									prefix = strings.Join(bindClauses, " ") + " "
+								}
+								if len(withItems) > 0 {
+									prefix += "WITH " + strings.Join(withItems, ", ") + " "
+								}
+								branchBody = prefix + branchBody
+							}
+							branchResult, err = subqueryExecutor.executeInternal(ctx, branchBody, branchParams)
 						}
-						branchResult, err = subqueryExecutor.executeInternal(ctx, branchBody, branchParams)
 					}
 				} else {
 					branchResult, err = subqueryExecutor.executeInternal(ctx, branch.innerBody, nil)
@@ -666,8 +738,21 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 			}
 		}
 
-		// Fallback: try the WITH chaining approach (parameterized - safe from injection)
-		substitutedBody := "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " WITH " + nodePattern.variable + " " + restOfSubquery
+		// Fallback correlated execution (parameterized - safe from injection).
+		// For write tails (notably MERGE), avoid inserting an extra WITH between
+		// MATCH and write clauses: current compound MATCH/MERGE handling expects
+		// `MATCH ... MERGE ...`, while `MATCH ... WITH ... MERGE ...` can skip writes.
+		substitutedBody := ""
+		upperRest := strings.ToUpper(strings.TrimSpace(restOfSubquery))
+		if strings.HasPrefix(upperRest, "MERGE ") ||
+			strings.HasPrefix(upperRest, "CREATE ") ||
+			strings.HasPrefix(upperRest, "SET ") ||
+			strings.HasPrefix(upperRest, "DELETE ") ||
+			strings.HasPrefix(upperRest, "REMOVE ") {
+			substitutedBody = "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " " + restOfSubquery
+		} else {
+			substitutedBody = "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " WITH " + nodePattern.variable + " " + restOfSubquery
+		}
 
 		// Execute the substituted subquery with parameters
 		innerResult, err := subqueryExecutor.executeInternal(ctx, substitutedBody, subqueryParams)
@@ -728,6 +813,155 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 	}
 
 	return combinedResult, nil
+}
+
+func (e *StorageExecutor) resolveCorrelatedImportValue(ctx context.Context, outerPart, seedVar, seedID, importVar string, cache map[string]map[string]interface{}) (interface{}, bool, error) {
+	if cache != nil {
+		if byVar, ok := cache[seedID]; ok {
+			if val, exists := byVar[importVar]; exists {
+				return val, true, nil
+			}
+		}
+	}
+
+	outerQuery := strings.TrimSpace(outerPart) + " RETURN " + seedVar + ", " + importVar
+	outerResult, err := e.executeInternal(ctx, outerQuery, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to resolve correlated import %s: %w", importVar, err)
+	}
+
+	seedCol := -1
+	importCol := -1
+	for i, c := range outerResult.Columns {
+		if strings.EqualFold(strings.TrimSpace(c), seedVar) {
+			seedCol = i
+		}
+		if strings.EqualFold(strings.TrimSpace(c), importVar) {
+			importCol = i
+		}
+	}
+	if seedCol == -1 || importCol == -1 {
+		return nil, false, nil
+	}
+
+	for _, row := range outerResult.Rows {
+		if seedCol >= len(row) {
+			continue
+		}
+		if !rowMatchesSeedID(row[seedCol], seedID) {
+			continue
+		}
+		var val interface{}
+		if importCol < len(row) {
+			val = row[importCol]
+		}
+		if cache != nil {
+			byVar, ok := cache[seedID]
+			if !ok {
+				byVar = make(map[string]interface{}, 4)
+				cache[seedID] = byVar
+			}
+			byVar[importVar] = val
+		}
+		return val, true, nil
+	}
+	if len(outerResult.Rows) == 1 && importCol >= 0 && importCol < len(outerResult.Rows[0]) {
+		val := outerResult.Rows[0][importCol]
+		if cache != nil {
+			byVar, ok := cache[seedID]
+			if !ok {
+				byVar = make(map[string]interface{}, 4)
+				cache[seedID] = byVar
+			}
+			byVar[importVar] = val
+		}
+		return val, true, nil
+	}
+
+	// Fallback for OPTIONAL MATCH imports: resolve the imported variable using
+	// a seed-scoped OPTIONAL MATCH query. This preserves correlated semantics for
+	// patterns like:
+	//   MATCH (o) ... OPTIONAL MATCH (o)-[:R]->(t:Label {...}) WITH o,t CALL { ... }
+	// where `t` can be null/non-null per seed.
+	if !strings.EqualFold(importVar, seedVar) {
+		if optIdx := findMultiWordKeywordIndex(outerPart, "OPTIONAL", "MATCH"); optIdx >= 0 {
+			optionalPart := strings.TrimSpace(outerPart[optIdx:])
+			end := len(optionalPart)
+			for _, kw := range []string{"WITH", "RETURN", "ORDER BY", "SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(optionalPart, kw); idx >= 0 && idx < end {
+					end = idx
+				}
+			}
+			optionalPart = strings.TrimSpace(optionalPart[:end])
+			if strings.HasPrefix(strings.ToUpper(optionalPart), "OPTIONAL MATCH") {
+				requiredPart := optionalPart
+				if len(requiredPart) >= len("OPTIONAL MATCH") {
+					requiredPart = "MATCH" + requiredPart[len("OPTIONAL MATCH"):]
+				}
+				seedScoped := fmt.Sprintf("MATCH (%s) WHERE id(%s) = '%s' %s RETURN %s", seedVar, seedVar, seedID, requiredPart, importVar)
+				fallbackRes, fallbackErr := e.executeInternal(ctx, seedScoped, nil)
+				if fallbackErr != nil {
+					return nil, false, fmt.Errorf("failed optional import fallback for %s: %w", importVar, fallbackErr)
+				}
+				if fallbackRes != nil && len(fallbackRes.Rows) > 0 {
+					importCol := -1
+					for i, c := range fallbackRes.Columns {
+						if strings.EqualFold(strings.TrimSpace(c), importVar) {
+							importCol = i
+							break
+						}
+					}
+					if importCol < 0 && len(fallbackRes.Columns) == 1 {
+						importCol = 0
+					}
+					if importCol >= 0 && importCol < len(fallbackRes.Rows[0]) {
+						val := fallbackRes.Rows[0][importCol]
+						if cache != nil {
+							byVar, ok := cache[seedID]
+							if !ok {
+								byVar = make(map[string]interface{}, 4)
+								cache[seedID] = byVar
+							}
+							byVar[importVar] = val
+						}
+						return val, true, nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, false, nil
+}
+
+func rowMatchesSeedID(value interface{}, seedID string) bool {
+	switch v := value.(type) {
+	case *storage.Node:
+		return v != nil && string(v.ID) == seedID
+	case storage.Node:
+		return string(v.ID) == seedID
+	case map[string]interface{}:
+		for _, key := range []string{"_nodeId", "id", "_id", "elementId"} {
+			if raw, ok := v[key]; ok {
+				if s, ok := raw.(string); ok && s != "" {
+					if s == seedID {
+						return true
+					}
+					if last := strings.LastIndex(s, ":"); last >= 0 && last+1 < len(s) && s[last+1:] == seedID {
+						return true
+					}
+				}
+			}
+		}
+	case string:
+		if v == seedID {
+			return true
+		}
+		if last := strings.LastIndex(v, ":"); last >= 0 && last+1 < len(v) && v[last+1:] == seedID {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *StorageExecutor) normalizeUnionBranchColumns(query string, result *ExecuteResult) {
@@ -1643,6 +1877,7 @@ func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody 
 	afterWith := strings.TrimSpace(trimmed[len("WITH "):])
 	nextIdx := len(afterWith)
 	clauseStarts := []int{
+		findKeywordIndex(afterWith, "WHERE"),
 		findMultiWordKeywordIndex(afterWith, "OPTIONAL", "MATCH"),
 		findKeywordIndex(afterWith, "MATCH"),
 		findKeywordIndex(afterWith, "UNWIND"),
@@ -1664,6 +1899,14 @@ func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody 
 
 	withExpr := strings.TrimSpace(afterWith[:nextIdx])
 	innerBody = strings.TrimSpace(afterWith[nextIdx:])
+	if nextIdx < len(afterWith) && findKeywordIndex(afterWith[nextIdx:], "WHERE") == 0 {
+		// Preserve `WITH ... WHERE ...` as part of the inner body so correlated
+		// branch semantics remain identical to openCypher behavior.
+		innerBody = strings.TrimSpace("WITH " + withExpr + " " + afterWith[nextIdx:])
+		if whereExpr, whereRest, ok := splitLeadingWhereNullGuard(innerBody); ok {
+			innerBody = strings.TrimSpace("WITH " + withExpr + " WHERE " + whereExpr + " " + whereRest)
+		}
+	}
 	if innerBody == "" {
 		return nil, "", true, fmt.Errorf("invalid CALL {} subquery: empty query body after WITH")
 	}
@@ -1694,6 +1937,102 @@ func parseLeadingWithImports(subqueryBody string) (withVars []string, innerBody 
 	}
 
 	return withVars, innerBody, true, nil
+}
+
+// splitLeadingWhereNullGuard detects a leading correlated guard shape:
+//
+//	WITH <imports> WHERE <expr> <write/query-clause...>
+//
+// and returns (<expr>, <rest-after-where-expr>, true).
+// It is intentionally conservative and only used by the correlated write branch
+// fallback path in executeMatchWithCallSubquery.
+func splitLeadingWhereNullGuard(query string) (whereExpr string, rest string, ok bool) {
+	trimmed := strings.TrimSpace(query)
+	var afterWhere string
+	if strings.HasPrefix(strings.ToUpper(trimmed), "WITH ") {
+		afterWith := strings.TrimSpace(trimmed[len("WITH "):])
+		whereIdx := findKeywordIndex(afterWith, "WHERE")
+		if whereIdx <= 0 {
+			return "", "", false
+		}
+		afterWhere = strings.TrimSpace(afterWith[whereIdx+len("WHERE"):])
+	} else if strings.HasPrefix(strings.ToUpper(trimmed), "WHERE ") {
+		afterWhere = strings.TrimSpace(trimmed[len("WHERE "):])
+	} else {
+		return "", "", false
+	}
+	if afterWhere == "" {
+		return "", "", false
+	}
+
+	nextIdx := len(afterWhere)
+	clauseStarts := []int{
+		findKeywordIndex(afterWhere, "SET"),
+		findKeywordIndex(afterWhere, "CREATE"),
+		findKeywordIndex(afterWhere, "MERGE"),
+		findKeywordIndex(afterWhere, "DELETE"),
+		findKeywordIndex(afterWhere, "REMOVE"),
+		findKeywordIndex(afterWhere, "MATCH"),
+		findMultiWordKeywordIndex(afterWhere, "OPTIONAL", "MATCH"),
+		findKeywordIndex(afterWhere, "UNWIND"),
+		findKeywordIndex(afterWhere, "CALL"),
+		findKeywordIndex(afterWhere, "RETURN"),
+		findKeywordIndex(afterWhere, "WITH"),
+	}
+	for _, idx := range clauseStarts {
+		if idx > 0 && idx < nextIdx {
+			nextIdx = idx
+		}
+	}
+	if nextIdx == len(afterWhere) {
+		return "", "", false
+	}
+
+	whereExpr = strings.TrimSpace(afterWhere[:nextIdx])
+	rest = strings.TrimSpace(afterWhere[nextIdx:])
+	if whereExpr == "" || rest == "" {
+		return "", "", false
+	}
+	return whereExpr, rest, true
+}
+
+// evalWhereNullGuard evaluates narrow guard expressions used in correlated UNION
+// write branches:
+//
+//	<var> IS NULL
+//	<var> IS NOT NULL
+//
+// Returns (pass, handled). handled=false means expression is outside this narrow
+// supported subset and caller should use the generic path.
+func evalWhereNullGuard(whereExpr string, vars map[string]interface{}) (pass bool, handled bool) {
+	expr := strings.TrimSpace(whereExpr)
+	// Accept optional wrapping parentheses.
+	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		inner := strings.TrimSpace(expr[1 : len(expr)-1])
+		if inner == expr {
+			break
+		}
+		expr = inner
+	}
+
+	// Case-insensitive single-variable null checks only.
+	// Examples:
+	//   t IS NULL
+	//   t IS NOT NULL
+	re := regexp.MustCompile(`(?i)^([A-Za-z_][A-Za-z0-9_]*)\s+IS\s+(NOT\s+)?NULL$`)
+	m := re.FindStringSubmatch(expr)
+	if len(m) != 3 {
+		return false, false
+	}
+
+	varName := m[1]
+	_, exists := vars[varName]
+	isNull := !exists || vars[varName] == nil
+	isNot := strings.TrimSpace(strings.ToUpper(m[2])) == "NOT"
+	if isNot {
+		return !isNull, true
+	}
+	return isNull, true
 }
 
 // splitTopLevelUnionBranches splits a query by top-level UNION/UNION ALL separators.
@@ -1831,9 +2170,33 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 				return nil, fmt.Errorf("CALL subquery seed row missing variable: %s", varName)
 			}
 			seedVal := seedRow[idx]
-			if node, ok := seedVal.(*storage.Node); ok && node != nil {
+			seedNode := (*storage.Node)(nil)
+			switch v := seedVal.(type) {
+			case *storage.Node:
+				if v != nil {
+					seedNode = v
+				}
+			case map[string]interface{}:
+				seedNode = e.seedNodeFromMap(v)
+			case string:
+				seedNode = e.seedNodeFromIDString(v)
+			case []interface{}:
+				if len(v) == 1 {
+					switch wrapped := v[0].(type) {
+					case *storage.Node:
+						if wrapped != nil {
+							seedNode = wrapped
+						}
+					case map[string]interface{}:
+						seedNode = e.seedNodeFromMap(wrapped)
+					case string:
+						seedNode = e.seedNodeFromIDString(wrapped)
+					}
+				}
+			}
+			if seedNode != nil {
 				pname := "__seed_id_" + varName
-				params[pname] = string(node.ID)
+				params[pname] = string(seedNode.ID)
 				nodeBindClauses = append(nodeBindClauses, fmt.Sprintf("MATCH (%s) WHERE id(%s) = $%s", varName, varName, pname))
 				nodeBindVars = append(nodeBindVars, varName)
 				continue
@@ -1843,9 +2206,12 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 		}
 		if len(nodeBindClauses) > 0 {
 			prefix := strings.Join(nodeBindClauses, " ")
-			if len(nodeBindVars) > 0 {
-				prefix += " WITH " + strings.Join(nodeBindVars, ", ")
-			}
+			// Keep imported node variables in scope directly from MATCH bindings.
+			// Inserting an extra WITH here breaks valid MERGE tails such as:
+			//   MATCH ... WITH p MERGE ...
+			// under the current compound MATCH/MERGE execution path.
+			// The MATCH bindings already provide the imported variables.
+			_ = nodeBindVars
 			correlatedBody = prefix + " " + correlatedBody
 		}
 
@@ -1855,6 +2221,11 @@ func (e *StorageExecutor) executeCorrelatedCallWithSeedRows(ctx context.Context,
 		}
 
 		if len(innerRes.Rows) == 0 {
+			// Unit subquery semantics: when a correlated subquery performs side effects
+			// without RETURN, preserve the outer row.
+			if len(innerRes.Columns) == 0 {
+				combinedRows = append(combinedRows, append([]interface{}{}, seedRow...))
+			}
 			continue
 		}
 

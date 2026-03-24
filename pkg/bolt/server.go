@@ -2319,6 +2319,36 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 	// Create Cypher executor scoped to this database
 	executor := cypher.NewStorageExecutor(storageEngine)
 
+	// Inherit shared embedder configuration from the server's base executor so
+	// Bolt multi-database sessions can run string vector queries
+	// (db.index.vector.queryNodes(..., $text)) just like HTTP/GraphQL paths.
+	if baseAdapter, ok := s.server.executor.(*boltQueryExecutorAdapter); ok && baseAdapter != nil && baseAdapter.executor != nil {
+		if emb := baseAdapter.executor.GetEmbedder(); emb != nil {
+			executor.SetEmbedder(emb)
+		}
+	}
+	// Allow the server's root executor to fully configure DB-scoped Bolt
+	// executors (embedder/search/inference/callbacks) so Bolt and HTTP share
+	// the same runtime behavior.
+	type databaseExecutorConfigurator interface {
+		ConfigureDatabaseExecutor(exec *cypher.StorageExecutor, dbName string, storageEngine storage.Engine)
+	}
+	if cfg, ok := s.server.executor.(databaseExecutorConfigurator); ok && cfg != nil {
+		cfg.ConfigureDatabaseExecutor(executor, dbName, storageEngine)
+	}
+	// Production Bolt wiring uses cmd/nornicdb DBQueryExecutor directly rather
+	// than boltQueryExecutorAdapter. Support that path via a narrow interface.
+	type baseCypherExecutorProvider interface {
+		BaseCypherExecutor() *cypher.StorageExecutor
+	}
+	if provider, ok := s.server.executor.(baseCypherExecutorProvider); ok && provider != nil {
+		if baseExec := provider.BaseCypherExecutor(); baseExec != nil {
+			if emb := baseExec.GetEmbedder(); emb != nil {
+				executor.SetEmbedder(emb)
+			}
+		}
+	}
+
 	// Wire database manager support when the underlying manager is available so
 	// USE/SHOW/CREATE/ALTER/DROP database commands share the same semantics as
 	// HTTP/GraphQL execution paths.

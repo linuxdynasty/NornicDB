@@ -2154,6 +2154,13 @@ func TestHandleImplicitTransaction_AsyncWriteAccepted(t *testing.T) {
 	srv.handleImplicitTransaction(rec, req, "nornic")
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Equal(t, "eventual", rec.Header().Get("X-NornicDB-Consistency"))
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	optimisticRaw, ok := payload["optimistic"].(map[string]interface{})
+	require.True(t, ok, "expected optimistic metadata in async response")
+	createdIDs, ok := optimisticRaw["createdNodeIds"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, createdIDs)
 }
 
 func TestHandleSimilar(t *testing.T) {
@@ -3623,11 +3630,13 @@ func TestNeo4jConversionAndTxHelpers_AdditionalBranches(t *testing.T) {
 		Columns: []string{"n"},
 		Rows:    [][]interface{}{{map[string]interface{}{"elementId": "4:nornicdb:abc"}}},
 		Metadata: map[string]interface{}{
-			"receipt": map[string]interface{}{"writes": 1},
+			"receipt":    map[string]interface{}{"writes": 1},
+			"optimistic": map[string]interface{}{"createdNodeIds": []string{"nornic:1"}},
 		},
 	})
 	require.Len(t, resp.Results, 1)
 	require.NotNil(t, resp.Receipt)
+	require.NotNil(t, resp.Optimistic)
 
 	// Nil result columns must serialize as [] for UI safety.
 	resp = &TransactionResponse{Results: make([]QueryResult, 0)}

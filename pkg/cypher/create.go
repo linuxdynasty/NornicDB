@@ -113,10 +113,13 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 		if err != nil {
 			return nil, fmt.Errorf("failed to create node: %w", err)
 		}
-		node.ID = actualID
+		if actualID != "" {
+			node.ID = actualID
+		}
 		e.notifyNodeMutated(string(node.ID))
 
 		result.Stats.NodesCreated++
+		addOptimisticNodeID(result, node.ID)
 
 		if nodePattern.variable != "" {
 			createdNodes[nodePattern.variable] = node
@@ -163,9 +166,12 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				if err != nil {
 					return nil, fmt.Errorf("failed to create source node: %w", err)
 				}
-				sourceNode.ID = actualID
+				if actualID != "" {
+					sourceNode.ID = actualID
+				}
 				e.notifyNodeMutated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
+				addOptimisticNodeID(result, sourceNode.ID)
 				if sourcePattern.variable != "" {
 					createdNodes[sourcePattern.variable] = sourceNode
 				}
@@ -189,9 +195,12 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				if err != nil {
 					return nil, fmt.Errorf("failed to create target node: %w", err)
 				}
-				targetNode.ID = actualID
+				if actualID != "" {
+					targetNode.ID = actualID
+				}
 				e.notifyNodeMutated(string(targetNode.ID))
 				result.Stats.NodesCreated++
+				addOptimisticNodeID(result, targetNode.ID)
 				if targetPattern.variable != "" {
 					createdNodes[targetPattern.variable] = targetNode
 				}
@@ -249,6 +258,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				pathNodes = append(pathNodes, endNode)
 			}
 			result.Stats.RelationshipsCreated++
+			addOptimisticRelationshipID(result, edge.ID)
 
 			// If there's more chain to process, continue with target as new source
 			if remainder != "" && (strings.HasPrefix(remainder, "-[") || strings.HasPrefix(remainder, "<-[")) {
@@ -444,10 +454,13 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create node: %w", err)
 		}
-		node.ID = actualID
+		if actualID != "" {
+			node.ID = actualID
+		}
 		e.notifyNodeMutated(string(node.ID))
 
 		result.Stats.NodesCreated++
+		addOptimisticNodeID(result, node.ID)
 
 		if nodePattern.variable != "" {
 			createdNodes[nodePattern.variable] = node
@@ -491,9 +504,12 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create source node: %w", err)
 				}
-				sourceNode.ID = actualID
+				if actualID != "" {
+					sourceNode.ID = actualID
+				}
 				e.notifyNodeMutated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
+				addOptimisticNodeID(result, sourceNode.ID)
 				if sourcePattern.variable != "" {
 					createdNodes[sourcePattern.variable] = sourceNode
 				}
@@ -516,9 +532,12 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create target node: %w", err)
 				}
-				targetNode.ID = actualID
+				if actualID != "" {
+					targetNode.ID = actualID
+				}
 				e.notifyNodeMutated(string(targetNode.ID))
 				result.Stats.NodesCreated++
+				addOptimisticNodeID(result, targetNode.ID)
 				if targetPattern.variable != "" {
 					createdNodes[targetPattern.variable] = targetNode
 				}
@@ -561,6 +580,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 				createdEdges[relVar] = edge
 			}
 			result.Stats.RelationshipsCreated++
+			addOptimisticRelationshipID(result, edge.ID)
 
 			// If there's more chain to process, continue with target as new source
 			if remainder != "" && (strings.HasPrefix(remainder, "-[") || strings.HasPrefix(remainder, "<-[")) {
@@ -1981,10 +2001,13 @@ func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]
 	if err != nil {
 		return fmt.Errorf("failed to create node: %w", err)
 	}
-	node.ID = actualID
+	if actualID != "" {
+		node.ID = actualID
+	}
 	e.notifyNodeMutated(string(node.ID))
 
 	result.Stats.NodesCreated++
+	addOptimisticNodeID(result, node.ID)
 
 	// Store in nodeVars for later reference
 	if nodeInfo.variable != "" {
@@ -2065,6 +2088,7 @@ func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map
 	}
 
 	result.Stats.RelationshipsCreated++
+	addOptimisticRelationshipID(result, edge.ID)
 
 	// Store edge variable if present
 	if relVar != "" {
@@ -2111,10 +2135,13 @@ func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to create node: %w", err)
 	}
-	node.ID = actualID
+	if actualID != "" {
+		node.ID = actualID
+	}
 	e.notifyNodeMutated(string(node.ID))
 
 	result.Stats.NodesCreated++
+	addOptimisticNodeID(result, node.ID)
 
 	// Store in nodeVars if it has a variable name
 	if nodeInfo.variable != "" {
@@ -2658,6 +2685,7 @@ func (e *StorageExecutor) executeMultipleCreates(ctx context.Context, cypher str
 				if node != nil && varName != "" {
 					nodeContext[varName] = node
 					result.Stats.NodesCreated++
+					addOptimisticNodeID(result, node.ID)
 				}
 			}
 		} else if strings.HasPrefix(upperSeg, "WITH") {

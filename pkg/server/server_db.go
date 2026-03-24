@@ -935,6 +935,7 @@ type TransactionResponse struct {
 	LastBookmarks []string             `json:"lastBookmarks,omitempty"` // Bookmark for causal consistency
 	Notifications []ServerNotification `json:"notifications,omitempty"` // Server notifications
 	Receipt       interface{}          `json:"receipt,omitempty"`       // Mutation receipt (tx_id, wal_seq_start, wal_seq_end, hash)
+	Optimistic    interface{}          `json:"optimistic,omitempty"`    // Optimistic mutation metadata (e.g., created IDs)
 }
 
 // TransactionInfo holds transaction state.
@@ -1272,10 +1273,13 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			result.Rows = filtered
 		}
 
-		// Extract receipt from result metadata if present (for mutations)
+		// Extract receipt and optimistic metadata from result metadata if present (for mutations)
 		if result.Metadata != nil {
 			if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
 				response.Receipt = receipt
+			}
+			if optimistic, ok := result.Metadata["optimistic"]; ok && optimistic != nil {
+				response.Optimistic = optimistic
 			}
 		}
 
@@ -1620,6 +1624,9 @@ func (s *Server) appendStatementResult(response *TransactionResponse, result *cy
 		if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
 			response.Receipt = receipt
 		}
+		if optimistic, ok := result.Metadata["optimistic"]; ok && optimistic != nil {
+			response.Optimistic = optimistic
+		}
 	}
 }
 
@@ -1858,6 +1865,9 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		if commitResult.Metadata != nil {
 			if receipt, ok := commitResult.Metadata["receipt"]; ok && receipt != nil {
 				response.Receipt = receipt
+			}
+			if optimistic, ok := commitResult.Metadata["optimistic"]; ok && optimistic != nil {
+				response.Optimistic = optimistic
 			}
 		}
 	}
