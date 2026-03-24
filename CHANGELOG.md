@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.30] - 2026-03-23
+
+### Fixed
+
+- **Unicode Arrow Parsing**:
+  - fixed pasted Cypher relationship arrows using Unicode direction characters (`→` / `←`) by normalizing them to standard Cypher `->` / `<-` tokens before routing and parsing
+
 ## [v1.0.29] - 2026-03-23
 
 ### Added
@@ -42,7 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - fixed DELETE/DETACH DELETE mutation stats under repeated OPTIONAL MATCH row expansion by deduplicating per-entity deletes
   - fixed branch regression where some SET/DELETE/CALL-IN-TRANSACTIONS paths returned nil projection values instead of expected results.
 - **Mirrored graph retrieval compatibility**:
-  - fixed pasted Cypher relationship arrows using Unicode direction characters (`→` / `←`) by normalizing them to standard Cypher `->` / `<-` tokens before routing and parsing
   - verified Neo4j-style mirrored `Section` save/query flows including `MERGE ... WITH ... MERGE` write shapes and `MATCH ... OPTIONAL MATCH ... RETURN n, r, p` retrieval.
 - **Indexed OR-IN lookup path for key-list reads**:
   - added index-backed planning for predicates shaped like `propA IN $keys OR propB IN $keys` across alternate key fields
