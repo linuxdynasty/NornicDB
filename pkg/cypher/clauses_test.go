@@ -2557,6 +2557,108 @@ func TestExecuteMergeWithContextDirect(t *testing.T) {
 			t.Fatal("Expected non-nil result")
 		}
 	})
+
+	t.Run("merge_with_with_clause_creates_relationship", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		defer store.Close()
+
+		e := NewStorageExecutor(store)
+
+		query := `
+		MERGE (parent:Section {code: $parent_code})
+		WITH parent
+		MERGE (child:Section {code: $code})
+		  ON CREATE SET child.content = $content
+		  ON MATCH SET child.content = $content
+		MERGE (child)-[:SUBSECTION_OF]->(parent)
+		`
+
+		_, err := e.Execute(ctx, query, map[string]interface{}{
+			"parent_code": "3.18.5",
+			"code":        "3.18.5.1",
+			"content":     "title A",
+		})
+		if err != nil {
+			t.Fatalf("Execute failed: %v", err)
+		}
+
+		verify, err := e.Execute(ctx, `
+		MATCH (child:Section {code: '3.18.5.1'})-[r:SUBSECTION_OF]->(parent:Section {code: '3.18.5'})
+		RETURN count(r) AS c, child.content AS content
+		`, nil)
+		if err != nil {
+			t.Fatalf("verification query failed: %v", err)
+		}
+		if len(verify.Rows) != 1 || len(verify.Rows[0]) != 2 {
+			t.Fatalf("unexpected verification shape: %+v", verify.Rows)
+		}
+		if got, ok := verify.Rows[0][0].(int64); !ok || got != 1 {
+			t.Fatalf("expected 1 SUBSECTION_OF edge, got %#v", verify.Rows[0][0])
+		}
+		if got, ok := verify.Rows[0][1].(string); !ok || got != "title A" {
+			t.Fatalf("expected child content to be updated, got %#v", verify.Rows[0][1])
+		}
+	})
+
+	t.Run("unwind_with_with_clause_creates_relationships_for_each_parent", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		defer store.Close()
+
+		e := NewStorageExecutor(store)
+
+		query := `
+		UNWIND $parent_codes AS p_code
+		MERGE (parent:Section {code: p_code})
+		WITH parent
+		MERGE (child:Section {code: $code})
+		  ON CREATE SET child.content = $content
+		  ON MATCH SET child.content = $content
+		WITH parent, child
+		MERGE (child)-[:SUBSECTION_OF]->(parent)
+		`
+
+		_, err := e.Execute(ctx, query, map[string]interface{}{
+			"parent_codes": []interface{}{"3.18.5", "3.18.6"},
+			"code":         "3.18",
+			"content":      "big title",
+		})
+		if err != nil {
+			t.Fatalf("Execute failed: %v", err)
+		}
+
+		verify, err := e.Execute(ctx, `
+		MATCH (child:Section {code: '3.18'})-[r:SUBSECTION_OF]->(parent:Section)
+		RETURN count(r) AS c
+		`, nil)
+		if err != nil {
+			t.Fatalf("verification query failed: %v", err)
+		}
+		if len(verify.Rows) != 1 || len(verify.Rows[0]) != 1 {
+			t.Fatalf("unexpected verification shape: %+v", verify.Rows)
+		}
+		if got, ok := verify.Rows[0][0].(int64); !ok || got != 2 {
+			t.Fatalf("expected 2 SUBSECTION_OF edges, got %#v", verify.Rows[0][0])
+		}
+
+		parents, err := e.Execute(ctx, `
+		MATCH (child:Section {code: '3.18'})-[:SUBSECTION_OF]->(parent:Section)
+		RETURN parent.code AS code
+		ORDER BY code
+		`, nil)
+		if err != nil {
+			t.Fatalf("parent verification query failed: %v", err)
+		}
+		if len(parents.Rows) != 2 {
+			t.Fatalf("expected 2 parent rows, got %+v", parents.Rows)
+		}
+		if parents.Rows[0][0] != "3.18.5" || parents.Rows[1][0] != "3.18.6" {
+			t.Fatalf("unexpected parent codes: %+v", parents.Rows)
+		}
+	})
 }
 
 func TestEvaluateStringConcatDirect(t *testing.T) {

@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mutation stats and deduplication correctness**:
   - fixed DELETE/DETACH DELETE mutation stats under repeated OPTIONAL MATCH row expansion by deduplicating per-entity deletes
   - fixed branch regression where some SET/DELETE/CALL-IN-TRANSACTIONS paths returned nil projection values instead of expected results.
+- **Mirrored graph retrieval compatibility**:
+  - fixed pasted Cypher relationship arrows using Unicode direction characters (`→` / `←`) by normalizing them to standard Cypher `->` / `<-` tokens before routing and parsing
+  - verified Neo4j-style mirrored `Section` save/query flows including `MERGE ... WITH ... MERGE` write shapes and `MATCH ... OPTIONAL MATCH ... RETURN n, r, p` retrieval.
 - **Indexed OR-IN lookup path for key-list reads**:
   - added index-backed planning for predicates shaped like `propA IN $keys OR propB IN $keys` across alternate key fields
   - avoids full label scans for large key-list lookups and cleanup/read query patterns.
@@ -58,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - exact `UNWIND + OPTIONAL MATCH + collect(CASE...)` key-lookup shape (per-key grouped rows and null-arm behavior)
   - `DETACH DELETE` with `WHERE elementId(...)` + `OPTIONAL MATCH` cleanup shape
   - OR-combined indexed `IN` predicate planning without scan fallback
+  - mirrored Neo4j `Section` import/query shapes including chained `MERGE ... WITH ... MERGE` writes and Unicode-arrow `OPTIONAL MATCH` retrieval
   - exact mutation query shapes:
     - `MATCH ... WHERE ... OR (...) CREATE ... CREATE ... RETURN ...`
     - `MATCH ... WHERE ... OR (...) MATCH ... SET ... RETURN ...`

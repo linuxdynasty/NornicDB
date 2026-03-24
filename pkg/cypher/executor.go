@@ -657,6 +657,7 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	e.resetHotPathTrace()
 	// Normalize query: trim BOM (some clients send it) then whitespace
 	cypher = trimBOM(cypher)
+	cypher = normalizeCypherRelationshipArrows(cypher)
 	cypher = strings.TrimSpace(cypher)
 	cypher = trimTrailingStatementDelimiters(cypher)
 	if cypher == "" {
@@ -948,6 +949,19 @@ func trimTrailingStatementDelimiters(query string) string {
 		}
 		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
 	}
+}
+
+func normalizeCypherRelationshipArrows(query string) string {
+	if query == "" {
+		return query
+	}
+	replacer := strings.NewReplacer(
+		"→", "->",
+		"←", "<-",
+		"—", "-",
+		"–", "-",
+	)
+	return replacer.Replace(query)
 }
 
 // TransactionCapableEngine is an engine that supports ACID transactions.
