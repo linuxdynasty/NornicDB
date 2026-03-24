@@ -111,6 +111,103 @@ func TestNormalizeMultiMatchWhereClauses(t *testing.T) {
 	)
 }
 
+func TestNormalizeMultiMatchWhereClauses_SingleWhereBetweenMatches(t *testing.T) {
+	in := "MATCH (o:OriginalText) WHERE o.joinKey = joinKey MATCH (t:TranslatedText) RETURN count(*) AS c"
+	got := normalizeMultiMatchWhereClauses(in)
+	require.Equal(
+		t,
+		"MATCH (o:OriginalText) MATCH (t:TranslatedText) WHERE o.joinKey = joinKey RETURN count(*) AS c",
+		got,
+	)
+}
+
+func TestBug_MatchWhereMatchSetReturn_Executes(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "test:o1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey128": "k128",
+			"textKey":    "shortkey",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "test:t1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"language":       "es",
+			"translatedText": "old",
+			"reviewResult":   "rejected",
+			"isRefetch":      false,
+			"submitter":      "existing@x.test",
+			"createdAt":      "2026-01-01T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateEdge(&storage.Edge{
+		ID:        "test:e1",
+		Type:      "TRANSLATES_TO",
+		StartNode: "test:o1",
+		EndNode:   "test:t1",
+	})
+	require.NoError(t, err)
+
+	q := `
+MATCH (o:OriginalText)
+WHERE o.textKey128 = $textKey128 OR ($textKey IS NOT NULL AND o.textKey = $textKey)
+MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+SET t.translatedText = $translatedText,
+    t.submitter = coalesce(t.submitter, $submitter),
+    t.isRefetch = CASE
+        WHEN t.submitter IS NOT NULL
+          AND coalesce(t.isRefetch, false) = false
+          AND toLower(coalesce(t.reviewResult, '')) IN ['rejected', 'reject']
+        THEN true
+        ELSE t.isRefetch
+    END
+RETURN elementId(t) AS id,
+       t.createdAt AS createdAt,
+       t.language AS language,
+       coalesce(t.translationId, elementId(t)) AS translationId,
+       t.translatedText AS translatedText,
+       t.auditedText AS auditedText,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.submitter AS submitter,
+       t.isRefetch AS isRefetch
+`
+	params := map[string]interface{}{
+		"textKey128":     "k128",
+		"textKey":        "shortkey",
+		"targetLang":     "es",
+		"translatedText": "new",
+		"submitter":      "new@x.test",
+	}
+	res, err := exec.Execute(ctx, q, params)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Columns, 11)
+	idx := func(col string) int {
+		for i, c := range res.Columns {
+			if c == col {
+				return i
+			}
+		}
+		return -1
+	}
+	require.Equal(t, "new", res.Rows[0][idx("translatedText")])
+	require.Equal(t, "existing@x.test", res.Rows[0][idx("submitter")])
+	require.Equal(t, true, res.Rows[0][idx("isRefetch")])
+}
+
 func TestRewriteUnwindCorrelationToIn(t *testing.T) {
 	in := "MATCH (o:OriginalText) MATCH (t:TranslatedText) WHERE o.joinKey = joinKey AND t.joinKey = joinKey CREATE (o)-[:TRANSLATES_TO]->(t) RETURN count(*) AS c"
 	got, ok := rewriteUnwindCorrelationToIn(in, "joinKey", "__unwind_items")

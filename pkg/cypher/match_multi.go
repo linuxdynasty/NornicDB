@@ -315,6 +315,11 @@ func countKeywordOccurrences(upper, keyword string) int {
 // executeMultiMatch handles queries with multiple MATCH clauses
 // Example: MATCH (p1:Person)-[:WORKS_AT]->(c:Company) MATCH (p2:Person)-[:WORKS_AT]->(c) WHERE p1 <> p2 RETURN p1, p2, c
 func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Normalize two-MATCH forms where WHERE appears between MATCH clauses:
+	// MATCH A WHERE wa MATCH B RETURN ...
+	// -> MATCH A MATCH B WHERE wa RETURN ...
+	cypher = normalizeMultiMatchWhereClauses(cypher)
+
 	// Find RETURN and WHERE positions
 	returnIdx := findKeywordIndex(cypher, "RETURN")
 	if returnIdx == -1 {

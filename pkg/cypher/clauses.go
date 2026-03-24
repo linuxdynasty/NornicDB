@@ -930,9 +930,11 @@ func canApplySetBasedUnwindRewrite(query string, items []interface{}) bool {
 }
 
 // normalizeMultiMatchWhereClauses rewrites top-level two-MATCH forms that place
-// WHERE after each MATCH into a single terminal WHERE joined by AND:
-// MATCH A WHERE wa MATCH B WHERE wb RETURN ...
-// -> MATCH A MATCH B WHERE wa AND wb RETURN ...
+// WHERE between MATCH clauses into a single terminal WHERE:
+//  1. MATCH A WHERE wa MATCH B RETURN ...
+//     -> MATCH A MATCH B WHERE wa RETURN ...
+//  2. MATCH A WHERE wa MATCH B WHERE wb RETURN ...
+//     -> MATCH A MATCH B WHERE wa AND wb RETURN ...
 func normalizeMultiMatchWhereClauses(query string) string {
 	trimmed := strings.TrimSpace(query)
 	if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
@@ -963,17 +965,21 @@ func normalizeMultiMatchWhereClauses(query string) string {
 	}
 
 	leftWhereIdx := findKeywordIndex(left, "WHERE")
-	rightWhereIdx := findKeywordIndex(right, "WHERE")
-	if leftWhereIdx <= 0 || rightWhereIdx <= 0 {
+	if leftWhereIdx <= 0 {
 		return query
 	}
+	rightWhereIdx := findKeywordIndex(right, "WHERE")
 
 	leftPattern := strings.TrimSpace(left[len("MATCH "):leftWhereIdx])
 	leftWhere := strings.TrimSpace(left[leftWhereIdx+len("WHERE"):])
-	rightPattern := strings.TrimSpace(right[:rightWhereIdx])
-	rightWhere := strings.TrimSpace(right[rightWhereIdx+len("WHERE"):])
+	rightPattern := strings.TrimSpace(right)
+	rightWhere := ""
+	if rightWhereIdx > 0 {
+		rightPattern = strings.TrimSpace(right[:rightWhereIdx])
+		rightWhere = strings.TrimSpace(right[rightWhereIdx+len("WHERE"):])
+	}
 
-	if leftPattern == "" || rightPattern == "" || leftWhere == "" || rightWhere == "" {
+	if leftPattern == "" || rightPattern == "" || leftWhere == "" {
 		return query
 	}
 
@@ -984,8 +990,10 @@ func normalizeMultiMatchWhereClauses(query string) string {
 	b.WriteString(rightPattern)
 	b.WriteString(" WHERE ")
 	b.WriteString(leftWhere)
-	b.WriteString(" AND ")
-	b.WriteString(rightWhere)
+	if rightWhere != "" {
+		b.WriteString(" AND ")
+		b.WriteString(rightWhere)
+	}
 	b.WriteString(" ")
 	b.WriteString(tailPart)
 	return b.String()
