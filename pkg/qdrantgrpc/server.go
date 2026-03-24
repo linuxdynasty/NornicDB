@@ -341,6 +341,17 @@ func (s *Server) Start() error {
 	s.listener = listener
 
 	// Create gRPC server with options
+	unaryInterceptors := make([]grpc.UnaryServerInterceptor, 0, 2)
+	streamInterceptors := make([]grpc.StreamServerInterceptor, 0, 2)
+	unaryInterceptors = append(unaryInterceptors, s.unaryLoggingInterceptor)
+	streamInterceptors = append(streamInterceptors, s.streamLoggingInterceptor)
+
+	// Add authentication interceptor if authenticator is provided
+	if s.authenticator != nil && s.authenticator.IsSecurityEnabled() {
+		unaryInterceptors = append(unaryInterceptors, s.unaryAuthInterceptor)
+		streamInterceptors = append(streamInterceptors, s.streamAuthInterceptor)
+	}
+
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(s.config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(s.config.MaxSendMsgSize),
@@ -356,12 +367,8 @@ func (s *Server) Start() error {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	}
-
-	// Add authentication interceptor if authenticator is provided
-	if s.authenticator != nil && s.authenticator.IsSecurityEnabled() {
-		opts = append(opts, grpc.UnaryInterceptor(s.unaryAuthInterceptor))
-		opts = append(opts, grpc.StreamInterceptor(s.streamAuthInterceptor))
+		grpc.ChainUnaryInterceptor(unaryInterceptors...),
+		grpc.ChainStreamInterceptor(streamInterceptors...),
 	}
 
 	s.grpcServer = grpc.NewServer(opts...)
@@ -553,6 +560,22 @@ func (s *Server) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, in
 	}
 	ctx = context.WithValue(ctx, contextKeyClaims{}, claims)
 	return handler(srv, &authServerStream{ServerStream: ss, ctx: ctx})
+}
+
+func (s *Server) unaryLoggingInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	start := time.Now()
+	resp, err := handler(ctx, req)
+	code := status.Code(err)
+	log.Printf("[gRPC] UNARY %s %s %v", info.FullMethod, code.String(), time.Since(start))
+	return resp, err
+}
+
+func (s *Server) streamLoggingInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	start := time.Now()
+	err := handler(srv, ss)
+	code := status.Code(err)
+	log.Printf("[gRPC] STREAM %s %s %v", info.FullMethod, code.String(), time.Since(start))
+	return err
 }
 
 // handleBasicAuth handles Basic authentication for gRPC requests.

@@ -1235,19 +1235,17 @@ func (s *Session) handleHello(data []byte) error {
 	// Store database for this session
 	s.database = dbName
 
-	// Log successful auth
-	if s.server != nil && s.server.config.LogQueries {
-		remoteAddr := "unknown"
-		if s.conn != nil {
-			remoteAddr = s.conn.RemoteAddr().String()
-		}
-		dbInfo := ""
-		if dbName != "" {
-			dbInfo = fmt.Sprintf(" db=%s", dbName)
-		}
-		fmt.Printf("[BOLT] Auth success: user=%s roles=%v from=%s%s\n",
-			s.authResult.Username, s.authResult.Roles, remoteAddr, dbInfo)
+	// Log successful auth (always-on access log style)
+	remoteAddr := "unknown"
+	if s.conn != nil {
+		remoteAddr = s.conn.RemoteAddr().String()
 	}
+	dbInfo := ""
+	if dbName != "" {
+		dbInfo = fmt.Sprintf(" db=%s", dbName)
+	}
+	fmt.Printf("[BOLT] HELLO %s user=%s roles=%v%s\n",
+		remoteAddr, s.authResult.Username, s.authResult.Roles, dbInfo)
 
 	return s.sendSuccess(map[string]any{
 		"server":        "NornicDB/0.1.0",
@@ -1468,14 +1466,21 @@ func (s *Session) handleRun(data []byte) error {
 	}
 
 	// Execute query (ctx may have timeout from tx_timeout metadata)
+	runStart := time.Now()
 	result, err := executor.Execute(ctx, query, params)
 	if err != nil {
+		s.logRunTiming("ERROR", dbName, query, time.Since(runStart), 0, err)
 		if s.server != nil && s.server.config.LogQueries {
 			fmt.Printf("[BOLT] ERROR: %v\n", err)
 		}
 		code, msg := mapBoltQueryError(err)
 		return s.sendFailure(code, msg)
 	}
+	rows := 0
+	if result != nil && result.Rows != nil {
+		rows = len(result.Rows)
+	}
+	s.logRunTiming("OK", dbName, query, time.Since(runStart), rows, nil)
 
 	// Per-database RBAC: filter SHOW DATABASES results by CanSeeDatabase so principals only see DBs they may access
 	if isShowDatabasesQuery(query) && result.Rows != nil && mode != nil {
@@ -1522,6 +1527,37 @@ func (s *Session) handleRun(data []byte) error {
 		return err
 	}
 	return s.flushIfPending()
+}
+
+func (s *Session) logRunTiming(status, dbName, query string, duration time.Duration, rows int, runErr error) {
+	remoteAddr := "unknown"
+	if s.conn != nil {
+		remoteAddr = s.conn.RemoteAddr().String()
+	}
+	user := "unknown"
+	if s.authResult != nil {
+		user = s.authResult.Username
+	}
+
+	includeQuery := s.server != nil && s.server.config.LogQueries
+	if runErr != nil {
+		if includeQuery {
+			fmt.Printf("[BOLT] RUN user=%s remote=%s db=%s status=%s rows=%d %v query=%s err=%v\n",
+				user, remoteAddr, dbName, status, rows, duration, truncateQuery(query, 200), runErr)
+		} else {
+			fmt.Printf("[BOLT] RUN user=%s remote=%s db=%s status=%s rows=%d %v err=%v\n",
+				user, remoteAddr, dbName, status, rows, duration, runErr)
+		}
+		return
+	}
+
+	if includeQuery {
+		fmt.Printf("[BOLT] RUN user=%s remote=%s db=%s status=%s rows=%d %v query=%s\n",
+			user, remoteAddr, dbName, status, rows, duration, truncateQuery(query, 200))
+		return
+	}
+	fmt.Printf("[BOLT] RUN user=%s remote=%s db=%s status=%s rows=%d %v\n",
+		user, remoteAddr, dbName, status, rows, duration)
 }
 
 func mapBoltQueryError(err error) (code, message string) {
