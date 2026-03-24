@@ -346,6 +346,22 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	matchVars := e.extractVariableNamesFromPattern(matchPattern)
 	withAliases := extractWithAliases(matchSegment)
 	allVars := dedupeNonEmpty(matchVars, withAliases)
+
+	// Include variables referenced in SET/RETURN expressions so multi-MATCH SET
+	// pipelines keep all required bindings in scope (e.g. t from:
+	// MATCH ... MATCH ... SET t.x=... RETURN t.x).
+	setTailForScope := strings.TrimSpace(normalized[setIdx+4:])
+	setScopePart := setTailForScope
+	if splitIdx := firstPostSetClauseIndex(setTailForScope); splitIdx >= 0 {
+		setScopePart = strings.TrimSpace(setTailForScope[:splitIdx])
+	}
+	returnScopePart := ""
+	if returnIdx > setIdx {
+		returnScopePart = strings.TrimSpace(normalized[returnIdx+6:])
+	}
+	scopeVars := extractScopeVariablesFromSetAndReturn(setScopePart, returnScopePart)
+	allVars = dedupeNonEmpty(allVars, scopeVars)
+
 	matchQuery := matchSegment + " RETURN *"
 	if len(allVars) > 0 {
 		matchQuery = matchSegment + " RETURN " + strings.Join(allVars, ", ")
@@ -711,6 +727,84 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			}
 		}
 
+		// Aggregation in SET RETURN should produce aggregated rows, not one row per match.
+		// Example: MATCH ... SET ... RETURN count(t) AS updated
+		hasAggregation := false
+		for _, item := range returnItems {
+			if isAggregateFunc(item.expr) {
+				hasAggregation = true
+				break
+			}
+		}
+		if hasAggregation {
+			aggRow := make([]interface{}, len(returnItems))
+			for j, item := range returnItems {
+				exprUpper := strings.ToUpper(strings.TrimSpace(item.expr))
+				switch {
+				case strings.HasPrefix(exprUpper, "COUNT(") && strings.HasSuffix(exprUpper, ")"):
+					inner := strings.TrimSpace(item.expr[len("COUNT(") : len(item.expr)-1])
+					innerUpper := strings.ToUpper(inner)
+					if innerUpper == "*" || inner == "" {
+						aggRow[j] = int64(len(matchResult.Rows))
+						continue
+					}
+					count := int64(0)
+					parts := strings.SplitN(inner, ".", 2)
+					varName := strings.TrimSpace(parts[0])
+					propName := ""
+					if len(parts) == 2 {
+						propName = strings.TrimSpace(parts[1])
+					}
+					for _, row := range matchResult.Rows {
+						varMap := make(map[string]*storage.Node, len(matchResult.Columns))
+						for i, colName := range matchResult.Columns {
+							if i < len(row) {
+								if node, ok := row[i].(*storage.Node); ok && node != nil {
+									varMap[colName] = node
+								}
+							}
+						}
+						node := varMap[varName]
+						if node == nil {
+							continue
+						}
+						if propName == "" {
+							count++
+							continue
+						}
+						if v, ok := node.Properties[propName]; ok && v != nil {
+							count++
+						}
+					}
+					aggRow[j] = count
+				default:
+					// Keep behavior deterministic for mixed projections by evaluating against first row.
+					if len(matchResult.Rows) == 0 {
+						aggRow[j] = nil
+						continue
+					}
+					varMap := make(map[string]*storage.Node, len(matchResult.Columns))
+					first := matchResult.Rows[0]
+					for i, colName := range matchResult.Columns {
+						if i < len(first) {
+							if node, ok := first[i].(*storage.Node); ok && node != nil {
+								varMap[colName] = node
+							}
+						}
+					}
+					if variable != "" {
+						if node, ok := varMap[variable]; ok {
+							aggRow[j] = e.resolveReturnItem(item, variable, node)
+							continue
+						}
+					}
+					aggRow[j] = e.evaluateExpressionWithContext(item.expr, varMap, make(map[string]*storage.Edge))
+				}
+			}
+			result.Rows = [][]interface{}{aggRow}
+			return result, nil
+		}
+
 		// Return updated nodes
 		// Build a map of variable names to nodes from match result columns
 		// This handles multiple variables (e.g., n, m) correctly
@@ -756,6 +850,50 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	}
 
 	return result, nil
+}
+
+var setScopeVarPattern = regexp.MustCompile(`(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:\.|\+=|=)`)
+
+// extractScopeVariablesFromSetAndReturn returns variable names referenced in
+// SET assignments and RETURN items so the pre-SET MATCH query includes all
+// variables needed for mutation and projection.
+func extractScopeVariablesFromSetAndReturn(setPart, returnPart string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 4)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if !isValidIdentifier(v) {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+
+	for _, m := range setScopeVarPattern.FindAllStringSubmatch(setPart, -1) {
+		if len(m) > 1 {
+			add(m[1])
+		}
+	}
+
+	if strings.TrimSpace(returnPart) != "" {
+		for _, raw := range splitTopLevelCommaKeepEmpty(returnPart) {
+			expr := strings.TrimSpace(raw)
+			if expr == "" {
+				continue
+			}
+			if asIdx := findKeywordIndex(expr, "AS"); asIdx > 0 {
+				expr = strings.TrimSpace(expr[:asIdx])
+			}
+			add(extractVariableNameFromReturnItem(expr))
+		}
+	}
+	return out
 }
 
 // collapseChainedSetClauses rewrites chained SET keywords into comma-separated assignments.

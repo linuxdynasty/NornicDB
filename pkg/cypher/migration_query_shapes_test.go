@@ -2,11 +2,240 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+const exactBoltCreateTranslatedQueryShape = `
+MATCH (o:OriginalText)
+WHERE o.textKey128 = $textKey128 OR ($textKey IS NOT NULL AND o.textKey = $textKey)
+CREATE (t:TranslatedText {
+  language: $targetLang,
+  translatedText: $translatedText,
+  auditedText: null,
+  isReviewed: false,
+  reviewResult: null,
+  reviewedAt: null,
+  submitter: $submitter,
+  isRefetch: $isRefetch,
+  createdAt: $now
+})
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN elementId(t) AS id,
+       t.createdAt AS createdAt,
+       t.language AS language,
+       coalesce(t.translationId, elementId(t)) AS translationId,
+       t.translatedText AS translatedText,
+       t.auditedText AS auditedText,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.submitter AS submitter,
+       t.isRefetch AS isRefetch
+`
+
+const exactBoltUpdateTranslatedQueryShape = `
+MATCH (o:OriginalText)
+WHERE o.textKey128 = $textKey128 OR ($textKey IS NOT NULL AND o.textKey = $textKey)
+MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+SET t.translatedText = $translatedText,
+		t.submitter = coalesce(t.submitter, $submitter),
+		t.isRefetch = CASE
+				WHEN t.submitter IS NOT NULL AND coalesce(t.isRefetch, false) = false AND toLower(coalesce(t.reviewResult, '')) IN ['rejected', 'reject'] THEN true
+				ELSE t.isRefetch
+		END
+RETURN elementId(t) AS id,
+			 t.createdAt AS createdAt,
+			 t.language AS language,
+			 coalesce(t.translationId, elementId(t)) AS translationId,
+			 t.translatedText AS translatedText,
+			 t.auditedText AS auditedText,
+			 coalesce(t.isReviewed, false) AS isReviewed,
+			 t.reviewResult AS reviewResult,
+			 t.reviewedAt AS reviewedAt,
+			 t.submitter AS submitter,
+			 t.isRefetch AS isRefetch
+`
+
+func TestExactShape_MatchWhereOrCreateCreateReturn_SingleMatchByTextKey128(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-single",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey128": "needle-128",
+			"textKey":    "unique-key",
+		},
+	})
+	require.NoError(t, err)
+
+	// Distractors should not match either arm.
+	for i := 0; i < 50; i++ {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("orig-noise-%d", i)),
+			Labels: []string{"OriginalText"},
+			Properties: map[string]interface{}{
+				"textKey128": fmt.Sprintf("noise-%d", i),
+				"textKey":    fmt.Sprintf("other-%d", i),
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	params := map[string]interface{}{
+		"textKey128":     "needle-128",
+		"textKey":        "unique-key",
+		"targetLang":     "es",
+		"translatedText": "hola",
+		"submitter":      "submitter@example.test",
+		"isRefetch":      false,
+		"now":            "2026-03-23T00:00:00Z",
+	}
+
+	res, err := exec.Execute(ctx, exactBoltCreateTranslatedQueryShape, params)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1, "exact query shape should create one translated node for one matched OriginalText")
+	require.Len(t, res.Columns, 11)
+
+	col := func(name string) int {
+		for i, c := range res.Columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	require.NotEqual(t, -1, col("id"))
+	require.NotEqual(t, -1, col("createdAt"))
+	require.NotEqual(t, -1, col("translationId"))
+	require.Equal(t, "es", res.Rows[0][col("language")])
+	require.Equal(t, "hola", res.Rows[0][col("translatedText")])
+	require.Equal(t, "submitter@example.test", res.Rows[0][col("submitter")])
+	require.Equal(t, false, res.Rows[0][col("isRefetch")])
+}
+
+func TestExactShape_MatchWhereMatchSetReturn_UpdatesExistingTranslationRow(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-upd-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey128": "needle-upd-128",
+			"textKey":    "needle-upd-key",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "tr-upd-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"language":       "es",
+			"translatedText": "old",
+			"reviewResult":   "rejected",
+			"isRefetch":      false,
+			"submitter":      "existing@x.test",
+			"createdAt":      "2026-01-01T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateEdge(&storage.Edge{
+		ID:        "edge-upd-1",
+		Type:      "TRANSLATES_TO",
+		StartNode: "orig-upd-1",
+		EndNode:   "tr-upd-1",
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, exactBoltUpdateTranslatedQueryShape, map[string]interface{}{
+		"textKey128":     "needle-upd-128",
+		"textKey":        "needle-upd-key",
+		"targetLang":     "es",
+		"translatedText": "new-value",
+		"submitter":      "new-submitter@x.test",
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Columns, 11)
+
+	col := func(name string) int {
+		for i, c := range res.Columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	require.Equal(t, "new-value", res.Rows[0][col("translatedText")])
+	require.Equal(t, "existing@x.test", res.Rows[0][col("submitter")], "coalesce should preserve existing submitter")
+	require.Equal(t, true, res.Rows[0][col("isRefetch")], "rejected + existing submitter should set isRefetch=true")
+}
+
+func TestExactShape_UpdateReviewByElementID_ReturnCountUpdated(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "tr-review-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"isReviewed":     false,
+			"translatedText": "old",
+		},
+	})
+	require.NoError(t, err)
+
+	q := `
+MATCH (t:TranslatedText)
+WHERE elementId(t) = $translationTextId
+SET t.isReviewed = true,
+    t.auditedText = $auditedTranslatedText,
+    t.reviewResult = $reviewResult,
+    t.reviewedAt = $reviewedAt,
+    t.reviewerFirstName = $reviewerFirstName,
+    t.reviewerLastName = $reviewerLastName,
+    t.reviewerEmail = $reviewerEmail,
+    t.correctionReason = $correctionReason,
+    t.reviewerComments = $reviewerComments,
+    t.translatedText = CASE
+      WHEN $reviewResult = 'rejected' AND $auditedTranslatedText IS NOT NULL AND trim($auditedTranslatedText) <> ''
+      THEN $auditedTranslatedText
+      ELSE t.translatedText
+    END
+RETURN count(t) AS updated
+`
+
+	res, err := exec.Execute(ctx, q, map[string]interface{}{
+		"translationTextId":     "tr-review-1",
+		"auditedTranslatedText": "new audited",
+		"reviewResult":          "rejected",
+		"reviewedAt":            "2026-03-23T00:00:00Z",
+		"reviewerFirstName":     "A",
+		"reviewerLastName":      "B",
+		"reviewerEmail":         "ab@example.test",
+		"correctionReason":      "tone",
+		"reviewerComments":      "ok",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"updated"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	require.Equal(t, int64(1), res.Rows[0][0])
+}
 
 func seedTranslationJoinNodes(t *testing.T, store storage.Engine) {
 	t.Helper()

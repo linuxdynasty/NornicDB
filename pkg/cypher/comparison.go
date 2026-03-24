@@ -406,7 +406,34 @@ func (e *StorageExecutor) evaluateIsNull(node *storage.Node, variable, whereClau
 
 	// Extract property
 	if !strings.HasPrefix(propExpr, variable+".") {
-		return true
+		// Keep historical permissive per-node behavior for unknown identifiers in
+		// single-node evaluation (e.g. "something IS NULL"), which many existing
+		// tests and call paths rely on.
+		if strings.Contains(propExpr, ".") {
+			return true
+		}
+		valExpr := strings.TrimSpace(propExpr)
+		if isValidIdentifier(valExpr) {
+			// If the identifier is row-bound (fabric/correlated execution), evaluate
+			// actual null semantics from the binding.
+			if bound, ok := e.fabricRecordBindings[valExpr]; ok {
+				if expectNotNull {
+					return bound != nil
+				}
+				return bound == nil
+			}
+			// Otherwise preserve permissive legacy semantics for unbound identifiers.
+			return true
+		}
+		// Literal/null expression support:
+		//   null IS NOT NULL -> false
+		//   'x' IS NOT NULL  -> true
+		//   1 IS NULL        -> false
+		val := e.parseValue(valExpr)
+		if expectNotNull {
+			return val != nil
+		}
+		return val == nil
 	}
 	propName := propExpr[len(variable)+1:]
 

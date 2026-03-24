@@ -601,10 +601,20 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 		nodeInfo := e.parseNodePattern(np)
 
 		var candidates []*storage.Node
-		if len(nodeInfo.labels) > 0 {
-			candidates, _ = store.GetNodesByLabel(nodeInfo.labels[0])
-		} else {
-			candidates = store.GetAllNodes()
+		// Single-pattern WHERE fast-path: reduce candidates via property index lookup
+		// when possible (e.g., o.textKey128='x' OR ('y' IS NOT NULL AND o.textKey='y')).
+		if whereIdx > 0 && len(nodePatterns) == 1 {
+			wherePart := strings.TrimSpace(matchClause[whereIdx+len("WHERE"):])
+			if indexed, ok := e.lookupWhereCandidatesUsingPropertyIndex(nodeInfo, wherePart, store); ok {
+				candidates = indexed
+			}
+		}
+		if candidates == nil {
+			if len(nodeInfo.labels) > 0 {
+				candidates, _ = store.GetNodesByLabel(nodeInfo.labels[0])
+			} else {
+				candidates = store.GetAllNodes()
+			}
 		}
 
 		// Filter by properties
@@ -671,6 +681,189 @@ func (e *StorageExecutor) evaluateWhereForNodeMap(nodeMap map[string]*storage.No
 		}
 	}
 	return true
+}
+
+func (e *StorageExecutor) lookupWhereCandidatesUsingPropertyIndex(nodeInfo nodePatternInfo, wherePart string, store storage.Engine) ([]*storage.Node, bool) {
+	if len(nodeInfo.labels) == 0 {
+		return nil, false
+	}
+	// Safety: don't index-narrow top-level OR expressions.
+	// A single property index lookup can under-approximate OR semantics when one
+	// branch is non-selective or when an index backend is non-unique for a value.
+	// Fall back to normal filtering to preserve openCypher correctness.
+	if findTopLevelKeyword(wherePart, " OR ") >= 0 {
+		return nil, false
+	}
+	schema := store.GetSchema()
+	if schema == nil {
+		return nil, false
+	}
+	label := nodeInfo.labels[0]
+	terms := splitTopLevelOrTerms(wherePart)
+	if len(terms) == 0 {
+		terms = []string{wherePart}
+	}
+
+	idSet := make(map[storage.NodeID]struct{}, 8)
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		prop, lit, ok := e.extractIndexedEqualityFromWhereTerm(nodeInfo.variable, term)
+		if !ok {
+			continue
+		}
+		ids := schema.PropertyIndexLookup(label, prop, lit)
+		for _, id := range ids {
+			idSet[id] = struct{}{}
+		}
+	}
+	if len(idSet) == 0 {
+		return nil, false
+	}
+	out := make([]*storage.Node, 0, len(idSet))
+	for id := range idSet {
+		n, err := store.GetNode(id)
+		if err == nil && n != nil {
+			out = append(out, n)
+		}
+	}
+	return out, true
+}
+
+func splitTopLevelOrTerms(expr string) []string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+	orIdx := findTopLevelKeyword(expr, " OR ")
+	if orIdx < 0 {
+		return []string{expr}
+	}
+	left := strings.TrimSpace(expr[:orIdx])
+	right := strings.TrimSpace(expr[orIdx+4:])
+	out := make([]string, 0, 4)
+	out = append(out, splitTopLevelOrTerms(left)...)
+	out = append(out, splitTopLevelOrTerms(right)...)
+	return out
+}
+
+func (e *StorageExecutor) extractIndexedEqualityFromWhereTerm(variable, term string) (string, interface{}, bool) {
+	term = strings.TrimSpace(term)
+	if term == "" {
+		return "", nil, false
+	}
+	if strings.HasPrefix(term, "(") && strings.HasSuffix(term, ")") {
+		inner := strings.TrimSpace(term[1 : len(term)-1])
+		if inner != "" {
+			term = inner
+		}
+	}
+
+	if prop, lit, ok := e.parseVarPropEqualsLiteral(variable, term); ok {
+		return prop, lit, true
+	}
+
+	parts := splitTopLevelAndCartesian(term)
+	if len(parts) < 2 {
+		return "", nil, false
+	}
+	var (
+		prop   string
+		lit    interface{}
+		haveEq bool
+	)
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if eqProp, eqLit, ok := e.parseVarPropEqualsLiteral(variable, p); ok {
+			prop, lit, haveEq = eqProp, eqLit, true
+			continue
+		}
+		if !e.isLiteralIsNotNullExpr(p) {
+			return "", nil, false
+		}
+	}
+	if haveEq {
+		return prop, lit, true
+	}
+	return "", nil, false
+}
+
+func (e *StorageExecutor) parseVarPropEqualsLiteral(variable, expr string) (string, interface{}, bool) {
+	expr = strings.TrimSpace(expr)
+	if strings.Count(expr, "=") != 1 ||
+		strings.Contains(expr, ">=") || strings.Contains(expr, "<=") ||
+		strings.Contains(expr, "!=") || strings.Contains(expr, "<>") {
+		return "", nil, false
+	}
+	parts := strings.SplitN(expr, "=", 2)
+	if len(parts) != 2 {
+		return "", nil, false
+	}
+	left := strings.TrimSpace(parts[0])
+	right := strings.TrimSpace(parts[1])
+	prefix := variable + "."
+	if !strings.HasPrefix(left, prefix) {
+		return "", nil, false
+	}
+	prop := strings.TrimSpace(left[len(prefix):])
+	if prop == "" {
+		return "", nil, false
+	}
+	lit, ok := parseWhereLiteral(right)
+	if !ok {
+		return "", nil, false
+	}
+	return prop, lit, true
+}
+
+func (e *StorageExecutor) isLiteralIsNotNullExpr(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	up := strings.ToUpper(expr)
+	needle := " IS NOT NULL"
+	idx := strings.Index(up, needle)
+	if idx <= 0 {
+		return false
+	}
+	lit := strings.TrimSpace(expr[:idx])
+	v, ok := parseWhereLiteral(lit)
+	if !ok {
+		return false
+	}
+	return v != nil
+}
+
+func parseWhereLiteral(token string) (interface{}, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, false
+	}
+	if strings.EqualFold(token, "null") {
+		return nil, true
+	}
+	if strings.EqualFold(token, "true") {
+		return true, true
+	}
+	if strings.EqualFold(token, "false") {
+		return false, true
+	}
+	if len(token) >= 2 && token[0] == '\'' && token[len(token)-1] == '\'' {
+		s := token[1 : len(token)-1]
+		s = strings.ReplaceAll(s, "''", "'")
+		s = strings.ReplaceAll(s, "\\\\", "\\")
+		return s, true
+	}
+	if i, err := strconv.ParseInt(token, 10, 64); err == nil {
+		return i, true
+	}
+	if f, err := strconv.ParseFloat(token, 64); err == nil {
+		return f, true
+	}
+	return nil, false
 }
 
 func (e *StorageExecutor) evaluateSimpleWhereClauseForNodeMap(nodeMap map[string]*storage.Node, clause string) (bool, bool) {

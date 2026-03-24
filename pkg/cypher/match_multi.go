@@ -326,9 +326,12 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 		return nil, fmt.Errorf("multi-MATCH query requires RETURN clause")
 	}
 
-	// Extract WHERE clause if present (between last MATCH pattern and RETURN)
+	// Extract WHERE clause if present (between last MATCH pattern and RETURN).
+	// Use the last WHERE before RETURN so queries like:
+	// MATCH A WHERE wa MATCH B RETURN ...
+	// (after normalization) do not accidentally pick an earlier WHERE position.
 	var whereClause string
-	whereIdx := findKeywordIndex(cypher, "WHERE")
+	whereIdx := lastKeywordIndexBefore(cypher, "WHERE", returnIdx)
 	if whereIdx > 0 && whereIdx < returnIdx {
 		whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 	}
@@ -529,6 +532,30 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 	}
 
 	return result, nil
+}
+
+// lastKeywordIndexBefore returns the last occurrence of keyword before endIdx.
+// It uses keyword-aware scanning and returns -1 when not found.
+func lastKeywordIndexBefore(query, keyword string, endIdx int) int {
+	if endIdx <= 0 || endIdx > len(query) {
+		endIdx = len(query)
+	}
+	segment := query[:endIdx]
+	pos := -1
+	search := 0
+	for {
+		rel := findKeywordIndex(segment[search:], keyword)
+		if rel < 0 {
+			break
+		}
+		found := search + rel
+		pos = found
+		search = found + len(keyword)
+		if search >= len(segment) {
+			break
+		}
+	}
+	return pos
 }
 
 // splitMatchClauses splits the query into individual MATCH clause patterns

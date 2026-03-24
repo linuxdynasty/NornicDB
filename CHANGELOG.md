@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.30] - 2026-03-23
+
+### Fixed
+
+- **Cypher mutation compatibility for translation update flows**:
+  - fixed chained `MATCH ... WHERE ... MATCH ... SET ... RETURN` handling for update queries that join `OriginalText` to `TranslatedText`
+  - fixed multi-MATCH WHERE extraction to use the correct terminal WHERE before RETURN, preventing false `expected multiple MATCH clauses` errors
+  - fixed `SET ... RETURN count(...)` aggregation semantics so update-count projections return deterministic values (`count(t)` now behaves correctly in mutation returns).
+- **SET scope resolution in multi-variable mutation queries**:
+  - fixed SET pre-match scope selection to include variables referenced in both SET and RETURN expressions (for example `t` in `SET t... RETURN t...`)
+  - fixed regression where valid mutation projections could return nil/empty values due to incomplete variable binding selection.
+- **WHERE-evaluation compatibility in correlated/fabric paths**:
+  - improved `IS NULL` / `IS NOT NULL` evaluation for row-bound identifiers while preserving permissive legacy behavior for unbound single-node expressions.
+
+### Tests
+
+- Added exact-shape regression coverage for production translation query forms:
+  - `MATCH ... WHERE ... OR (...) CREATE ... CREATE ... RETURN ...`
+  - `MATCH ... WHERE ... OR (...) MATCH ... SET ... RETURN ...`
+  - `MATCH ... WHERE elementId(...) SET ... RETURN count(...) AS updated`
+- Added fan-out and null-arm guard tests for OR-based creation filters to ensure cardinality correctness and prevent broad unintended matches.
+
 ## [v1.0.29] - 2026-03-23
 
 ### Added

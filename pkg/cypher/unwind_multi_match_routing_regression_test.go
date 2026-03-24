@@ -208,6 +208,132 @@ RETURN elementId(t) AS id,
 	require.Equal(t, true, res.Rows[0][idx("isRefetch")])
 }
 
+func TestBug_MatchWhereOrCreateCreateReturn_DoesNotFanOut(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Add many distractors to catch accidental broad scans/fan-out behavior.
+	for i := 0; i < 500; i++ {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("test:noise-%d", i)),
+			Labels: []string{"OriginalText"},
+			Properties: map[string]interface{}{
+				"textKey128": fmt.Sprintf("noise-%d", i),
+				"textKey":    "dupKey",
+			},
+		})
+		require.NoError(t, err)
+	}
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "test:o-target",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey128": "k128-target",
+			"textKey":    "shortkey",
+		},
+	})
+	require.NoError(t, err)
+
+	q := `
+MATCH (o:OriginalText)
+WHERE o.textKey128 = $textKey128 OR ($textKey IS NOT NULL AND o.textKey = $textKey)
+CREATE (t:TranslatedText {
+  language: $targetLang,
+  translatedText: $translatedText,
+  auditedText: null,
+  isReviewed: false,
+  reviewResult: null,
+  reviewedAt: null,
+  submitter: $submitter,
+  isRefetch: $isRefetch,
+  createdAt: $now
+})
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN elementId(t) AS id,
+       t.createdAt AS createdAt,
+       t.language AS language,
+       coalesce(t.translationId, elementId(t)) AS translationId,
+       t.translatedText AS translatedText,
+       t.auditedText AS auditedText,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.submitter AS submitter,
+       t.isRefetch AS isRefetch
+`
+	params := map[string]interface{}{
+		"textKey128":     "k128-target",
+		"textKey":        nil, // Keep second OR arm false.
+		"targetLang":     "es",
+		"translatedText": "hola",
+		"submitter":      "s@x.test",
+		"isRefetch":      false,
+		"now":            "2026-01-01T00:00:00Z",
+	}
+	res, err := exec.Execute(ctx, q, params)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1, "query should create exactly one translation row")
+
+	edges, err := store.AllEdges()
+	require.NoError(t, err)
+	translatesTo := 0
+	for _, e := range edges {
+		if e != nil && e.Type == "TRANSLATES_TO" {
+			translatesTo++
+		}
+	}
+	require.Equal(t, 1, translatesTo, "should create exactly one TRANSLATES_TO edge")
+}
+
+func TestBug_MatchWhereOrCreateCreateReturn_NullTextKeySkipsSecondArm(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Many rows match textKey arm; with textKey = null that arm must be disabled.
+	for i := 0; i < 100; i++ {
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("test:bulk-%d", i)),
+			Labels: []string{"OriginalText"},
+			Properties: map[string]interface{}{
+				"textKey128": fmt.Sprintf("bulk-%d", i),
+				"textKey":    "shared",
+			},
+		})
+		require.NoError(t, err)
+	}
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "test:o-target-null",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey128": "needle-128",
+			"textKey":    "shared",
+		},
+	})
+	require.NoError(t, err)
+
+	q := `
+MATCH (o:OriginalText)
+WHERE o.textKey128 = $textKey128 OR ($textKey IS NOT NULL AND o.textKey = $textKey)
+CREATE (t:TranslatedText {language: $targetLang, translatedText: $translatedText, createdAt: $now})
+CREATE (o)-[:TRANSLATES_TO]->(t)
+RETURN count(*) AS c
+`
+	res, err := exec.Execute(ctx, q, map[string]interface{}{
+		"textKey128":     "needle-128",
+		"textKey":        nil,
+		"targetLang":     "es",
+		"translatedText": "hola",
+		"now":            "2026-01-01T00:00:00Z",
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), res.Rows[0][0], "second OR arm must not match when textKey is null")
+}
+
 func TestRewriteUnwindCorrelationToIn(t *testing.T) {
 	in := "MATCH (o:OriginalText) MATCH (t:TranslatedText) WHERE o.joinKey = joinKey AND t.joinKey = joinKey CREATE (o)-[:TRANSLATES_TO]->(t) RETURN count(*) AS c"
 	got, ok := rewriteUnwindCorrelationToIn(in, "joinKey", "__unwind_items")
