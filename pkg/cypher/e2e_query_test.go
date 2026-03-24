@@ -814,6 +814,157 @@ func TestE2E_OptionalMatch_NoResults(t *testing.T) {
 	assert.Equal(t, 1, len(result.Rows))
 }
 
+func TestE2E_MirroredGraphPythonScript_CreatesAndRetrievesHierarchy(t *testing.T) {
+	exec, ctx := setupE2EExecutor(t)
+
+	runCreationScript := func() {
+		_, err := exec.Execute(ctx, "MERGE (s:Section {code: $code})", map[string]interface{}{"code": "3.18.5.1"})
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `
+		MERGE (parent:Section {code: $parent_code})
+		WITH parent
+		MERGE (child:Section {code: $code})
+		  ON CREATE SET child.content = $content
+		  ON MATCH SET child.content = $content
+		MERGE (child)-[:SUBSECTION_OF]->(parent)
+		`, map[string]interface{}{
+			"parent_code": "3.18.5.1",
+			"code":        "3.18.5",
+			"content":     "title A",
+		})
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, "MERGE (s:Section {code: $code}) ON CREATE SET s.content = $content ON MATCH SET s.content = $content", map[string]interface{}{"code": "3.18.6.1", "content": "A"})
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, "MERGE (s:Section {code: $code}) ON CREATE SET s.content = $content ON MATCH SET s.content = $content", map[string]interface{}{"code": "3.18.6.2", "content": "B"})
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, "MERGE (s:Section {code: $code}) ON CREATE SET s.content = $content ON MATCH SET s.content = $content", map[string]interface{}{"code": "3.18.6.3", "content": "C"})
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `
+		UNWIND $parent_codes AS p_code
+		MERGE (parent:Section {code: p_code})
+		WITH parent
+		MERGE (child:Section {code: $code})
+		  ON CREATE SET child.content = $content
+		  ON MATCH SET child.content = $content
+		WITH parent, child
+		MERGE (child)-[:SUBSECTION_OF]->(parent)
+		`, map[string]interface{}{
+			"parent_codes": []interface{}{"3.18.6.1", "3.18.6.2", "3.18.6.3"},
+			"code":         "3.18.6",
+			"content":      "title A B C",
+		})
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `
+		UNWIND $parent_codes AS p_code
+		MERGE (parent:Section {code: p_code})
+		WITH parent
+		MERGE (child:Section {code: $code})
+		  ON CREATE SET child.content = $content
+		  ON MATCH SET child.content = $content
+		WITH parent, child
+		MERGE (child)-[:SUBSECTION_OF]->(parent)
+		`, map[string]interface{}{
+			"parent_codes": []interface{}{"3.18.5", "3.18.6"},
+			"code":         "3.18",
+			"content":      "big title title A title A B C",
+		})
+		require.NoError(t, err)
+	}
+
+	assertGraphState := func() {
+		expectedOptionalRows := [][]interface{}{
+			{"3.18", "SUBSECTION_OF", "3.18.5"},
+			{"3.18", "SUBSECTION_OF", "3.18.6"},
+			{"3.18.5", "SUBSECTION_OF", "3.18.5.1"},
+			{"3.18.5.1", nil, nil},
+			{"3.18.6", "SUBSECTION_OF", "3.18.6.1"},
+			{"3.18.6", "SUBSECTION_OF", "3.18.6.2"},
+			{"3.18.6", "SUBSECTION_OF", "3.18.6.3"},
+			{"3.18.6.1", nil, nil},
+			{"3.18.6.2", nil, nil},
+			{"3.18.6.3", nil, nil},
+		}
+
+		nodes, err := exec.Execute(ctx, "MATCH (n:Section) RETURN count(n) AS c", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(7), nodes.Rows[0][0])
+
+		rels, err := exec.Execute(ctx, "MATCH (:Section)-[r:SUBSECTION_OF]->(:Section) RETURN count(r) AS c", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(6), rels.Rows[0][0])
+
+		parents, err := exec.Execute(ctx, `
+		MATCH (n:Section {code: '3.18'})-[:SUBSECTION_OF]->(p:Section)
+		RETURN p.code AS code
+		ORDER BY code
+		`, nil)
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"3.18.5"}, {"3.18.6"}}, parents.Rows)
+
+		children, err := exec.Execute(ctx, `
+		MATCH (n:Section {code: '3.18.6'})-[:SUBSECTION_OF]->(p:Section)
+		RETURN p.code AS code
+		ORDER BY code
+		`, nil)
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"3.18.6.1"}, {"3.18.6.2"}, {"3.18.6.3"}}, children.Rows)
+
+		content, err := exec.Execute(ctx, "MATCH (n:Section {code: '3.18'}) RETURN n.content AS content", nil)
+		require.NoError(t, err)
+		require.Equal(t, [][]interface{}{{"big title title A title A B C"}}, content.Rows)
+
+		optional, err := exec.Execute(ctx, `
+		MATCH (n:Section)
+		OPTIONAL MATCH (n)-[r:SUBSECTION_OF]->(p)
+		RETURN n.code AS code, type(r) AS relType, p.code AS parentCode
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, optional.Rows, 10)
+		assert.ElementsMatch(t, expectedOptionalRows, optional.Rows)
+
+		rowsByCode := map[string]int{}
+		nilRows := 0
+		for _, row := range optional.Rows {
+			require.Len(t, row, 3)
+			code, ok := row[0].(string)
+			require.True(t, ok)
+			rowsByCode[code]++
+			if row[1] == nil {
+				nilRows++
+				require.Nil(t, row[2])
+			} else {
+				require.Equal(t, "SUBSECTION_OF", row[1])
+				require.NotNil(t, row[2])
+			}
+		}
+		require.Equal(t, 4, nilRows)
+		require.Equal(t, 2, rowsByCode["3.18"])
+		require.Equal(t, 3, rowsByCode["3.18.6"])
+		require.Equal(t, 1, rowsByCode["3.18.5"])
+		require.Equal(t, 1, rowsByCode["3.18.5.1"])
+		require.Equal(t, 1, rowsByCode["3.18.6.1"])
+		require.Equal(t, 1, rowsByCode["3.18.6.2"])
+		require.Equal(t, 1, rowsByCode["3.18.6.3"])
+
+		unicodeOptional, err := exec.Execute(ctx, "MATCH (n:Section) OPTIONAL MATCH (n)-[r:SUBSECTION_OF]→(p) RETURN n.code AS code, type(r) AS relType, p.code AS parentCode", nil)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, expectedOptionalRows, unicodeOptional.Rows)
+		require.Equal(t, optional.Rows, unicodeOptional.Rows)
+	}
+
+	runCreationScript()
+	assertGraphState()
+
+	// Re-run the exact same script to verify public Execute routing still reaches
+	// MERGE semantics correctly and does not duplicate relationships.
+	runCreationScript()
+	assertGraphState()
+}
+
 // =============================================================================
 // RELATIONSHIP MATCHING TESTS
 // =============================================================================

@@ -17,7 +17,7 @@ import (
 // the caller's transaction context (explicit tx or implicit tx wrapper carried
 // on ctx), avoiding nested implicit transactions and misrouting.
 func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
-	cypher = normalizeCypherRelationshipArrows(cypher)
+	cypher = normalizeCypherSyntaxConfusables(cypher)
 	cypher = strings.TrimSpace(cypher)
 	cypher = trimTrailingStatementDelimiters(cypher)
 	if cypher == "" {

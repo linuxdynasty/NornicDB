@@ -2553,6 +2553,58 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 		result.Rows = append(result.Rows, row)
 	}
 
+	orderByIdx := findKeywordIndex(restOfQuery, "ORDER")
+	if orderByIdx > 0 {
+		orderStart := orderByIdx + 5
+		for orderStart < len(restOfQuery) && isWhitespace(restOfQuery[orderStart]) {
+			orderStart++
+		}
+		if orderStart+2 <= len(restOfQuery) && strings.EqualFold(restOfQuery[orderStart:orderStart+2], "BY") {
+			orderStart += 2
+		}
+		orderPart := restOfQuery[orderStart:]
+		endIdx := len(orderPart)
+		for _, kw := range []string{"SKIP", "LIMIT"} {
+			if idx := findKeywordIndex(orderPart, kw); idx >= 0 && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		orderExpr := strings.TrimSpace(orderPart[:endIdx])
+		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+	}
+
+	skipIdx := findKeywordIndex(restOfQuery, "SKIP")
+	skip := 0
+	if skipIdx > 0 {
+		skipPart := strings.TrimSpace(restOfQuery[skipIdx+4:])
+		skipPart = strings.Fields(skipPart)[0]
+		if s, err := strconv.Atoi(skipPart); err == nil {
+			skip = s
+		}
+	}
+
+	limitIdx := findKeywordIndex(restOfQuery, "LIMIT")
+	limit := -1
+	if limitIdx > 0 {
+		limitPart := strings.TrimSpace(restOfQuery[limitIdx+5:])
+		limitPart = strings.Fields(limitPart)[0]
+		if l, err := strconv.Atoi(limitPart); err == nil {
+			limit = l
+		}
+	}
+
+	if skip > 0 || limit >= 0 {
+		startIdx := skip
+		if startIdx > len(result.Rows) {
+			startIdx = len(result.Rows)
+		}
+		endIdx := len(result.Rows)
+		if limit >= 0 && startIdx+limit < endIdx {
+			endIdx = startIdx + limit
+		}
+		result.Rows = result.Rows[startIdx:endIdx]
+	}
+
 	return result, nil
 }
 

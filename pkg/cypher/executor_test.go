@@ -75,6 +75,42 @@ func TestExecuteInvalidSyntax(t *testing.T) {
 	}
 }
 
+func TestNormalizeCypherSyntaxConfusables(t *testing.T) {
+	t.Run("normalizes syntax outside literals and comments", func(t *testing.T) {
+		query := "// keep → and NBSP\nMATCH\u00A0（n:`Sec→tion` {note: 'a→b\u00A0', text: \"c←d\"}）\u200B-[r:SUBSECTION_OF]→（p）/* keep ← */ RETURN n．code， p"
+		expected := "// keep → and NBSP\nMATCH (n:`Sec→tion` {note: 'a→b\u00A0', text: \"c←d\"})-[r:SUBSECTION_OF]->(p)/* keep ← */ RETURN n.code, p"
+		assert.Equal(t, expected, normalizeCypherSyntaxConfusables(query))
+	})
+
+	t.Run("preserves escaped quoted and backticked content", func(t *testing.T) {
+		query := "MATCH (n {single: 'it''s →', double: \"say \"\"←\"\"\", ident: `odd``→``name`}) RETURN n"
+		assert.Equal(t, query, normalizeCypherSyntaxConfusables(query))
+	})
+}
+
+func TestExecuteNormalizesCypherSyntaxConfusables(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	defer store.Close()
+
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "MERGE\u00A0（parent:Section\u00A0｛code：＄parent｝） WITH parent MERGE\u00A0（child:Section\u00A0｛code：＄child， note：'keep → inside literal'｝） MERGE\u00A0（child）-[r:SUBSECTION_OF]→（parent）", map[string]interface{}{
+		"parent": "3.18",
+		"child":  "3.18.1",
+	})
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "MATCH\u00A0（n:Section） OPTIONAL MATCH\u200B（n）-[r:SUBSECTION_OF]→（p） RETURN n.code AS code， type（r） AS relType， p.code AS parentCode ORDER BY code", nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{"3.18", nil, nil}, {"3.18.1", "SUBSECTION_OF", "3.18"}}, result.Rows)
+
+	note, err := exec.Execute(ctx, "MATCH (n:Section {code: $code}) RETURN n.note", map[string]interface{}{"code": "3.18.1"})
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{"keep → inside literal"}}, note.Rows)
+}
+
 func TestExecuteCompoundCreateWithDelete_Branches(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

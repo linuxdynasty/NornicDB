@@ -117,6 +117,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
@@ -657,7 +658,7 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	e.resetHotPathTrace()
 	// Normalize query: trim BOM (some clients send it) then whitespace
 	cypher = trimBOM(cypher)
-	cypher = normalizeCypherRelationshipArrows(cypher)
+	cypher = normalizeCypherSyntaxConfusables(cypher)
 	cypher = strings.TrimSpace(cypher)
 	cypher = trimTrailingStatementDelimiters(cypher)
 	if cypher == "" {
@@ -951,17 +952,209 @@ func trimTrailingStatementDelimiters(query string) string {
 	}
 }
 
-func normalizeCypherRelationshipArrows(query string) string {
+func normalizeCypherSyntaxConfusables(query string) string {
 	if query == "" {
 		return query
 	}
-	replacer := strings.NewReplacer(
-		"→", "->",
-		"←", "<-",
-		"—", "-",
-		"–", "-",
+
+	const (
+		normalizeDefault = iota
+		normalizeSingleQuoted
+		normalizeDoubleQuoted
+		normalizeBacktickQuoted
+		normalizeLineComment
+		normalizeBlockComment
 	)
-	return replacer.Replace(query)
+
+	runes := []rune(query)
+	var builder strings.Builder
+	builder.Grow(len(query) + 8)
+	changed := false
+	state := normalizeDefault
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+
+		switch state {
+		case normalizeDefault:
+			switch {
+			case r == '/' && next == '/':
+				builder.WriteRune(r)
+				builder.WriteRune(next)
+				i++
+				state = normalizeLineComment
+				continue
+			case r == '/' && next == '*':
+				builder.WriteRune(r)
+				builder.WriteRune(next)
+				i++
+				state = normalizeBlockComment
+				continue
+			case r == '\'':
+				builder.WriteRune(r)
+				state = normalizeSingleQuoted
+				continue
+			case r == '"':
+				builder.WriteRune(r)
+				state = normalizeDoubleQuoted
+				continue
+			case r == '`':
+				builder.WriteRune(r)
+				state = normalizeBacktickQuoted
+				continue
+			}
+
+			if replacement, ok := cypherSyntaxConfusableReplacement(r); ok {
+				builder.WriteString(replacement)
+				changed = changed || replacement != string(r)
+				continue
+			}
+
+			if replacement, ok := cypherWhitespaceReplacement(r); ok {
+				builder.WriteRune(replacement)
+				changed = changed || replacement != r
+				continue
+			}
+
+			if isIgnorableCypherFormatRune(r) {
+				changed = true
+				continue
+			}
+
+			builder.WriteRune(r)
+
+		case normalizeSingleQuoted:
+			builder.WriteRune(r)
+			if r == '\\' && i+1 < len(runes) {
+				builder.WriteRune(runes[i+1])
+				i++
+				continue
+			}
+			if r == '\'' {
+				if i+1 < len(runes) && runes[i+1] == '\'' {
+					builder.WriteRune(runes[i+1])
+					i++
+					continue
+				}
+				state = normalizeDefault
+			}
+
+		case normalizeDoubleQuoted:
+			builder.WriteRune(r)
+			if r == '\\' && i+1 < len(runes) {
+				builder.WriteRune(runes[i+1])
+				i++
+				continue
+			}
+			if r == '"' {
+				if i+1 < len(runes) && runes[i+1] == '"' {
+					builder.WriteRune(runes[i+1])
+					i++
+					continue
+				}
+				state = normalizeDefault
+			}
+
+		case normalizeBacktickQuoted:
+			builder.WriteRune(r)
+			if r == '`' {
+				if i+1 < len(runes) && runes[i+1] == '`' {
+					builder.WriteRune(runes[i+1])
+					i++
+					continue
+				}
+				state = normalizeDefault
+			}
+
+		case normalizeLineComment:
+			builder.WriteRune(r)
+			if r == '\n' || r == '\r' {
+				state = normalizeDefault
+			}
+
+		case normalizeBlockComment:
+			builder.WriteRune(r)
+			if r == '*' && next == '/' {
+				builder.WriteRune(next)
+				i++
+				state = normalizeDefault
+			}
+		}
+	}
+
+	if !changed {
+		return query
+	}
+
+	return builder.String()
+}
+
+func cypherSyntaxConfusableReplacement(r rune) (string, bool) {
+	switch r {
+	case '→':
+		return "->", true
+	case '←':
+		return "<-", true
+	case '—', '–', '−', '‐', '‑', '‒':
+		return "-", true
+	case '（':
+		return "(", true
+	case '）':
+		return ")", true
+	case '［':
+		return "[", true
+	case '］':
+		return "]", true
+	case '｛':
+		return "{", true
+	case '｝':
+		return "}", true
+	case '，':
+		return ",", true
+	case '：':
+		return ":", true
+	case '；':
+		return ";", true
+	case '．':
+		return ".", true
+	case '＝':
+		return "=", true
+	case '＜':
+		return "<", true
+	case '＞':
+		return ">", true
+	case '＄':
+		return "$", true
+	default:
+		return "", false
+	}
+}
+
+func cypherWhitespaceReplacement(r rune) (rune, bool) {
+	switch r {
+	case '\u0085', '\u2028', '\u2029':
+		return '\n', true
+	case ' ', '\t', '\n', '\r':
+		return 0, false
+	default:
+		if unicode.IsSpace(r) {
+			return ' ', true
+		}
+		return 0, false
+	}
+}
+
+func isIgnorableCypherFormatRune(r rune) bool {
+	switch r {
+	case '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF':
+		return true
+	default:
+		return false
+	}
 }
 
 // TransactionCapableEngine is an engine that supports ACID transactions.
