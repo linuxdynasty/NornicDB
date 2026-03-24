@@ -28,6 +28,10 @@ type EmbedWorker struct {
 
 	// Trigger channel to wake up worker immediately
 	trigger chan struct{}
+	// Debounced external-trigger state (write-lull signaling).
+	triggerMu            sync.Mutex
+	triggerDebounceTimer *time.Timer
+	triggerDebounceSeq   atomic.Uint64
 
 	// Callback after embedding a node (for search index update)
 	onEmbedded func(node *storage.Node)
@@ -81,6 +85,9 @@ type EmbedWorkerConfig struct {
 	ScanInterval time.Duration // How often to scan for nodes without embeddings (default: 5s)
 	BatchDelay   time.Duration // Delay between processing nodes (default: 500ms)
 	MaxRetries   int           // Max retry attempts per node (default: 3)
+	// TriggerDebounceDelay delays enqueue-triggered scans until writes lull.
+	// Each new Enqueue resets the timer. Set 0 for immediate trigger behavior.
+	TriggerDebounceDelay time.Duration // default: 2s
 
 	// Text chunking settings.
 	ChunkSize    int // Max tokens per chunk (default: 512)
@@ -112,6 +119,7 @@ func DefaultEmbedWorkerConfig() *EmbedWorkerConfig {
 		ScanInterval:         15 * time.Minute,       // Scan for missed nodes every 15 minutes
 		BatchDelay:           500 * time.Millisecond, // Delay between processing nodes
 		MaxRetries:           3,
+		TriggerDebounceDelay: 2 * time.Second,
 		ChunkSize:            512,
 		ChunkOverlap:         50,
 		EmbedBatchSize:       32,
@@ -200,7 +208,7 @@ func (ew *EmbedWorker) SetEmbedder(embedder embed.Embedder) {
 	ew.embedder = embedder
 	ew.mu.Unlock()
 	// Trigger immediate processing now that embedder is available
-	ew.Trigger()
+	ew.TriggerImmediate()
 }
 
 // SetOnEmbedded sets a callback to be called after a node is embedded.
@@ -222,7 +230,43 @@ func (ew *EmbedWorker) Trigger() {
 	if ew.closed.Load() {
 		return
 	}
+	delay := time.Duration(0)
+	if ew.config != nil {
+		delay = ew.config.TriggerDebounceDelay
+	}
+	if delay <= 0 {
+		ew.signalTrigger()
+		return
+	}
 
+	seq := ew.triggerDebounceSeq.Add(1)
+	ew.triggerMu.Lock()
+	if ew.triggerDebounceTimer != nil {
+		ew.triggerDebounceTimer.Stop()
+	}
+	ew.triggerDebounceTimer = time.AfterFunc(delay, func() {
+		if ew.closed.Load() {
+			return
+		}
+		// Debounce reset behavior: only latest schedule fires.
+		if ew.triggerDebounceSeq.Load() != seq {
+			return
+		}
+		ew.signalTrigger()
+	})
+	ew.triggerMu.Unlock()
+}
+
+// TriggerImmediate bypasses debounce and signals worker immediately.
+// Use for explicit/manual triggers, not high-frequency write-path enqueue.
+func (ew *EmbedWorker) TriggerImmediate() {
+	ew.signalTrigger()
+}
+
+func (ew *EmbedWorker) signalTrigger() {
+	if ew.closed.Load() {
+		return
+	}
 	select {
 	case ew.trigger <- struct{}{}:
 	default:
@@ -264,6 +308,14 @@ func (ew *EmbedWorker) Reset() {
 	// Cancel context to stop current processing
 	ew.cancel()
 
+	// Stop pending debounced trigger timer.
+	ew.triggerMu.Lock()
+	if ew.triggerDebounceTimer != nil {
+		ew.triggerDebounceTimer.Stop()
+		ew.triggerDebounceTimer = nil
+	}
+	ew.triggerMu.Unlock()
+
 	// Wait synchronously for previous workers to exit before reusing the WaitGroup.
 	// This avoids "WaitGroup is reused before previous Wait has returned" panics
 	// when Reset and Close overlap under load.
@@ -299,6 +351,14 @@ func (ew *EmbedWorker) Reset() {
 // Close gracefully shuts down the worker.
 func (ew *EmbedWorker) Close() {
 	ew.closed.Store(true)
+
+	// Stop pending debounced trigger timer.
+	ew.triggerMu.Lock()
+	if ew.triggerDebounceTimer != nil {
+		ew.triggerDebounceTimer.Stop()
+		ew.triggerDebounceTimer = nil
+	}
+	ew.triggerMu.Unlock()
 
 	// Stop any pending debounce timer
 	ew.clusterDebounceMu.Lock()
@@ -708,8 +768,9 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Small delay before next
 	time.Sleep(ew.config.BatchDelay)
 
-	// Trigger another check immediately if there might be more
-	ew.Trigger()
+	// Trigger another check immediately if there might be more.
+	// Internal chaining should not be debounced.
+	ew.signalTrigger()
 
 	return true // Successfully processed
 }

@@ -1824,7 +1824,7 @@ func (db *DB) EmbedExisting(ctx context.Context) (int, error) {
 	if db.embedQueue == nil {
 		return 0, fmt.Errorf("auto-embed not enabled")
 	}
-	db.embedQueue.Trigger()
+	db.embedQueue.TriggerImmediate()
 	return 0, nil // Worker will process in background
 }
 
