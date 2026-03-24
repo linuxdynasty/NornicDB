@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,17 +257,10 @@ func (ew *EmbedWorker) Reset() {
 	// Cancel context to stop current processing
 	ew.cancel()
 
-	// Wait for worker to exit, but do not block forever if embedder backend is stuck.
-	waitDone := make(chan struct{}, 1)
-	go func() {
-		ew.wg.Wait()
-		waitDone <- struct{}{}
-	}()
-	select {
-	case <-waitDone:
-	case <-time.After(10 * time.Second):
-		log.Printf("⚠️ embed worker reset: timeout waiting for worker exit; continuing with fresh worker")
-	}
+	// Wait synchronously for previous workers to exit before reusing the WaitGroup.
+	// This avoids "WaitGroup is reused before previous Wait has returned" panics
+	// when Reset and Close overlap under load.
+	ew.wg.Wait()
 
 	// Reset state under lock
 	ew.mu.Lock()
@@ -312,16 +304,8 @@ func (ew *EmbedWorker) Close() {
 	ew.cancel()
 	// Do NOT close trigger channel: Trigger() can still race and send, which would panic.
 	// Context cancellation is enough to stop workers.
-	waitDone := make(chan struct{}, 1)
-	go func() {
-		ew.wg.Wait()
-		waitDone <- struct{}{}
-	}()
-	select {
-	case <-waitDone:
-	case <-time.After(10 * time.Second):
-		log.Printf("⚠️ embed worker close: timeout waiting for worker exit; forcing shutdown continuation")
-	}
+	// Wait synchronously for worker shutdown to complete.
+	ew.wg.Wait()
 }
 
 // scheduleClusteringDebounced accumulates embedding counts and debounces the k-means trigger.

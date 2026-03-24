@@ -1107,6 +1107,48 @@ func TestEmbedWorkerConcurrency(t *testing.T) {
 		assert.GreaterOrEqual(t, stats.Processed, 0)
 		t.Logf("Processed %d nodes", stats.Processed)
 	})
+
+	t.Run("reset_close_overlap_no_waitgroup_reuse_panic", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(baseEngine, "test")
+		embedder := newMockEmbedder()
+
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     "race-node-1",
+			Labels: []string{"Memory"},
+			Properties: map[string]any{
+				"content": "Race content",
+			},
+		})
+		require.NoError(t, err)
+
+		worker := NewEmbedWorker(embedder, engine, &EmbedWorkerConfig{
+			ScanInterval: 5 * time.Second,
+			BatchDelay:   1 * time.Millisecond,
+			MaxRetries:   1,
+			ChunkSize:    256,
+			ChunkOverlap: 32,
+		})
+
+		worker.Trigger()
+		time.Sleep(25 * time.Millisecond)
+
+		done := make(chan struct{})
+		go func() {
+			worker.Reset()
+			close(done)
+		}()
+
+		// Intentionally overlap Close with Reset, matching the production race.
+		time.Sleep(1 * time.Millisecond)
+		worker.Close()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reset did not finish after overlapping close")
+		}
+	})
 }
 
 // TestRecentlyProcessedOnlyLogsOnce verifies we don't spam "recently processed" logs
