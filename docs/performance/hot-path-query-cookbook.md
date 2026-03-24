@@ -67,6 +67,17 @@ LIMIT 1;
 
 Use when you only need yes/no, not full payload.
 
+### 1.4 Direct ID Seek Shape
+
+```cypher
+MATCH (n:EntityA)
+WHERE elementId(n) = $id
+RETURN n
+LIMIT 1;
+```
+
+Keep this as a dedicated template so planners can reliably choose direct ID seek.
+
 ## Area 2: Batch Retrieval
 
 ### 2.1 Bulk Lookup For Many Keys
@@ -92,6 +103,22 @@ RETURN n;
 ```
 
 Use with bounded chunk size (for example 100-1000 keys per call).
+
+### 2.3 OR-To-UNION Dual-Key Lookup
+
+```cypher
+CALL {
+  WITH $lookupKey AS k
+  MATCH (n:EntityA {primaryKey: k}) RETURN n
+  UNION
+  WITH $lookupKey AS k
+  MATCH (n:EntityA {alternateKey: k}) RETURN n
+}
+WITH DISTINCT n
+RETURN n;
+```
+
+Prefer this over a single `OR` predicate across different properties.
 
 ## Area 3: Queue, Feed, And Pagination
 
@@ -144,6 +171,46 @@ LIMIT $limit;
 ```
 
 Use only for shallow pages.
+
+### 3.5 Top-N With Composite Index-Friendly Shape
+
+```cypher
+MATCH (a:EntityA)-[:KEY_REL]->(b:EntityB)
+WHERE b.category = $category
+  AND b.status = $status
+RETURN b, a
+ORDER BY b.createdAt DESC
+LIMIT 30;
+```
+
+Keep the sort key and filtered fields aligned with a composite index when possible.
+
+### 3.6 Optional Predicate Split (Two Templates)
+
+Template A (no prefix filter):
+
+```cypher
+MATCH (a:EntityA)-[:KEY_REL]->(b:EntityB)
+WHERE b.category = $category
+  AND b.status = $status
+RETURN b, a
+ORDER BY b.createdAt DESC
+LIMIT 30;
+```
+
+Template B (with prefix filter):
+
+```cypher
+MATCH (a:EntityA)-[:KEY_REL]->(b:EntityB)
+WHERE b.category = $category
+  AND b.status = $status
+  AND a.scope STARTS WITH $scopePrefix
+RETURN b, a
+ORDER BY b.createdAt DESC
+LIMIT 30;
+```
+
+Prefer two templates over `($scopePrefix = '' OR a.scope STARTS WITH $scopePrefix)`.
 
 ## Area 4: Search Patterns
 
@@ -201,6 +268,18 @@ WHERE a.tenantId = $tenantId
 RETURN b.status, count(*) AS total;
 ```
 
+### 5.4 Null-Normalized Predicate Shape
+
+```cypher
+MATCH (b:EntityB)
+WHERE b.status = 'open'
+  AND (b.isReviewed = false OR b.isReviewed IS NULL)
+RETURN b
+LIMIT 100;
+```
+
+Prefer explicit null-aware predicates instead of `coalesce(...)` wrappers on filtered columns.
+
 ## Area 6: Relationship And Traversal
 
 ### 6.1 Idempotent Relationship Upsert
@@ -211,6 +290,16 @@ MATCH (b:EntityB {primaryKey: $toKey})
 MERGE (a)-[r:LINKS_TO]->(b)
 SET r.updatedAt = $now;
 ```
+
+### 6.4 Relationship Attach By ID
+
+```cypher
+MATCH (a:EntityA) WHERE elementId(a) = $fromId
+MATCH (b:EntityB) WHERE elementId(b) = $toId
+CREATE (a)-[:LINKS_TO {createdAt: $now}]->(b);
+```
+
+Use stable ID lookups before relationship creation for predictable attach latency.
 
 ### 6.2 Bounded Traversal
 
@@ -271,6 +360,17 @@ SET n += row.props, n.updatedAt = $now;
 
 Use bounded batch sizes to avoid oversized transactions.
 
+### 7.4 Single-Statement Autocommit Shape
+
+```cypher
+MERGE (n:EntityA {primaryKey: $primaryKey})
+ON CREATE SET n.createdAt = $now
+SET n.updatedAt = $now, n.payload = $payload
+RETURN n;
+```
+
+Favor single-statement request shapes on hot write/read paths.
+
 ## Area 8: Cleanup, TTL, And Archival
 
 ### 8.1 Safe Batch Cleanup For Test Data
@@ -306,6 +406,17 @@ DETACH DELETE n;
 ```
 
 Use when retention policy requires recoverable archives.
+
+### 8.4 Streaming Batch Delete Loop
+
+```cypher
+MATCH (n:EntityB)
+WHERE n.sessionId = $sessionId
+WITH n LIMIT 500
+DETACH DELETE n;
+```
+
+Repeat in application/job scheduler until zero rows are affected.
 
 ## Area 9: Multi-Tenant Query Isolation
 
@@ -345,6 +456,33 @@ RETURN a, collect(b) AS related;
 ### 10.2 Split Heavy Optional Shapes
 
 If optional branches become large and sparse, split into multiple focused queries and compose in the application layer.
+
+## Area 11: Plan Reuse And Diagnostics
+
+### 11.1 Stable Parameterized Template Reuse
+
+```cypher
+MATCH (a:EntityA)-[:KEY_REL]->(b:EntityB)
+WHERE b.category = $category AND b.status = $status
+RETURN b
+ORDER BY b.createdAt DESC
+LIMIT $limit;
+```
+
+Keep the query text shape stable and pass only parameter changes across calls.
+
+### 11.2 PROFILE Index Acceptance/Rejection Checks
+
+```cypher
+PROFILE
+MATCH (a:EntityA)-[:KEY_REL]->(b:EntityB)
+WHERE b.category = $category AND b.status = $status
+RETURN b
+ORDER BY b.createdAt DESC
+LIMIT 30;
+```
+
+Use profiling to confirm index-backed seeks/sorts and to identify rejection causes such as function wrapping or predicate shape.
 
 ## Common Anti-Patterns To Avoid
 
