@@ -9,28 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.0.30] - 2026-03-23
-
-### Fixed
-
-- **Cypher mutation compatibility for translation update flows**:
-  - fixed chained `MATCH ... WHERE ... MATCH ... SET ... RETURN` handling for update queries that join `OriginalText` to `TranslatedText`
-  - fixed multi-MATCH WHERE extraction to use the correct terminal WHERE before RETURN, preventing false `expected multiple MATCH clauses` errors
-  - fixed `SET ... RETURN count(...)` aggregation semantics so update-count projections return deterministic values (`count(t)` now behaves correctly in mutation returns).
-- **SET scope resolution in multi-variable mutation queries**:
-  - fixed SET pre-match scope selection to include variables referenced in both SET and RETURN expressions (for example `t` in `SET t... RETURN t...`)
-  - fixed regression where valid mutation projections could return nil/empty values due to incomplete variable binding selection.
-- **WHERE-evaluation compatibility in correlated/fabric paths**:
-  - improved `IS NULL` / `IS NOT NULL` evaluation for row-bound identifiers while preserving permissive legacy behavior for unbound single-node expressions.
-
-### Tests
-
-- Added exact-shape regression coverage for production translation query forms:
-  - `MATCH ... WHERE ... OR (...) CREATE ... CREATE ... RETURN ...`
-  - `MATCH ... WHERE ... OR (...) MATCH ... SET ... RETURN ...`
-  - `MATCH ... WHERE elementId(...) SET ... RETURN count(...) AS updated`
-- Added fan-out and null-arm guard tests for OR-based creation filters to ensure cardinality correctness and prevent broad unintended matches.
-
 ## [v1.0.29] - 2026-03-23
 
 ### Added
@@ -41,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cypher mutation and grouped-query compatibility for translation flows**:
+  - fixed chained `MATCH ... WHERE ... MATCH ... SET ... RETURN` handling for update queries that join `OriginalText` to `TranslatedText`
+  - fixed multi-MATCH WHERE extraction to use the correct terminal WHERE before RETURN, preventing false `expected multiple MATCH clauses` errors
+  - fixed `SET ... RETURN count(...)` aggregation semantics so update-count projections return deterministic values (`count(t)` now behaves correctly in mutation returns)
+  - fixed chained MATCH normalization so queries containing `OPTIONAL MATCH` are not rewritten into incompatible required-MATCH forms
+  - fixed joined-row aggregation handling for `COLLECT(...)` with non-aggregate return columns, preserving grouped-per-key result semantics
+  - improved MATCH WHERE extraction boundaries in mixed clause pipelines so optional-tail clauses do not leak into WHERE parsing.
 - **Correlated CALL/UNION correctness and performance**:
   - restored correct UNION subquery result behavior for correlated execution paths
   - reduced fixed overhead in correlated query routing/execution to improve hot-path latency.
@@ -56,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mutation stats and deduplication correctness**:
   - fixed DELETE/DETACH DELETE mutation stats under repeated OPTIONAL MATCH row expansion by deduplicating per-entity deletes
   - fixed branch regression where some SET/DELETE/CALL-IN-TRANSACTIONS paths returned nil projection values instead of expected results.
+- **Indexed OR-IN lookup path for key-list reads**:
+  - added index-backed planning for predicates shaped like `propA IN $keys OR propB IN $keys` (for example `textKey`/`textKey128`)
+  - avoids full label scans for large key-list lookups and cleanup/read query patterns.
 
 ### Tests
 
@@ -66,7 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - correlated subquery create-or-update translation shape (`OPTIONAL MATCH + CALL { WITH ... UNION ... }`)
   - CALL subquery write-path regression cases (`WITH ... CREATE`, `WITH ... MERGE`)
   - delete deduplication under OPTIONAL MATCH row multiplication
-  - parser/import handling for `WITH ... WHERE ...` correlated subquery clauses.
+  - parser/import handling for `WITH ... WHERE ...` correlated subquery clauses
+  - exact `UNWIND + OPTIONAL MATCH + collect(CASE...)` translation lookup shape (per-key grouped rows and null-arm behavior)
+  - `DETACH DELETE` with `WHERE elementId(...)` + `OPTIONAL MATCH` cleanup shape
+  - OR-combined indexed `IN` predicate planning without scan fallback
+  - exact translation mutation shapes:
+    - `MATCH ... WHERE ... OR (...) CREATE ... CREATE ... RETURN ...`
+    - `MATCH ... WHERE ... OR (...) MATCH ... SET ... RETURN ...`
+    - `MATCH ... WHERE elementId(...) SET ... RETURN count(...) AS updated`
+  - fan-out and null-arm guard tests for OR-based creation filters.
 
 ### Technical Details
 

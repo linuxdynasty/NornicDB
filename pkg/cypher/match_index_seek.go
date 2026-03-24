@@ -220,6 +220,102 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexIn(
 	return nodes, true, nil
 }
 
+// tryCollectNodesFromPropertyIndexInOrParam attempts to satisfy OR-combined IN
+// predicates backed by indexes, e.g.:
+//
+//	n.textKey IN $keys OR n.textKey128 IN $keys
+//
+// This is important for cleanup/read paths that pass large key lists and would
+// otherwise full-scan labels.
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexInOrParam(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" || params == nil {
+		return nil, false, nil
+	}
+	orIdx := findTopLevelKeyword(clause, " OR ")
+	if orIdx <= 0 {
+		return nil, false, nil
+	}
+	left := strings.TrimSpace(clause[:orIdx])
+	right := strings.TrimSpace(clause[orIdx+4:])
+	if left == "" || right == "" {
+		return nil, false, nil
+	}
+
+	lprop, lvals, lok := e.parseSimpleIndexedInParam(nodePattern.variable, left, params)
+	rprop, rvals, rok := e.parseSimpleIndexedInParam(nodePattern.variable, right, params)
+	if !lok || !rok {
+		return nil, false, nil
+	}
+
+	// Merge values (keep deterministic and duplicate-free).
+	merged := make([]interface{}, 0, len(lvals)+len(rvals))
+	seenVals := make(map[string]struct{}, len(lvals)+len(rvals))
+	for _, v := range append(lvals, rvals...) {
+		if v == nil {
+			continue
+		}
+		k := fmt.Sprintf("%T:%v", v, v)
+		if _, ok := seenVals[k]; ok {
+			continue
+		}
+		seenVals[k] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+
+	leftLabels := e.indexCandidateLabels(schema, nodePattern.labels, lprop)
+	rightLabels := e.indexCandidateLabels(schema, nodePattern.labels, rprop)
+	if len(leftLabels) == 0 || len(rightLabels) == 0 {
+		return nil, false, nil
+	}
+
+	idSet := make(map[storage.NodeID]struct{}, 256)
+	for _, label := range leftLabels {
+		for _, v := range merged {
+			for _, id := range schema.PropertyIndexLookup(label, lprop, v) {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	for _, label := range rightLabels {
+		for _, v := range merged {
+			for _, id := range schema.PropertyIndexLookup(label, rprop, v) {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(idSet))
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		node, err := e.storage.GetNode(storage.NodeID(id))
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, true, nil
+}
+
 // tryCollectNodesFromIDInParam attempts to satisfy simple id/elementId IN-list predicates:
 //
 //	id(<var>) IN $param

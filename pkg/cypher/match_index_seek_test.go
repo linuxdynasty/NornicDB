@@ -151,6 +151,56 @@ func TestMatchUsesPropertyIndexForInParamList(t *testing.T) {
 	require.Equal(t, "src-c", res.Rows[1][0])
 }
 
+func TestMatchUsesPropertyIndexForOrInParamList_NoScan(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	eng := &allNodesForbiddenEngine{MemoryEngine: base}
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-or-a",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "k-a",
+			"textKey128": "h-a",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-or-b",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "k-b",
+			"textKey128": "h-b",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-or-c",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "k-c",
+			"textKey128": "h-c",
+		},
+	})
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(eng)
+	_, err = exec.Execute(context.Background(), "CREATE INDEX idx_or_textkey FOR (n:OriginalText) ON (n.textKey)", nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(context.Background(), "CREATE INDEX idx_or_textkey128 FOR (n:OriginalText) ON (n.textKey128)", nil)
+	require.NoError(t, err)
+
+	eng.forbidScan = true
+	res, err := exec.Execute(
+		context.Background(),
+		"MATCH (o:OriginalText) WHERE o.textKey IN $keys OR o.textKey128 IN $keys RETURN elementId(o) AS id ORDER BY id",
+		map[string]interface{}{"keys": []interface{}{"k-a", "h-c"}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+}
+
 func TestParseSimpleIndexedInParam(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewMemoryEngine())
 	prop, vals, ok := exec.parseSimpleIndexedInParam("n", "n.translationId IN $keys", map[string]interface{}{

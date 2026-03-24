@@ -525,6 +525,110 @@ func TestMigrationDDL_CreateIndexVariants_ParseAndApply(t *testing.T) {
 	}
 }
 
+func TestExactShape_UnwindOptionalMatchCollectCaseMap_ReturnsPerKeyRows(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "o-k1", Labels: []string{"OriginalText"}, Properties: map[string]interface{}{"textKey": "k1", "textKey128": "h1", "trackingId": "trk1", "page": "p1"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "o-k2", Labels: []string{"OriginalText"}, Properties: map[string]interface{}{"textKey": "k2", "textKey128": "h2", "trackingId": "trk2", "page": "p2"}})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{ID: "t-k1-es", Labels: []string{"TranslatedText"}, Properties: map[string]interface{}{"createdAt": "2026-03-23T00:00:00Z", "language": "es", "translatedText": "hola", "isReviewed": false}})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{ID: "e-k1", Type: "TRANSLATES_TO", StartNode: "o-k1", EndNode: "t-k1-es"})
+	require.NoError(t, err)
+
+	q := `
+UNWIND $keys AS key
+MATCH (o:OriginalText)
+WHERE o.textKey = key OR o.textKey128 = key
+OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+RETURN key AS lookupKey,
+       elementId(o) AS originalId,
+       o.textKey AS textKey,
+       o.textKey128 AS textKey128,
+       o.trackingId AS trackingId,
+       o.page AS page,
+       collect(CASE WHEN t IS NULL THEN null ELSE {
+           id: elementId(t),
+           createdAt: t.createdAt,
+           language: t.language,
+           translationId: coalesce(t.translationId, elementId(t)),
+           translatedText: t.translatedText,
+           auditedText: t.auditedText,
+           isReviewed: coalesce(t.isReviewed, false),
+           reviewResult: t.reviewResult,
+           reviewedAt: t.reviewedAt,
+           submitter: t.submitter,
+           isRefetch: t.isRefetch
+       }) AS texts
+`
+
+	// Sanity check the non-UNWIND shape for a key with no translation row.
+	noUnwindQ := `
+MATCH (o:OriginalText)
+WHERE o.textKey = 'k2' OR o.textKey128 = 'k2'
+OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: 'es'})
+RETURN o.textKey AS textKey,
+       collect(CASE WHEN t IS NULL THEN null ELSE { language: t.language } END) AS texts
+`
+	noUnwindRes, noUnwindErr := exec.Execute(ctx, noUnwindQ, nil)
+	require.NoError(t, noUnwindErr)
+	require.Len(t, noUnwindRes.Rows, 1)
+	noUnwindQK1 := `
+MATCH (o:OriginalText)
+WHERE o.textKey = 'k1' OR o.textKey128 = 'k1'
+OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+RETURN o.textKey AS textKey,
+       collect(CASE WHEN t IS NULL THEN null ELSE { language: t.language } END) AS texts
+`
+	noUnwindResK1, noUnwindErrK1 := exec.Execute(ctx, noUnwindQK1, map[string]interface{}{"targetLang": "es"})
+	require.NoError(t, noUnwindErrK1)
+	require.Len(t, noUnwindResK1.Rows, 1)
+	noUnwindQK2 := `
+MATCH (o:OriginalText)
+WHERE o.textKey = 'k2' OR o.textKey128 = 'k2'
+OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+RETURN o.textKey AS textKey,
+       collect(CASE WHEN t IS NULL THEN null ELSE { language: t.language } END) AS texts
+`
+	noUnwindResK2, noUnwindErrK2 := exec.Execute(ctx, noUnwindQK2, map[string]interface{}{"targetLang": "es"})
+	require.NoError(t, noUnwindErrK2)
+	require.Len(t, noUnwindResK2.Rows, 1)
+
+	res, err := exec.Execute(ctx, q, map[string]interface{}{"keys": []interface{}{"k1", "k2"}, "targetLang": "es"})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 2, "must return one grouped row per key")
+
+	col := func(name string) int {
+		for i, c := range res.Columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	lookupKeyIdx := col("lookupKey")
+	textsIdx := col("texts")
+	require.NotEqual(t, -1, lookupKeyIdx)
+	require.NotEqual(t, -1, textsIdx)
+
+	rowsByKey := map[string][]interface{}{}
+	for _, row := range res.Rows {
+		key, _ := row[lookupKeyIdx].(string)
+		rowsByKey[key] = row
+	}
+	require.Contains(t, rowsByKey, "k1")
+	require.Contains(t, rowsByKey, "k2")
+
+	k1Texts, _ := rowsByKey["k1"][textsIdx].([]interface{})
+	require.Len(t, k1Texts, 1, "k1 should include one translatedText map")
+	k2Texts, _ := rowsByKey["k2"][textsIdx].([]interface{})
+	require.Len(t, k2Texts, 0, "k2 should produce empty collect list for OPTIONAL MATCH miss")
+}
+
 func TestMigrationShape_UnwindMatchMergeSetMap_ComplexRowsAndClauses(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

@@ -940,6 +940,12 @@ func normalizeMultiMatchWhereClauses(query string) string {
 	if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
 		return query
 	}
+	// Only normalize chained required MATCH clauses. Queries containing
+	// OPTIONAL MATCH have different left-join semantics and must not be
+	// rewritten into multi-MATCH WHERE forms.
+	if findKeywordIndex(trimmed, "OPTIONAL MATCH") >= 0 {
+		return query
+	}
 
 	returnIdx := findKeywordIndex(trimmed, "RETURN")
 	if returnIdx <= 0 {
@@ -2519,6 +2525,9 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 
 	// If there's an aggregation, delegate to processWithAggregation
 	if hasAggregation {
+		if grouped, ok := e.tryBuildJoinedGroupedCollectResult(rows, sourceVar, targetVar, relVar, returnItems); ok {
+			return grouped, nil
+		}
 		return e.processWithAggregation(rows, sourceVar, targetVar, relVar, restOfQuery)
 	}
 
@@ -2545,6 +2554,138 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 	}
 
 	return result, nil
+}
+
+// tryBuildJoinedGroupedCollectResult implements Cypher grouping semantics for
+// joined-row pipelines that include COLLECT(...) alongside non-aggregate return
+// expressions. It returns (result, true) when handled, otherwise (nil, false).
+func (e *StorageExecutor) tryBuildJoinedGroupedCollectResult(rows []joinedRow, sourceVar, targetVar, relVar string, returnItems []returnItem) (*ExecuteResult, bool) {
+	if len(returnItems) == 0 {
+		return nil, false
+	}
+	isAggExpr := func(expr string) bool {
+		return isAggregateFuncName(expr, "count") ||
+			isAggregateFuncName(expr, "sum") ||
+			isAggregateFuncName(expr, "avg") ||
+			isAggregateFuncName(expr, "min") ||
+			isAggregateFuncName(expr, "max") ||
+			isAggregateFuncName(expr, "collect")
+	}
+
+	hasNonAgg := false
+	for _, item := range returnItems {
+		expr := strings.TrimSpace(item.expr)
+		if !isAggregateFuncName(expr, "collect") {
+			hasNonAgg = true
+			continue
+		}
+	}
+	if !hasNonAgg {
+		return nil, false
+	}
+	for _, item := range returnItems {
+		expr := strings.TrimSpace(item.expr)
+		if isAggExpr(expr) && !isAggregateFuncName(expr, "collect") {
+			return nil, false
+		}
+	}
+
+	type grouped struct {
+		keyVals []interface{}
+		rows    []joinedRow
+	}
+	groups := make(map[string]*grouped)
+	order := make([]string, 0)
+
+	nonAggIndexes := make([]int, 0)
+	for i, item := range returnItems {
+		if !isAggExpr(strings.TrimSpace(item.expr)) {
+			nonAggIndexes = append(nonAggIndexes, i)
+		}
+	}
+
+	for _, jr := range rows {
+		nodeCtx, relCtx := buildJoinedEvaluationContext(jr, sourceVar, targetVar, relVar)
+		keyVals := make([]interface{}, len(nonAggIndexes))
+		for ki, itemIdx := range nonAggIndexes {
+			keyVals[ki] = e.evaluateExpressionWithContext(strings.TrimSpace(returnItems[itemIdx].expr), nodeCtx, relCtx)
+		}
+		key := fmt.Sprintf("%#v", keyVals)
+		g, ok := groups[key]
+		if !ok {
+			g = &grouped{keyVals: keyVals, rows: make([]joinedRow, 0, 1)}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.rows = append(g.rows, jr)
+	}
+
+	res := &ExecuteResult{Columns: make([]string, len(returnItems)), Rows: make([][]interface{}, 0, len(order))}
+	for i, item := range returnItems {
+		if item.alias != "" {
+			res.Columns[i] = item.alias
+		} else {
+			res.Columns[i] = item.expr
+		}
+	}
+
+	nonAggPos := make(map[int]int, len(nonAggIndexes))
+	for pos, idx := range nonAggIndexes {
+		nonAggPos[idx] = pos
+	}
+
+	for _, key := range order {
+		g := groups[key]
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			expr := strings.TrimSpace(item.expr)
+			if pos, ok := nonAggPos[i]; ok {
+				row[i] = g.keyVals[pos]
+				continue
+			}
+
+			// COLLECT and COLLECT(DISTINCT) over grouped rows.
+			inner, suffix, _ := extractFuncArgsWithSuffix(expr, "collect")
+			distinct := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(inner)), "DISTINCT ")
+			if distinct {
+				inner = strings.TrimSpace(inner[len("DISTINCT "):])
+			}
+			collected := make([]interface{}, 0, len(g.rows))
+			seen := map[string]struct{}{}
+			for _, r := range g.rows {
+				nodeCtx, relCtx := buildJoinedEvaluationContext(r, sourceVar, targetVar, relVar)
+				normalizedInner := strings.TrimSpace(inner)
+				if strings.HasPrefix(strings.ToUpper(normalizedInner), "CASE ") && !strings.HasSuffix(strings.ToUpper(normalizedInner), " END") {
+					normalizedInner = normalizedInner + " END"
+				}
+				var val interface{}
+				if isCaseExpression(normalizedInner) {
+					val = e.evaluateCaseExpression(normalizedInner, nodeCtx, relCtx)
+				} else {
+					val = e.evaluateExpressionWithContext(normalizedInner, nodeCtx, relCtx)
+				}
+				if val == nil {
+					continue // collect(null) ignores nulls (Neo4j compatible)
+				}
+				if distinct {
+					h := fmt.Sprintf("%#v", val)
+					if _, exists := seen[h]; exists {
+						continue
+					}
+					seen[h] = struct{}{}
+				}
+				collected = append(collected, val)
+			}
+			if suffix != "" {
+				row[i] = e.applyArraySuffix(collected, suffix)
+			} else {
+				row[i] = collected
+			}
+		}
+		res.Rows = append(res.Rows, row)
+	}
+
+	return res, true
 }
 
 // ========================================

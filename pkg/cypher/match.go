@@ -124,6 +124,34 @@ func compareForSort(a, b interface{}) bool {
 	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
 }
 
+func extractMatchWhereClause(cypher string, whereIdx, returnIdx int) string {
+	if whereIdx <= 0 || returnIdx <= whereIdx+5 || returnIdx > len(cypher) {
+		return ""
+	}
+	segment := cypher[whereIdx+5 : returnIdx]
+	upperSegment := strings.ToUpper(segment)
+	end := len(segment)
+	for _, kw := range []string{
+		" OPTIONAL MATCH ",
+		" UNWIND ",
+		" CALL ",
+		" CREATE ",
+		" MERGE ",
+		" DELETE ",
+		" DETACH DELETE ",
+		" SET ",
+		" REMOVE ",
+		" ORDER BY ",
+		" SKIP ",
+		" LIMIT ",
+	} {
+		if idx := findKeywordNotInBrackets(upperSegment, kw); idx >= 0 && idx < end {
+			end = idx
+		}
+	}
+	return strings.TrimSpace(segment[:end])
+}
+
 func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	originalCypher := cypher
 	// Substitute parameters AFTER routing to avoid keyword detection issues
@@ -301,8 +329,9 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	}
 	// Use findKeywordNotInBrackets to avoid matching WHERE inside list comprehensions like [x WHERE ...]
 	matchPart := cypher[5:] // Skip "MATCH"
+	optionalMatchIdx := findKeywordIndex(cypher, "OPTIONAL MATCH")
 	// Note: whereIdx already defined above for fast-path count optimization
-	if whereIdx > 0 {
+	if whereIdx > 0 && !(optionalMatchIdx > whereIdx && optionalMatchIdx < returnIdx) {
 		matchPart = cypher[5:whereIdx]
 	} else if returnIdx > 0 {
 		matchPart = cypher[5:returnIdx]
@@ -314,7 +343,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		// Extract WHERE clause if present
 		var whereClause string
 		if whereIdx > 0 {
-			whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+			whereClause = extractMatchWhereClause(cypher, whereIdx, returnIdx)
 		}
 		// Parse ORDER/SKIP/LIMIT once so traversal can short-circuit when safe.
 		orderByIdx := findKeywordIndex(cypher, "ORDER")
@@ -547,7 +576,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	usedIndexTopK := false
 	streamingWhereApplied := false
 	if whereIdx > 0 {
-		wherePart = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		wherePart = extractMatchWhereClause(cypher, whereIdx, returnIdx)
 		if candidates, used, idxErr := e.tryCollectNodesFromIDEquality(nodePattern, wherePart); idxErr == nil && used {
 			nodes = candidates
 			usedPropertyIndex = true
@@ -558,6 +587,12 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 		if !usedPropertyIndex {
 			if candidates, used, idxErr := e.tryCollectNodesFromIDInParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInOrParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
 			}

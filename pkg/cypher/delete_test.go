@@ -261,3 +261,43 @@ func TestDetachDelete_DeduplicatesRepeatedRowsFromOptionalMatch(t *testing.T) {
 	require.Len(t, remaining.Rows, 1)
 	assert.Equal(t, int64(0), remaining.Rows[0][0].(int64))
 }
+
+func TestDetachDelete_WhereElementIDWithOptionalMatch(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := executor.Execute(ctx, `
+		CREATE (o:OriginalText {id: 'o-del-1'})
+		CREATE (t:TranslatedText {id: 't-del-1'})
+		CREATE (o)-[:TRANSLATES_TO]->(t)
+	`, nil)
+	require.NoError(t, err)
+
+	elemRes, err := executor.Execute(ctx, `
+		MATCH (o:OriginalText {id: 'o-del-1'})
+		RETURN elementId(o) AS eid
+		LIMIT 1
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, elemRes.Rows, 1)
+	eid, ok := elemRes.Rows[0][0].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, eid)
+
+	deleteResult, err := executor.Execute(ctx, `
+		MATCH (o:OriginalText)
+		WHERE elementId(o) = $eid
+		OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText)
+		DETACH DELETE o, t
+	`, map[string]interface{}{"eid": eid})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResult.Stats)
+	assert.GreaterOrEqual(t, deleteResult.Stats.NodesDeleted, 1)
+
+	remaining, err := executor.Execute(ctx, `MATCH (n) RETURN count(n)`, nil)
+	require.NoError(t, err)
+	require.Len(t, remaining.Rows, 1)
+	assert.Equal(t, int64(0), remaining.Rows[0][0].(int64))
+}
