@@ -2180,9 +2180,9 @@ func TestMatchMultiAndUnwindBranchCoverage(t *testing.T) {
 		"a": &storage.Node{ID: "p1", Properties: map[string]interface{}{"age": int64(30)}},
 		"b": &storage.Node{ID: "p2", Properties: map[string]interface{}{"age": int64(40)}},
 	}
-	assert.True(t, exec.evaluateBindingWhere(b, "a <> b AND a.age < b.age"))
-	assert.True(t, exec.evaluateBindingWhere(b, "NOT a.age > b.age"))
-	assert.True(t, exec.evaluateBindingWhere(b, "a.age > b.age OR a = b"))
+	assert.True(t, exec.evaluateBindingWhere(b, "a <> b AND a.age < b.age", nil))
+	assert.True(t, exec.evaluateBindingWhere(b, "NOT a.age > b.age", nil))
+	assert.True(t, exec.evaluateBindingWhere(b, "a.age > b.age OR a = b", nil))
 	assert.True(t, exec.evaluateWhereForContext("a.age < b.age", map[string]*storage.Node{"a": b["a"], "b": b["b"]}))
 	assert.False(t, exec.evaluateWhereForContext("a.name", map[string]*storage.Node{"a": b["a"]}))
 	assert.False(t, isSystemNode(nil))

@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -300,4 +301,44 @@ func TestDetachDelete_WhereElementIDWithOptionalMatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, remaining.Rows, 1)
 	assert.Equal(t, int64(0), remaining.Rows[0][0].(int64))
+}
+
+func TestDeleteStreamingEligibility(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+
+	assert.True(t, executor.isDeleteStreamingEligible("MATCH (n:Person)", "n", true))
+	assert.False(t, executor.isDeleteStreamingEligible("MATCH (n:Person) WITH n LIMIT 100", "n", true))
+	assert.False(t, executor.isDeleteStreamingEligible("MATCH (n:Person) ORDER BY n.createdAt DESC", "n", true))
+	assert.False(t, executor.isDeleteStreamingEligible("MATCH (n:Person)", "n", false))
+}
+
+func TestDetachDeleteStreaming_ReturnCountProjection(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	for i := 0; i < deleteStreamingBatchSize+25; i++ {
+		_, err := executor.Execute(ctx, fmt.Sprintf("CREATE (:StreamDelete {id: 'sd-%d'})", i), nil)
+		require.NoError(t, err)
+	}
+
+	deleteResult, err := executor.Execute(ctx, `
+MATCH (n:StreamDelete)
+DETACH DELETE n
+RETURN count(n) AS deleted`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, deleteResult.Stats)
+	require.Len(t, deleteResult.Rows, 1)
+	require.Len(t, deleteResult.Columns, 1)
+	assert.Equal(t, "deleted", deleteResult.Columns[0])
+	assert.Equal(t, int64(deleteStreamingBatchSize+25), deleteResult.Rows[0][0])
+	assert.Equal(t, deleteStreamingBatchSize+25, deleteResult.Stats.NodesDeleted)
+
+	remaining, err := executor.Execute(ctx, "MATCH (n:StreamDelete) RETURN count(n) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, remaining.Rows, 1)
+	assert.Equal(t, int64(0), remaining.Rows[0][0])
 }

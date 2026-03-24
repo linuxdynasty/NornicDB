@@ -163,3 +163,94 @@ func TestMatchWhereElementIDInParam_UsesDirectLookupWithoutAllNodesScan(t *testi
 	require.Equal(t, "prompt text 1", res.Rows[0][0])
 	require.Equal(t, "prompt text 2", res.Rows[1][0])
 }
+
+func TestMatchWhereElementIDEqualityParam_UsesDirectLookupWithoutAllNodesScan(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(&failingNodeLookupEngine{
+		Engine:      ns,
+		allNodesErr: errors.New("all-nodes scan must not be used for elementId = $param seek"),
+	})
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "param-elem-id",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "param prompt text"},
+	})
+	require.NoError(t, err)
+
+	// elementId(n) = $id with canonical element ID parameter
+	res, err := exec.Execute(ctx, `
+		MATCH (n)
+		WHERE elementId(n) = $id
+		RETURN n.text AS text
+		LIMIT 1
+	`, map[string]interface{}{
+		"id": "4:nornicdb:param-elem-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"text"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "param prompt text", res.Rows[0][0])
+}
+
+func TestMatchWhereIDEqualityParam_UsesDirectLookupWithoutAllNodesScan(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(&failingNodeLookupEngine{
+		Engine:      ns,
+		allNodesErr: errors.New("all-nodes scan must not be used for id = $param seek"),
+	})
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "param-raw-id",
+		Labels:     []string{"SystemPrompt"},
+		Properties: map[string]interface{}{"text": "raw param text"},
+	})
+	require.NoError(t, err)
+
+	// id(n) = $id with raw ID parameter
+	res, err := exec.Execute(ctx, `
+		MATCH (n)
+		WHERE id(n) = $id
+		RETURN n.text AS text
+		LIMIT 1
+	`, map[string]interface{}{
+		"id": "param-raw-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"text"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "raw param text", res.Rows[0][0])
+}
+
+func TestMatchWhereElementIDEqualityParam_WithLabel_UsesDirectLookup(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	ns := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(&failingNodeLookupEngine{
+		Engine:      ns,
+		allNodesErr: errors.New("all-nodes scan must not be used for labeled elementId = $param seek"),
+	})
+	ctx := context.Background()
+
+	_, err := ns.CreateNode(&storage.Node{
+		ID:         "labeled-param-id",
+		Labels:     []string{"Task"},
+		Properties: map[string]interface{}{"title": "my task"},
+	})
+	require.NoError(t, err)
+
+	res, err := exec.Execute(ctx, `
+		MATCH (t:Task)
+		WHERE elementId(t) = $id
+		RETURN t.title AS title
+	`, map[string]interface{}{
+		"id": "4:nornicdb:labeled-param-id",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"title"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "my task", res.Rows[0][0])
+}

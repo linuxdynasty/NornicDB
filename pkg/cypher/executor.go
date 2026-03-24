@@ -2258,13 +2258,21 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		}
 		return e.executeShortestPathQuery(query)
 	case startsWithMatch:
-		// Check for optimizable patterns FIRST
-		patternInfo := DetectQueryPattern(cypher)
-		if patternInfo.IsOptimizable() {
-			if result, ok := e.ExecuteOptimized(ctx, cypher, patternInfo); ok {
-				return result, nil
+		// Multi-MATCH chains have dedicated routing inside executeMatch (executeMultiMatch,
+		// executeChainedMatchWithAggregations). Keep them on that path to preserve WHERE
+		// semantics across MATCH boundaries.
+		matchCount := countKeywordOccurrences(upperQuery, "MATCH")
+		optionalMatchCount := countKeywordOccurrences(upperQuery, "OPTIONAL MATCH")
+		isMultiMatch := matchCount-optionalMatchCount > 1
+		if !isMultiMatch {
+			// Check for optimizable patterns FIRST
+			patternInfo := DetectQueryPattern(cypher)
+			if patternInfo.IsOptimizable() {
+				if result, ok := e.ExecuteOptimized(ctx, cypher, patternInfo); ok {
+					return result, nil
+				}
+				// Fall through to generic on optimization failure
 			}
-			// Fall through to generic on optimization failure
 		}
 		return e.executeMatch(ctx, cypher)
 	case findMultiWordKeywordIndex(cypher, "CREATE", "CONSTRAINT") == 0,

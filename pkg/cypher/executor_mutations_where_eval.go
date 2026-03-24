@@ -329,10 +329,18 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		return e.evaluateWhere(node, variable, left) && e.evaluateWhere(node, variable, right)
 	}
 
-	// Handle OR at top level only
+	// Handle OR at top level only.
+	// Optimize catch-all patterns: ($p = '' OR field STARTS WITH $p)
+	// When one branch is a tautology (e.g. '' = ''), short-circuit to true
+	// without evaluating the other branch.
 	if orIdx := findTopLevelKeyword(whereClause, " OR "); orIdx > 0 {
 		left := strings.TrimSpace(whereClause[:orIdx])
 		right := strings.TrimSpace(whereClause[orIdx+4:])
+		// Fast tautology check: if either branch is a constant-true equality
+		// (e.g. '' = '' or 'x' = 'x'), the whole OR is true.
+		if isConstantTrueEquality(left) || isConstantTrueEquality(right) {
+			return true
+		}
 		return e.evaluateWhere(node, variable, left) || e.evaluateWhere(node, variable, right)
 	}
 
@@ -794,4 +802,43 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 	}
 
 	return result
+}
+
+// isConstantTrueEquality returns true if the expression is a constant equality
+// that always evaluates to true, e.g. ” = ” or 'x' = 'x' or "" = "".
+// This is used to short-circuit OR branches when one side is a tautology
+// (common in optional predicate patterns like $p = ” OR field STARTS WITH $p
+// where $p has been substituted to ”).
+func isConstantTrueEquality(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	// Strip outer parens.
+	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		inner := strings.TrimSpace(expr[1 : len(expr)-1])
+		if inner == expr {
+			break
+		}
+		expr = inner
+	}
+	eqIdx := strings.Index(expr, "=")
+	if eqIdx <= 0 || eqIdx >= len(expr)-1 {
+		return false
+	}
+	// Reject !=, <=, >=, ==
+	if eqIdx > 0 && (expr[eqIdx-1] == '!' || expr[eqIdx-1] == '<' || expr[eqIdx-1] == '>') {
+		return false
+	}
+	if eqIdx+1 < len(expr) && expr[eqIdx+1] == '=' {
+		return false
+	}
+	left := strings.TrimSpace(expr[:eqIdx])
+	right := strings.TrimSpace(expr[eqIdx+1:])
+	if left == "" || right == "" {
+		return false
+	}
+	// Both sides must be identical quoted strings or identical unquoted literals.
+	if left == right {
+		// e.g. '' = '' or "" = "" or someValue = someValue (after param substitution)
+		return true
+	}
+	return false
 }

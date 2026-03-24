@@ -309,7 +309,9 @@ func (e *StorageExecutor) analyzeMatchClause(query string) *PlanOperator {
 	return e.analyzeNodeScan(query)
 }
 
-// analyzeNodeScan determines the type of node scan needed
+// analyzeNodeScan determines the type of node scan needed.
+// When the storage schema is available, it checks for actual index existence
+// and reports index usage or rejection reasons in the plan arguments.
 func (e *StorageExecutor) analyzeNodeScan(query string) *PlanOperator {
 	// Check for label in pattern (n:Label)
 	if matches := labelExtractPattern.FindStringSubmatch(query); matches != nil {
@@ -317,26 +319,32 @@ func (e *StorageExecutor) analyzeNodeScan(query string) *PlanOperator {
 
 		// Check for property filter (n:Label {prop: value})
 		if strings.Contains(query, "{") {
-			// Estimate rows based on filter selectivity
+			args := map[string]interface{}{
+				"label": label,
+			}
+			// Check actual index availability from schema.
+			e.annotateIndexDiagnostics(args, label, query)
+
 			return &PlanOperator{
 				OperatorType:  "NodeIndexSeek",
 				Description:   fmt.Sprintf("Index seek on :%s", label),
 				EstimatedRows: 10,
-				Arguments: map[string]interface{}{
-					"label": label,
-				},
-				Identifiers: []string{"n"},
+				Arguments:     args,
+				Identifiers:   []string{"n"},
 			}
 		}
+
+		args := map[string]interface{}{
+			"label": label,
+		}
+		e.annotateIndexDiagnostics(args, label, query)
 
 		return &PlanOperator{
 			OperatorType:  "NodeByLabelScan",
 			Description:   fmt.Sprintf("Scan all :%s nodes", label),
 			EstimatedRows: 1000,
-			Arguments: map[string]interface{}{
-				"label": label,
-			},
-			Identifiers: []string{"n"},
+			Arguments:     args,
+			Identifiers:   []string{"n"},
 		}
 	}
 
@@ -346,6 +354,59 @@ func (e *StorageExecutor) analyzeNodeScan(query string) *PlanOperator {
 		Description:   "Scan all nodes",
 		EstimatedRows: 10000,
 		Identifiers:   []string{"n"},
+	}
+}
+
+// annotateIndexDiagnostics adds index usage/rejection diagnostics to the plan
+// operator arguments. This makes tuning deterministic by exposing whether an
+// index was available, which properties are indexed, and why it was rejected.
+func (e *StorageExecutor) annotateIndexDiagnostics(args map[string]interface{}, label, query string) {
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		args["indexStatus"] = "no_schema"
+		return
+	}
+
+	// Collect all indexes for this label.
+	indexes := schema.GetIndexes()
+	var labelIndexes []string
+	for _, raw := range indexes {
+		idx, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		idxLabel, _ := idx["label"].(string)
+		if !strings.EqualFold(strings.TrimSpace(idxLabel), label) {
+			continue
+		}
+		prop := ""
+		if p, ok := idx["property"].(string); ok {
+			prop = p
+		}
+		if prop == "" {
+			if props, ok := idx["properties"].([]string); ok && len(props) > 0 {
+				prop = strings.Join(props, ",")
+			}
+		}
+		idxType, _ := idx["type"].(string)
+		labelIndexes = append(labelIndexes, fmt.Sprintf("%s(%s)", idxType, prop))
+	}
+
+	if len(labelIndexes) == 0 {
+		args["indexStatus"] = "no_index_for_label"
+		return
+	}
+
+	args["indexStatus"] = "available"
+	args["availableIndexes"] = labelIndexes
+
+	// Check WHERE clause for predicate shapes that prevent index use.
+	upper := strings.ToUpper(query)
+	if strings.Contains(upper, "COALESCE(") {
+		args["indexRejectionRisk"] = "function_wrapping (coalesce)"
+	}
+	if strings.Contains(upper, "TOLOWER(") || strings.Contains(upper, "TOUPPER(") {
+		args["indexRejectionRisk"] = "function_wrapping (toLower/toUpper)"
 	}
 }
 

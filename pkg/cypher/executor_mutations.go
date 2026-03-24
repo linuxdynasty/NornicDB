@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
+
+const deleteStreamingBatchSize = 500
 
 // ========================================
 // WITH Clause
@@ -135,21 +138,33 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		return nil, fmt.Errorf("DELETE clause must specify variable(s) to delete (e.g., DELETE n)")
 	}
 
-	// Execute the match first - return the specific variables being deleted
-	// Can't use RETURN * because it returns literal "*" instead of expanding
-	// For DETACH DELETE, we need to ensure deleteIdx points to the start of "DETACH DELETE"
-	// not just "DETACH", so the match query doesn't include "DETACH"
+	// For DETACH DELETE, ensure deleteIdx points to "DETACH DELETE", not bare "DETACH".
 	if detach && deleteIdx > 0 {
-		// Double-check: if we found "DETACH DELETE", make sure deleteIdx points to it
-		// If the substring starting at deleteIdx is "DETACH DELETE", we're good
-		// If it's just "DETACH", we need to adjust
 		checkSubstring := strings.ToUpper(strings.TrimSpace(cypher[deleteIdx:]))
 		if strings.HasPrefix(checkSubstring, "DETACH ") && !strings.HasPrefix(checkSubstring, "DETACH DELETE ") {
-			// We found "DETACH" but not "DETACH DELETE" - this is an error
 			return nil, fmt.Errorf("DETACH DELETE requires both DETACH and DELETE keywords together")
 		}
 	}
 
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+	needEdgeStats := returnIdx > 0 || detach // always track for DETACH so stats are correct
+
+	// Streaming batched delete hot path for large DETACH DELETE scans.
+	// This preserves semantics by only engaging on simple shapes without
+	// LIMIT/SKIP/WITH/ORDER BY/CALL/UNWIND in the MATCH segment.
+	matchSegment := strings.TrimSpace(cypher[matchIdx:deleteIdx])
+	_, inTransactionWrapper := e.getStorage(ctx).(*transactionStorageWrapper)
+	if !inTransactionWrapper && e.isDeleteStreamingEligible(matchSegment, deleteVars, detach) {
+		result, err := e.executeDeleteStreaming(ctx, matchSegment, deleteVars, needEdgeStats)
+		if err != nil {
+			return nil, err
+		}
+		e.applyDeleteReturnProjection(result, cypher, deleteVars)
+		return result, nil
+	}
+
+	// Execute the match first - return the specific variables being deleted
+	// Can't use RETURN * because it returns literal "*" instead of expanding
 	matchQuery := cypher[matchIdx:deleteIdx] + " RETURN " + deleteVars
 	matchResult, err := e.executeMatch(ctx, matchQuery)
 	if err != nil {
@@ -159,9 +174,12 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	// to live nodes before delete processing.
 	e.normalizeSetMatchRowsToNodes(matchResult, store)
 
-	// Delete matched nodes and/or relationships
-	deletedNodeIDs := make(map[string]struct{})
-	deletedEdgeIDs := make(map[string]struct{})
+	// Delete matched nodes and/or relationships.
+	// Pre-size dedup maps based on match result to reduce rehashing.
+	rowCount := len(matchResult.Rows)
+	deletedNodeIDs := make(map[string]struct{}, rowCount)
+	deletedEdgeIDs := make(map[string]struct{}, rowCount)
+
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
 			// Try to extract node ID or edge ID
@@ -170,21 +188,16 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 			switch v := val.(type) {
 			case map[string]interface{}:
-				// Check if it's a relationship or node by looking for internal ID keys
-				// Relationships have _edgeId, nodes have _nodeId
 				if id, ok := v["_edgeId"].(string); ok {
 					edgeID = id
 				} else if id, ok := v["_nodeId"].(string); ok {
 					nodeID = id
 				}
 			case *storage.Node:
-				// Direct node pointer
 				nodeID = string(v.ID)
 			case *storage.Edge:
-				// Direct edge pointer
 				edgeID = string(v.ID)
 			case string:
-				// Just an ID string - could be node or edge
 				nodeID = v
 			}
 
@@ -209,14 +222,15 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 			}
 
 			if detach {
-				// Count edges that will be deleted with the node (for stats)
-				// DeleteNode() automatically deletes connected edges and updates counts internally
-				// We just need to count them for the result stats
-				outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
-				incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
-				edgesCount := len(outgoingEdges) + len(incomingEdges)
+				// Count edges that will be deleted with the node (for stats).
+				// Combine outgoing + incoming in a single stats tally.
+				edgesCount := 0
+				if needEdgeStats {
+					outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
+					incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
+					edgesCount = len(outgoingEdges) + len(incomingEdges)
+				}
 
-				// DeleteNode() handles edge deletion internally and updates internal counts
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 					result.Stats.RelationshipsDeleted += edgesCount
@@ -224,7 +238,6 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 					e.removeNodeFromSearch(nodeID)
 				}
 			} else {
-				// Non-detach delete - just delete the node (will fail if edges exist)
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 					deletedNodeIDs[nodeID] = struct{}{}
@@ -234,53 +247,225 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		}
 	}
 
-	// Handle RETURN clause (e.g., RETURN count(*) as deleted)
+	e.applyDeleteReturnProjection(result, cypher, deleteVars)
+
+	return result, nil
+}
+
+func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cypher, deleteVars string) {
+	if result == nil {
+		return
+	}
 	returnIdx := findKeywordIndex(cypher, "RETURN")
-	if returnIdx > 0 {
-		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
-		returnItems := e.parseReturnItems(returnPart)
-		result.Columns = make([]string, len(returnItems))
-		row := make([]interface{}, len(returnItems))
+	if returnIdx <= 0 {
+		return
+	}
+	returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+	returnItems := e.parseReturnItems(returnPart)
+	result.Columns = make([]string, len(returnItems))
+	row := make([]interface{}, len(returnItems))
 
-		for i, item := range returnItems {
-			if item.alias != "" {
-				result.Columns[i] = item.alias
-			} else {
-				result.Columns[i] = item.expr
-			}
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+		upperExpr := strings.ToUpper(item.expr)
+		if !strings.HasPrefix(upperExpr, "COUNT(") {
+			continue
+		}
+		inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1]) // Remove "count(" and ")"
+		upperInner := strings.ToUpper(inner)
+		if upperInner == "*" {
+			row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+			continue
+		}
+		if strings.Contains(upperInner, strings.ToUpper(deleteVars)) {
+			row[i] = int64(result.Stats.NodesDeleted)
+		} else {
+			row[i] = int64(result.Stats.NodesDeleted)
+		}
+	}
+	result.Rows = [][]interface{}{row}
+}
 
-			// Handle count(n) or count(*) - return number of deleted nodes/relationships
-			// Neo4j behavior:
-			//   - count(n) returns only the number of nodes deleted (not relationships)
-			//   - count(*) returns the total entities deleted (nodes + relationships)
-			// This matches Neo4j's documented behavior for DELETE operations
-			upperExpr := strings.ToUpper(item.expr)
-			if strings.HasPrefix(upperExpr, "COUNT(") {
-				// Extract what we're counting: count(n), count(r), count(*)
-				inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1]) // Remove "count(" and ")"
-				upperInner := strings.ToUpper(inner)
+func (e *StorageExecutor) isDeleteStreamingEligible(matchSegment, deleteVars string, detach bool) bool {
+	if !detach {
+		return false
+	}
+	if strings.TrimSpace(matchSegment) == "" {
+		return false
+	}
+	// Keep streaming path conservative to avoid semantic drift.
+	for _, blocked := range []string{"WITH", "LIMIT", "SKIP", "ORDER", "CALL", "UNWIND"} {
+		if containsKeywordOutsideStrings(matchSegment, blocked) {
+			return false
+		}
+	}
+	// Keep variable parsing simple and deterministic for now.
+	if strings.Contains(deleteVars, ",") {
+		return false
+	}
+	deleteVars = strings.TrimSpace(deleteVars)
+	if deleteVars == "" {
+		return false
+	}
+	// Basic identifier check
+	for i, r := range deleteVars {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
-				if upperInner == "*" {
-					// count(*) - return sum of nodes and relationships (Neo4j compatibility)
-					// Neo4j: count(*) in DELETE returns total entities (nodes + relationships)
-					row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
-				} else {
-					// count(n) or count(r) - return only the count of what was deleted
-					// Neo4j: count(n) after DETACH DELETE n returns only nodes, not relationships
-					// Check if the variable matches the deleted variable (node deletion)
-					if strings.Contains(upperInner, strings.ToUpper(deleteVars)) {
-						// count(n) where n is the deleted node variable - return only nodes (Neo4j compatibility)
-						row[i] = int64(result.Stats.NodesDeleted)
-					} else {
-						// count(r) or count(something else) - check if it's a relationship
-						// For now, default to nodes only for safety
-						// In practice, DELETE queries typically use count(n) or count(*)
-						row[i] = int64(result.Stats.NodesDeleted)
+func (e *StorageExecutor) executeDeleteStreaming(ctx context.Context, matchSegment, deleteVars string, needEdgeStats bool) (*ExecuteResult, error) {
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+	store := e.getStorage(ctx)
+
+	limitLiteral := strconv.Itoa(deleteStreamingBatchSize)
+	usedFallback := false
+
+	for {
+		matchQuery := matchSegment + " RETURN " + deleteVars + " LIMIT " + limitLiteral
+		matchResult, err := e.executeMatch(ctx, matchQuery)
+		if err != nil {
+			return nil, err
+		}
+		if len(matchResult.Rows) == 0 {
+			break
+		}
+
+		e.normalizeSetMatchRowsToNodes(matchResult, store)
+		deletedNodeIDs := make(map[string]struct{}, len(matchResult.Rows))
+		deletedEdgeIDs := make(map[string]struct{}, len(matchResult.Rows))
+		batchDeletes := 0
+		for _, row := range matchResult.Rows {
+			for _, val := range row {
+				var nodeID string
+				var edgeID string
+				switch v := val.(type) {
+				case map[string]interface{}:
+					if id, ok := v["_edgeId"].(string); ok {
+						edgeID = id
+					} else if id, ok := v["_nodeId"].(string); ok {
+						nodeID = id
 					}
+				case *storage.Node:
+					nodeID = string(v.ID)
+				case *storage.Edge:
+					edgeID = string(v.ID)
+				case string:
+					nodeID = v
+				}
+
+				if edgeID != "" {
+					if _, seen := deletedEdgeIDs[edgeID]; seen {
+						continue
+					}
+					if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
+						result.Stats.RelationshipsDeleted++
+						deletedEdgeIDs[edgeID] = struct{}{}
+						batchDeletes++
+					}
+					continue
+				}
+				if nodeID == "" {
+					continue
+				}
+				if _, seen := deletedNodeIDs[nodeID]; seen {
+					continue
+				}
+
+				edgesCount := 0
+				if needEdgeStats {
+					outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
+					incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
+					edgesCount = len(outgoingEdges) + len(incomingEdges)
+				}
+
+				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
+					result.Stats.NodesDeleted++
+					result.Stats.RelationshipsDeleted += edgesCount
+					deletedNodeIDs[nodeID] = struct{}{}
+					e.removeNodeFromSearch(nodeID)
+					batchDeletes++
 				}
 			}
 		}
-		result.Rows = [][]interface{}{row}
+
+		// Safety valve: if a batch yields rows but no successful deletes, stop to avoid loops.
+		if batchDeletes == 0 {
+			// Fallback once to the generic non-limited match to recover when an indexed
+			// candidate source is temporarily stale after deletes.
+			if !usedFallback {
+				usedFallback = true
+				fullMatchResult, fullErr := e.executeMatch(ctx, matchSegment+" RETURN "+deleteVars)
+				if fullErr != nil {
+					return nil, fullErr
+				}
+				e.normalizeSetMatchRowsToNodes(fullMatchResult, store)
+				if len(fullMatchResult.Rows) == 0 {
+					break
+				}
+				for _, row := range fullMatchResult.Rows {
+					for _, val := range row {
+						var nodeID string
+						var edgeID string
+						switch v := val.(type) {
+						case map[string]interface{}:
+							if id, ok := v["_edgeId"].(string); ok {
+								edgeID = id
+							} else if id, ok := v["_nodeId"].(string); ok {
+								nodeID = id
+							}
+						case *storage.Node:
+							nodeID = string(v.ID)
+						case *storage.Edge:
+							edgeID = string(v.ID)
+						case string:
+							nodeID = v
+						}
+						if edgeID != "" {
+							if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
+								result.Stats.RelationshipsDeleted++
+								batchDeletes++
+							}
+							continue
+						}
+						if nodeID == "" {
+							continue
+						}
+						edgesCount := 0
+						if needEdgeStats {
+							outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
+							incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
+							edgesCount = len(outgoingEdges) + len(incomingEdges)
+						}
+						if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
+							result.Stats.NodesDeleted++
+							result.Stats.RelationshipsDeleted += edgesCount
+							e.removeNodeFromSearch(nodeID)
+							batchDeletes++
+						}
+					}
+				}
+				if batchDeletes > 0 {
+					continue
+				}
+			}
+			break
+		}
+		// If fewer than the batch size rows were returned, we drained the candidate set.
+		if len(matchResult.Rows) < deleteStreamingBatchSize {
+			break
+		}
 	}
 
 	return result, nil

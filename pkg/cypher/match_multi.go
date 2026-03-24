@@ -363,7 +363,7 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 
 	// Apply WHERE filter if present
 	if whereClause != "" {
-		bindings = e.filterBindingsByWhere(bindings, whereClause)
+		bindings = e.filterBindingsByWhere(bindings, whereClause, getParamsFromContext(ctx))
 	}
 
 	// Build result from bindings
@@ -739,11 +739,11 @@ func (e *StorageExecutor) executeChainedMatch(pattern string, existingBindings [
 }
 
 // filterBindingsByWhere filters bindings based on WHERE clause
-func (e *StorageExecutor) filterBindingsByWhere(bindings []binding, whereClause string) []binding {
+func (e *StorageExecutor) filterBindingsByWhere(bindings []binding, whereClause string, params map[string]interface{}) []binding {
 	var result []binding
 
 	for _, b := range bindings {
-		if e.evaluateBindingWhere(b, whereClause) {
+		if e.evaluateBindingWhere(b, whereClause, params) {
 			result = append(result, b)
 		}
 	}
@@ -752,27 +752,58 @@ func (e *StorageExecutor) filterBindingsByWhere(bindings []binding, whereClause 
 }
 
 // evaluateBindingWhere evaluates WHERE clause against a binding
-func (e *StorageExecutor) evaluateBindingWhere(b binding, whereClause string) bool {
+func (e *StorageExecutor) evaluateBindingWhere(b binding, whereClause string, params map[string]interface{}) bool {
 	whereClause = strings.TrimSpace(whereClause)
+	// Logical operators may span lines in formatted queries; normalize control
+	// whitespace so top-level AND/OR detection remains stable.
+	whereClause = strings.ReplaceAll(whereClause, "\n", " ")
+	whereClause = strings.ReplaceAll(whereClause, "\r", " ")
+	whereClause = strings.ReplaceAll(whereClause, "\t", " ")
 	upper := strings.ToUpper(whereClause)
 
 	// Handle AND
 	if andIdx := findTopLevelKeyword(whereClause, " AND "); andIdx > 0 {
 		left := strings.TrimSpace(whereClause[:andIdx])
 		right := strings.TrimSpace(whereClause[andIdx+5:])
-		return e.evaluateBindingWhere(b, left) && e.evaluateBindingWhere(b, right)
+		return e.evaluateBindingWhere(b, left, params) && e.evaluateBindingWhere(b, right, params)
 	}
 
 	// Handle OR
 	if orIdx := findTopLevelKeyword(whereClause, " OR "); orIdx > 0 {
 		left := strings.TrimSpace(whereClause[:orIdx])
 		right := strings.TrimSpace(whereClause[orIdx+4:])
-		return e.evaluateBindingWhere(b, left) || e.evaluateBindingWhere(b, right)
+		return e.evaluateBindingWhere(b, left, params) || e.evaluateBindingWhere(b, right, params)
 	}
 
 	// Handle NOT
 	if strings.HasPrefix(upper, "NOT ") {
-		return !e.evaluateBindingWhere(b, whereClause[4:])
+		return !e.evaluateBindingWhere(b, whereClause[4:], params)
+	}
+
+	// Handle string predicates: n.prop STARTS WITH/ENDS WITH/CONTAINS value
+	for _, pred := range []string{" STARTS WITH ", " ENDS WITH ", " CONTAINS "} {
+		if idx := findTopLevelKeyword(whereClause, pred); idx > 0 {
+			left := strings.TrimSpace(whereClause[:idx])
+			right := strings.TrimSpace(whereClause[idx+len(pred):])
+			if dotIdx := strings.Index(left, "."); dotIdx > 0 {
+				varName := left[:dotIdx]
+				propName := left[dotIdx+1:]
+				if node := b[varName]; node != nil {
+					actual, _ := node.Properties[propName].(string)
+					expectedRaw := e.resolveWhereValue(right, params)
+					expected, _ := expectedRaw.(string)
+					switch strings.TrimSpace(strings.ToUpper(pred)) {
+					case "STARTS WITH":
+						return strings.HasPrefix(actual, expected)
+					case "ENDS WITH":
+						return strings.HasSuffix(actual, expected)
+					case "CONTAINS":
+						return strings.Contains(actual, expected)
+					}
+				}
+			}
+			return false
+		}
 	}
 
 	// Handle variable comparison: p1 <> p2 (comparing node IDs)
@@ -809,7 +840,7 @@ func (e *StorageExecutor) evaluateBindingWhere(b binding, whereClause string) bo
 
 				if node := b[varName]; node != nil {
 					actualVal := node.Properties[propName]
-					expectedVal := e.parseValue(right)
+					expectedVal := e.resolveWhereValue(right, params)
 
 					switch op {
 					case "=":
@@ -834,27 +865,84 @@ func (e *StorageExecutor) evaluateBindingWhere(b binding, whereClause string) bo
 	return true
 }
 
+func (e *StorageExecutor) resolveWhereValue(raw string, params map[string]interface{}) interface{} {
+	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "$") {
+		name := strings.TrimSpace(strings.TrimPrefix(s, "$"))
+		if params != nil {
+			if v, ok := params[name]; ok {
+				return v
+			}
+		}
+	}
+	return e.parseValue(s)
+}
+
 // resolveBindingItem resolves a return item against a binding
 func (e *StorageExecutor) resolveBindingItem(item returnItem, b binding) interface{} {
-	expr := item.expr
+	expr := strings.TrimSpace(item.expr)
+	if expr == "" {
+		return nil
+	}
+	return e.resolveBindingExpr(expr, b)
+}
 
-	// Check for property access: var.prop
+func (e *StorageExecutor) resolveBindingExpr(expr string, b binding) interface{} {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+
+	// elementId(var)
+	if strings.HasPrefix(strings.ToLower(expr), "elementid(") && strings.HasSuffix(expr, ")") {
+		inner := strings.TrimSpace(expr[len("elementId(") : len(expr)-1])
+		if node := b[inner]; node != nil {
+			return string(node.ID)
+		}
+		return nil
+	}
+
+	// Reuse shared COALESCE evaluator used in MATCH row projection paths.
+	if strings.HasPrefix(strings.ToUpper(expr), "COALESCE(") && strings.HasSuffix(expr, ")") {
+		return e.evaluateCoalesceInContext(expr, b, nil, nil)
+	}
+
+	// Literal value
+	if strings.HasPrefix(expr, "'") || strings.HasPrefix(expr, "\"") ||
+		strings.EqualFold(expr, "true") || strings.EqualFold(expr, "false") ||
+		strings.EqualFold(expr, "null") || isNumericLiteral(expr) {
+		return e.parseValue(expr)
+	}
+
+	// Property access: var.prop
 	if dotIdx := strings.Index(expr, "."); dotIdx > 0 {
 		varName := expr[:dotIdx]
 		propName := expr[dotIdx+1:]
-
 		if node := b[varName]; node != nil {
 			return node.Properties[propName]
 		}
 		return nil
 	}
 
-	// Check for node variable
+	// Node variable
 	if node := b[expr]; node != nil {
 		return node
 	}
 
+	// Fallback to the common expression evaluator used in other MATCH/RETURN paths.
+	if val := e.evaluateExpressionWithContext(expr, b, nil); val != nil {
+		return val
+	}
+
 	return nil
+}
+
+func isNumericLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := strconv.ParseFloat(s, 64)
+	return err == nil
 }
 
 // collectNodesWithStreaming efficiently collects nodes from storage using streaming when possible.

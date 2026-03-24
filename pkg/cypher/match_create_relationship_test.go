@@ -276,6 +276,100 @@ func TestMatchCreateRelationship_ReverseDirection(t *testing.T) {
 	})
 }
 
+func TestMatchCreateRelationship_IDSeekFastPath(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create two nodes to link.
+	_, err := store.CreateNode(&storage.Node{
+		ID:         "fp-node-a",
+		Labels:     []string{"Widget"},
+		Properties: map[string]interface{}{"name": "alpha"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:         "fp-node-b",
+		Labels:     []string{"Widget"},
+		Properties: map[string]interface{}{"name": "beta"},
+	})
+	require.NoError(t, err)
+
+	t.Run("comma-separated MATCH with elementId params creates relationship via ID seek", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `
+			MATCH (a), (b)
+			WHERE elementId(a) = $from AND elementId(b) = $to
+			CREATE (a)-[r:LINKS_TO]->(b)
+			RETURN type(r) AS relType
+		`, map[string]interface{}{
+			"from": "4:nornicdb:fp-node-a",
+			"to":   "4:nornicdb:fp-node-b",
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, result.Stats.RelationshipsCreated)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, "LINKS_TO", result.Rows[0][0])
+	})
+
+	t.Run("verify relationship exists", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `
+			MATCH (:Widget {name: 'alpha'})-[r:LINKS_TO]->(:Widget {name: 'beta'})
+			RETURN type(r) AS relType
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, "LINKS_TO", result.Rows[0][0])
+	})
+
+	t.Run("multiple MATCH clauses with id() params creates relationship via ID seek", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `
+			MATCH (a)
+			WHERE id(a) = $from
+			MATCH (b)
+			WHERE id(b) = $to
+			CREATE (a)-[r:ALSO_LINKS]->(b)
+			RETURN type(r) AS relType
+		`, map[string]interface{}{
+			"from": "fp-node-a",
+			"to":   "fp-node-b",
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, result.Stats.RelationshipsCreated)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, "ALSO_LINKS", result.Rows[0][0])
+	})
+
+	t.Run("labeled pattern with elementId param validates label", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `
+			MATCH (a:Widget), (b:Widget)
+			WHERE elementId(a) = $from AND elementId(b) = $to
+			CREATE (a)-[r:TYPED_LINK]->(b)
+			RETURN type(r) AS relType
+		`, map[string]interface{}{
+			"from": "4:nornicdb:fp-node-a",
+			"to":   "4:nornicdb:fp-node-b",
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, result.Stats.RelationshipsCreated)
+	})
+
+	t.Run("wrong label returns no match - no relationship created", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `
+			MATCH (a:NonExistentLabel), (b:Widget)
+			WHERE elementId(a) = $from AND elementId(b) = $to
+			CREATE (a)-[r:SHOULD_NOT_EXIST]->(b)
+			RETURN type(r) AS relType
+		`, map[string]interface{}{
+			"from": "4:nornicdb:fp-node-a",
+			"to":   "4:nornicdb:fp-node-b",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.Stats.RelationshipsCreated)
+		assert.Empty(t, result.Rows)
+	})
+}
+
 func TestMatchCreateRelationship_CompoundHelpersAndDeleteBranches(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

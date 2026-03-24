@@ -1381,7 +1381,18 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 		}
 
-		if len(allNodeVars) == 0 && len(allEdgeVars) == 0 && len(nonEmptyMatchClauses) == 1 {
+		// Fast path: resolve nodes directly from WHERE elementId/id equality
+		// predicates. This avoids label scans for the common "MATCH by id +
+		// CREATE rel" pattern (e.g. MATCH (a), (b) WHERE elementId(a) = $x
+		// AND elementId(b) = $y CREATE (a)-[:REL]->(b)).
+		if len(allNodeVars) == 0 && len(allEdgeVars) == 0 {
+			if combo, ok := e.tryResolveMatchNodesByIDFromWhere(nonEmptyMatchClauses, getParamsFromContext(ctx)); ok {
+				allCombinations = []map[string]*storage.Node{combo}
+				hadMatchPatterns = true
+			}
+		}
+
+		if len(allNodeVars) == 0 && len(allEdgeVars) == 0 && len(nonEmptyMatchClauses) == 1 && allCombinations == nil {
 			shortcutSafe := true
 			if whereIdx := findKeywordIndex(nonEmptyMatchClauses[0], "WHERE"); whereIdx > 0 {
 				whereClause := strings.TrimSpace(nonEmptyMatchClauses[0][whereIdx+5:])
@@ -3039,4 +3050,204 @@ func (e *StorageExecutor) buildCombinationsUsingWhereJoin(
 		out = next
 	}
 	return out, true
+}
+
+// tryResolveMatchNodesByIDFromWhere attempts to resolve all MATCH pattern
+// variables via direct ID lookup from WHERE elementId(var) = $param or
+// id(var) = $param predicates. This is the relationship-create hot path:
+// it avoids label scans when both endpoints are identified by ID.
+//
+// It collects all WHERE clauses across MATCH segments, splits on top-level
+// AND, and tries to parse each conjunct as an ID equality predicate. If
+// every pattern variable can be resolved this way, it returns a single
+// combination map. Otherwise it returns (nil, false) and the caller falls
+// through to the generic label-scan path.
+func (e *StorageExecutor) tryResolveMatchNodesByIDFromWhere(
+	matchClauses []string,
+	params map[string]interface{},
+) (map[string]*storage.Node, bool) {
+	if len(matchClauses) == 0 {
+		return nil, false
+	}
+
+	// Collect all pattern variables and their label constraints, plus all
+	// WHERE conjuncts across segments.
+	type varInfo struct {
+		labels     []string
+		properties map[string]interface{}
+	}
+	variables := make(map[string]*varInfo)
+	var allWhereTerms []string
+
+	for _, clause := range matchClauses {
+		whereForClause := ""
+		patternPart := clause
+		if whereIdx := findKeywordIndex(clause, "WHERE"); whereIdx > 0 {
+			whereForClause = strings.TrimSpace(clause[whereIdx+5:])
+			patternPart = strings.TrimSpace(clause[:whereIdx])
+		}
+
+		// Extract pattern variables from comma-separated node patterns.
+		patterns := e.splitNodePatterns(patternPart)
+		for _, p := range patterns {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			// Skip relationship patterns — they contain arrows.
+			if containsOutsideStrings(p, "->") || containsOutsideStrings(p, "<-") || containsOutsideStrings(p, "-[") {
+				return nil, false
+			}
+			info := e.parseNodePattern(p)
+			if info.variable == "" {
+				continue
+			}
+			variables[info.variable] = &varInfo{
+				labels:     info.labels,
+				properties: info.properties,
+			}
+		}
+
+		if whereForClause != "" {
+			for _, term := range splitTopLevelAndCartesian(whereForClause) {
+				term = strings.TrimSpace(term)
+				if term != "" {
+					allWhereTerms = append(allWhereTerms, term)
+				}
+			}
+		}
+	}
+
+	if len(variables) == 0 || len(allWhereTerms) == 0 {
+		return nil, false
+	}
+
+	// Try to resolve each variable from an ID equality predicate.
+	resolved := make(map[string]*storage.Node, len(variables))
+	for _, term := range allWhereTerms {
+		varName, node := e.resolveNodeFromIDEqualityTerm(term, params)
+		if varName == "" || node == nil {
+			continue
+		}
+		if _, known := variables[varName]; !known {
+			continue
+		}
+		resolved[varName] = node
+	}
+
+	// All variables must be resolved for the fast path to apply.
+	if len(resolved) != len(variables) {
+		return nil, false
+	}
+
+	// Validate label and property constraints from the patterns.
+	for varName, info := range variables {
+		node := resolved[varName]
+		if len(info.labels) > 0 && !nodeHasAnyLabel(node, info.labels) {
+			return nil, false
+		}
+		for k, v := range info.properties {
+			if node.Properties[k] != v {
+				return nil, false
+			}
+		}
+	}
+
+	return resolved, true
+}
+
+// resolveNodeFromIDEqualityTerm parses a single WHERE conjunct of the form
+// elementId(<var>) = <value> or id(<var>) = <value> and resolves the node.
+// Returns the variable name and resolved node, or ("", nil) if the term
+// doesn't match the expected shape.
+func (e *StorageExecutor) resolveNodeFromIDEqualityTerm(
+	term string,
+	params map[string]interface{},
+) (string, *storage.Node) {
+	term = strings.TrimSpace(term)
+	if term == "" {
+		return "", nil
+	}
+
+	eqIdx := strings.Index(term, "=")
+	if eqIdx <= 0 || eqIdx >= len(term)-1 {
+		return "", nil
+	}
+	// Reject !=, <=, >=, ==
+	if eqIdx > 0 && (term[eqIdx-1] == '!' || term[eqIdx-1] == '<' || term[eqIdx-1] == '>') {
+		return "", nil
+	}
+	if eqIdx+1 < len(term) && term[eqIdx+1] == '=' {
+		return "", nil
+	}
+
+	left := strings.TrimSpace(term[:eqIdx])
+	right := strings.TrimSpace(term[eqIdx+1:])
+	if left == "" || right == "" {
+		return "", nil
+	}
+
+	// LHS must be id(var) or elementId(var).
+	kind := ""
+	varName := ""
+	lowerLeft := strings.ToLower(left)
+	switch {
+	case strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")"):
+		kind = "id"
+		varName = strings.TrimSpace(left[3 : len(left)-1])
+	case strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")"):
+		kind = "elementId"
+		varName = strings.TrimSpace(left[10 : len(left)-1])
+	default:
+		return "", nil
+	}
+	if varName == "" {
+		return "", nil
+	}
+
+	// Resolve the RHS value.
+	var idValue string
+	if strings.HasPrefix(right, "$") {
+		// Parameter reference.
+		if params == nil {
+			return "", nil
+		}
+		paramName := strings.TrimSpace(right[1:])
+		raw, ok := params[paramName]
+		if !ok {
+			return "", nil
+		}
+		s, ok := raw.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			return "", nil
+		}
+		idValue = strings.TrimSpace(s)
+	} else {
+		// Literal value — strip surrounding quotes.
+		idValue = strings.TrimSpace(right)
+		if len(idValue) >= 2 {
+			if (idValue[0] == '\'' && idValue[len(idValue)-1] == '\'') ||
+				(idValue[0] == '"' && idValue[len(idValue)-1] == '"') {
+				idValue = idValue[1 : len(idValue)-1]
+			}
+		}
+		if idValue == "" {
+			return "", nil
+		}
+	}
+
+	// Strip canonical element ID prefix (4:dbname:rawid).
+	lookupID := idValue
+	if kind == "elementId" || strings.HasPrefix(lookupID, "4:") {
+		if parts := strings.SplitN(lookupID, ":", 3); len(parts) == 3 && parts[0] == "4" {
+			lookupID = parts[2]
+		}
+	}
+
+	node, err := e.storage.GetNode(storage.NodeID(lookupID))
+	if err != nil || node == nil {
+		return "", nil
+	}
+
+	return varName, node
 }

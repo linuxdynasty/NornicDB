@@ -152,6 +152,25 @@ func extractMatchWhereClause(cypher string, whereIdx, returnIdx int) string {
 	return strings.TrimSpace(segment[:end])
 }
 
+func hasStandaloneWithClause(cypher string) bool {
+	searchStart := 0
+	for {
+		idx := findKeywordIndex(cypher[searchStart:], "WITH")
+		if idx < 0 {
+			return false
+		}
+		absIdx := searchStart + idx
+		preceding := strings.ToUpper(strings.TrimSpace(cypher[:absIdx]))
+		if !strings.HasSuffix(preceding, "STARTS") && !strings.HasSuffix(preceding, "ENDS") {
+			return true
+		}
+		searchStart = absIdx + len("WITH")
+		if searchStart >= len(cypher) {
+			return false
+		}
+	}
+}
+
 func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	originalCypher := cypher
 	// Substitute parameters AFTER routing to avoid keyword detection issues
@@ -216,7 +235,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	hasExists := hasSubqueryPattern(cypher, existsSubqueryRe)
 	hasCountSubquery := hasSubqueryPattern(cypher, countSubqueryRe)
 	hasCollectSubquery := hasSubqueryPattern(cypher, collectSubqueryRe)
-	hasWith := findKeywordIndex(cypher, "WITH") > 0
+	hasWith := hasStandaloneWithClause(cypher)
 
 	if !hasUnion && !hasExists && !hasCountSubquery && !hasCollectSubquery && !hasWith {
 		matchCount := countKeywordOccurrences(upper, "MATCH")
@@ -577,6 +596,9 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	streamingWhereApplied := false
 	if whereIdx > 0 {
 		wherePart = extractMatchWhereClause(cypher, whereIdx, returnIdx)
+		// Rewrite coalesce-wrapped predicates to OR-expanded form for index visibility.
+		// e.g. coalesce(t.isReviewed, false) = false → (t.isReviewed = false OR t.isReviewed IS NULL)
+		wherePart = tryRewriteNullNormalizedPredicate(wherePart)
 		if candidates, used, idxErr := e.tryCollectNodesFromIDEquality(nodePattern, wherePart); idxErr == nil && used {
 			nodes = candidates
 			usedPropertyIndex = true
@@ -584,6 +606,13 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		inWherePart := wherePart
 		if rawWherePart != "" {
 			inWherePart = rawWherePart
+		}
+		// Parameterized id/elementId equality: elementId(n) = $param, id(n) = $param
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromIDEqualityParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
 		}
 		if !usedPropertyIndex {
 			if candidates, used, idxErr := e.tryCollectNodesFromIDInParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
@@ -593,6 +622,13 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 		if !usedPropertyIndex {
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInOrParam(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		// OR-equality rewrite: a.prop1 = $x OR a.prop2 = $x → two index lookups + DISTINCT
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexOrEquality(nodePattern, inWherePart, getParamsFromContext(ctx)); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
 			}
@@ -621,6 +657,20 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNull(nodePattern, wherePart); idxErr == nil && used {
 				nodes = candidates
 				usedPropertyIndex = true
+			}
+		}
+		// Index-backed top-K for ORDER BY + LIMIT when no other index seek matched.
+		// Over-fetch from the property index (sorted by index key) and apply WHERE
+		// post-filter. This avoids full label scan + sort for common pagination patterns
+		// like ORDER BY createdAt DESC LIMIT 30.
+		if !usedPropertyIndex && !usedIndexTopK && !hasAggregation && hasOrderBy && limit > 0 && orderExprEarly != "" {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexOrderLimit(
+				nodePattern, wherePart, orderExprEarly, skip+limit,
+			); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+				usedIndexTopK = true
+				e.markOuterIndexTopKUsed()
 			}
 		}
 		if !usedPropertyIndex && streamingLimit > 0 && !hasOrderBy && !hasAggregation {

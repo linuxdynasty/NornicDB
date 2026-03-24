@@ -110,6 +110,124 @@ func (e *StorageExecutor) tryCollectNodesFromIDEquality(nodePattern nodePatternI
 	return []*storage.Node{node}, true, nil
 }
 
+// tryCollectNodesFromIDEqualityParam attempts to satisfy:
+//
+//	MATCH (n[:Label]) WHERE id(n) = $param
+//	MATCH (n[:Label]) WHERE elementId(n) = $param
+//
+// via a direct node lookup using the parameter value. This complements
+// tryCollectNodesFromIDEquality which only handles literal values on the RHS.
+// The parameter-aware variant is critical for app workloads that always pass
+// IDs as parameters (e.g., attach/read-by-id paths).
+func (e *StorageExecutor) tryCollectNodesFromIDEqualityParam(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	if params == nil || strings.TrimSpace(whereClause) == "" {
+		return nil, false, nil
+	}
+	clause := strings.TrimSpace(whereClause)
+
+	upper := strings.ToUpper(clause)
+	if strings.Contains(upper, " AND ") || strings.Contains(upper, " OR ") || strings.Contains(upper, " IN ") {
+		return nil, false, nil
+	}
+
+	eqIdx := strings.Index(clause, "=")
+	if eqIdx <= 0 {
+		return nil, false, nil
+	}
+	if eqIdx > 0 {
+		prev := clause[eqIdx-1]
+		if prev == '!' || prev == '<' || prev == '>' {
+			return nil, false, nil
+		}
+	}
+	if eqIdx+1 < len(clause) {
+		next := clause[eqIdx+1]
+		if next == '=' {
+			return nil, false, nil
+		}
+	}
+
+	left := strings.TrimSpace(clause[:eqIdx])
+	right := strings.TrimSpace(clause[eqIdx+1:])
+	if left == "" || right == "" {
+		return nil, false, nil
+	}
+
+	// RHS must be a parameter reference ($paramName).
+	if !strings.HasPrefix(right, "$") {
+		return nil, false, nil
+	}
+	paramName := strings.TrimSpace(right[1:])
+	if paramName == "" {
+		return nil, false, nil
+	}
+
+	kind := ""
+	varName := ""
+	lowerLeft := strings.ToLower(left)
+	switch {
+	case strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")"):
+		kind = "id"
+		varName = strings.TrimSpace(left[3 : len(left)-1])
+	case strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")"):
+		kind = "elementId"
+		varName = strings.TrimSpace(left[10 : len(left)-1])
+	default:
+		return nil, false, nil
+	}
+
+	if varName == "" || varName != nodePattern.variable {
+		return nil, false, nil
+	}
+
+	raw, ok := params[paramName]
+	if !ok {
+		return []*storage.Node{}, true, nil
+	}
+	idValue, ok := raw.(string)
+	if !ok || strings.TrimSpace(idValue) == "" {
+		return []*storage.Node{}, true, nil
+	}
+	idValue = strings.TrimSpace(idValue)
+
+	lookupID := idValue
+	if kind == "elementId" {
+		parts := strings.SplitN(idValue, ":", 3)
+		if len(parts) == 3 && parts[0] == "4" {
+			lookupID = parts[2]
+		}
+	}
+	// Permissive: strip canonical element ID prefix for id() lookups too.
+	if strings.HasPrefix(lookupID, "4:") {
+		if parts := strings.SplitN(lookupID, ":", 3); len(parts) == 3 {
+			lookupID = parts[2]
+		}
+	}
+
+	node, err := e.storage.GetNode(storage.NodeID(lookupID))
+	if err != nil || node == nil {
+		return []*storage.Node{}, true, nil
+	}
+
+	if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+		return []*storage.Node{}, true, nil
+	}
+
+	if len(nodePattern.properties) > 0 {
+		for k, v := range nodePattern.properties {
+			if node.Properties[k] != v {
+				return []*storage.Node{}, true, nil
+			}
+		}
+	}
+
+	return []*storage.Node{node}, true, nil
+}
+
 // tryCollectNodesFromPropertyIndex attempts to satisfy MATCH node candidates from a schema property index.
 // It only applies to simple equality predicates:
 //   - <var>.<prop> = <value>
@@ -316,6 +434,86 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexInOrParam(
 	return nodes, true, nil
 }
 
+// tryCollectNodesFromPropertyIndexOrEquality attempts to satisfy OR-combined
+// equality predicates backed by indexes, e.g.:
+//
+//	a.prop1 = $x OR a.prop2 = $x
+//	a.prop1 = 'val1' OR a.prop2 = 'val2'
+//
+// It splits the OR into two branches, attempts index lookup on each, and merges
+// results with deduplication. This removes a major source of slow scans for
+// dual-key lookup workloads.
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrEquality(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return nil, false, nil
+	}
+	orIdx := findTopLevelKeyword(clause, " OR ")
+	if orIdx <= 0 {
+		return nil, false, nil
+	}
+	left := strings.TrimSpace(clause[:orIdx])
+	right := strings.TrimSpace(clause[orIdx+4:])
+	if left == "" || right == "" {
+		return nil, false, nil
+	}
+
+	// Try to parse each branch as a simple indexed equality predicate.
+	lprop, lval, lok := e.parseSimpleIndexedEquality(nodePattern.variable, left)
+	rprop, rval, rok := e.parseSimpleIndexedEquality(nodePattern.variable, right)
+	if !lok || !rok {
+		return nil, false, nil
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+
+	leftLabels := e.indexCandidateLabels(schema, nodePattern.labels, lprop)
+	rightLabels := e.indexCandidateLabels(schema, nodePattern.labels, rprop)
+	if len(leftLabels) == 0 && len(rightLabels) == 0 {
+		return nil, false, nil
+	}
+
+	idSet := make(map[storage.NodeID]struct{}, 64)
+	for _, label := range leftLabels {
+		for _, id := range schema.PropertyIndexLookup(label, lprop, lval) {
+			idSet[id] = struct{}{}
+		}
+	}
+	for _, label := range rightLabels {
+		for _, id := range schema.PropertyIndexLookup(label, rprop, rval) {
+			idSet[id] = struct{}{}
+		}
+	}
+	if len(idSet) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(idSet))
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		node, err := e.storage.GetNode(storage.NodeID(id))
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, true, nil
+}
+
 // tryCollectNodesFromIDInParam attempts to satisfy simple id/elementId IN-list predicates:
 //
 //	id(<var>) IN $param
@@ -420,6 +618,90 @@ func (e *StorageExecutor) tryCollectNodesFromIDInParam(
 			continue
 		}
 		nodes = append(nodes, node)
+	}
+
+	return nodes, true, nil
+}
+
+// tryCollectNodesFromPropertyIndexOrderLimit attempts to satisfy ORDER BY + LIMIT
+// queries using a property index for sorted iteration, even when the WHERE clause
+// is not a simple IS NOT NULL predicate. It over-fetches from the index (up to 4x
+// the requested limit) and applies any WHERE filter post-hoc. This avoids full
+// label scan + in-memory sort for common pagination patterns like:
+//
+//	MATCH (n:Label) WHERE <filter> ORDER BY n.createdAt DESC LIMIT 30
+//
+// It only applies when:
+//   - A single ORDER BY property with a matching index exists
+//   - The node pattern has at least one label
+//   - limit > 0
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	orderExpr string,
+	limit int,
+) ([]*storage.Node, bool, error) {
+	if limit <= 0 || len(nodePattern.labels) == 0 {
+		return nil, false, nil
+	}
+
+	orderSpecs := e.parseNodeOrderSpecs(orderExpr, nodePattern.variable)
+	if len(orderSpecs) != 1 {
+		return nil, false, nil
+	}
+	spec := orderSpecs[0]
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+
+	labels := e.indexCandidateLabels(schema, nodePattern.labels, spec.propName)
+	if len(labels) != 1 {
+		return nil, false, nil
+	}
+	label := labels[0]
+
+	// Over-fetch: grab more candidates than needed to account for WHERE filtering.
+	// Use 4x multiplier with a reasonable ceiling to avoid loading too much.
+	overFetch := limit * 4
+	if overFetch < 200 {
+		overFetch = 200
+	}
+
+	ids := schema.PropertyIndexTopK(label, spec.propName, overFetch, spec.descending)
+	if len(ids) == 0 {
+		return nil, false, nil // No index data — fall back to generic path
+	}
+
+	hasWhere := strings.TrimSpace(whereClause) != ""
+	nodes := make([]*storage.Node, 0, limit)
+	for _, id := range ids {
+		node, err := e.storage.GetNode(id)
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		if len(nodePattern.properties) > 0 && !e.nodeMatchesProps(node, nodePattern.properties) {
+			continue
+		}
+		// Apply WHERE filter if present.
+		if hasWhere && !e.evaluateWhere(node, nodePattern.variable, whereClause) {
+			continue
+		}
+		nodes = append(nodes, node)
+		if len(nodes) >= limit {
+			break
+		}
+	}
+
+	// If we exhausted the over-fetched set without reaching the limit, the index
+	// didn't have enough qualifying rows. Return false to fall back to the generic
+	// path which will scan all candidates.
+	if len(nodes) < limit && len(ids) >= overFetch {
+		return nil, false, nil
 	}
 
 	return nodes, true, nil
@@ -1115,4 +1397,110 @@ func nodeHasAnyLabel(node *storage.Node, labels []string) bool {
 		}
 	}
 	return false
+}
+
+// tryRewriteNullNormalizedPredicate rewrites coalesce-wrapped equality predicates
+// into OR-expanded forms that are visible to the index seek cascade and compiled
+// WHERE fast-paths.
+//
+// Rewrites:
+//
+//	coalesce(var.prop, <default>) = <value>  →  (var.prop = <value> OR var.prop IS NULL)
+//	                                            when <value> == <default>
+//
+//	coalesce(var.prop, <default>) <> <value> →  (var.prop <> <value> AND var.prop IS NOT NULL)
+//	                                            when <value> == <default>
+//
+// This is safe because coalesce(x, d) = d is semantically equivalent to
+// (x = d OR x IS NULL).
+func tryRewriteNullNormalizedPredicate(whereClause string) string {
+	clause := strings.TrimSpace(whereClause)
+	if clause == "" {
+		return clause
+	}
+
+	// Only rewrite simple top-level predicates (no AND/OR at the top level).
+	// Nested coalesce inside AND/OR conjuncts would need recursive rewrite
+	// which risks semantic drift — keep it strict.
+	upper := strings.ToUpper(clause)
+	if strings.Contains(upper, " AND ") || strings.Contains(upper, " OR ") {
+		return clause
+	}
+
+	// Look for coalesce( at the start.
+	lowerClause := strings.ToLower(clause)
+	if !strings.HasPrefix(lowerClause, "coalesce(") {
+		return clause
+	}
+
+	// Find matching closing paren for coalesce(...).
+	depth := 0
+	closeIdx := -1
+	for i := 9; i < len(clause); i++ { // start after "coalesce("
+		switch clause[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				closeIdx = i
+				goto found
+			}
+			depth--
+		}
+	}
+found:
+	if closeIdx < 0 {
+		return clause
+	}
+
+	inner := strings.TrimSpace(clause[9:closeIdx])
+	afterCoalesce := strings.TrimSpace(clause[closeIdx+1:])
+
+	// Parse inner: expect "var.prop, <default>"
+	commaIdx := strings.Index(inner, ",")
+	if commaIdx <= 0 {
+		return clause
+	}
+	varProp := strings.TrimSpace(inner[:commaIdx])
+	defaultVal := strings.TrimSpace(inner[commaIdx+1:])
+	if varProp == "" || defaultVal == "" {
+		return clause
+	}
+	// varProp must look like variable.property
+	if !strings.Contains(varProp, ".") {
+		return clause
+	}
+
+	// Parse operator and RHS: expect "= <value>" or "<> <value>" or "!= <value>"
+	op := ""
+	rhs := ""
+	if strings.HasPrefix(afterCoalesce, "<>") {
+		op = "<>"
+		rhs = strings.TrimSpace(afterCoalesce[2:])
+	} else if strings.HasPrefix(afterCoalesce, "!=") {
+		op = "<>"
+		rhs = strings.TrimSpace(afterCoalesce[2:])
+	} else if strings.HasPrefix(afterCoalesce, "=") {
+		op = "="
+		rhs = strings.TrimSpace(afterCoalesce[1:])
+	} else {
+		return clause
+	}
+
+	if rhs == "" {
+		return clause
+	}
+
+	// Only rewrite when the comparison value matches the default value.
+	// coalesce(x, false) = false → rewrite
+	// coalesce(x, false) = true  → don't rewrite (different semantics)
+	if !strings.EqualFold(rhs, defaultVal) {
+		return clause
+	}
+
+	if op == "=" {
+		return fmt.Sprintf("(%s = %s OR %s IS NULL)", varProp, rhs, varProp)
+	}
+	// <> case: coalesce(x, d) <> d means x <> d AND x IS NOT NULL
+	return fmt.Sprintf("(%s <> %s AND %s IS NOT NULL)", varProp, rhs, varProp)
 }

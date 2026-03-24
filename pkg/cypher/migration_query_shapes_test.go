@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -811,6 +812,203 @@ RETURN count(n) AS c
 	require.NoError(t, err)
 	require.Len(t, notes.Rows, 1)
 	require.Equal(t, int64(1), notes.Rows[0][0])
+}
+
+func TestExactShape_ListReviewTranslations_WithPagePathFilter_ReturnsExpectedRow(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-list-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "review-key-1",
+			"textKey128": "review-key-1-128",
+			"pagePath":   "/benefits/financial-summary",
+			"page":       "https://example.test/benefits/financial-summary",
+			"trackingId": "trk-list-1",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "tr-list-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"language":       "es",
+			"isReviewed":     false,
+			"translatedText": "hola",
+			"createdAt":      "2026-03-24T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateEdge(&storage.Edge{
+		ID:        "edge-list-1",
+		Type:      "TRANSLATES_TO",
+		StartNode: "orig-list-1",
+		EndNode:   "tr-list-1",
+	})
+	require.NoError(t, err)
+
+	stageA, err := exec.Execute(ctx, `
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+RETURN count(t) AS c
+`, map[string]interface{}{"language": "es"})
+	require.NoError(t, err)
+	require.Len(t, stageA.Rows, 1)
+	require.Equal(t, int64(1), stageA.Rows[0][0])
+
+	stageB, err := exec.Execute(ctx, `
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN count(t) AS c
+`, map[string]interface{}{"pagePath": "/benefits"})
+	require.NoError(t, err)
+	require.Len(t, stageB.Rows, 1)
+	require.Equal(t, int64(1), stageB.Rows[0][0])
+
+	stageC, err := exec.Execute(ctx, `
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+RETURN count(t) AS c
+`, map[string]interface{}{"language": "es"})
+	require.NoError(t, err)
+	require.Len(t, stageC.Rows, 1)
+	require.Equal(t, int64(1), stageC.Rows[0][0])
+
+	stageC2, err := exec.Execute(ctx, `
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+RETURN count(o) AS c
+`, map[string]interface{}{"language": "es"})
+	require.NoError(t, err)
+	require.Len(t, stageC2.Rows, 1)
+	require.Equal(t, int64(1), stageC2.Rows[0][0], "chained relationship match must bind start variable o")
+
+	stageD, err := exec.Execute(ctx, `
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN count(t) AS c
+`, map[string]interface{}{"language": "es", "pagePath": "/benefits"})
+	t.Logf("normalized stageD: %s", normalizeMultiMatchWhereClauses(`
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN count(t) AS c
+`))
+	nodeO, _ := store.GetNode("orig-list-1")
+	nodeT, _ := store.GetNode("tr-list-1")
+	require.NotNil(t, nodeO)
+	require.NotNil(t, nodeT)
+	require.True(t, exec.evaluateBindingWhere(binding{
+		"o": nodeO,
+		"t": nodeT,
+	}, "t.language = $language AND t.isReviewed = false AND o.pagePath STARTS WITH $pagePath", map[string]interface{}{"language": "es", "pagePath": "/benefits"}))
+	require.True(t, exec.evaluateBindingWhere(binding{
+		"o": nodeO,
+		"t": nodeT,
+	}, "t.language = 'es' AND t.isReviewed = false AND o.pagePath STARTS WITH '/benefits'", nil))
+	normalized := normalizeMultiMatchWhereClauses(`
+MATCH (t:TranslatedText)
+WHERE t.language = $language AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN count(t) AS c
+`)
+	returnIdx := findKeywordIndex(normalized, "RETURN")
+	whereIdx := lastKeywordIndexBefore(normalized, "WHERE", returnIdx)
+	matchClauses := splitMatchClauses(normalized, whereIdx, returnIdx)
+	require.Len(t, matchClauses, 2)
+	bindings := exec.executeFirstMatch(matchClauses[0])
+	require.NotEmpty(t, bindings)
+	bindings = exec.executeChainedMatch(matchClauses[1], bindings)
+	require.NotEmpty(t, bindings)
+	require.NotNil(t, bindings[0]["o"], "chained match must bind o variable")
+	require.NotNil(t, bindings[0]["t"], "chained match must preserve t variable")
+	rawWhere := strings.TrimSpace(normalized[whereIdx+5 : returnIdx])
+	filteredBindings := exec.filterBindingsByWhere(bindings, rawWhere, map[string]interface{}{"language": "es", "pagePath": "/benefits"})
+	require.NotEmpty(t, filteredBindings, "combined where predicate should keep matching binding")
+	directCtx := context.WithValue(ctx, paramsKey, map[string]interface{}{"language": "es", "pagePath": "/benefits"})
+	directRes, directErr := exec.executeMultiMatch(directCtx, normalized)
+	require.NoError(t, directErr)
+	require.NotNil(t, directRes)
+	require.Len(t, directRes.Rows, 1, "direct executeMultiMatch should preserve matching row")
+	require.Equal(t, int64(1), directRes.Rows[0][0])
+	substituted := exec.substituteParams(normalized, map[string]interface{}{"language": "es", "pagePath": "/benefits"})
+	directSubRes, directSubErr := exec.executeMultiMatch(ctx, substituted)
+	require.NoError(t, directSubErr)
+	require.NotNil(t, directSubRes)
+	require.Len(t, directSubRes.Rows, 1, "executeMultiMatch with pre-substituted query should preserve matching row")
+	require.Equal(t, int64(1), directSubRes.Rows[0][0])
+	require.Equal(t, 2, countKeywordOccurrences(strings.ToUpper(substituted), "MATCH"))
+	require.Equal(t, 0, countKeywordOccurrences(strings.ToUpper(substituted), "OPTIONAL MATCH"))
+	routeRes, routeErr := exec.executeWithoutTransaction(directCtx, substituted, strings.ToUpper(strings.TrimSpace(substituted)))
+	require.NoError(t, routeErr)
+	require.NotNil(t, routeRes)
+	require.Len(t, routeRes.Rows, 1)
+	viaMatchRes, viaMatchErr := exec.executeMatch(directCtx, substituted)
+	require.NoError(t, viaMatchErr)
+	require.NotNil(t, viaMatchRes)
+	require.Len(t, viaMatchRes.Rows, 1)
+	require.Equal(t, int64(1), viaMatchRes.Rows[0][0], "executeMatch should return the same row")
+	require.NoError(t, err)
+	require.Len(t, stageD.Rows, 1)
+	require.Equal(t, int64(1), stageD.Rows[0][0])
+
+	shape := `
+MATCH (t:TranslatedText)
+WHERE t.language = $language
+	AND t.isReviewed = false
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN elementId(t) AS translationId,
+       coalesce(o.textKey, o.textKey128, 'unknown') AS textKey,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.translatedText AS translatedText,
+       coalesce(o.originalText, '') AS originalText,
+       t.translatedText AS originalTranslatedText,
+       t.auditedText AS auditedTranslatedText,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.createdAt AS createdAt,
+       o.page AS page,
+       o.trackingId AS trackingId
+ORDER BY t.createdAt DESC
+LIMIT 30`
+	t.Logf("normalized full shape: %s", normalizeMultiMatchWhereClauses(shape))
+	shapeDirectCtx := context.WithValue(ctx, paramsKey, map[string]interface{}{
+		"language": "es",
+		"pagePath": "/benefits",
+	})
+	shapeDirectRes, shapeDirectErr := exec.executeMultiMatch(shapeDirectCtx, normalizeMultiMatchWhereClauses(shape))
+	require.NoError(t, shapeDirectErr)
+	require.NotNil(t, shapeDirectRes)
+	require.Len(t, shapeDirectRes.Rows, 1, "direct executeMultiMatch should return row for full shape")
+
+	res, err := exec.Execute(ctx, shape, map[string]interface{}{
+		"language": "es",
+		"pagePath": "/benefits",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, []string{
+		"translationId", "textKey", "isReviewed", "translatedText", "originalText",
+		"originalTranslatedText", "auditedTranslatedText", "reviewResult", "reviewedAt",
+		"createdAt", "page", "trackingId",
+	}, res.Columns)
+	require.Len(t, res.Rows, 1, "exact list-review shape should return the matching translation row")
+	require.Equal(t, "review-key-1", res.Rows[0][1], "textKey must map to the created original node")
+	require.Equal(t, false, res.Rows[0][2], "isReviewed must remain false for review queue rows")
+	require.Equal(t, "trk-list-1", res.Rows[0][11], "trackingId must be preserved in projection")
 }
 
 func TestMigrationDDL_OpenCypherCompatibleVariants_FullStatements(t *testing.T) {

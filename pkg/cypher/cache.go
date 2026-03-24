@@ -4,7 +4,9 @@ package cypher
 import (
 	"container/list"
 	"fmt"
+	"hash"
 	"hash/fnv"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -415,9 +417,11 @@ func (qc *QueryCache) cacheKey(cypher string, params map[string]interface{}) str
 	h := fnv.New64a()
 	h.Write([]byte(cypher))
 
-	// Add params in sorted order for consistency
-	if params != nil {
-		h.Write([]byte(fmt.Sprintf("%v", params)))
+	// Add params in sorted key order for deterministic hashing.
+	// Go map iteration order is non-deterministic, so fmt.Sprintf("%v", map)
+	// can produce different strings for identical maps.
+	if len(params) > 0 {
+		hashSortedParams(h, params)
 	}
 
 	return strconv.FormatUint(h.Sum64(), 36)
@@ -703,10 +707,26 @@ func cacheKeyFNV(cypher string, params map[string]interface{}) string {
 	// do not defeat result cache hits for the same logical query.
 	normalized := normalizeQuery(trimTrailingStatementDelimiters(cypher))
 	h.Write([]byte(normalized))
-	if params != nil {
-		h.Write([]byte(fmt.Sprintf("%v", params)))
+	if len(params) > 0 {
+		hashSortedParams(h, params)
 	}
 	return strconv.FormatUint(h.Sum64(), 36)
+}
+
+// hashSortedParams writes parameter keys and values into the hash in sorted
+// key order, ensuring deterministic cache keys regardless of Go map iteration order.
+func hashSortedParams(h hash.Hash64, params map[string]interface{}) {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte{0}) // separator
+		h.Write([]byte(fmt.Sprintf("%v", params[k])))
+		h.Write([]byte{0})
+	}
 }
 
 // =============================================================================

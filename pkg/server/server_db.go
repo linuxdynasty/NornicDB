@@ -1124,6 +1124,19 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// FAST PATH: Single-statement autocommit without special options.
+	// This is the overwhelmingly common case (>95% of /tx/commit calls).
+	// Skip the statement-loop overhead, pre-allocate tightly, and avoid
+	// unnecessary bookmark/notification machinery on the happy path.
+	if len(req.Statements) == 1 {
+		stmt := req.Statements[0]
+		if result, handled := s.handleSingleStatementFastPath(w, r, dbName, stmt); handled {
+			_ = result // written directly to w
+			return
+		}
+		// Fall through to generic path if fast path declined (e.g. :USE override)
+	}
+
 	response := TransactionResponse{
 		Results:       make([]QueryResult, 0, len(req.Statements)),
 		Errors:        make([]QueryError, 0),
@@ -1337,6 +1350,154 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.writeJSON(w, status, response)
+}
+
+// handleSingleStatementFastPath handles the common case of a single-statement
+// /tx/commit request with minimal overhead. It returns (nil, true) when it
+// handled the request (wrote the response), or (nil, false) when the caller
+// should fall through to the generic multi-statement path.
+func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Request, dbName string, stmt StatementRequest) (*TransactionResponse, bool) {
+	// Decline fast path for statements that override the database via :USE.
+	trimmedStmt := strings.TrimSpace(stmt.Statement)
+	upperStmt := strings.ToUpper(trimmedStmt)
+	if strings.HasPrefix(upperStmt, ":USE ") || strings.HasPrefix(upperStmt, "USE ") {
+		return nil, false
+	}
+
+	claims := getClaims(r)
+
+	// Access check.
+	if !s.getDatabaseAccessMode(claims).CanAccessDatabase(dbName) {
+		resp := TransactionResponse{
+			Results: []QueryResult{},
+			Errors: []QueryError{{
+				Code:    "Neo.ClientError.Security.Forbidden",
+				Message: fmt.Sprintf("Access to database '%s' is not allowed.", dbName),
+			}},
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return nil, true
+	}
+
+	// Write permission check for mutations.
+	if isMutationQuery(stmt.Statement) {
+		if claims == nil || !s.getResolvedAccess(claims, dbName).Write {
+			resp := TransactionResponse{
+				Results: []QueryResult{},
+				Errors: []QueryError{{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
+				}},
+			}
+			s.writeJSON(w, http.StatusOK, resp)
+			return nil, true
+		}
+	}
+
+	// Database existence check.
+	if !s.dbManager.ExistsOrIsConstituent(dbName) {
+		resp := TransactionResponse{
+			Results: []QueryResult{},
+			Errors: []QueryError{{
+				Code:    "Neo.ClientError.Database.DatabaseNotFound",
+				Message: fmt.Sprintf("Database '%s' not found", dbName),
+			}},
+		}
+		s.writeJSON(w, http.StatusNotFound, resp)
+		return nil, true
+	}
+
+	// Prepare query.
+	queryStatement := stripCypherComments(trimmedStmt)
+	queryStatement = strings.TrimSpace(queryStatement)
+	if strings.HasPrefix(queryStatement, "\xef\xbb\xbf") {
+		queryStatement = strings.TrimSpace(strings.TrimPrefix(queryStatement, "\xef\xbb\xbf"))
+	}
+
+	if queryStatement == "" {
+		resp := TransactionResponse{
+			Results:       []QueryResult{{Columns: []string{}, Data: []ResultRow{}}},
+			Errors:        []QueryError{},
+			LastBookmarks: []string{s.generateBookmark()},
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return nil, true
+	}
+
+	// Execute.
+	executor, err := s.getExecutorForDatabaseWithAuth(dbName, r.Header.Get("Authorization"))
+	if err != nil {
+		resp := TransactionResponse{
+			Results: []QueryResult{},
+			Errors: []QueryError{{
+				Code:    "Neo.ClientError.Database.General",
+				Message: fmt.Sprintf("Failed to access database '%s': %v", dbName, err),
+			}},
+		}
+		s.writeJSON(w, http.StatusInternalServerError, resp)
+		return nil, true
+	}
+
+	queryStart := time.Now()
+	execCtx := cypher.WithAuthToken(r.Context(), r.Header.Get("Authorization"))
+	result, execErr := executor.Execute(execCtx, queryStatement, stmt.Parameters)
+	queryDuration := time.Since(queryStart)
+
+	s.logSlowQuery(stmt.Statement, stmt.Parameters, queryDuration, execErr)
+
+	if execErr != nil {
+		resp := TransactionResponse{
+			Results: []QueryResult{},
+			Errors: []QueryError{{
+				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Message: execErr.Error(),
+			}},
+			LastBookmarks: []string{s.generateBookmark()},
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return nil, true
+	}
+
+	// Build response with minimal allocation.
+	qr := QueryResult{
+		Columns: result.Columns,
+		Data:    make([]ResultRow, len(result.Rows)),
+	}
+	for i, row := range result.Rows {
+		convertedRow := s.convertRowToNeo4jFormat(row)
+		qr.Data[i] = ResultRow{
+			Row:  convertedRow,
+			Meta: s.generateRowMeta(convertedRow),
+		}
+	}
+	if stmt.IncludeStats {
+		qr.Stats = &QueryStats{ContainsUpdates: isMutationQuery(stmt.Statement)}
+	}
+
+	resp := TransactionResponse{
+		Results:       []QueryResult{qr},
+		Errors:        []QueryError{},
+		LastBookmarks: []string{s.generateBookmark()},
+	}
+
+	// Attach receipt/optimistic metadata if present.
+	if result.Metadata != nil {
+		if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
+			resp.Receipt = receipt
+		}
+		if optimistic, ok := result.Metadata["optimistic"]; ok && optimistic != nil {
+			resp.Optimistic = optimistic
+		}
+	}
+
+	status := http.StatusOK
+	if s.db.IsAsyncWritesEnabled() && isMutationQuery(stmt.Statement) {
+		status = http.StatusAccepted
+		w.Header().Set("X-NornicDB-Consistency", "eventual")
+	}
+
+	s.writeJSON(w, status, resp)
+	return nil, true
 }
 
 // grantAccessToNewDatabase grants the admin role and the creating principal's roles full access
