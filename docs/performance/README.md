@@ -8,6 +8,7 @@
 - **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** - Performance comparison
 - **[Test Results](test-results.md)** - Test suite results
 - **[Optimization Guide](http-optimization-options.md)** - Performance tuning
+- **[Hot Path Query Cookbook](hot-path-query-cookbook.md)** - Optimized Cypher shapes for high-traffic read/write paths
 - **[GPU Acceleration](../features/gpu-acceleration.md)** - GPU performance
 - **[Query Optimization](searching.md)** - Query tuning
 
