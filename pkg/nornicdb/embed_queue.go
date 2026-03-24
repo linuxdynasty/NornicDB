@@ -65,7 +65,14 @@ type EmbedWorker struct {
 	// initialScanDone ensures startup refresh/index scan runs once for the whole worker pool,
 	// not once per worker goroutine.
 	initialScanDone bool
+
+	// refreshMu/lastRefreshAt throttle full pending-index refresh scans, which are
+	// potentially expensive on large datasets and can contend with write traffic.
+	refreshMu     sync.Mutex
+	lastRefreshAt time.Time
 }
+
+const minRefreshOnEmptyInterval = 30 * time.Second
 
 // EmbedWorkerConfig holds configuration for the embedding worker.
 type EmbedWorkerConfig struct {
@@ -404,7 +411,7 @@ func (ew *EmbedWorker) worker() {
 	if doInitialScan {
 		fmt.Println("🔍 Initial scan for nodes needing embeddings...")
 		// Refresh index to clean up stale entries from deleted nodes
-		ew.refreshEmbeddingIndex()
+		ew.refreshEmbeddingIndexIfDue(true)
 	}
 
 	ew.processUntilEmpty()
@@ -448,7 +455,7 @@ func (ew *EmbedWorker) processUntilEmpty() {
 				consecutiveEmptyCount++
 				if consecutiveEmptyCount == 1 {
 					// First empty check - refresh index to catch any new nodes and clean up stale entries
-					removed := ew.refreshEmbeddingIndex()
+					removed := ew.refreshEmbeddingIndexIfDue(false)
 					if removed > 0 {
 						fmt.Printf("🧹 Cleaned up %d stale entries from pending embeddings index\n", removed)
 						// Reset counter since we found and cleaned stale entries - try again
@@ -739,6 +746,20 @@ func (ew *EmbedWorker) refreshEmbeddingIndex() int {
 		return mgr.RefreshPendingEmbeddingsIndex()
 	}
 	return 0
+}
+
+// refreshEmbeddingIndexIfDue runs a full pending-index refresh at most once per
+// minRefreshOnEmptyInterval unless forced. This avoids repeated full scans when
+// the worker is repeatedly triggered by bursty writes.
+func (ew *EmbedWorker) refreshEmbeddingIndexIfDue(force bool) int {
+	ew.refreshMu.Lock()
+	if !force && !ew.lastRefreshAt.IsZero() && time.Since(ew.lastRefreshAt) < minRefreshOnEmptyInterval {
+		ew.refreshMu.Unlock()
+		return 0
+	}
+	ew.lastRefreshAt = time.Now()
+	ew.refreshMu.Unlock()
+	return ew.refreshEmbeddingIndex()
 }
 
 // markNodeEmbedded removes a node from the pending embeddings index.
