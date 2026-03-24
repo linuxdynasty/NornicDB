@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.31] - 2026-03-24
+
+### Fixed
+
+- **Safe Unicode Cypher syntax normalization**:
+  - expanded Cypher ingress normalization beyond Unicode arrows to safely normalize syntax confusables including dash variants, fullwidth structural punctuation, unusual whitespace, and selected zero-width separators
+  - restricted normalization to query syntax only so string literals, comments, and backticked identifiers are preserved exactly as written
+  - improved pasted-query compatibility for Neo4j-style Cypher copied from chat apps, documents, and rich-text sources.
+- **Compound `MATCH ... OPTIONAL MATCH ... RETURN` result modifiers**:
+  - fixed the specialized joined-row execution path to apply `ORDER BY`, `SKIP`, and `LIMIT` instead of returning storage/join order
+  - restored deterministic aliased ordering for `OPTIONAL MATCH` retrieval queries and aligned the executor with Neo4j-compatible result semantics.
+
+### Tests
+
+- Added exact regression coverage for:
+  - safe normalization of Unicode Cypher syntax confusables outside literals/comments/backticks
+  - normalized `MERGE` and `OPTIONAL MATCH` execution through the public executor path
+  - deterministic ordered results for mirrored-graph `OPTIONAL MATCH` retrieval queries
+  - end-to-end parity for ASCII and Unicode-arrow mirrored `Section` hierarchy queries.
+
 ## [v1.0.30] - 2026-03-23
 
 ### Fixed
