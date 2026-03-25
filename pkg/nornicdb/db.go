@@ -1986,12 +1986,14 @@ func (db *DB) EmbedQueryForDB(ctx context.Context, dbName string, query string) 
 
 // Store creates a new memory with automatic relationship inference.
 func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
+	storageEngine := db.storage
+	defaultDB := db.defaultDatabaseName()
+	db.mu.RUnlock()
 
 	if mem == nil {
 		return nil, ErrInvalidInput
@@ -2017,7 +2019,7 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 	node.Properties = db.encryptProperties(node.Properties)
 
 	// Store in storage engine
-	_, err := db.storage.CreateNode(node)
+	_, err := storageEngine.CreateNode(node)
 	if err != nil {
 		return nil, fmt.Errorf("storing memory: %w", err)
 	}
@@ -2031,7 +2033,7 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 		}
 	}
 	if hasEmbedding {
-		inferEngine, _ := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
+		inferEngine, _ := db.getOrCreateInferenceService(defaultDB, storageEngine)
 		if inferEngine != nil {
 			suggestions, err := inferEngine.OnStoreBestOfChunks(ctx, mem.ID, mem.ChunkEmbeddings)
 			if err == nil {
@@ -2049,7 +2051,7 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 							"method": suggestion.Method,
 						},
 					}
-					_ = db.storage.CreateEdge(edge) // Best effort
+					_ = storageEngine.CreateEdge(edge) // Best effort
 				}
 			}
 		}

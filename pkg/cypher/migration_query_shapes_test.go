@@ -1011,6 +1011,458 @@ LIMIT 30`
 	require.Equal(t, "trk-list-1", res.Rows[0][11], "trackingId must be preserved in projection")
 }
 
+func TestRewriteListReviewPageFilterHotPath(t *testing.T) {
+	in := `
+MATCH (o:OriginalText)
+WHERE o.pagePath STARTS WITH $pagePath
+MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText)
+WHERE t.language = $language
+  AND coalesce(t.isReviewed, false) = false
+RETURN elementId(t) AS translationId,
+       coalesce(o.textKey, o.textKey128, 'unknown') AS textKey,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.translatedText AS translatedText,
+       coalesce(o.originalText, '') AS originalText,
+       t.translatedText AS originalTranslatedText,
+       t.auditedText AS auditedTranslatedText,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.createdAt AS createdAt,
+       o.page AS page,
+       o.trackingId AS trackingId
+ORDER BY t.createdAt DESC
+LIMIT 30`
+
+	out := rewriteListReviewPageFilterHotPath(in)
+	upper := strings.ToUpper(strings.Join(strings.Fields(out), " "))
+	require.True(t, strings.Contains(upper, "MATCH (T:TRANSLATEDTEXT) WHERE T.LANGUAGE = $LANGUAGE AND (T.ISREVIEWED = FALSE OR T.ISREVIEWED IS NULL)"))
+	require.True(t, strings.Contains(upper, "MATCH (O:ORIGINALTEXT)-[:TRANSLATES_TO]->(T) WHERE O.PAGEPATH STARTS WITH $PAGEPATH"))
+	require.True(t, strings.Contains(upper, "RETURN ELEMENTID(T) AS TRANSLATIONID"))
+	require.True(t, strings.Contains(upper, "ORDER BY T.CREATEDAT DESC LIMIT 30"))
+}
+
+func TestRewriteListReviewTraversalHotPath_CurrentShape(t *testing.T) {
+	in := `
+MATCH (t:TranslatedText {language: $language, isReviewed: false})<-[:TRANSLATES_TO]-(o:OriginalText)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN elementId(t) AS translationId,
+       o.textKey AS textKey,
+       o.textKey128 AS textKey128,
+       t.isReviewed AS isReviewed,
+       t.translatedText AS translatedText,
+       o.originalText AS originalText,
+       t.translatedText AS originalTranslatedText,
+       t.auditedText AS auditedTranslatedText,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.createdAt AS createdAt,
+       o.page AS page,
+       o.trackingId AS trackingId
+ORDER BY t.createdAt DESC
+LIMIT 30`
+
+	out := rewriteListReviewTraversalHotPath(in)
+	upper := strings.ToUpper(strings.Join(strings.Fields(out), " "))
+	require.True(t, strings.Contains(upper, "MATCH (O:ORIGINALTEXT)-[:TRANSLATES_TO]->(T:TRANSLATEDTEXT {LANGUAGE: $LANGUAGE, ISREVIEWED: FALSE})"))
+	require.True(t, strings.Contains(upper, "WHERE O.PAGEPATH STARTS WITH $PAGEPATH"))
+	require.True(t, strings.Contains(upper, "RETURN ELEMENTID(T) AS TRANSLATIONID"))
+	require.True(t, strings.Contains(upper, "ORDER BY T.CREATEDAT DESC LIMIT 30"))
+}
+
+func TestExactShape_CreateOrUpdateTranslation_MergeOptionalCallUnion_ReturnsRow(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-create-update-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "review-key-shape",
+			"textKey128": "review-key-shape-128",
+			"pagePath":   "/seed",
+		},
+	})
+	require.NoError(t, err)
+
+	shape := `
+MERGE (o:OriginalText {textKey: $lookupValue})
+ON CREATE SET
+  o.originalText = $originalText,
+  o.page = $page,
+  o.pagePath = $pagePath,
+  o.trackingId = $trackingId,
+  o.bypassRAG = $bypassRAG,
+  o.contentType = $contentType,
+  o.createdAt = $now,
+  o.updatedAt = $now,
+  o.textKey = $textKey,
+  o.textKey128 = $textKey128
+ON MATCH SET
+  o.updatedAt = $now,
+  o.page = CASE WHEN trim(coalesce($page, '')) <> '' THEN $page ELSE o.page END,
+  o.pagePath = CASE WHEN $pagePath <> '' THEN $pagePath ELSE o.pagePath END
+WITH o,
+     $targetLang AS targetLang,
+     $translatedText AS translatedText,
+     $submitter AS submitter,
+     $isRefetch AS isRefetch,
+     $now AS now
+OPTIONAL MATCH (o)-[:TRANSLATES_TO]->(existing:TranslatedText {language: targetLang})
+WITH o, head(collect(existing)) AS existing, targetLang, translatedText, submitter, isRefetch, now
+CALL {
+  WITH o, existing, targetLang, translatedText, submitter, isRefetch, now
+  WITH o, existing, targetLang, translatedText, submitter, isRefetch, now
+  WHERE existing IS NULL
+  CREATE (t:TranslatedText {
+    language: targetLang,
+    translatedText: translatedText,
+    auditedText: null,
+    isReviewed: false,
+    reviewResult: null,
+    reviewedAt: null,
+    submitter: submitter,
+    isRefetch: isRefetch,
+    createdAt: now
+  })
+  CREATE (o)-[:TRANSLATES_TO]->(t)
+  RETURN t
+  UNION
+  WITH existing, translatedText, submitter
+  WHERE existing IS NOT NULL
+  SET existing.translatedText = translatedText,
+      existing.auditedText = null,
+      existing.isReviewed = false,
+      existing.reviewResult = null,
+      existing.reviewedAt = null,
+      existing.submitter = coalesce(existing.submitter, submitter),
+      existing.isRefetch = CASE
+        WHEN existing.submitter IS NOT NULL
+          AND (existing.isRefetch IS NULL OR existing.isRefetch = false)
+          AND existing.reviewResult IN ['rejected', 'reject']
+        THEN true
+        ELSE existing.isRefetch
+      END
+  RETURN existing AS t
+}
+RETURN elementId(o) AS originalId,
+       o.textKey AS textKey,
+       o.textKey128 AS textKey128,
+       o.page AS page,
+       o.trackingId AS trackingId,
+       elementId(t) AS id,
+       t.createdAt AS createdAt,
+       t.language AS language,
+       coalesce(t.translationId, elementId(t)) AS translationId,
+       t.translatedText AS translatedText,
+       t.auditedText AS auditedText,
+       coalesce(t.isReviewed, false) AS isReviewed,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.submitter AS submitter,
+       t.isRefetch AS isRefetch
+`
+
+	params := map[string]interface{}{
+		"lookupValue":    "review-key-shape",
+		"originalText":   "Hello world",
+		"page":           "https://example.test/review",
+		"pagePath":       "/review",
+		"trackingId":     "trk-shape",
+		"bypassRAG":      false,
+		"contentType":    "text/plain",
+		"now":            "2026-03-24T00:00:00Z",
+		"textKey":        "review-key-shape",
+		"textKey128":     "review-key-shape-128",
+		"targetLang":     "es",
+		"translatedText": "hola",
+		"submitter":      "submitter@example.test",
+		"isRefetch":      false,
+	}
+
+	first, err := exec.Execute(ctx, shape, params)
+	require.NoError(t, err)
+	require.Len(t, first.Rows, 1)
+	require.Contains(t, first.Columns, "originalId")
+	require.Contains(t, first.Columns, "translatedText")
+	firstCol := func(name string) int {
+		for i, c := range first.Columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	require.NotNil(t, first.Rows[0][firstCol("translatedText")])
+	firstOriginalID := first.Rows[0][firstCol("originalId")]
+
+	secondParams := map[string]interface{}{
+		"lookupValue":    "review-key-shape",
+		"originalText":   "Hello world",
+		"page":           "https://example.test/review",
+		"pagePath":       "/review",
+		"trackingId":     "trk-shape",
+		"bypassRAG":      false,
+		"contentType":    "text/plain",
+		"now":            "2026-03-24T00:00:01Z",
+		"textKey":        "review-key-shape",
+		"textKey128":     "review-key-shape-128",
+		"targetLang":     "es",
+		"translatedText": "hola-actualizada",
+		"submitter":      "submitter@example.test",
+		"isRefetch":      false,
+	}
+	second, err := exec.Execute(ctx, shape, secondParams)
+	require.NoError(t, err)
+	require.Len(t, second.Rows, 1)
+	secondCol := func(name string) int {
+		for i, c := range second.Columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	require.Equal(t, firstOriginalID, second.Rows[0][secondCol("originalId")], "shape should keep targeting same original node")
+	require.NotNil(t, second.Rows[0][secondCol("translatedText")])
+}
+
+func TestExactShape_ListReviewTranslations_PageFilter_CurrentShape_ReturnsExpectedRow(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-list-current-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":      "review-key-current",
+			"textKey128":   "review-key-current-128",
+			"originalText": "Please review me",
+			"pagePath":     "/benefits/financial-summary",
+			"page":         "https://example.test/benefits/financial-summary",
+			"trackingId":   "trk-current-1",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "tr-list-current-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"language":       "es",
+			"isReviewed":     false,
+			"translatedText": "hola",
+			"createdAt":      "2026-03-24T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{
+		ID:        "edge-list-current-1",
+		Type:      "TRANSLATES_TO",
+		StartNode: "orig-list-current-1",
+		EndNode:   "tr-list-current-1",
+	})
+	require.NoError(t, err)
+
+	shape := `
+MATCH (t:TranslatedText {language: $language, isReviewed: false})<-[:TRANSLATES_TO]-(o:OriginalText)
+WHERE o.pagePath STARTS WITH $pagePath
+RETURN elementId(t) AS translationId,
+       o.textKey AS textKey,
+       o.textKey128 AS textKey128,
+       t.isReviewed AS isReviewed,
+       t.translatedText AS translatedText,
+       o.originalText AS originalText,
+       t.translatedText AS originalTranslatedText,
+       t.auditedText AS auditedTranslatedText,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.createdAt AS createdAt,
+       o.page AS page,
+       o.trackingId AS trackingId
+ORDER BY t.createdAt DESC
+LIMIT 30
+`
+
+	res, err := exec.Execute(ctx, shape, map[string]interface{}{
+		"language": "es",
+		"pagePath": "/benefits",
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "review-key-current", res.Rows[0][1])
+	require.Equal(t, "review-key-current-128", res.Rows[0][2])
+	require.Equal(t, false, res.Rows[0][3])
+	require.Equal(t, "trk-current-1", res.Rows[0][12])
+}
+
+func TestExactShape_FindTranslatedByOriginalElementID_RelTraversal(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "orig-find-1",
+		Labels: []string{"OriginalText"},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "tr-find-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"language":       "es",
+			"translatedText": "hola",
+			"isReviewed":     false,
+			"createdAt":      "2026-03-24T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+	err = store.CreateEdge(&storage.Edge{
+		ID:        "edge-find-1",
+		Type:      "TRANSLATES_TO",
+		StartNode: "orig-find-1",
+		EndNode:   "tr-find-1",
+	})
+	require.NoError(t, err)
+
+	// Add noise to ensure start-node pruning path is exercised.
+	for i := 0; i < 300; i++ {
+		_, nerr := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID(fmt.Sprintf("orig-find-noise-%d", i)),
+			Labels: []string{"OriginalText"},
+		})
+		require.NoError(t, nerr)
+	}
+
+	shape := `
+MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText {language: $targetLang})
+WHERE elementId(o) = $originalId
+RETURN elementId(t) AS id,
+       t.createdAt AS createdAt,
+       t.language AS language,
+       t.translationId AS translationId,
+       t.translatedText AS translatedText,
+       t.auditedText AS auditedText,
+       t.isReviewed AS isReviewed,
+       t.reviewResult AS reviewResult,
+       t.reviewedAt AS reviewedAt,
+       t.submitter AS submitter,
+       t.isRefetch AS isRefetch
+LIMIT 1`
+
+	elemRes, err := exec.Execute(ctx, `
+MATCH (o:OriginalText)
+WHERE elementId(o) = 'orig-find-1'
+RETURN elementId(o) AS id
+LIMIT 1
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, elemRes.Rows, 1)
+	originalID, _ := elemRes.Rows[0][0].(string)
+	require.NotEmpty(t, originalID)
+
+	res, err := exec.Execute(ctx, shape, map[string]interface{}{
+		"originalId": originalID,
+		"targetLang": "es",
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "es", res.Rows[0][2])
+	require.Equal(t, "hola", res.Rows[0][4])
+}
+
+func TestExactShape_CleanupBatchedDetachDelete_ByRunIDAndKeys(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	runID := "run-cleanup-1"
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "t-clean-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"testRun": runID,
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "t-clean-2",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"testRun": runID,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o-clean-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"testRun":    runID,
+			"textKey":    "cleanup-k1",
+			"textKey128": "cleanup-k1-128",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o-clean-2",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"testRun":    runID,
+			"textKey":    "cleanup-k2",
+			"textKey128": "cleanup-k2-128",
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.CreateNode(&storage.Node{
+		ID:     "o-clean-3",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey":    "cleanup-k3",
+			"textKey128": "cleanup-k3-128",
+		},
+	})
+	require.NoError(t, err)
+
+	delTranslated, err := exec.Execute(ctx, `
+MATCH (t:TranslatedText)
+WHERE t.testRun = $runID
+WITH t LIMIT 100
+DETACH DELETE t
+RETURN count(t) AS deleted
+`, map[string]interface{}{"runID": runID})
+	require.NoError(t, err)
+	require.Len(t, delTranslated.Rows, 1)
+	require.Equal(t, int64(2), delTranslated.Rows[0][0])
+
+	delOriginalByRun, err := exec.Execute(ctx, `
+MATCH (o:OriginalText)
+WHERE o.testRun = $runID
+WITH o LIMIT 100
+DETACH DELETE o
+RETURN count(o) AS deleted
+`, map[string]interface{}{"runID": runID})
+	require.NoError(t, err)
+	require.Len(t, delOriginalByRun.Rows, 1)
+	require.Equal(t, int64(2), delOriginalByRun.Rows[0][0])
+
+	delOriginalByKeys, err := exec.Execute(ctx, `
+MATCH (o:OriginalText)
+WHERE o.textKey IN $keys
+WITH o LIMIT 100
+DETACH DELETE o
+RETURN count(o) AS deleted
+`, map[string]interface{}{"keys": []interface{}{"cleanup-k3"}})
+	require.NoError(t, err)
+	require.Len(t, delOriginalByKeys.Rows, 1)
+	require.Equal(t, int64(1), delOriginalByKeys.Rows[0][0])
+}
+
 func TestMigrationDDL_OpenCypherCompatibleVariants_FullStatements(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

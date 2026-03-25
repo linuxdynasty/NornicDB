@@ -361,6 +361,39 @@ func TestMergeHelpers_ParseReturnAndClauseSplitBranches(t *testing.T) {
 	assert.Nil(t, splitMergeChainClauseBlock(""))
 	parts := splitMergeChainClauseBlock("junk OPTIONAL MATCH (a) FOREACH (x IN [1] | SET a.v = x) RETURN a")
 	require.GreaterOrEqual(t, len(parts), 3)
+
+	collapsed := collapseConsecutiveDuplicateWithClauses(`
+MERGE (o:OriginalText {textKey: $lookupValue})
+WITH o, $targetLang AS targetLang
+WITH o, $targetLang AS targetLang
+WHERE o IS NOT NULL
+RETURN o
+`)
+	require.Equal(t, 1, strings.Count(collapsed, "WITH o, $targetLang AS targetLang"))
+}
+
+func TestFindMergeNode_UsesPropertyIndexLookup(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	require.NoError(t, schema.AddPropertyIndex("idx_original_textkey", "OriginalText", []string{"textKey"}))
+	nodeID, err := store.CreateNode(&storage.Node{
+		ID:     "orig-idx-1",
+		Labels: []string{"OriginalText"},
+		Properties: map[string]interface{}{
+			"textKey": "k-1",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, schema.PropertyIndexInsert("OriginalText", "textKey", nodeID, "k-1"))
+
+	found, err := exec.findMergeNode(store, []string{"OriginalText"}, map[string]interface{}{"textKey": "k-1"})
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, storage.NodeID("orig-idx-1"), found.ID)
 }
 
 func TestExecuteCompoundMatchMerge_OptionalAndContextRelationshipBranches(t *testing.T) {

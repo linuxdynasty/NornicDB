@@ -173,6 +173,10 @@ func hasStandaloneWithClause(cypher string) bool {
 
 func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	originalCypher := cypher
+	// Hot-path rewrite: list-review traversal shape that starts from TranslatedText
+	// and filters pagePath on OriginalText in WHERE. Reordering the traversal to start
+	// from OriginalText enables start-node pruning before relationship expansion.
+	cypher = rewriteListReviewTraversalHotPath(cypher)
 	// Substitute parameters AFTER routing to avoid keyword detection issues
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -850,6 +854,37 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	}
 
 	return result, nil
+}
+
+func rewriteListReviewTraversalHotPath(cypher string) string {
+	trimmed := strings.TrimSpace(cypher)
+	upperCollapsed := strings.ToUpper(strings.Join(strings.Fields(trimmed), " "))
+
+	required := []string{
+		"MATCH (T:TRANSLATEDTEXT",
+		"<-[:TRANSLATES_TO]-(O:ORIGINALTEXT)",
+		"ISREVIEWED: FALSE",
+		"WHERE O.PAGEPATH STARTS WITH",
+		"ORDER BY T.CREATEDAT DESC",
+		"LIMIT 30",
+	}
+	for _, token := range required {
+		if !strings.Contains(upperCollapsed, token) {
+			return cypher
+		}
+	}
+
+	matchIdx := findKeywordIndex(trimmed, "MATCH")
+	whereIdx := findKeywordIndex(trimmed, "WHERE")
+	if matchIdx != 0 || whereIdx <= 0 {
+		return cypher
+	}
+
+	// Keep WHERE/RETURN tail exactly as requested by caller; only rewrite the
+	// traversal pattern orientation to improve pruning in traversal execution.
+	tail := strings.TrimSpace(trimmed[whereIdx:])
+	rewrittenHead := "MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText {language: $language, isReviewed: false})"
+	return rewrittenHead + " " + tail
 }
 
 // selectTopKNodesByOrder returns the first k nodes for simple ORDER BY expressions

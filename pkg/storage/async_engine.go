@@ -1177,14 +1177,10 @@ func (ae *AsyncEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 }
 
 // AllNodes returns merged view of cache, in-flight nodes, and engine.
-// NOTE: We hold the read lock for the ENTIRE operation to prevent race conditions
-// with Flush() which clears the cache after writing to the engine.
-// CRITICAL: We must include in-flight nodes - these are being written to the engine
-// but haven't been cleared from tracking yet. Without this, nodes can become
-// "invisible" during the flush window, causing DETACH DELETE to miss them.
+// It snapshots async cache state quickly under lock, then releases the lock
+// before engine I/O to avoid holding ae.mu across potentially slow scans.
 func (ae *AsyncEngine) AllNodes() ([]*Node, error) {
 	ae.mu.RLock()
-	defer ae.mu.RUnlock()
 
 	// Build set of deleted IDs (these should NOT appear in results)
 	deletedIDs := make(map[NodeID]bool)
@@ -1197,6 +1193,7 @@ func (ae *AsyncEngine) AllNodes() ([]*Node, error) {
 	for id, node := range ae.nodeCache {
 		cachedNodes[id] = node
 	}
+	ae.mu.RUnlock()
 
 	// Get nodes from underlying engine
 	engineNodes, err := ae.engine.AllNodes()
@@ -1236,11 +1233,10 @@ func (ae *AsyncEngine) AllNodes() ([]*Node, error) {
 }
 
 // AllEdges returns merged view of cache and engine.
-// NOTE: We hold the read lock for the ENTIRE operation to prevent race conditions
-// with Flush() which clears the cache after writing to the engine.
+// It snapshots async cache state quickly under lock, then releases the lock
+// before engine I/O to avoid holding ae.mu across potentially slow scans.
 func (ae *AsyncEngine) AllEdges() ([]*Edge, error) {
 	ae.mu.RLock()
-	defer ae.mu.RUnlock()
 
 	cachedEdges := make([]*Edge, 0, len(ae.edgeCache))
 	deletedIDs := make(map[EdgeID]bool)
@@ -1251,6 +1247,7 @@ func (ae *AsyncEngine) AllEdges() ([]*Edge, error) {
 	for _, edge := range ae.edgeCache {
 		cachedEdges = append(cachedEdges, edge)
 	}
+	ae.mu.RUnlock()
 
 	engineEdges, err := ae.engine.AllEdges()
 	if err != nil {

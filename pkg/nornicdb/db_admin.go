@@ -207,8 +207,9 @@ func (db *DB) GetSearchStats() *SearchStats {
 // HTTP handlers should return 202 Accepted instead of 201 Created for writes.
 func (db *DB) IsAsyncWritesEnabled() bool {
 	db.mu.RLock()
-	defer db.mu.RUnlock()
-	return db.config.Database.AsyncWritesEnabled
+	enabled := db.config.Database.AsyncWritesEnabled
+	db.mu.RUnlock()
+	return enabled
 }
 
 // CypherResult holds results from a Cypher query.
@@ -221,14 +222,15 @@ type CypherResult struct {
 // ExecuteCypher runs a Cypher query and returns structured results.
 func (db *DB) ExecuteCypher(ctx context.Context, query string, params map[string]interface{}) (*CypherResult, error) {
 	db.mu.RLock()
-	defer db.mu.RUnlock()
-
 	if db.closed {
+		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
+	executor := db.cypherExecutor
+	db.mu.RUnlock()
 
 	// Execute query through Cypher executor
-	result, err := db.cypherExecutor.Execute(ctx, query, params)
+	result, err := executor.Execute(ctx, query, params)
 	if err != nil {
 		return nil, err
 	}
@@ -521,12 +523,14 @@ func (db *DB) GetNode(ctx context.Context, id string) (*Node, error) {
 
 // CreateNode creates a new node.
 func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[string]interface{}) (*Node, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
+	storageEngine := db.storage
+	embedQueue := db.embedQueue
+	db.mu.RUnlock()
 
 	id := generateID("node")
 	now := time.Now()
@@ -541,19 +545,25 @@ func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[st
 		CreatedAt:  now,
 	}
 
-	actualID, err := db.storage.CreateNode(node)
+	actualID, err := storageEngine.CreateNode(node)
 	if err != nil {
 		return nil, err
 	}
 
-	// Always queue for async embedding generation (non-blocking)
-	if db.embedQueue != nil {
-		db.embedQueue.Enqueue(string(actualID))
+	// Always queue for async embedding generation (non-blocking trigger).
+	if embedQueue != nil {
+		embedQueue.Enqueue(string(actualID))
 	}
 
-	// Update search indexes (live indexing for seamless Mimir compatibility)
-	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
-		_ = svc.IndexNode(node) // Best effort - search may lag behind writes
+	// Keep request-path read-your-write behavior for search by indexing immediately.
+	// Storage event callbacks still provide eventual consistency for external writers.
+	svc, svcErr := db.getOrCreateSearchService(db.defaultDatabaseName(), storageEngine)
+	if svcErr == nil && svc != nil {
+		indexNode := storage.CopyNode(node)
+		indexNode.ID = actualID
+		if indexErr := svc.IndexNode(indexNode); indexErr != nil && !db.shouldIgnoreSearchIndexingError(indexErr) {
+			return nil, indexErr
+		}
 	}
 
 	return &Node{
@@ -566,14 +576,16 @@ func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[st
 
 // UpdateNode updates a node's properties.
 func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]interface{}) (*Node, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
+	storageEngine := db.storage
+	embedQueue := db.embedQueue
+	db.mu.RUnlock()
 
-	n, err := db.storage.GetNode(storage.NodeID(id))
+	n, err := storageEngine.GetNode(storage.NodeID(id))
 	if err != nil {
 		return nil, ErrNotFound
 	}
@@ -604,13 +616,21 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 		invalidateNodeManagedEmbeddings(n)
 	}
 
-	if err := db.storage.UpdateNode(n); err != nil {
+	if err := storageEngine.UpdateNode(n); err != nil {
 		return nil, err
 	}
 
 	// Kick the embed worker so regeneration starts quickly (it will pull from the pending index).
-	if invalidateManagedEmbeddings && db.embedQueue != nil {
-		db.embedQueue.Trigger()
+	if invalidateManagedEmbeddings && embedQueue != nil {
+		embedQueue.Trigger()
+	}
+
+	// Keep search results immediately consistent after updates.
+	svc, svcErr := db.getOrCreateSearchService(db.defaultDatabaseName(), storageEngine)
+	if svcErr == nil && svc != nil {
+		if indexErr := svc.IndexNode(n); indexErr != nil && !db.shouldIgnoreSearchIndexingError(indexErr) {
+			return nil, indexErr
+		}
 	}
 
 	// Decrypt for return

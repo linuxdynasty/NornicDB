@@ -165,6 +165,13 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 	// Execute the match first - return the specific variables being deleted
 	// Can't use RETURN * because it returns literal "*" instead of expanding
+	if hot, ok, err := e.tryExecuteDeleteWithWithLimitHotPath(ctx, cypher, matchIdx, deleteIdx, deleteVars, detach, needEdgeStats); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return hot, nil
+	}
+
 	matchQuery := cypher[matchIdx:deleteIdx] + " RETURN " + deleteVars
 	matchResult, err := e.executeMatch(ctx, matchQuery)
 	if err != nil {
@@ -250,6 +257,208 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	e.applyDeleteReturnProjection(result, cypher, deleteVars)
 
 	return result, nil
+}
+
+// tryExecuteDeleteWithWithLimitHotPath executes:
+//
+//	MATCH ... [WHERE ...]
+//	WITH <var> LIMIT <n>
+//	DETACH DELETE <var>
+//	[RETURN ...]
+//
+// with a streamlined path that avoids generic WITH parsing in delete execution.
+func (e *StorageExecutor) tryExecuteDeleteWithWithLimitHotPath(ctx context.Context, cypher string, matchIdx, deleteIdx int, deleteVars string, detach bool, needEdgeStats bool) (*ExecuteResult, bool, error) {
+	if !detach || matchIdx < 0 || deleteIdx <= matchIdx {
+		return nil, false, nil
+	}
+	if strings.Contains(deleteVars, ",") {
+		return nil, false, nil
+	}
+	deleteVar := strings.TrimSpace(deleteVars)
+	if deleteVar == "" {
+		return nil, false, nil
+	}
+
+	matchSegment := strings.TrimSpace(cypher[matchIdx:deleteIdx])
+	withIdx := findKeywordIndex(matchSegment, "WITH")
+	if withIdx <= 0 {
+		return nil, false, nil
+	}
+
+	// Keep this hot path strict and deterministic.
+	for _, blocked := range []string{"ORDER BY", "SKIP", "UNWIND", "CALL", "OPTIONAL MATCH"} {
+		if containsKeywordOutsideStrings(matchSegment, blocked) {
+			return nil, false, nil
+		}
+	}
+
+	baseMatch := strings.TrimSpace(matchSegment[:withIdx])
+	withPart := strings.TrimSpace(matchSegment[withIdx+4:]) // skip "WITH"
+	limitIdx := findKeywordIndex(withPart, "LIMIT")
+	if limitIdx <= 0 {
+		return nil, false, nil
+	}
+
+	withVar := strings.TrimSpace(withPart[:limitIdx])
+	if withVar != deleteVar {
+		return nil, false, nil
+	}
+	limitLiteral := strings.TrimSpace(withPart[limitIdx+5:]) // skip "LIMIT"
+	if limitLiteral == "" {
+		return nil, false, nil
+	}
+	limitFields := strings.Fields(limitLiteral)
+	if len(limitFields) == 0 {
+		return nil, false, nil
+	}
+	limitN, err := strconv.Atoi(limitFields[0])
+	if err != nil || limitN <= 0 {
+		return nil, false, nil
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+	store := e.getStorage(ctx)
+
+	candidates, ok, err := e.collectDeleteWithLimitCandidates(baseMatch, deleteVar, limitN, getParamsFromContext(ctx))
+	if err != nil {
+		return nil, true, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+
+	deletedNodeIDs := make(map[string]struct{}, len(candidates))
+	for _, node := range candidates {
+		if node == nil {
+			continue
+		}
+		nodeID := string(node.ID)
+		if _, seen := deletedNodeIDs[nodeID]; seen {
+			continue
+		}
+		edgesCount := 0
+		if needEdgeStats {
+			outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
+			incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
+			edgesCount = len(outgoingEdges) + len(incomingEdges)
+		}
+		if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
+			result.Stats.NodesDeleted++
+			result.Stats.RelationshipsDeleted += edgesCount
+			deletedNodeIDs[nodeID] = struct{}{}
+			e.removeNodeFromSearch(nodeID)
+		}
+	}
+
+	e.applyDeleteReturnProjection(result, cypher, deleteVar)
+	return result, true, nil
+}
+
+func (e *StorageExecutor) collectDeleteWithLimitCandidates(baseMatch, deleteVar string, limitN int, params map[string]interface{}) ([]*storage.Node, bool, error) {
+	matchIdx := findKeywordIndex(baseMatch, "MATCH")
+	if matchIdx < 0 {
+		return nil, false, nil
+	}
+	whereIdx := findKeywordIndex(baseMatch, "WHERE")
+	patternPart := strings.TrimSpace(baseMatch[matchIdx+5:])
+	wherePart := ""
+	if whereIdx > 0 {
+		patternPart = strings.TrimSpace(baseMatch[matchIdx+5 : whereIdx])
+		wherePart = strings.TrimSpace(baseMatch[whereIdx+5:])
+	}
+	nodePat := e.parseNodePattern(patternPart)
+	if strings.TrimSpace(nodePat.variable) != deleteVar {
+		return nil, false, nil
+	}
+
+	var nodes []*storage.Node
+	var err error
+	if len(nodePat.labels) > 0 {
+		nodes, err = e.storage.GetNodesByLabel(nodePat.labels[0])
+	} else {
+		nodes, err = e.storage.AllNodes()
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	if len(nodePat.properties) > 0 {
+		nodes = e.filterNodesByProperties(nodes, nodePat.properties)
+	}
+
+	if wherePart != "" {
+		// Supported hot-path predicates:
+		//   var.prop = $param | 'literal'
+		//   var.prop IN $param
+		eqRE := regexp.MustCompile(`(?i)^\s*` + regexp.QuoteMeta(deleteVar) + `\.(\w+)\s*=\s*(.+?)\s*$`)
+		inRE := regexp.MustCompile(`(?i)^\s*` + regexp.QuoteMeta(deleteVar) + `\.(\w+)\s+IN\s+\$(\w+)\s*$`)
+
+		if m := eqRE.FindStringSubmatch(wherePart); len(m) == 3 {
+			prop := m[1]
+			rhs := strings.TrimSpace(m[2])
+			var expected interface{}
+			if strings.HasPrefix(rhs, "$") {
+				key := strings.TrimSpace(strings.TrimPrefix(rhs, "$"))
+				val, ok := params[key]
+				if !ok {
+					return []*storage.Node{}, true, nil
+				}
+				expected = val
+			} else {
+				expected = strings.Trim(rhs, "'\"")
+			}
+			filtered := make([]*storage.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if n == nil {
+					continue
+				}
+				if e.compareEqual(n.Properties[prop], expected) {
+					filtered = append(filtered, n)
+				}
+			}
+			nodes = filtered
+		} else if m := inRE.FindStringSubmatch(wherePart); len(m) == 3 {
+			prop := m[1]
+			paramName := m[2]
+			raw, ok := params[paramName]
+			if !ok {
+				return []*storage.Node{}, true, nil
+			}
+			allowed := map[string]struct{}{}
+			switch v := raw.(type) {
+			case []interface{}:
+				for _, item := range v {
+					allowed[fmt.Sprintf("%v", item)] = struct{}{}
+				}
+			case []string:
+				for _, item := range v {
+					allowed[item] = struct{}{}
+				}
+			default:
+				return nil, false, nil
+			}
+			filtered := make([]*storage.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if n == nil {
+					continue
+				}
+				if _, ok := allowed[fmt.Sprintf("%v", n.Properties[prop])]; ok {
+					filtered = append(filtered, n)
+				}
+			}
+			nodes = filtered
+		} else {
+			return nil, false, nil
+		}
+	}
+
+	if limitN < len(nodes) {
+		nodes = nodes[:limitN]
+	}
+	return nodes, true, nil
 }
 
 func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cypher, deleteVars string) {

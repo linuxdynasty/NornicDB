@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +58,14 @@ func mergeLookupCacheKey(label, prop string, val interface{}) string {
 	return fmt.Sprintf("%s:{%s:%v}", label, prop, val)
 }
 
+func cloneNodePropertiesMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func (e *StorageExecutor) findMergeNodeInCache(labels []string, props map[string]interface{}) *storage.Node {
 	if len(labels) == 0 || len(props) == 0 {
 		return nil
@@ -94,6 +103,29 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 
 	if cached := e.findMergeNodeInCache(labels, props); cached != nil {
 		return cached, nil
+	}
+
+	// Index hot path: if a property index exists for any MERGE key, look up
+	// candidate node IDs directly instead of label/full scans.
+	schema := store.GetSchema()
+	if schema != nil {
+		label := labels[0]
+		for prop, val := range props {
+			if _, ok := schema.GetPropertyIndex(label, prop); !ok {
+				continue
+			}
+			ids := schema.PropertyIndexLookup(label, prop, val)
+			for _, id := range ids {
+				n, err := store.GetNode(id)
+				if err != nil || n == nil {
+					continue
+				}
+				if mergeNodeMatches(n, labels, props) {
+					e.cacheMergeNode(labels, props, n)
+					return n, nil
+				}
+			}
+		}
 	}
 
 	nodes, err := store.GetNodesByLabel(labels[0])
@@ -1787,6 +1819,10 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
 	}
+	// Normalization: collapse duplicated consecutive WITH projections.
+	// Some generated MERGE+CALL query shapes emit the same WITH line twice
+	// inside subqueries, which is a semantic no-op but adds parse/execution overhead.
+	cypher = collapseConsecutiveDuplicateWithClauses(cypher)
 
 	result := &ExecuteResult{
 		Columns: []string{},
@@ -1945,6 +1981,25 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 	}
 
 	return result, nil
+}
+
+func collapseConsecutiveDuplicateWithClauses(cypher string) string {
+	lines := strings.Split(cypher, "\n")
+	if len(lines) < 2 {
+		return cypher
+	}
+	out := make([]string, 0, len(lines))
+	var prevTrim string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		upperTrim := strings.ToUpper(trimmed)
+		if strings.HasPrefix(upperTrim, "WITH ") && prevTrim == trimmed {
+			continue
+		}
+		out = append(out, line)
+		prevTrim = trimmed
+	}
+	return strings.Join(out, "\n")
 }
 
 // applyWithProjection applies WITH semantics to a MERGE chain segment.
@@ -2198,9 +2253,12 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 				setEnd = setIdx
 			}
 			setClause := strings.TrimSpace(segment[onMatchIdx+12 : setEnd])
+			beforeProps := cloneNodePropertiesMap(node.Properties)
 			e.applySetToNode(node, varName, setClause)
-			store.UpdateNode(node)
-			e.notifyNodeMutated(string(node.ID))
+			if !reflect.DeepEqual(beforeProps, node.Properties) {
+				store.UpdateNode(node)
+				e.notifyNodeMutated(string(node.ID))
+			}
 		}
 	} else {
 		// Create new node
@@ -2242,9 +2300,12 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 					setEnd = setIdx
 				}
 				setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
+				beforeProps := cloneNodePropertiesMap(node.Properties)
 				e.applySetToNode(node, varName, setClause)
-				store.UpdateNode(node)
-				e.notifyNodeMutated(string(node.ID))
+				if !reflect.DeepEqual(beforeProps, node.Properties) {
+					store.UpdateNode(node)
+					e.notifyNodeMutated(string(node.ID))
+				}
 			}
 		}
 	}
@@ -2259,10 +2320,13 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			}
 		}
 		setClause := strings.TrimSpace(segment[setIdx+3 : setEnd])
+		beforeProps := cloneNodePropertiesMap(node.Properties)
 		e.applySetToNode(node, varName, setClause)
-		store.UpdateNode(node)
-		e.notifyNodeMutated(string(node.ID))
-		e.cacheMergeNode(labels, props, node)
+		if !reflect.DeepEqual(beforeProps, node.Properties) {
+			store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
+			e.cacheMergeNode(labels, props, node)
+		}
 	}
 
 	return node, varName, nil

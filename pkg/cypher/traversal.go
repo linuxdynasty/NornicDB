@@ -217,8 +217,18 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	var optimizedStartNodes []*storage.Node
 	usedPropertyIndex := false
 	if whereClause != "" {
-		// Prefer indexed start-node pruning for simple property predicates.
+		// Direct element/id equality seek on start variable:
+		// MATCH (o)-[:R]->(t) WHERE elementId(o) = '...'
+		// This avoids traversing from all start nodes for single-node lookups.
 		if matches.StartNode.variable != "" {
+			if nodes, used, idxErr := e.tryCollectNodesFromIDEquality(matches.StartNode, whereClause); idxErr == nil && used {
+				optimizedStartNodes = nodes
+				usedPropertyIndex = true
+			}
+		}
+
+		// Prefer indexed start-node pruning for simple property predicates.
+		if matches.StartNode.variable != "" && len(optimizedStartNodes) == 0 {
 			if nodes, used, idxErr := e.tryCollectNodesFromPropertyIndex(matches.StartNode, whereClause); idxErr == nil && used {
 				optimizedStartNodes = nodes
 				usedPropertyIndex = true

@@ -342,3 +342,32 @@ RETURN count(n) AS deleted`, nil)
 	require.Len(t, remaining.Rows, 1)
 	assert.Equal(t, int64(0), remaining.Rows[0][0])
 }
+
+func TestDetachDelete_WithLimitHotPath_ReturnCountProjection(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		_, err := executor.Execute(ctx, fmt.Sprintf("CREATE (:TmpDelete {testRun: 'run-1', id: 'd-%d'})", i), nil)
+		require.NoError(t, err)
+	}
+
+	res, err := executor.Execute(ctx, `
+MATCH (n:TmpDelete)
+WHERE n.testRun = 'run-1'
+WITH n LIMIT 2
+DETACH DELETE n
+RETURN count(n) AS deleted
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	assert.Equal(t, int64(2), res.Rows[0][0], "WITH LIMIT delete hot path should delete limited batch")
+
+	remaining, err := executor.Execute(ctx, "MATCH (n:TmpDelete) WHERE n.testRun = 'run-1' RETURN count(n) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, remaining.Rows, 1)
+	assert.Equal(t, int64(3), remaining.Rows[0][0])
+}
