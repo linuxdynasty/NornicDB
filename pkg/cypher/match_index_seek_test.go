@@ -211,6 +211,61 @@ func TestParseSimpleIndexedInParam(t *testing.T) {
 	require.Len(t, vals, 2)
 }
 
+func TestParseSimpleIndexedInLiteral(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	prop, vals, ok := exec.parseSimpleIndexedInLiteral("n", "n.translationId IN ['src-a','src-c']")
+	require.True(t, ok)
+	require.Equal(t, "translationId", prop)
+	require.Len(t, vals, 2)
+}
+
+func TestMatchUsesPropertyIndexForInLiteralList(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	eng := &allNodesForbiddenEngine{MemoryEngine: base}
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-lit-a",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"translationId": "src-a",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-lit-b",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"translationId": "src-b",
+		},
+	})
+	require.NoError(t, err)
+	_, err = eng.CreateNode(&storage.Node{
+		ID:     "nornic:doc-lit-c",
+		Labels: []string{"MongoDocument"},
+		Properties: map[string]interface{}{
+			"translationId": "src-c",
+		},
+	})
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(eng)
+	_, err = exec.Execute(context.Background(), "CREATE INDEX idx_translation_id_lit FOR (n:MongoDocument) ON (n.translationId)", nil)
+	require.NoError(t, err)
+	eng.forbidScan = true
+
+	res, err := exec.Execute(
+		context.Background(),
+		"MATCH (n:MongoDocument) WHERE n.translationId IN ['src-a','src-c'] RETURN n.translationId AS id ORDER BY n.translationId",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+	require.Equal(t, "src-a", res.Rows[0][0])
+	require.Equal(t, "src-c", res.Rows[1][0])
+}
+
 func TestMatchUsesPropertyIndexForIsNotNullOrderByLimit(t *testing.T) {
 	base := storage.NewMemoryEngine()
 	t.Cleanup(func() { _ = base.Close() })

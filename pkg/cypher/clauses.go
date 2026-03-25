@@ -1417,8 +1417,10 @@ type optionalRelResult struct {
 // executeCompoundMatchOptionalMatch handles MATCH ... OPTIONAL MATCH ... WITH ... RETURN queries
 // This implements left outer join semantics for relationship traversals with aggregation support
 func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	originalCypher := cypher
+	params := getParamsFromContext(ctx)
 	// Substitute parameters AFTER routing to avoid keyword detection issues
-	if params := getParamsFromContext(ctx); params != nil {
+	if params != nil {
 		cypher = e.substituteParams(cypher, params)
 	}
 
@@ -1450,6 +1452,11 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 	// Parse the initial MATCH clause section (everything between MATCH and OPTIONAL MATCH)
 	// This may contain: node pattern, WHERE clause, and WITH DISTINCT
 	initialSection := strings.TrimSpace(cypher[5:optMatchIdx]) // Get original case, skip "MATCH"
+	originalOptMatchIdx := findKeywordIndex(originalCypher, "OPTIONAL MATCH")
+	initialSectionRaw := initialSection
+	if originalOptMatchIdx > 5 {
+		initialSectionRaw = strings.TrimSpace(originalCypher[5:originalOptMatchIdx])
+	}
 
 	// Extract WHERE clause if present (between node pattern and WITH DISTINCT/OPTIONAL MATCH)
 	var whereClause string
@@ -1480,40 +1487,19 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 		}
 		whereClause = strings.TrimSpace(initialSection[whereIdx+5 : whereEnd]) // Skip "WHERE"
 	}
-
-	// Get all nodes matching the initial pattern
-	var initialNodes []*storage.Node
-	var err error
-	if len(nodePattern.labels) > 0 {
-		initialNodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-	} else {
-		initialNodes, err = e.storage.AllNodes()
+	rawWhereClause := ""
+	if rawWhereIdx := findKeywordIndex(initialSectionRaw, "WHERE"); rawWhereIdx > 0 {
+		rawWhereEnd := len(initialSectionRaw)
+		if rawWithIdx := findStandaloneWithIndex(initialSectionRaw); rawWithIdx > rawWhereIdx {
+			rawWhereEnd = rawWithIdx
+		}
+		rawWhereClause = strings.TrimSpace(initialSectionRaw[rawWhereIdx+5 : rawWhereEnd])
 	}
+
+	// Collect initial MATCH nodes with index-backed candidates when possible.
+	initialNodes, err := e.collectOptionalMatchInitialNodes(nodePattern, whereClause, rawWhereClause, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get initial nodes: %w", err)
-	}
-
-	// Filter by properties if any
-	if len(nodePattern.properties) > 0 {
-		filtered := make([]*storage.Node, 0)
-		for _, node := range initialNodes {
-			match := true
-			for k, v := range nodePattern.properties {
-				if node.Properties[k] != v {
-					match = false
-					break
-				}
-			}
-			if match {
-				filtered = append(filtered, node)
-			}
-		}
-		initialNodes = filtered
-	}
-
-	// Apply WHERE clause filtering if present
-	if whereClause != "" {
-		initialNodes = e.filterNodes(initialNodes, nodePattern.variable, whereClause)
 	}
 
 	// Parse the OPTIONAL MATCH relationship pattern
@@ -1573,6 +1559,122 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 		Columns: []string{"matched"},
 		Rows:    [][]interface{}{{int64(len(joinedRows))}},
 	}, nil
+}
+
+func (e *StorageExecutor) collectOptionalMatchInitialNodes(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	rawWhereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, error) {
+	var (
+		nodes             []*storage.Node
+		err               error
+		usedPropertyIndex bool
+	)
+
+	if rawWhereClause != "" {
+		inWherePart := rawWhereClause
+		if candidates, used, idxErr := e.tryCollectNodesFromIDEqualityParam(nodePattern, inWherePart, params); idxErr == nil && used {
+			nodes = candidates
+			usedPropertyIndex = true
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromIDInParam(nodePattern, inWherePart, params); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInOrParam(nodePattern, inWherePart, params); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexOrEquality(nodePattern, inWherePart, params); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(nodePattern, inWherePart, params); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+	}
+
+	if !usedPropertyIndex && whereClause != "" {
+		if candidates, used, idxErr := e.tryCollectNodesFromIDEquality(nodePattern, whereClause); idxErr == nil && used {
+			nodes = candidates
+			usedPropertyIndex = true
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInLiteral(nodePattern, whereClause); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(nodePattern, whereClause); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNull(nodePattern, whereClause); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
+	}
+
+	if !usedPropertyIndex {
+		if len(nodePattern.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		} else {
+			nodes, err = e.storage.AllNodes()
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if usedPropertyIndex && len(nodes) == 0 && whereClause != "" {
+		// Fail-open on possible stale index metadata/candidates.
+		if len(nodePattern.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		} else {
+			nodes, err = e.storage.AllNodes()
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Filter by pattern properties if any.
+	if len(nodePattern.properties) > 0 {
+		filtered := make([]*storage.Node, 0, len(nodes))
+		for _, node := range nodes {
+			match := true
+			for k, v := range nodePattern.properties {
+				if node.Properties[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				filtered = append(filtered, node)
+			}
+		}
+		nodes = filtered
+	}
+
+	// Apply WHERE filtering for full semantic correctness.
+	if whereClause != "" {
+		nodes = e.filterNodes(nodes, nodePattern.variable, whereClause)
+	}
+	return nodes, nil
 }
 
 // parseOptionalRelPattern parses patterns like (a)-[r:TYPE]->(b:Label)

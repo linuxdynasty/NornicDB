@@ -377,13 +377,51 @@ func (e *StorageExecutor) collectDeleteWithLimitCandidates(baseMatch, deleteVar 
 
 	var nodes []*storage.Node
 	var err error
-	if len(nodePat.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePat.labels[0])
-	} else {
-		nodes, err = e.storage.AllNodes()
+	usedIndex := false
+	if wherePart != "" {
+		if candidates, used, idxErr := e.tryCollectNodesFromIDInParam(nodePat, wherePart, params); idxErr == nil && used {
+			nodes = candidates
+			usedIndex = true
+		}
+		if !usedIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexIn(wherePartNodePattern(nodePat, deleteVar), wherePart, params); idxErr == nil && used {
+				nodes = candidates
+				usedIndex = true
+			}
+		}
+		if !usedIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInLiteral(wherePartNodePattern(nodePat, deleteVar), wherePart); idxErr == nil && used {
+				nodes = candidates
+				usedIndex = true
+			}
+		}
+		if !usedIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndex(wherePartNodePattern(nodePat, deleteVar), wherePart); idxErr == nil && used {
+				nodes = candidates
+				usedIndex = true
+			}
+		}
 	}
-	if err != nil {
-		return nil, true, err
+	if !usedIndex {
+		if len(nodePat.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodePat.labels[0])
+		} else {
+			nodes, err = e.storage.AllNodes()
+		}
+		if err != nil {
+			return nil, true, err
+		}
+	}
+	if usedIndex && len(nodes) == 0 && wherePart != "" {
+		// Fail-open on potential stale index candidates.
+		if len(nodePat.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodePat.labels[0])
+		} else {
+			nodes, err = e.storage.AllNodes()
+		}
+		if err != nil {
+			return nil, true, err
+		}
 	}
 	if len(nodePat.properties) > 0 {
 		nodes = e.filterNodesByProperties(nodes, nodePat.properties)
@@ -459,6 +497,14 @@ func (e *StorageExecutor) collectDeleteWithLimitCandidates(baseMatch, deleteVar 
 		nodes = nodes[:limitN]
 	}
 	return nodes, true, nil
+}
+
+func wherePartNodePattern(nodePat nodePatternInfo, variable string) nodePatternInfo {
+	if strings.TrimSpace(nodePat.variable) != "" {
+		return nodePat
+	}
+	nodePat.variable = variable
+	return nodePat
 }
 
 func (e *StorageExecutor) applyDeleteReturnProjection(result *ExecuteResult, cypher, deleteVars string) {

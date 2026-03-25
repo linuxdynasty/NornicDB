@@ -338,6 +338,59 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexIn(
 	return nodes, true, nil
 }
 
+// tryCollectNodesFromPropertyIndexInLiteral attempts to satisfy simple IN-list
+// predicates with literal lists:
+//
+//	<var>.<prop> IN ['a', 'b', ...]
+func (e *StorageExecutor) tryCollectNodesFromPropertyIndexInLiteral(
+	nodePattern nodePatternInfo,
+	whereClause string,
+) ([]*storage.Node, bool, error) {
+	property, listValues, ok := e.parseSimpleIndexedInLiteral(nodePattern.variable, whereClause)
+	if !ok {
+		return nil, false, nil
+	}
+
+	schema := e.storage.GetSchema()
+	if schema == nil {
+		return nil, false, nil
+	}
+	labels := e.indexCandidateLabels(schema, nodePattern.labels, property)
+	if len(labels) == 0 {
+		return nil, false, nil
+	}
+
+	idSet := make(map[storage.NodeID]struct{}, 256)
+	for _, label := range labels {
+		for _, value := range listValues {
+			for _, id := range schema.PropertyIndexLookup(label, property, value) {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return []*storage.Node{}, true, nil
+	}
+
+	nodes := make([]*storage.Node, 0, len(idSet))
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		node, err := e.storage.GetNode(storage.NodeID(id))
+		if err != nil || node == nil {
+			continue
+		}
+		if len(nodePattern.labels) > 0 && !nodeHasAnyLabel(node, nodePattern.labels) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, true, nil
+}
+
 // tryCollectNodesFromPropertyIndexInOrParam attempts to satisfy OR-combined IN
 // predicates backed by indexes, e.g.:
 //
@@ -960,6 +1013,59 @@ func (e *StorageExecutor) parseSimpleIndexedInParam(variable, whereClause string
 	list := coerceInterfaceList(raw)
 	if len(list) == 0 {
 		return "", []interface{}{}, true
+	}
+	out := make([]interface{}, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, v := range list {
+		if v == nil {
+			continue
+		}
+		k := fmt.Sprintf("%T:%v", v, v)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, v)
+	}
+	return parsedProp, out, true
+}
+
+func (e *StorageExecutor) parseSimpleIndexedInLiteral(variable, whereClause string) (property string, values []interface{}, ok bool) {
+	clause := strings.TrimSpace(whereClause)
+	for strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") && len(clause) >= 2 {
+		inner := strings.TrimSpace(clause[1 : len(clause)-1])
+		if inner == clause {
+			break
+		}
+		clause = inner
+	}
+	if clause == "" {
+		return "", nil, false
+	}
+	// Keep this optimization deterministic and safe: only simple standalone IN predicates.
+	if containsFold(clause, " AND ") || containsFold(clause, " OR ") {
+		return "", nil, false
+	}
+	inIdx := keywordIndexFrom(clause, "IN", 0, defaultKeywordScanOpts())
+	if inIdx <= 0 || inIdx >= len(clause)-2 {
+		return "", nil, false
+	}
+	left := strings.TrimSpace(clause[:inIdx])
+	right := strings.TrimSpace(clause[inIdx+2:])
+	if left == "" || right == "" {
+		return "", nil, false
+	}
+	parsedProp, ok := parseVariableProperty(left, variable)
+	if !ok {
+		return "", nil, false
+	}
+	if !strings.HasPrefix(right, "[") || !strings.HasSuffix(right, "]") {
+		return "", nil, false
+	}
+	rawList := e.parseValue(right)
+	list := coerceInterfaceList(rawList)
+	if len(list) == 0 {
+		return parsedProp, []interface{}{}, true
 	}
 	out := make([]interface{}, 0, len(list))
 	seen := make(map[string]struct{}, len(list))

@@ -742,8 +742,10 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 // executeMatchWithOptionalMatch handles MATCH ... WITH ... WHERE ... OPTIONAL MATCH ... RETURN queries
 // This is a Neo4j compatibility feature that processes WITH clause filtering before OPTIONAL MATCH
 func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	originalCypher := cypher
+	params := getParamsFromContext(ctx)
 	// Substitute parameters AFTER routing to avoid keyword detection issues
-	if params := getParamsFromContext(ctx); params != nil {
+	if params != nil {
 		cypher = e.substituteParams(cypher, params)
 	}
 
@@ -770,30 +772,21 @@ func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cyp
 	} else {
 		nodePatternPart = matchPart
 	}
+	matchPartRaw := ""
+	if rawWithIdx := findKeywordIndex(originalCypher, "WITH"); rawWithIdx > 5 {
+		rawMatchPart := strings.TrimSpace(originalCypher[5:rawWithIdx])
+		if rawMatchWhereIdx := findKeywordIndex(rawMatchPart, "WHERE"); rawMatchWhereIdx > 0 {
+			matchPartRaw = strings.TrimSpace(rawMatchPart[rawMatchWhereIdx+5:])
+		}
+	}
 
 	// Parse node pattern
 	nodePattern := e.parseNodePattern(nodePatternPart)
 
-	// Get matching nodes
-	var nodes []*storage.Node
-	var err error
-	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-	} else {
-		nodes, err = e.storage.AllNodes()
-	}
+	// Get matching nodes (index-backed when possible)
+	nodes, err := e.collectOptionalMatchInitialNodes(nodePattern, matchWhereClause, matchPartRaw, params)
 	if err != nil {
 		return nil, fmt.Errorf("storage error: %w", err)
-	}
-
-	// Apply property filter from MATCH pattern
-	if len(nodePattern.properties) > 0 {
-		nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
-	}
-
-	// Apply WHERE clause filter from MATCH if present
-	if matchWhereClause != "" {
-		nodes = e.filterNodesByWhereClause(nodes, matchWhereClause, nodePattern.variable)
 	}
 
 	// Extract WITH clause section (between WITH and OPTIONAL MATCH)

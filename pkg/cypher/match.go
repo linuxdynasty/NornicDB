@@ -643,6 +643,12 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 				usedPropertyIndex = true
 			}
 		}
+		if !usedPropertyIndex {
+			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexInLiteral(nodePattern, wherePart); idxErr == nil && used {
+				nodes = candidates
+				usedPropertyIndex = true
+			}
+		}
 		if !usedPropertyIndex && !hasAggregation && hasOrderBy && skip == 0 && limit > 0 && orderExprEarly != "" {
 			if candidates, used, idxErr := e.tryCollectNodesFromPropertyIndexNotNullOrderLimit(nodePattern, wherePart, orderExprEarly, limit); idxErr == nil && used {
 				nodes = candidates

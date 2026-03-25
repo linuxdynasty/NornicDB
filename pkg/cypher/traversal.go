@@ -6,6 +6,7 @@ package cypher
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1032,10 +1033,43 @@ func (e *StorageExecutor) traverseGraph(match *TraversalMatch) []PathResult {
 
 	// Get starting nodes
 	var startNodes []*storage.Node
-	if len(match.StartNode.labels) > 0 {
-		startNodes, _ = e.storage.GetNodesByLabel(match.StartNode.labels[0])
-	} else {
-		startNodes = e.storage.GetAllNodes()
+	if len(match.StartNode.labels) > 0 && len(match.StartNode.properties) == 1 {
+		for prop, value := range match.StartNode.properties {
+			schema := e.storage.GetSchema()
+			if schema != nil {
+				labels := e.indexCandidateLabels(schema, match.StartNode.labels, prop)
+				if len(labels) > 0 {
+					idSet := make(map[storage.NodeID]struct{}, 64)
+					for _, label := range labels {
+						for _, id := range schema.PropertyIndexLookup(label, prop, value) {
+							idSet[id] = struct{}{}
+						}
+					}
+					if len(idSet) > 0 {
+						ids := make([]string, 0, len(idSet))
+						for id := range idSet {
+							ids = append(ids, string(id))
+						}
+						sort.Strings(ids)
+						startNodes = make([]*storage.Node, 0, len(ids))
+						for _, id := range ids {
+							node, err := e.storage.GetNode(storage.NodeID(id))
+							if err != nil || node == nil {
+								continue
+							}
+							startNodes = append(startNodes, node)
+						}
+					}
+				}
+			}
+		}
+	}
+	if startNodes == nil {
+		if len(match.StartNode.labels) > 0 {
+			startNodes, _ = e.storage.GetNodesByLabel(match.StartNode.labels[0])
+		} else {
+			startNodes = e.storage.GetAllNodes()
+		}
 	}
 
 	// Filter by properties

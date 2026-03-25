@@ -1250,8 +1250,12 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		s.logSlowQuery(stmt.Statement, stmt.Parameters, queryDuration, err)
 
 		if err != nil {
+			code := "Neo.ClientError.Statement.SyntaxError"
+			if transientCode, ok := mapTransientTransactionError(err.Error()); ok {
+				code = transientCode
+			}
 			response.Errors = append(response.Errors, QueryError{
-				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Code:    code,
 				Message: err.Error(),
 			})
 			hasError = true
@@ -1446,10 +1450,14 @@ func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Re
 	s.logSlowQuery(stmt.Statement, stmt.Parameters, queryDuration, execErr)
 
 	if execErr != nil {
+		code := "Neo.ClientError.Statement.SyntaxError"
+		if transientCode, ok := mapTransientTransactionError(execErr.Error()); ok {
+			code = transientCode
+		}
 		resp := TransactionResponse{
 			Results: []QueryResult{},
 			Errors: []QueryError{{
-				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Code:    code,
 				Message: execErr.Error(),
 			}},
 			LastBookmarks: []string{s.generateBookmark()},
@@ -1853,6 +1861,9 @@ func mapSessionExecError(err error) (code, message string) {
 		return "Neo.ClientError.Statement.SyntaxError", ""
 	}
 	msg := err.Error()
+	if transientCode, ok := mapTransientTransactionError(msg); ok {
+		return transientCode, msg
+	}
 	// If the engine already returned a Neo4j-style code prefix
 	// (for example Neo.ClientError.Transaction.ForbiddenDueToTransactionType: ...),
 	// preserve it for protocol compatibility.
@@ -1872,6 +1883,25 @@ func mapSessionExecError(err error) (code, message string) {
 		}
 	}
 	return "Neo.ClientError.Statement.SyntaxError", msg
+}
+
+// mapTransientTransactionError maps conflict/deadlock style failures to Neo4j-compatible
+// transient transaction errors so clients can safely retry.
+func mapTransientTransactionError(message string) (string, bool) {
+	m := strings.ToLower(strings.TrimSpace(message))
+	if m == "" {
+		return "", false
+	}
+	if strings.Contains(m, "deadlock") {
+		return "Neo.TransientError.Transaction.DeadlockDetected", true
+	}
+	if strings.Contains(m, "changed after transaction start") ||
+		strings.Contains(m, "transaction conflict") ||
+		strings.Contains(m, "write conflict") ||
+		strings.Contains(m, "conflict:") {
+		return "Neo.TransientError.Transaction.Outdated", true
+	}
+	return "", false
 }
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
@@ -2015,8 +2045,12 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 
 	commitResult, err := s.txSessions.CommitAndDelete(r.Context(), tx)
 	if err != nil {
+		code := "Neo.ClientError.Transaction.TransactionCommitFailed"
+		if transientCode, ok := mapTransientTransactionError(err.Error()); ok {
+			code = transientCode
+		}
 		response.Errors = append(response.Errors, QueryError{
-			Code:    "Neo.ClientError.Transaction.TransactionCommitFailed",
+			Code:    code,
 			Message: err.Error(),
 		})
 		s.writeJSON(w, http.StatusOK, response)
