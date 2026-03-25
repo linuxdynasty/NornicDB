@@ -104,6 +104,16 @@ RETURN n;
 
 Use with bounded chunk size (for example 100-1000 keys per call).
 
+### 2.2b Literal IN-List Lookup (Small, Fixed Sets)
+
+```cypher
+MATCH (n:EntityA)
+WHERE n.primaryKey IN ['k1', 'k2', 'k3']
+RETURN n;
+```
+
+Use for static, small key sets embedded directly in query text.
+
 ### 2.3 OR-To-UNION Dual-Key Lookup
 
 ```cypher
@@ -320,6 +330,16 @@ RETURN p
 LIMIT 100;
 ```
 
+### 6.5 Relationship Match With Indexed Start-Node Pruning
+
+```cypher
+MATCH (a:EntityA {primaryKey: $primaryKey})-[:LINKS_TO]->(b:EntityB)
+RETURN a, b
+LIMIT 100;
+```
+
+Prefer exact/prefix-start predicates on the traversal start node so candidate pruning happens before expansion.
+
 ## Area 7: Write Hot Paths
 
 ### 7.1 Targeted Bulk Update
@@ -418,6 +438,17 @@ DETACH DELETE n;
 
 Repeat in application/job scheduler until zero rows are affected.
 
+### 8.5 Indexed Delete Batches By Key Lists
+
+```cypher
+MATCH (n:EntityA)
+WHERE n.primaryKey IN $keys
+WITH n LIMIT 500
+DETACH DELETE n;
+```
+
+Prefer indexed key predicates in batched delete loops to avoid broad label scans.
+
 ## Area 9: Multi-Tenant Query Isolation
 
 ### 9.1 Tenant-First Point Lookup
@@ -452,6 +483,28 @@ MATCH (a:EntityA {primaryKey: $primaryKey})
 OPTIONAL MATCH (a)-[:KEY_REL]->(b:EntityB)
 RETURN a, collect(b) AS related;
 ```
+
+### 10.1b Optional Expansion With Key-List Seed
+
+```cypher
+MATCH (a:EntityA)
+WHERE a.primaryKey IN $keys
+OPTIONAL MATCH (a)-[:KEY_REL]->(b:EntityB {category: $category})
+RETURN a.primaryKey AS lookupKey, collect(b) AS related;
+```
+
+Seed OPTIONAL MATCH with indexed candidate sets first (`IN`, exact key, or ID) to keep expansion bounded.
+
+### 10.1c Optional Expansion By Direct Node ID
+
+```cypher
+MATCH (a:EntityA)
+WHERE elementId(a) = $id
+OPTIONAL MATCH (a)-[:KEY_REL]->(b:EntityB)
+RETURN a, collect(b) AS related;
+```
+
+Use when caller already has element IDs and needs deterministic low-latency expansion.
 
 ### 10.2 Split Heavy Optional Shapes
 

@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.32] - 2026-03-24
+
+### Added
+
+- **Cross-protocol access logging by default**:
+  - added Bolt and gRPC request/access logging to match HTTP visibility behavior.
+  - improves operational parity and troubleshooting across all exposed protocols.
+
+- **Hot-path query cookbook (user-facing performance guide)**:
+  - added a generic, domain-neutral cookbook of optimized graph query shapes and anti-pattern guidance.
+  - includes practical patterns for key lookups, relationship traversals, review/queue-style scans, batched deletes, and pagination.
+
+- **PROFILE diagnostics for index planning decisions**:
+  - expanded explain/profile metadata to show index usage status and rejection risk reasons.
+  - helps operators understand why a query used (or skipped) an index.
+
+### Changed
+
+- **Cypher planner/executor hot paths**:
+  - direct ID seek planning for parameterized predicates (`id(...) = $x`, `elementId(...) = $x`) to avoid label scans.
+  - improved OR/IN index planning (`a.p1 = $x OR a.p2 = $x`, `a.prop IN $keys`) with branch-based index usage and deduplication.
+  - null-normalized predicate handling for better index visibility (coalesce-style boolean filters).
+  - index-backed top-N execution for `ORDER BY ... LIMIT` when eligible, avoiding full materialization/sort.
+  - traversal start-node pruning/index usage improved for relationship-match shapes.
+  - streaming/batched `DETACH DELETE` execution improved for bounded-memory cleanup and large delete sets.
+
+- **`/tx/commit` execution overhead reduction**:
+  - optimized single-statement implicit transaction path to reduce per-request overhead in the common case.
+  - tightened cache-key determinism for parameterized query shapes to improve plan/cache reuse.
+
+- **Embedding queue scheduling behavior**:
+  - introduced debounce/throttling behavior on write-triggered embedding queue work to reduce write-path contention during active traffic.
+  - pending-index refresh scans now run with less interference against foreground writes.
+
+- **Write-path lock contention reduction**:
+  - narrowed lock scope in high-write code paths so longer operations perform less work while holding shared/global locks.
+
+### Fixed
+
+- **Neo4j-compatible conflict error semantics at API layer**:
+  - transaction conflict/deadlock-style commit failures are now surfaced as Neo4j-compatible transient errors (retryable classification) instead of syntax errors.
+  - aligns client retry behavior with expected Neo4j semantics.
+
+### Tests
+
+- Added/updated regression coverage for:
+  - parameterized ID seek planning and index-backed IN/OR-IN query shapes.
+  - migration-style exact query-shape execution paths and cleanup deletes.
+  - transaction error mapping for transient conflict/deadlock responses.
+  - delete-streaming and routing correctness.
+
+### Technical Details
+
+- **Range covered**: `v1.0.31..HEAD`
+- **Commits in range**: 10 (non-merge)
+- **Repository delta**: 32 files changed, +3,906 / -269 lines
+- **Primary focus areas**: Cypher hot-path execution, transaction semantics compatibility, write contention reduction, and operator observability.
+
 ## [v1.0.31] - 2026-03-24
 
 ### Fixed
