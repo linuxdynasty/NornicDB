@@ -669,6 +669,25 @@ func (w *WALEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	return w.engine.GetNodesByLabel(label)
 }
 
+// ForEachNodeIDByLabel delegates label-to-nodeID iteration to the underlying
+// engine when available. This keeps LIMIT + label paths fast without forcing
+// full node materialization.
+func (w *WALEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) bool) error {
+	if lookup, ok := w.engine.(LabelNodeIDLookupEngine); ok {
+		return lookup.ForEachNodeIDByLabel(label, visit)
+	}
+	ids, err := NodeIDsByLabel(w.engine, label, 0)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if visit != nil && !visit(id) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // GetFirstNodeByLabel delegates to underlying engine.
 func (w *WALEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	return w.engine.GetFirstNodeByLabel(label)
@@ -905,6 +924,26 @@ func (w *WALEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) 
 	return nil
 }
 
+// StreamNodesByPrefix implements PrefixStreamingEngine by delegating prefix-scoped
+// iteration to the wrapped engine when available. This preserves namespace-aware
+// early termination behavior for MATCH ... LIMIT hot paths.
+func (w *WALEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	if prefixStreamer, ok := w.engine.(PrefixStreamingEngine); ok {
+		err := prefixStreamer.StreamNodesByPrefix(ctx, prefix, fn)
+		if err == ErrIterationStopped {
+			return nil
+		}
+		return err
+	}
+	// Fallback to StreamNodes + prefix filter.
+	return w.StreamNodes(ctx, func(node *Node) error {
+		if !strings.HasPrefix(string(node.ID), prefix) {
+			return nil
+		}
+		return fn(node)
+	})
+}
+
 // StreamEdges implements StreamingEngine.StreamEdges by delegating to the underlying engine.
 func (w *WALEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
 	if streamer, ok := w.engine.(StreamingEngine); ok {
@@ -965,3 +1004,6 @@ var _ Engine = (*WALEngine)(nil)
 
 // Verify WALEngine implements StreamingEngine interface
 var _ StreamingEngine = (*WALEngine)(nil)
+
+// Verify WALEngine implements PrefixStreamingEngine interface
+var _ PrefixStreamingEngine = (*WALEngine)(nil)

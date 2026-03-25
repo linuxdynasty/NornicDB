@@ -2395,6 +2395,90 @@ func (ae *AsyncEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 	return nil
 }
 
+// StreamNodesByPrefix implements PrefixStreamingEngine by merging pending cache
+// entries with prefix-scoped streaming from the underlying engine.
+func (ae *AsyncEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	ae.mu.RLock()
+	cachedIDs := make(map[NodeID]bool, len(ae.nodeCache))
+	deletedIDs := make(map[NodeID]bool, len(ae.deleteNodes))
+	cachedCopies := make([]*Node, 0, len(ae.nodeCache))
+
+	for id, node := range ae.nodeCache {
+		cachedIDs[id] = true
+		if ae.deleteNodes[id] {
+			continue
+		}
+		if strings.HasPrefix(string(id), prefix) {
+			cachedCopies = append(cachedCopies, CopyNode(node))
+		}
+	}
+	for id := range ae.deleteNodes {
+		deletedIDs[id] = true
+	}
+	ae.mu.RUnlock()
+
+	for _, node := range cachedCopies {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			if err == ErrIterationStopped {
+				return nil
+			}
+			return err
+		}
+	}
+
+	if prefixStreamer, ok := ae.engine.(PrefixStreamingEngine); ok {
+		return prefixStreamer.StreamNodesByPrefix(ctx, prefix, func(node *Node) error {
+			if cachedIDs[node.ID] || deletedIDs[node.ID] {
+				return nil
+			}
+			return fn(node)
+		})
+	}
+
+	// Fallback to full stream if underlying engine does not support prefix stream.
+	if streamer, ok := ae.engine.(StreamingEngine); ok {
+		return streamer.StreamNodes(ctx, func(node *Node) error {
+			if cachedIDs[node.ID] || deletedIDs[node.ID] {
+				return nil
+			}
+			if !strings.HasPrefix(string(node.ID), prefix) {
+				return nil
+			}
+			return fn(node)
+		})
+	}
+
+	nodes, err := ae.engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if cachedIDs[node.ID] || deletedIDs[node.ID] {
+			continue
+		}
+		if !strings.HasPrefix(string(node.ID), prefix) {
+			continue
+		}
+		if err := fn(node); err != nil {
+			if err == ErrIterationStopped {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // StreamEdges implements StreamingEngine.StreamEdges by delegating to the underlying engine.
 func (ae *AsyncEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
 	ae.mu.RLock()

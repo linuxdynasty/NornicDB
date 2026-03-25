@@ -1047,6 +1047,16 @@ type StreamingEngine interface {
 	StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error
 }
 
+// PrefixStreamingEngine extends StreamingEngine with namespace/key-prefix-aware
+// streaming for efficient bounded scans on engines where IDs embed tenant/db
+// prefixes. This avoids full-store scans followed by callback filtering.
+type PrefixStreamingEngine interface {
+	StreamingEngine
+
+	// StreamNodesByPrefix streams only nodes whose IDs start with the given prefix.
+	StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error
+}
+
 // NodeVisitor is a function called for each node during streaming.
 type NodeVisitor func(node *Node) error
 

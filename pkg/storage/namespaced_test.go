@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,12 @@ type namespacedStreamingOnlyEngine struct {
 	Engine
 	streamNodeErr error
 	streamEdgeErr error
+}
+
+type namespacedPrefixStreamingEngine struct {
+	Engine
+	prefixCalls int
+	lastPrefix  string
 }
 
 type namespacedSchemaProviderEngine struct {
@@ -226,6 +233,85 @@ func (e *namespacedStreamingOnlyEngine) StreamNodeChunks(ctx context.Context, ch
 	return nil
 }
 
+func (e *namespacedPrefixStreamingEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedPrefixStreamingEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
+	edges, err := e.Engine.AllEdges()
+	if err != nil {
+		return err
+	}
+	for _, edge := range edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedPrefixStreamingEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error {
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for i := 0; i < len(nodes); i += chunkSize {
+		end := i + chunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := fn(nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *namespacedPrefixStreamingEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	e.prefixCalls++
+	e.lastPrefix = prefix
+	nodes, err := e.Engine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !strings.HasPrefix(string(node.ID), prefix) {
+			continue
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *namespacedSchemaProviderEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
 	return e.schema
 }
@@ -263,6 +349,32 @@ func TestNamespacedEngine_BasicOperations(t *testing.T) {
 	prefixedNode, err := inner.GetNode(NodeID("tenant_a:node-1"))
 	require.NoError(t, err)
 	assert.Equal(t, "tenant_a:node-1", string(prefixedNode.ID))
+}
+
+func TestNamespacedEngine_StreamNodes_UsesPrefixStreamingWhenAvailable(t *testing.T) {
+	base := NewMemoryEngine()
+	defer base.Close()
+
+	_, err := base.CreateNode(&Node{ID: NodeID("tenant_a:n1"), Labels: []string{"L"}, Properties: map[string]any{"name": "a1"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: NodeID("tenant_b:n2"), Labels: []string{"L"}, Properties: map[string]any{"name": "b1"}})
+	require.NoError(t, err)
+	_, err = base.CreateNode(&Node{ID: NodeID("tenant_a:n3"), Labels: []string{"L"}, Properties: map[string]any{"name": "a2"}})
+	require.NoError(t, err)
+
+	prefixInner := &namespacedPrefixStreamingEngine{Engine: base}
+	tenantA := NewNamespacedEngine(prefixInner, "tenant_a")
+
+	var seen []NodeID
+	err = tenantA.StreamNodes(context.Background(), func(node *Node) error {
+		seen = append(seen, node.ID)
+		return nil
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, prefixInner.prefixCalls, "should use prefix streaming path exactly once")
+	require.Equal(t, "tenant_a:", prefixInner.lastPrefix)
+	require.ElementsMatch(t, []NodeID{"n1", "n3"}, seen, "should only return unprefixed tenant_a nodes")
 }
 
 func TestNamespacedEngine_Isolation(t *testing.T) {

@@ -1,7 +1,9 @@
 package multidb
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -16,6 +18,11 @@ type sizeTrackingEngine struct {
 
 var _ storage.Engine = (*sizeTrackingEngine)(nil)
 
+// Preserve optional streaming capabilities of wrapped engines so query execution
+// can keep LIMIT short-circuit behavior on hot paths.
+var _ storage.StreamingEngine = (*sizeTrackingEngine)(nil)
+var _ storage.LabelNodeIDLookupEngine = (*sizeTrackingEngine)(nil)
+
 func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbName string) storage.Engine {
 	return &sizeTrackingEngine{
 		Engine:  engine,
@@ -26,6 +33,100 @@ func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbNa
 
 func (t *sizeTrackingEngine) GetInnerEngine() storage.Engine {
 	return t.Engine
+}
+
+// StreamNodes delegates streaming iteration to the wrapped engine when available.
+func (t *sizeTrackingEngine) StreamNodes(ctx context.Context, fn func(node *storage.Node) error) error {
+	if streamer, ok := t.Engine.(storage.StreamingEngine); ok {
+		return streamer.StreamNodes(ctx, fn)
+	}
+	// Fallback to engine-agnostic helper.
+	return storage.StreamNodesWithFallback(ctx, t.Engine, 1000, fn)
+}
+
+// StreamEdges delegates streaming iteration to the wrapped engine when available.
+func (t *sizeTrackingEngine) StreamEdges(ctx context.Context, fn func(edge *storage.Edge) error) error {
+	if streamer, ok := t.Engine.(storage.StreamingEngine); ok {
+		return streamer.StreamEdges(ctx, fn)
+	}
+	edges, err := t.Engine.AllEdges()
+	if err != nil {
+		return err
+	}
+	for _, edge := range edges {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(edge); err != nil {
+			if err == storage.ErrIterationStopped {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// StreamNodeChunks delegates chunked streaming to wrapped engine when available.
+func (t *sizeTrackingEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*storage.Node) error) error {
+	if streamer, ok := t.Engine.(storage.StreamingEngine); ok {
+		return streamer.StreamNodeChunks(ctx, chunkSize, fn)
+	}
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	chunk := make([]*storage.Node, 0, chunkSize)
+	err := t.StreamNodes(ctx, func(node *storage.Node) error {
+		chunk = append(chunk, node)
+		if len(chunk) >= chunkSize {
+			if err := fn(chunk); err != nil {
+				return err
+			}
+			chunk = make([]*storage.Node, 0, chunkSize)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(chunk) > 0 {
+		return fn(chunk)
+	}
+	return nil
+}
+
+// StreamNodesByPrefix preserves prefix-scoped streaming when supported by wrapped engine.
+func (t *sizeTrackingEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *storage.Node) error) error {
+	if prefixStreamer, ok := t.Engine.(storage.PrefixStreamingEngine); ok {
+		return prefixStreamer.StreamNodesByPrefix(ctx, prefix, fn)
+	}
+	// Fallback to full stream + prefix filter.
+	return t.StreamNodes(ctx, func(node *storage.Node) error {
+		if prefix == "" || strings.HasPrefix(string(node.ID), prefix) {
+			return fn(node)
+		}
+		return nil
+	})
+}
+
+// ForEachNodeIDByLabel preserves label->ID lookup capabilities across wrapper
+// boundaries so LIMIT + label paths can avoid full node decode.
+func (t *sizeTrackingEngine) ForEachNodeIDByLabel(label string, visit func(storage.NodeID) bool) error {
+	if lookup, ok := t.Engine.(storage.LabelNodeIDLookupEngine); ok {
+		return lookup.ForEachNodeIDByLabel(label, visit)
+	}
+	ids, err := storage.NodeIDsByLabel(t.Engine, label, 0)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if visit != nil && !visit(id) {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (t *sizeTrackingEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {

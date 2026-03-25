@@ -556,6 +556,52 @@ func (b *BadgerEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 	})
 }
 
+// StreamNodesByPrefix streams nodes whose IDs start with prefix.
+// This is significantly faster than full StreamNodes + callback filtering when
+// tenants/databases share a physical store.
+func (b *BadgerEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	if err := b.ensureOpen(); err != nil {
+		return err
+	}
+
+	return b.withView(func(txn *badger.Txn) error {
+		seekPrefix := append([]byte{prefixNode}, []byte(prefix)...)
+		it := txn.NewIterator(badgerIterOptsPrefetchValues(seekPrefix, 10))
+		defer it.Close()
+
+		for it.Seek(seekPrefix); it.ValidForPrefix(seekPrefix); it.Next() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			item := it.Item()
+			var node *Node
+			err := item.Value(func(val []byte) error {
+				key := item.Key()
+				if len(key) <= 1 {
+					return nil
+				}
+				nodeID := NodeID(key[1:])
+				var decErr error
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
+				return decErr
+			})
+			if err != nil {
+				continue
+			}
+			if err := fn(node); err != nil {
+				if err == ErrIterationStopped {
+					return nil
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // StreamEdges implements StreamingEngine.StreamEdges for memory-efficient iteration.
 // Iterates through all edges one at a time without loading all into memory.
 func (b *BadgerEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {

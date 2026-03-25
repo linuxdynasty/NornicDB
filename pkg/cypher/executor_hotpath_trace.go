@@ -2,9 +2,10 @@ package cypher
 
 // HotPathTrace records which key query hot paths were used for the most recent Execute call.
 type HotPathTrace struct {
-	OuterIndexTopK         bool
-	OuterScanFallbackUsed  bool
-	FabricBatchedApplyRows bool
+	OuterIndexTopK           bool
+	OuterScanFallbackUsed    bool
+	FabricBatchedApplyRows   bool
+	SimpleMatchLimitFastPath bool
 }
 
 func (e *StorageExecutor) resetHotPathTrace() {
@@ -43,6 +44,15 @@ func (e *StorageExecutor) setFabricBatchedApplyRowsUsed(v bool) {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.FabricBatchedApplyRows = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markSimpleMatchLimitFastPathUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.SimpleMatchLimitFastPath = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

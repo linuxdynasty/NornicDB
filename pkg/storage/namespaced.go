@@ -803,6 +803,12 @@ func (n *NamespacedEngine) EdgeCount() (int64, error) {
 
 // StreamNodes streams nodes in the namespace.
 func (n *NamespacedEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
+	if prefixStreamer, ok := n.inner.(PrefixStreamingEngine); ok {
+		return prefixStreamer.StreamNodesByPrefix(ctx, n.namespace+n.separator, func(node *Node) error {
+			return fn(n.toUserNode(node))
+		})
+	}
+
 	if streamer, ok := n.inner.(StreamingEngine); ok {
 		return streamer.StreamNodes(ctx, func(node *Node) error {
 			if n.hasNodePrefix(node.ID) {

@@ -2077,6 +2077,13 @@ func isSystemCommandNoGraph(cypher string) bool {
 
 // executeWithoutTransaction executes query without transaction wrapping (original path).
 func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
+	// FAST PATH: Simple MATCH-return-limit reads should never be routed through
+	// heavier compound planners. Keep this check first to avoid regressions when
+	// adding complex routing rules.
+	if result, handled := e.tryFastPathSimpleMatchReturnLimit(ctx, cypher, upperQuery); handled {
+		return result, nil
+	}
+
 	// FAST PATH: Check for common compound query patterns using pre-compiled regex
 	// This avoids multiple findKeywordIndex calls for frequently-used patterns
 	if result, handled := e.tryFastPathCompoundQuery(ctx, cypher); handled {

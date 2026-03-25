@@ -1004,6 +1004,33 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	limit int,
 ) ([]*storage.Node, error) {
 	store := e.getStorage(ctx)
+
+	// For label-constrained LIMIT queries, prefer direct label lookup over full
+	// graph streaming. This avoids scanning unrelated labels until LIMIT is met
+	// (a major latency issue for sparse labels like SystemPrompt).
+	if limit > 0 && len(labels) == 1 && len(properties) == 0 && strings.TrimSpace(whereClause) == "" {
+		ids, err := storage.NodeIDsByLabel(store, labels[0], limit)
+		if err != nil {
+			return nil, err
+		}
+		hideSystemNodes := shouldHideSystemNodes(store)
+		filtered := make([]*storage.Node, 0, min(limit, len(ids)))
+		for _, id := range ids {
+			node, getErr := store.GetNode(id)
+			if getErr != nil || node == nil {
+				continue
+			}
+			if hideSystemNodes && isSystemNode(node) {
+				continue
+			}
+			filtered = append(filtered, node)
+			if len(filtered) >= limit {
+				break
+			}
+		}
+		return filtered, nil
+	}
+
 	// Determine if we can use streaming optimization
 	canStream := len(properties) == 0 // Can't filter properties inline yet
 

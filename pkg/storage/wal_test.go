@@ -50,6 +50,14 @@ type walStreamingCountEngine struct {
 	edges []*Edge
 }
 
+type walPrefixStreamingEngine struct {
+	Engine
+	nodes             []*Node
+	streamNodesCalls  int
+	streamPrefixCalls int
+	lastPrefix        string
+}
+
 type walNamespaceListerEngine struct {
 	Engine
 	namespaces []string
@@ -170,6 +178,65 @@ func (e *walStreamingCountEngine) StreamNodeChunks(ctx context.Context, chunkSiz
 			end = len(e.nodes)
 		}
 		if err := fn(e.nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walPrefixStreamingEngine) StreamNodes(ctx context.Context, fn func(*Node) error) error {
+	e.streamNodesCalls++
+	for _, node := range e.nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walPrefixStreamingEngine) StreamEdges(_ context.Context, _ func(*Edge) error) error {
+	return nil
+}
+
+func (e *walPrefixStreamingEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func([]*Node) error) error {
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for i := 0; i < len(e.nodes); i += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + chunkSize
+		if end > len(e.nodes) {
+			end = len(e.nodes)
+		}
+		if err := fn(e.nodes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *walPrefixStreamingEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	e.streamPrefixCalls++
+	e.lastPrefix = prefix
+	for _, node := range e.nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !strings.HasPrefix(string(node.ID), prefix) {
+			continue
+		}
+		if err := fn(node); err != nil {
 			return err
 		}
 	}
@@ -2637,6 +2704,98 @@ func TestWALEngine_StreamNodes(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 10, count, "Should stop after 10 nodes")
 	})
+}
+
+func TestWALEngine_StreamNodesByPrefix(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("delegates to wrapped PrefixStreamingEngine", func(t *testing.T) {
+		nodes := []*Node{
+			{ID: "tenant_a:n1"},
+			{ID: "tenant_b:n2"},
+			{ID: "tenant_a:n3"},
+		}
+		inner := &walPrefixStreamingEngine{
+			Engine: NewMemoryEngine(),
+			nodes:  nodes,
+		}
+		t.Cleanup(func() { _ = inner.Engine.Close() })
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = wal.Close() })
+		walEngine := NewWALEngine(inner, wal)
+		var got []NodeID
+		err = walEngine.StreamNodesByPrefix(context.Background(), "tenant_a:", func(node *Node) error {
+			got = append(got, node.ID)
+			if len(got) == 1 {
+				return ErrIterationStopped
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, inner.streamPrefixCalls, "prefix path must be used")
+		assert.Equal(t, 0, inner.streamNodesCalls, "full stream fallback must not be used")
+		assert.Equal(t, "tenant_a:", inner.lastPrefix)
+		require.Len(t, got, 1)
+		assert.Equal(t, NodeID("tenant_a:n1"), got[0])
+	})
+
+	t.Run("falls back to StreamNodes+prefix filter when prefix streamer is unavailable", func(t *testing.T) {
+		base := NewMemoryEngine()
+		t.Cleanup(func() { _ = base.Close() })
+		inner := &walStreamingCountEngine{
+			Engine: base,
+			nodes: []*Node{
+				{ID: "tenant_a:n1"},
+				{ID: "tenant_b:n2"},
+				{ID: "tenant_a:n3"},
+			},
+		}
+		wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = wal.Close() })
+		walEngine := NewWALEngine(inner, wal)
+		var got []NodeID
+		err = walEngine.StreamNodesByPrefix(context.Background(), "tenant_a:", func(node *Node) error {
+			got = append(got, node.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []NodeID{"tenant_a:n1", "tenant_a:n3"}, got)
+	})
+}
+
+func TestWALEngine_ForEachNodeIDByLabel(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+
+	for i := 0; i < 5; i++ {
+		_, err := base.CreateNode(&Node{
+			ID:     NodeID(fmt.Sprintf("nornic:n-%d", i)),
+			Labels: []string{"Person"},
+		})
+		require.NoError(t, err)
+	}
+
+	wal, err := NewWAL(t.TempDir(), &WALConfig{SyncMode: "none"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = wal.Close() })
+
+	walEngine := NewWALEngine(base, wal)
+	lookup, ok := interface{}(walEngine).(LabelNodeIDLookupEngine)
+	require.True(t, ok, "wal wrapper must expose LabelNodeIDLookupEngine")
+
+	var count int
+	err = lookup.ForEachNodeIDByLabel("Person", func(id NodeID) bool {
+		count++
+		return count < 3
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
 }
 
 func TestWALEngine_StreamEdges(t *testing.T) {
