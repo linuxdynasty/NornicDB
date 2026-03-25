@@ -679,19 +679,21 @@ func invalidateNodeManagedEmbeddings(node *storage.Node) {
 
 // DeleteNode deletes a node.
 func (db *DB) DeleteNode(ctx context.Context, id string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	defaultDB := db.defaultDatabaseName()
+	db.mu.RUnlock()
 
 	// Remove from search indexes first (before storage deletion)
-	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+	if svc, _ := db.getOrCreateSearchService(defaultDB, storageEngine); svc != nil {
 		_ = svc.RemoveNode(storage.NodeID(id))
 	}
 
-	return db.storage.DeleteNode(storage.NodeID(id))
+	return storageEngine.DeleteNode(storage.NodeID(id))
 }
 
 // GraphEdge represents an edge for HTTP API.
@@ -827,18 +829,19 @@ func (db *DB) GetEdgesForNode(ctx context.Context, nodeID string) ([]*GraphEdge,
 
 // CreateEdge creates a new edge.
 func (db *DB) CreateEdge(ctx context.Context, source, target, edgeType string, properties map[string]interface{}) (*GraphEdge, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
+	storageEngine := db.storage
+	db.mu.RUnlock()
 
 	// Verify nodes exist
-	if _, err := db.storage.GetNode(storage.NodeID(source)); err != nil {
+	if _, err := storageEngine.GetNode(storage.NodeID(source)); err != nil {
 		return nil, fmt.Errorf("source node not found")
 	}
-	if _, err := db.storage.GetNode(storage.NodeID(target)); err != nil {
+	if _, err := storageEngine.GetNode(storage.NodeID(target)); err != nil {
 		return nil, fmt.Errorf("target node not found")
 	}
 
@@ -854,7 +857,7 @@ func (db *DB) CreateEdge(ctx context.Context, source, target, edgeType string, p
 		CreatedAt:  now,
 	}
 
-	if err := db.storage.CreateEdge(edge); err != nil {
+	if err := storageEngine.CreateEdge(edge); err != nil {
 		return nil, err
 	}
 
@@ -870,14 +873,15 @@ func (db *DB) CreateEdge(ctx context.Context, source, target, edgeType string, p
 
 // DeleteEdge deletes an edge.
 func (db *DB) DeleteEdge(ctx context.Context, id string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	db.mu.RUnlock()
 
-	return db.storage.DeleteEdge(storage.EdgeID(id))
+	return storageEngine.DeleteEdge(storage.EdgeID(id))
 }
 
 // SearchResult holds a search result with score.
@@ -1181,14 +1185,16 @@ func (db *DB) GetIndexes(ctx context.Context) ([]*IndexInfo, error) {
 // CreateIndex creates a new index on a label/property combination.
 // Supported types: "property", "fulltext", "vector", "range"
 func (db *DB) CreateIndex(ctx context.Context, label, property, indexType string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	config := db.config
+	db.mu.RUnlock()
 
-	schema := db.storage.GetSchema()
+	schema := storageEngine.GetSchema()
 	if schema == nil {
 		return fmt.Errorf("schema manager not initialized")
 	}
@@ -1202,7 +1208,10 @@ func (db *DB) CreateIndex(ctx context.Context, label, property, indexType string
 		return schema.AddFulltextIndex(indexName, []string{label}, []string{property})
 	case "vector":
 		// Use configured embedding dimensions instead of hardcoded value
-		dims := db.config.Memory.EmbeddingDimensions
+		dims := 1024
+		if config != nil {
+			dims = config.Memory.EmbeddingDimensions
+		}
 		return schema.AddVectorIndex(indexName, label, property, dims, "cosine")
 	case "range":
 		return schema.AddRangeIndex(indexName, label, property)
@@ -1214,14 +1223,15 @@ func (db *DB) CreateIndex(ctx context.Context, label, property, indexType string
 // BootstrapCanonicalSchema creates standard constraints for the canonical Memory model.
 // This is idempotent and can be safely called on startup.
 func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	db.mu.RUnlock()
 
-	schema := db.storage.GetSchema()
+	schema := storageEngine.GetSchema()
 	if schema == nil {
 		return fmt.Errorf("schema manager not initialized")
 	}
@@ -1234,7 +1244,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 			Label:      "Memory",
 			Properties: []string{prop},
 		}
-		if err := storage.ValidateConstraintOnCreationForEngine(db.storage, constraint); err != nil {
+		if err := storage.ValidateConstraintOnCreationForEngine(storageEngine, constraint); err != nil {
 			return err
 		}
 		if err := schema.AddConstraint(constraint); err != nil {
@@ -1248,7 +1258,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 		Label:      "Memory",
 		Properties: []string{"id"},
 	}
-	if err := storage.ValidateConstraintOnCreationForEngine(db.storage, nodeKey); err != nil {
+	if err := storage.ValidateConstraintOnCreationForEngine(storageEngine, nodeKey); err != nil {
 		return err
 	}
 	if err := schema.AddConstraint(nodeKey); err != nil {
@@ -1271,7 +1281,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 			Property:     prop,
 			ExpectedType: expectedType,
 		}
-		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(db.storage, ptc); err != nil {
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(storageEngine, ptc); err != nil {
 			return err
 		}
 		if err := schema.AddPropertyTypeConstraint(name, "Memory", prop, expectedType); err != nil {
@@ -1605,16 +1615,18 @@ func escapeCSV(s string) string {
 // DeleteUserData deletes all data for a user (GDPR compliance).
 // Uses streaming iteration to avoid loading all nodes into memory.
 func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	defaultDB := db.defaultDatabaseName()
+	db.mu.RUnlock()
 
 	// Collect IDs to delete first (can't delete while iterating)
 	var toDelete []storage.NodeID
-	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
+	err := storage.StreamNodesWithFallback(ctx, storageEngine, 1000, func(n *storage.Node) error {
 		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
 			toDelete = append(toDelete, n.ID)
 		}
@@ -1624,13 +1636,15 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 		return err
 	}
 
+	svc, _ := db.getOrCreateSearchService(defaultDB, storageEngine)
+
 	// Now delete the collected nodes
 	for _, id := range toDelete {
 		// Remove from search indexes first (before storage deletion)
-		if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+		if svc != nil {
 			_ = svc.RemoveNode(id)
 		}
-		if err := db.storage.DeleteNode(id); err != nil {
+		if err := storageEngine.DeleteNode(id); err != nil {
 			return err
 		}
 	}
@@ -1641,19 +1655,20 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 // AnonymizeUserData anonymizes all data for a user (GDPR compliance).
 // Uses streaming iteration to avoid loading all nodes into memory.
 func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	db.mu.RLock()
 	if db.closed {
+		db.mu.RUnlock()
 		return ErrClosed
 	}
+	storageEngine := db.storage
+	db.mu.RUnlock()
 
 	anonymousID := generateID("")
 
 	// Collect nodes to update (can't update while streaming in some engines)
 	// We must make copies since other goroutines might be iterating over these nodes
 	var toUpdate []*storage.Node
-	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
+	err := storage.StreamNodesWithFallback(ctx, storageEngine, 1000, func(n *storage.Node) error {
 		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
 			// Make a deep copy of the node to avoid concurrent modification
 			nodeCopy := &storage.Node{
@@ -1693,7 +1708,7 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 
 	// Now update the collected nodes
 	for _, n := range toUpdate {
-		if err := db.storage.UpdateNode(n); err != nil {
+		if err := storageEngine.UpdateNode(n); err != nil {
 			return err
 		}
 	}
