@@ -138,12 +138,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		score float64
 	}
 	out := make([]scoredNode, 0, min(len(candidateNodes), spec.Limit*2))
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	s.vectorIndex.mu.RLock()
-	defer s.vectorIndex.mu.RUnlock()
+	meta := s.snapshotVectorQueryCandidateMeta(candidateNodes)
 
 	for nodeID := range candidateNodes {
 		select {
@@ -151,11 +146,14 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 			return nil, ctx.Err()
 		default:
 		}
+		nodeMeta, ok := meta[nodeID]
+		if !ok {
+			continue
+		}
 
 		if spec.Label != "" {
-			labels := s.nodeLabels[nodeID]
 			has := false
-			for _, l := range labels {
+			for _, l := range nodeMeta.labels {
 				if l == spec.Label {
 					has = true
 					break
@@ -169,18 +167,17 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		// Apply Cypher precedence for selecting which vector represents this node.
 		bestScore := -1.0
 
-		if named := s.nodeNamedVector[nodeID]; named != nil {
+		if named := nodeMeta.named; named != nil {
 			if vecID, ok := named[vectorName]; ok {
-				if v, ok := s.vectorIndex.vectors[vecID]; ok {
-					bestScore = float64(vector.DotProductSIMD(normalizedQuery, v))
+				if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
+					bestScore = score
 				}
 			}
 			// If there is no explicit Cypher property/index mapping (property key is empty),
 			// fall through to managed named embeddings (any key) before chunk fallback.
 			if bestScore < 0 && spec.Property == "" {
 				for _, vecID := range named {
-					if v, ok := s.vectorIndex.vectors[vecID]; ok {
-						score := float64(vector.DotProductSIMD(normalizedQuery, v))
+					if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
 						if score > bestScore {
 							bestScore = score
 						}
@@ -190,19 +187,18 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		}
 
 		if bestScore < 0 && spec.Property != "" {
-			if props := s.nodePropVector[nodeID]; props != nil {
+			if props := nodeMeta.props; props != nil {
 				if vecID, ok := props[spec.Property]; ok {
-					if v, ok := s.vectorIndex.vectors[vecID]; ok {
-						bestScore = float64(vector.DotProductSIMD(normalizedQuery, v))
+					if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
+						bestScore = score
 					}
 				}
 			}
 		}
 
 		if bestScore < 0 {
-			for _, vecID := range s.nodeChunkVectors[nodeID] {
-				if v, ok := s.vectorIndex.vectors[vecID]; ok {
-					score := float64(vector.DotProductSIMD(normalizedQuery, v))
+			for _, vecID := range nodeMeta.chunks {
+				if score, ok := s.scoreVectorIDDot(normalizedQuery, vecID); ok {
 					if score > bestScore {
 						bestScore = score
 					}
@@ -225,6 +221,58 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		hits = append(hits, VectorQueryHit{ID: r.id, Score: r.score})
 	}
 	return hits, nil
+}
+
+type vectorQueryCandidateMeta struct {
+	labels []string
+	named  map[string]string
+	props  map[string]string
+	chunks []string
+}
+
+func (s *Service) snapshotVectorQueryCandidateMeta(candidateNodes map[string]struct{}) map[string]vectorQueryCandidateMeta {
+	meta := make(map[string]vectorQueryCandidateMeta, len(candidateNodes))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for nodeID := range candidateNodes {
+		labels := append([]string(nil), s.nodeLabels[nodeID]...)
+		named := cloneStringMap(s.nodeNamedVector[nodeID])
+		props := cloneStringMap(s.nodePropVector[nodeID])
+		chunks := append([]string(nil), s.nodeChunkVectors[nodeID]...)
+		meta[nodeID] = vectorQueryCandidateMeta{
+			labels: labels,
+			named:  named,
+			props:  props,
+			chunks: chunks,
+		}
+	}
+	return meta
+}
+
+func (s *Service) scoreVectorIDDot(normalizedQuery []float32, vecID string) (float64, bool) {
+	if s.vectorIndex == nil {
+		return 0, false
+	}
+	s.vectorIndex.mu.RLock()
+	vec, ok := s.vectorIndex.vectors[vecID]
+	if !ok {
+		s.vectorIndex.mu.RUnlock()
+		return 0, false
+	}
+	score := float64(vector.DotProductSIMD(normalizedQuery, vec))
+	s.vectorIndex.mu.RUnlock()
+	return score, true
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string, similarity string) ([]VectorQueryHit, error) {
