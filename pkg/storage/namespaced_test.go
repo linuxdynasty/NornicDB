@@ -75,6 +75,30 @@ func (e *namespacedHelperEngine) StreamNodes(ctx context.Context, fn func(node *
 	return nil
 }
 
+func (e *namespacedHelperEngine) StreamNodesByPrefix(ctx context.Context, prefix string, fn func(node *Node) error) error {
+	if e.streamNodeErr != nil {
+		return e.streamNodeErr
+	}
+	nodes, err := e.MemoryEngine.AllNodes()
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !strings.HasPrefix(string(node.ID), prefix) {
+			continue
+		}
+		if err := fn(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *namespacedHelperEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
 	if e.streamEdgeErr != nil {
 		return e.streamEdgeErr

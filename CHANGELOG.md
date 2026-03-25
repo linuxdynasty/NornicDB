@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.33] - 2026-03-25
+
+### Added
+
+- **Live-data regression coverage for `MATCH ... LIMIT` hot paths**:
+  - added integration/benchmark coverage for cache-busted simple read shapes (varying `LIMIT`) on real datasets.
+  - added strict wrapper-delegation tests to ensure streaming and prefix-streaming capabilities are preserved across engine wrappers.
+
+### Changed
+
+- **Simple `MATCH ... RETURN ... LIMIT` routing**:
+  - added/expanded dedicated fast-path handling for simple node-return limit queries and alias variants.
+  - added explicit hot-path tracing hooks for these shapes to make routing behavior observable in tests.
+
+- **Wrapper capability forwarding for performance-critical interfaces**:
+  - propagated streaming interfaces through multi-database size-tracking wrappers so read paths can terminate early instead of materializing full scans.
+  - propagated prefix-stream and label-ID lookup interfaces through WAL wrappers to preserve optimized behavior in wrapped deployments.
+
+- **Label-constrained `LIMIT` execution strategy**:
+  - changed label-only `LIMIT` collection to prefer label-ID iteration + targeted node fetch instead of full label materialization before applying `LIMIT`.
+  - this improves latency stability for both sparse-label and dense-label reads.
+
+- **Vector query concurrency behavior**:
+  - reduced lock contention in vector query specification paths under high-concurrency workloads.
+
+### Fixed
+
+- **`MATCH (n) RETURN n LIMIT K` latency regression in multi-database stacks**:
+  - fixed a routing/capability loss where wrappers could drop optimized streaming behavior, causing full-scan-like latency even with low `LIMIT`.
+  - restored millisecond-range latency for cache-busted simple-limit query shapes after warm-up.
+
+### Tests
+
+- Added/updated regression coverage for:
+  - simple `MATCH ... LIMIT` fast-path parsing/routing and trace visibility
+  - label-limited node collection strategy (`label + LIMIT`)
+  - namespaced/prefix streaming delegation through async, WAL, and size-tracking wrappers
+  - real-data benchmark probes for cache-busted limit-shape latency.
+
+### Technical Details
+
+- **Range covered**: `f7a92fc..HEAD` (from latest changelog baseline to current `main` head)
+- **Commits in range**: 2 (non-merge)
+- **Repository delta**: 20 files changed, +1,377 / -24 lines
+- **Primary focus areas**: Cypher read hot-path latency, storage-wrapper capability propagation, and high-concurrency contention reduction.
+
 ## [v1.0.32] - 2026-03-24
 
 ### Added
