@@ -124,6 +124,30 @@ func TestSearchServices_HelperBranches(t *testing.T) {
 		db.closed = true
 		require.True(t, db.shouldIgnoreSearchIndexingError(errors.New("after close")))
 	})
+
+	t.Run("pending flush debounces ready-service mutations", func(t *testing.T) {
+		engine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = engine.Close() })
+		db := &DB{buildCtx: context.Background()}
+		svc := search.NewServiceWithDimensionsAndBM25Engine(engine, 3, search.DefaultBM25Engine())
+		entry := &dbSearchService{
+			dbName:            "nornic",
+			svc:               svc,
+			buildDone:         make(chan struct{}),
+			pendingFlushDelay: 20 * time.Millisecond,
+		}
+		close(entry.buildDone)
+
+		entry.queueIndex(&storage.Node{ID: "debounced", Labels: []string{"Doc"}, ChunkEmbeddings: [][]float32{{1, 2, 3}}})
+		db.ensurePendingFlush(entry)
+
+		time.Sleep(5 * time.Millisecond)
+		require.Equal(t, 0, svc.EmbeddingCount())
+		require.Eventually(t, func() bool {
+			return svc.EmbeddingCount() == 1
+		}, time.Second, 10*time.Millisecond)
+		db.bgWg.Wait()
+	})
 }
 
 func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
@@ -759,6 +783,14 @@ func TestSearchServices_EnsureBuiltAndStart_ErrorBranches(t *testing.T) {
 		_, err = db.EnsureSearchIndexesBuildStarted("system", nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "system database")
+	})
+}
+
+func TestSearchServices_CloseBuildDone_IsIdempotent(t *testing.T) {
+	entry := &dbSearchService{buildDone: make(chan struct{})}
+	entry.closeBuildDone()
+	require.NotPanics(t, func() {
+		entry.closeBuildDone()
 	})
 }
 

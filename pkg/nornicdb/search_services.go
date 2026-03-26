@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/gpu"
@@ -30,10 +31,28 @@ type dbSearchService struct {
 	clusterMu               sync.Mutex
 	lastClusteredEmbedCount int
 
-	pendingMu    sync.Mutex
-	pendingOps   map[string]pendingSearchMutation
-	pendingFlush sync.Once
+	pendingMu           sync.Mutex
+	pendingOps          map[string]pendingSearchMutation
+	pendingFlushMu      sync.Mutex
+	pendingFlushTimer   *time.Timer
+	pendingFlushRunning bool
+	pendingFlushDelay   time.Duration
 }
+
+func (e *dbSearchService) closeBuildDone() {
+	if e == nil || e.buildDone == nil {
+		return
+	}
+	defer func() {
+		if recover() != nil {
+			// Tests and shutdown races may observe a pre-closed buildDone channel.
+			// Treat repeated close attempts as idempotent completion.
+		}
+	}()
+	close(e.buildDone)
+}
+
+const searchMutationDebounceDelay = 250 * time.Millisecond
 
 type pendingSearchMutation struct {
 	node   *storage.Node
@@ -89,6 +108,22 @@ func (e *dbSearchService) drainPending() map[string]pendingSearchMutation {
 	out := e.pendingOps
 	e.pendingOps = make(map[string]pendingSearchMutation)
 	return out
+}
+
+func (e *dbSearchService) hasPending() bool {
+	if e == nil {
+		return false
+	}
+	e.pendingMu.Lock()
+	defer e.pendingMu.Unlock()
+	return len(e.pendingOps) > 0
+}
+
+func (e *dbSearchService) flushDelay() time.Duration {
+	if e == nil || e.pendingFlushDelay <= 0 {
+		return searchMutationDebounceDelay
+	}
+	return e.pendingFlushDelay
 }
 
 // DatabaseSearchStatus exposes per-database search service readiness/progress.
@@ -401,12 +436,12 @@ func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context)
 				entry.clusterMu.Unlock()
 			}
 			entry.buildErrMu.Unlock()
-			close(entry.buildDone)
+			entry.closeBuildDone()
 		}) {
 			entry.buildErrMu.Lock()
 			entry.buildErr = ErrClosed
 			entry.buildErrMu.Unlock()
-			close(entry.buildDone)
+			entry.closeBuildDone()
 		}
 	})
 }
@@ -415,9 +450,40 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 	if entry == nil || entry.svc == nil {
 		return
 	}
-	entry.pendingFlush.Do(func() {
-		_ = db.startBackgroundTask(func() {
-			<-entry.buildDone
+	entry.pendingFlushMu.Lock()
+	if entry.pendingFlushTimer != nil {
+		entry.pendingFlushTimer.Stop()
+	}
+	delay := entry.flushDelay()
+	entry.pendingFlushTimer = time.AfterFunc(delay, func() {
+		entry.pendingFlushMu.Lock()
+		entry.pendingFlushTimer = nil
+		if entry.pendingFlushRunning {
+			entry.pendingFlushMu.Unlock()
+			return
+		}
+		entry.pendingFlushRunning = true
+		entry.pendingFlushMu.Unlock()
+
+		started := db.startBackgroundTask(func() {
+			defer func() {
+				entry.pendingFlushMu.Lock()
+				entry.pendingFlushRunning = false
+				entry.pendingFlushMu.Unlock()
+				if entry.hasPending() {
+					db.ensurePendingFlush(entry)
+				}
+			}()
+
+			progress := entry.svc.GetBuildProgress()
+			if progress.Building || !progress.Ready {
+				ctx := db.buildCtx
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				db.startSearchIndexBuild(entry, ctx)
+				<-entry.buildDone
+			}
 
 			for {
 				ops := entry.drainPending()
@@ -452,7 +518,13 @@ func (db *DB) ensurePendingFlush(entry *dbSearchService) {
 				}
 			}
 		})
+		if !started {
+			entry.pendingFlushMu.Lock()
+			entry.pendingFlushRunning = false
+			entry.pendingFlushMu.Unlock()
+		}
 	})
+	entry.pendingFlushMu.Unlock()
 }
 
 func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error {
@@ -546,26 +618,20 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 	db.searchServicesMu.RLock()
 	entry := db.searchServices[dbName]
 	db.searchServicesMu.RUnlock()
-	if entry != nil {
-		progress := svc.GetBuildProgress()
-		if progress.Building || !progress.Ready {
-			entry.queueIndex(userNode)
-			ctx := db.buildCtx
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			db.startSearchIndexBuild(entry, ctx)
-			db.ensurePendingFlush(entry)
-			return
-		}
+	if entry == nil {
+		return
 	}
 
-	if err := svc.IndexNode(userNode); err != nil {
-		if db.shouldIgnoreSearchIndexingError(err) {
-			return
+	entry.queueIndex(userNode)
+	progress := svc.GetBuildProgress()
+	if progress.Building || !progress.Ready {
+		ctx := db.buildCtx
+		if ctx == nil {
+			ctx = context.Background()
 		}
-		log.Printf("⚠️ Failed to index node %s in db %s: %v", node.ID, dbName, err)
+		db.startSearchIndexBuild(entry, ctx)
 	}
+	db.ensurePendingFlush(entry)
 }
 
 func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
@@ -585,21 +651,16 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 		return
 	}
 
+	entry.queueRemove(local)
 	progress := entry.svc.GetBuildProgress()
 	if progress.Building || !progress.Ready {
-		entry.queueRemove(local)
 		ctx := db.buildCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
 		db.startSearchIndexBuild(entry, ctx)
-		db.ensurePendingFlush(entry)
-		return
 	}
-
-	if err := entry.svc.RemoveNode(storage.NodeID(local)); err != nil {
-		log.Printf("⚠️ Failed to remove node %s from search indexes in db %s: %v", nodeID, dbName, err)
-	}
+	db.ensurePendingFlush(entry)
 }
 
 // GetDatabaseManagedEmbeddingStats returns managed embedding usage for a database.

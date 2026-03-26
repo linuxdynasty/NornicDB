@@ -145,6 +145,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/storage/lifecycle"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
 
@@ -432,6 +433,8 @@ type DB struct {
 
 	// Optional: when set, getOrCreateSearchService uses this to get the reranker for a database (enables per-DB reranker).
 	rerankerResolver func(dbName string) search.Reranker
+
+	lifecycleManager *lifecycle.MVCCLifecycleManager
 }
 
 // DbConfigResolver returns effective embedding dimensions, search min similarity, and BM25 engine for a database.
@@ -860,6 +863,17 @@ func Open(dataDir string, config *Config) (*DB, error) {
 				return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 			}
 		}
+		if config.Database.MVCCLifecycleEnabled {
+			lifecycleConfig := lifecycle.DefaultLifecycleConfig()
+			lifecycleConfig.Enabled = config.Database.MVCCRetentionMaxVersions > 1 || config.Database.MVCCRetentionTTL > 0
+			lifecycleConfig.CycleInterval = config.Database.MVCCLifecycleCycleInterval
+			lifecycleConfig.MaxVersionsPerKey = config.Database.MVCCRetentionMaxVersions
+			lifecycleConfig.TTL = config.Database.MVCCRetentionTTL
+			lifecycleConfig.MaxSnapshotLifetime = config.Database.MVCCLifecycleMaxSnapshotAge
+			lifecycleConfig.MaxChainHardCap = config.Database.MVCCLifecycleMaxChainCap
+			db.lifecycleManager = lifecycle.NewMVCCLifecycleManager(lifecycleConfig, badgerEngine)
+			badgerEngine.SetLifecycleController(db.lifecycleManager)
+		}
 
 		// Initialize WAL for durability (uses batch sync mode by default for better performance)
 		walConfig := storage.DefaultWALConfig()
@@ -1044,11 +1058,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize embedding worker config from main config
 	db.embedWorkerConfig = &EmbedWorkerConfig{
 		NumWorkers:           config.EmbeddingWorker.NumWorkers,
-		ScanInterval:         15 * time.Minute,       // Scan for missed nodes every 15 minutes
-		BatchDelay:           500 * time.Millisecond, // Delay between processing nodes
-		MaxRetries:           3,
-		ChunkSize:            512,
-		ChunkOverlap:         50,
+		ScanInterval:         config.EmbeddingWorker.ScanInterval,
+		BatchDelay:           config.EmbeddingWorker.BatchDelay,
+		TriggerDebounceDelay: config.EmbeddingWorker.TriggerDebounceDelay,
+		MaxRetries:           config.EmbeddingWorker.MaxRetries,
+		ChunkSize:            config.EmbeddingWorker.ChunkSize,
+		ChunkOverlap:         config.EmbeddingWorker.ChunkOverlap,
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
 		PropertiesInclude:    config.EmbeddingWorker.PropertiesInclude,
@@ -1127,24 +1142,24 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	if notifier, ok := underlyingEngine.(storage.StorageEventNotifier); ok {
 		// When a node is created/updated/deleted, route the event to the correct
 		// per-database search service based on the namespace prefix (<db>:<id>).
-		// IMPORTANT: dispatch asynchronously so storage writes/flushes are never
-		// blocked by search indexing work (prevents commit/status stalls under load).
+		// The downstream mutation path is debounced, so we can enqueue inline here
+		// without spawning one goroutine per write event.
 		notifier.OnNodeCreated(func(node *storage.Node) {
 			if node == nil {
 				return
 			}
 			nodeCopy := storage.CopyNode(node)
-			go db.indexNodeFromEvent(nodeCopy)
+			db.indexNodeFromEvent(nodeCopy)
 		})
 		notifier.OnNodeUpdated(func(node *storage.Node) {
 			if node == nil {
 				return
 			}
 			nodeCopy := storage.CopyNode(node)
-			go db.indexNodeFromEvent(nodeCopy)
+			db.indexNodeFromEvent(nodeCopy)
 		})
 		notifier.OnNodeDeleted(func(nodeID storage.NodeID) {
-			go db.removeNodeFromEvent(nodeID)
+			db.removeNodeFromEvent(nodeID)
 		})
 	}
 
@@ -1153,7 +1168,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// buffered in AsyncEngine (so the inner engine never emits a delete event).
 	if asyncNotifier != nil {
 		asyncNotifier.OnNodeDeleted(func(nodeID storage.NodeID) {
-			go db.removeNodeFromEvent(nodeID)
+			db.removeNodeFromEvent(nodeID)
 		})
 	}
 
@@ -1184,6 +1199,14 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			log.Printf("🧾 Rebuilding MVCC heads before search warmup...")
 			if err := maint.RebuildMVCCHeads(ctx); err != nil {
 				log.Printf("⚠️  MVCC head rebuild failed: %v", err)
+			}
+		}
+		if db.lifecycleManager != nil {
+			db.lifecycleManager.StartLifecycle(db.buildCtx)
+			if db.config.Database.MVCCLifecycleCycleInterval > 0 {
+				log.Printf("🔄 MVCC lifecycle manager enabled (cycle=%s)", db.config.Database.MVCCLifecycleCycleInterval)
+			} else {
+				log.Printf("🔄 MVCC lifecycle manager enabled in manual-only mode")
 			}
 		}
 
@@ -2415,10 +2438,11 @@ func (db *DB) Neighbors(ctx context.Context, id string, depth int, edgeType stri
 
 // Forget removes a memory and its edges.
 func (db *DB) Forget(ctx context.Context, id string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.mu.RLock()
+	closed := db.closed
+	db.mu.RUnlock()
 
-	if db.closed {
+	if closed {
 		return ErrClosed
 	}
 

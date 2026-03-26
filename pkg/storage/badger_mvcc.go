@@ -80,12 +80,11 @@ func normalizeMVCCHead(head MVCCHead) MVCCHead {
 	return head
 }
 
-func (b *BadgerEngine) beginMVCCSnapshotRead() {
-	b.activeMVCCSnapshotReaders.Add(1)
-}
-
-func (b *BadgerEngine) endMVCCSnapshotRead() {
-	b.activeMVCCSnapshotReaders.Add(-1)
+func (b *BadgerEngine) beginMVCCSnapshotRead(version MVCCVersion) (func(), error) {
+	return b.acquireSnapshotReader(SnapshotReaderInfo{
+		SnapshotVersion: version,
+		StartTime:       time.Now(),
+	})
 }
 
 func (b *BadgerEngine) effectiveMVCCPruneOptions(opts MVCCPruneOptions) MVCCPruneOptions {
@@ -427,10 +426,13 @@ func (b *BadgerEngine) GetNodeLatestVisible(id NodeID) (*Node, error) {
 }
 
 func (b *BadgerEngine) GetNodeVisibleAt(id NodeID, version MVCCVersion) (*Node, error) {
-	b.beginMVCCSnapshotRead()
-	defer b.endMVCCSnapshotRead()
+	deregister, err := b.beginMVCCSnapshotRead(version)
+	if err != nil {
+		return nil, err
+	}
+	defer deregister()
 	var node *Node
-	err := b.withView(func(txn *badger.Txn) error {
+	err = b.withView(func(txn *badger.Txn) error {
 		head, err := b.loadNodeMVCCHeadInTxn(txn, id)
 		if err != nil {
 			return err
@@ -500,10 +502,13 @@ func (b *BadgerEngine) GetEdgeLatestVisible(id EdgeID) (*Edge, error) {
 }
 
 func (b *BadgerEngine) GetEdgeVisibleAt(id EdgeID, version MVCCVersion) (*Edge, error) {
-	b.beginMVCCSnapshotRead()
-	defer b.endMVCCSnapshotRead()
+	deregister, err := b.beginMVCCSnapshotRead(version)
+	if err != nil {
+		return nil, err
+	}
+	defer deregister()
 	var edge *Edge
-	err := b.withView(func(txn *badger.Txn) error {
+	err = b.withView(func(txn *badger.Txn) error {
 		head, err := b.loadEdgeMVCCHeadInTxn(txn, id)
 		if err != nil {
 			return err
@@ -662,11 +667,14 @@ func (b *BadgerEngine) iterateEdgesVisibleAtInTxn(txn *badger.Txn, version MVCCV
 }
 
 func (b *BadgerEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersion) ([]*Node, error) {
-	b.beginMVCCSnapshotRead()
-	defer b.endMVCCSnapshotRead()
+	deregister, err := b.beginMVCCSnapshotRead(version)
+	if err != nil {
+		return nil, err
+	}
+	defer deregister()
 	var nodes []*Node
 	normalizedLabel := normalizeLabel(label)
-	err := b.withView(func(txn *badger.Txn) error {
+	err = b.withView(func(txn *badger.Txn) error {
 		return b.iterateNodesVisibleAtInTxn(txn, version, func(node *Node) error {
 			if node == nil {
 				return nil
@@ -694,11 +702,14 @@ func (b *BadgerEngine) GetNodesByLabelVisibleAt(label string, version MVCCVersio
 }
 
 func (b *BadgerEngine) GetEdgesByTypeVisibleAt(edgeType string, version MVCCVersion) ([]*Edge, error) {
-	b.beginMVCCSnapshotRead()
-	defer b.endMVCCSnapshotRead()
+	deregister, err := b.beginMVCCSnapshotRead(version)
+	if err != nil {
+		return nil, err
+	}
+	defer deregister()
 	var edges []*Edge
 	normalizedType := strings.ToLower(edgeType)
-	err := b.withView(func(txn *badger.Txn) error {
+	err = b.withView(func(txn *badger.Txn) error {
 		return b.iterateEdgesVisibleAtInTxn(txn, version, func(edge *Edge) error {
 			if edge == nil {
 				return nil
@@ -720,10 +731,13 @@ func (b *BadgerEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, version M
 	if startID == "" || endID == "" {
 		return nil, ErrInvalidID
 	}
-	b.beginMVCCSnapshotRead()
-	defer b.endMVCCSnapshotRead()
+	deregister, err := b.beginMVCCSnapshotRead(version)
+	if err != nil {
+		return nil, err
+	}
+	defer deregister()
 	var edges []*Edge
-	err := b.withView(func(txn *badger.Txn) error {
+	err = b.withView(func(txn *badger.Txn) error {
 		return b.iterateEdgesVisibleAtInTxn(txn, version, func(edge *Edge) error {
 			if edge == nil {
 				return nil
@@ -1040,6 +1054,9 @@ func (b *BadgerEngine) bootstrapEdgeMVCCFromCurrentStateInTxn(txn *badger.Txn) e
 func (b *BadgerEngine) PruneMVCCVersions(ctx context.Context, opts MVCCPruneOptions) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if b.lifecycleController != nil && b.lifecycleController.IsLifecycleEnabled() {
+		return b.lifecycleController.RunPruneNow(ctx, opts)
 	}
 	effectiveOpts := b.effectiveMVCCPruneOptions(opts)
 	activeSnapshotReaders := b.activeMVCCSnapshotReaders.Load() > 0

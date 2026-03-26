@@ -177,6 +177,14 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 	return ae
 }
 
+// GetInnerEngine returns the wrapped storage engine.
+func (e *AsyncEngine) GetInnerEngine() Engine {
+	if e == nil {
+		return nil
+	}
+	return e.engine
+}
+
 // flushLoop periodically flushes pending writes to the underlying engine.
 func (ae *AsyncEngine) flushLoop() {
 	defer ae.wg.Done()

@@ -9,6 +9,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func countNodeMVCCVersions(t *testing.T, engine *BadgerEngine, nodeID NodeID) int {
+	t.Helper()
+	count := 0
+	require.NoError(t, engine.withView(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = mvccNodeVersionPrefix(nodeID)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+			count++
+		}
+		return nil
+	}))
+	return count
+}
+
 type nonMVCCEngine struct {
 	Engine
 }
@@ -267,37 +283,87 @@ func TestBadgerEngine_PruneMVCCVersions_TombstoneCompactionHonorsActiveReaders(t
 	require.NoError(t, err)
 	require.True(t, head.Tombstoned)
 
-	countVersions := func() int {
-		count := 0
-		require.NoError(t, engine.withView(func(txn *badger.Txn) error {
-			opts := badger.DefaultIteratorOptions
-			opts.Prefix = mvccNodeVersionPrefix(nodeID)
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
-				count++
-			}
-			return nil
-		}))
-		return count
-	}
-
-	require.Equal(t, 3, countVersions())
+	require.Equal(t, 3, countNodeMVCCVersions(t, engine, nodeID))
 	engine.activeMVCCSnapshotReaders.Add(1)
 	_, err = engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 100})
 	require.NoError(t, err)
 	engine.activeMVCCSnapshotReaders.Add(-1)
-	require.Equal(t, 3, countVersions())
+	require.Equal(t, 3, countNodeMVCCVersions(t, engine, nodeID))
 
 	deleted, err := engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 100})
 	require.NoError(t, err)
 	require.Equal(t, int64(2), deleted)
-	require.Equal(t, 1, countVersions())
+	require.Equal(t, 1, countNodeMVCCVersions(t, engine, nodeID))
 	_, err = engine.GetNodeLatestVisible(nodeID)
 	require.ErrorIs(t, err, ErrNotFound)
 	remainingHead, err := engine.GetNodeCurrentHead(nodeID)
 	require.NoError(t, err)
 	require.True(t, remainingHead.Tombstoned)
+}
+
+func TestBadgerEngine_MVCCStress_ChurnPruneBoundsRetainedChain(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := NewBadgerEngineWithOptions(BadgerOptions{DataDir: dir})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, engine.Close())
+	})
+
+	nodeID := NodeID(prefixTestID("mvcc-stress-churn"))
+	createVersion := func(iteration int) *Node {
+		return &Node{
+			ID:     nodeID,
+			Labels: []string{"Doc"},
+			Properties: map[string]any{
+				"iteration": iteration,
+				"state":     "live",
+			},
+		}
+	}
+
+	_, err = engine.CreateNode(createVersion(0))
+	require.NoError(t, err)
+
+	const churnCycles = 48
+	for i := 1; i <= churnCycles; i++ {
+		require.NoError(t, engine.UpdateNode(createVersion(i)))
+		if i%6 == 0 {
+			require.NoError(t, engine.DeleteNode(nodeID))
+			_, err := engine.GetNodeLatestVisible(nodeID)
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = engine.CreateNode(createVersion(i * 100))
+			require.NoError(t, err)
+		}
+	}
+
+	headBeforePrune, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	prePruneVersions := countNodeMVCCVersions(t, engine, nodeID)
+	require.Greater(t, prePruneVersions, 12)
+
+	deleted, err := engine.PruneMVCCVersions(context.Background(), MVCCPruneOptions{MaxVersionsPerKey: 3})
+	require.NoError(t, err)
+	require.Greater(t, deleted, int64(0))
+
+	headAfterPrune, err := engine.GetNodeCurrentHead(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, 0, headAfterPrune.Version.Compare(headBeforePrune.Version))
+	require.False(t, headAfterPrune.Tombstoned)
+	require.LessOrEqual(t, countNodeMVCCVersions(t, engine, nodeID), 4)
+
+	latest, err := engine.GetNodeLatestVisible(nodeID)
+	require.NoError(t, err)
+	require.EqualValues(t, churnCycles*100, latest.Properties["iteration"])
+	require.Equal(t, "live", latest.Properties["state"])
+
+	_, err = engine.GetNodeVisibleAt(nodeID, headBeforePrune.FloorVersion)
+	if !headBeforePrune.FloorVersion.IsZero() {
+		if err != nil {
+			require.ErrorIs(t, err, ErrNotFound)
+		}
+	}
+	_, err = engine.GetNodeVisibleAt(nodeID, headAfterPrune.Version)
+	require.NoError(t, err)
 }
 
 func TestMVCCInternalRecordsAlwaysUseMsgpack(t *testing.T) {

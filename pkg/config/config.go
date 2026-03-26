@@ -253,6 +253,18 @@ type DatabaseConfig struct {
 	// Env: NORNICDB_MVCC_RETENTION_TTL
 	MVCCRetentionTTL time.Duration
 
+	// MVCCLifecycleEnabled enables the MVCC lifecycle manager.
+	MVCCLifecycleEnabled bool
+
+	// MVCCLifecycleCycleInterval controls background lifecycle cadence.
+	MVCCLifecycleCycleInterval time.Duration
+
+	// MVCCLifecycleMaxSnapshotAge bounds snapshot lifetime under pressure.
+	MVCCLifecycleMaxSnapshotAge time.Duration
+
+	// MVCCLifecycleMaxChainCap bounds pathological MVCC chain growth.
+	MVCCLifecycleMaxChainCap int
+
 	// StorageSerializer selects the storage serialization format ("gob", "msgpack").
 	// Env: NORNICDB_STORAGE_SERIALIZER (default: msgpack)
 	StorageSerializer string
@@ -322,6 +334,7 @@ type ServerConfig struct {
 // Environment variables:
 //   - NORNICDB_EMBED_SCAN_INTERVAL: How often to scan for unembedded nodes (default: 15m)
 //   - NORNICDB_EMBED_BATCH_DELAY: Delay between processing nodes (default: 500ms)
+//   - NORNICDB_EMBED_TRIGGER_DEBOUNCE: Delay before write-triggered scans fire (default: 2s)
 //   - NORNICDB_EMBED_MAX_RETRIES: Max retry attempts per node (default: 3)
 //   - NORNICDB_EMBED_CHUNK_SIZE: Max tokens per chunk (default: 8192)
 //   - NORNICDB_EMBED_CHUNK_OVERLAP: Tokens to overlap between chunks (default: 50)
@@ -337,6 +350,8 @@ type EmbeddingWorkerConfig struct {
 	ScanInterval time.Duration
 	// BatchDelay is the delay between processing individual nodes
 	BatchDelay time.Duration
+	// TriggerDebounceDelay delays write-triggered scans until mutation bursts settle.
+	TriggerDebounceDelay time.Duration
 	// MaxRetries is the max retry attempts per node
 	MaxRetries int
 	// ChunkSize is max tokens per chunk.
@@ -943,6 +958,18 @@ func (c *Config) Validate() error {
 	if c.Database.MVCCRetentionTTL < 0 {
 		return fmt.Errorf("invalid mvcc retention ttl: %s", c.Database.MVCCRetentionTTL)
 	}
+	if c.Database.MVCCLifecycleCycleInterval < 0 {
+		return fmt.Errorf("invalid mvcc lifecycle interval: %s", c.Database.MVCCLifecycleCycleInterval)
+	}
+	if c.Database.MVCCLifecycleMaxSnapshotAge < 0 {
+		return fmt.Errorf("invalid mvcc lifecycle max snapshot age: %s", c.Database.MVCCLifecycleMaxSnapshotAge)
+	}
+	if c.Database.MVCCLifecycleMaxChainCap < 0 {
+		return fmt.Errorf("invalid mvcc lifecycle max chain cap: %d", c.Database.MVCCLifecycleMaxChainCap)
+	}
+	if c.EmbeddingWorker.TriggerDebounceDelay < 0 {
+		return fmt.Errorf("invalid embed trigger debounce: %s", c.EmbeddingWorker.TriggerDebounceDelay)
+	}
 
 	return nil
 }
@@ -1012,6 +1039,10 @@ type YAMLConfig struct {
 		BadgerEdgeTypeCacheMaxTypes  int    `yaml:"badger_edge_type_cache_max_types"`
 		MVCCRetentionMaxVersions     int    `yaml:"mvcc_retention_max_versions"`
 		MVCCRetentionTTL             string `yaml:"mvcc_retention_ttl"`
+		MVCCLifecycleEnabled         *bool  `yaml:"mvcc_lifecycle_enabled"`
+		MVCCLifecycleCycleInterval   string `yaml:"mvcc_lifecycle_interval"`
+		MVCCLifecycleMaxSnapshotAge  string `yaml:"mvcc_lifecycle_max_snapshot_age"`
+		MVCCLifecycleMaxChainCap     int    `yaml:"mvcc_lifecycle_max_chain_cap"`
 		StorageSerializer            string `yaml:"storage_serializer"`
 		PersistSearchIndexes         bool   `yaml:"persist_search_indexes"`
 	} `yaml:"database"`
@@ -1063,6 +1094,7 @@ type YAMLConfig struct {
 	EmbeddingWorker struct {
 		ScanInterval      string   `yaml:"scan_interval"`
 		BatchDelay        string   `yaml:"batch_delay"`
+		TriggerDebounce   string   `yaml:"trigger_debounce"`
 		MaxRetries        int      `yaml:"max_retries"`
 		ChunkSize         int      `yaml:"chunk_size"`
 		ChunkOverlap      int      `yaml:"chunk_overlap"`
@@ -1242,6 +1274,10 @@ func LoadDefaults() *Config {
 	config.Database.BadgerEdgeTypeCacheMaxTypes = 50
 	config.Database.MVCCRetentionMaxVersions = 100
 	config.Database.MVCCRetentionTTL = 0
+	config.Database.MVCCLifecycleEnabled = true
+	config.Database.MVCCLifecycleCycleInterval = 30 * time.Second
+	config.Database.MVCCLifecycleMaxSnapshotAge = time.Hour
+	config.Database.MVCCLifecycleMaxChainCap = 1000
 	config.Database.StorageSerializer = "msgpack"
 
 	// Server defaults - Bolt
@@ -1297,6 +1333,7 @@ func LoadDefaults() *Config {
 	config.EmbeddingWorker.NumWorkers = 1
 	config.EmbeddingWorker.ScanInterval = 15 * time.Minute
 	config.EmbeddingWorker.BatchDelay = 500 * time.Millisecond
+	config.EmbeddingWorker.TriggerDebounceDelay = 2 * time.Second
 	config.EmbeddingWorker.MaxRetries = 3
 	config.EmbeddingWorker.ChunkSize = 8192
 	config.EmbeddingWorker.ChunkOverlap = 50
@@ -1517,6 +1554,18 @@ func applyEnvVars(config *Config) error {
 	if v := getEnvDuration("NORNICDB_MVCC_RETENTION_TTL", 0); v > 0 {
 		config.Database.MVCCRetentionTTL = v
 	}
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_MVCC_LIFECYCLE_ENABLED"); ok {
+		config.Database.MVCCLifecycleEnabled = v
+	}
+	if v := getEnvDuration("NORNICDB_MVCC_LIFECYCLE_INTERVAL", 0); v > 0 {
+		config.Database.MVCCLifecycleCycleInterval = v
+	}
+	if v := getEnvDuration("NORNICDB_MVCC_LIFECYCLE_MAX_SNAPSHOT_AGE", 0); v > 0 {
+		config.Database.MVCCLifecycleMaxSnapshotAge = v
+	}
+	if v := getEnvInt("NORNICDB_MVCC_LIFECYCLE_MAX_CHAIN_CAP", -1); v >= 0 {
+		config.Database.MVCCLifecycleMaxChainCap = v
+	}
 	if v := getEnv("NORNICDB_STORAGE_SERIALIZER", ""); v != "" {
 		config.Database.StorageSerializer = strings.ToLower(v)
 	}
@@ -1705,6 +1754,9 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnvDuration("NORNICDB_EMBED_BATCH_DELAY", 0); v > 0 {
 		config.EmbeddingWorker.BatchDelay = v
+	}
+	if v := getEnvDuration("NORNICDB_EMBED_TRIGGER_DEBOUNCE", -1); v >= 0 {
+		config.EmbeddingWorker.TriggerDebounceDelay = v
 	}
 	if v := getEnvInt("NORNICDB_EMBED_MAX_RETRIES", 0); v > 0 {
 		config.EmbeddingWorker.MaxRetries = v
@@ -2125,6 +2177,22 @@ func LoadFromFile(configPath string) (*Config, error) {
 			config.Database.MVCCRetentionTTL = d
 		}
 	}
+	if yamlCfg.Database.MVCCLifecycleEnabled != nil {
+		config.Database.MVCCLifecycleEnabled = *yamlCfg.Database.MVCCLifecycleEnabled
+	}
+	if yamlCfg.Database.MVCCLifecycleCycleInterval != "" {
+		if d, err := time.ParseDuration(yamlCfg.Database.MVCCLifecycleCycleInterval); err == nil {
+			config.Database.MVCCLifecycleCycleInterval = d
+		}
+	}
+	if yamlCfg.Database.MVCCLifecycleMaxSnapshotAge != "" {
+		if d, err := time.ParseDuration(yamlCfg.Database.MVCCLifecycleMaxSnapshotAge); err == nil {
+			config.Database.MVCCLifecycleMaxSnapshotAge = d
+		}
+	}
+	if yamlCfg.Database.MVCCLifecycleMaxChainCap > 0 {
+		config.Database.MVCCLifecycleMaxChainCap = yamlCfg.Database.MVCCLifecycleMaxChainCap
+	}
 	if yamlCfg.Database.StorageSerializer != "" {
 		config.Database.StorageSerializer = strings.ToLower(yamlCfg.Database.StorageSerializer)
 	}
@@ -2265,6 +2333,11 @@ func LoadFromFile(configPath string) (*Config, error) {
 	if yamlCfg.EmbeddingWorker.BatchDelay != "" {
 		if d, err := time.ParseDuration(yamlCfg.EmbeddingWorker.BatchDelay); err == nil {
 			config.EmbeddingWorker.BatchDelay = d
+		}
+	}
+	if yamlCfg.EmbeddingWorker.TriggerDebounce != "" {
+		if d, err := time.ParseDuration(yamlCfg.EmbeddingWorker.TriggerDebounce); err == nil {
+			config.EmbeddingWorker.TriggerDebounceDelay = d
 		}
 	}
 	if yamlCfg.EmbeddingWorker.MaxRetries > 0 {

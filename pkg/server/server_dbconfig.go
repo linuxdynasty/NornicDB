@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/config/dbconfig"
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // GET /admin/databases/config/keys
@@ -25,10 +28,6 @@ func (s *Server) handleDbConfigKeys(w http.ResponseWriter, r *http.Request) {
 // handleDbConfigPrefix handles GET/PUT /admin/databases/{dbName}/config.
 // Route is registered as /admin/databases/ so we receive e.g. /admin/databases/nornic/config.
 func (s *Server) handleDbConfigPrefix(w http.ResponseWriter, r *http.Request) {
-	if s.dbConfigStore == nil {
-		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "per-database config not available (system DB unavailable)")
-		return
-	}
 	path := strings.TrimPrefix(r.URL.Path, "/admin/databases/")
 	if path == "" || path == "config/keys" {
 		// config/keys is handled by handleDbConfigKeys
@@ -41,17 +40,146 @@ func (s *Server) handleDbConfigPrefix(w http.ResponseWriter, r *http.Request) {
 		s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.BadRequest", "system database cannot have config overrides")
 		return
 	}
-	if len(parts) != 2 || parts[1] != "config" {
+	if len(parts) != 2 {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.General.BadRequest", "not found")
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetDbConfig(w, r, dbName)
-	case http.MethodPut:
-		s.handlePutDbConfig(w, r, dbName)
+	switch {
+	case parts[1] == "config":
+		if s.dbConfigStore == nil {
+			s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "per-database config not available (system DB unavailable)")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetDbConfig(w, r, dbName)
+		case http.MethodPut:
+			s.handlePutDbConfig(w, r, dbName)
+		default:
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "method not allowed")
+		}
+	case parts[1] == "mvcc" || strings.HasPrefix(parts[1], "mvcc/"):
+		s.handleDbLifecyclePrefix(w, r, dbName, parts[1])
 	default:
-		s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "method not allowed")
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.General.BadRequest", "not found")
+	}
+}
+
+func (s *Server) handleDbLifecyclePrefix(w http.ResponseWriter, r *http.Request, dbName string, suffix string) {
+	if s.dbManager == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "database manager unavailable")
+		return
+	}
+	if s.dbManager.IsCompositeDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported", "mvcc lifecycle controls are not supported for composite databases")
+		return
+	}
+	storageEngine, err := s.dbManager.GetStorage(dbName)
+	if err != nil {
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Database.DatabaseNotFound", err.Error())
+		return
+	}
+	lce, ok := storageEngine.(storage.MVCCLifecycleEngine)
+	if !ok {
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": false, "database": dbName})
+		return
+	}
+	switch suffix {
+	case "mvcc", "mvcc/status":
+		if r.Method != http.MethodGet {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "GET required")
+			return
+		}
+		status := lce.LifecycleStatus()
+		status["database"] = dbName
+		s.writeJSON(w, http.StatusOK, status)
+	case "mvcc/prune":
+		if r.Method != http.MethodPost {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "POST required")
+			return
+		}
+		if err := lce.TriggerPruneNow(r.Context()); err != nil {
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "prune triggered", "database": dbName})
+	case "mvcc/pause":
+		if r.Method != http.MethodPost {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "POST required")
+			return
+		}
+		lce.PauseLifecycle()
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "lifecycle paused", "database": dbName})
+	case "mvcc/resume":
+		if r.Method != http.MethodPost {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "POST required")
+			return
+		}
+		lce.ResumeLifecycle()
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "lifecycle resumed", "database": dbName})
+	case "mvcc/schedule":
+		if r.Method != http.MethodPost {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "POST required")
+			return
+		}
+		scheduler, ok := storageEngine.(storage.MVCCLifecycleScheduleEngine)
+		if !ok {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported", "mvcc lifecycle schedule control is not supported for this database")
+			return
+		}
+		var body struct {
+			Interval string `json:"interval"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.BadRequest", "invalid JSON body")
+			return
+		}
+		interval, err := time.ParseDuration(strings.TrimSpace(body.Interval))
+		if err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.BadRequest", "invalid interval")
+			return
+		}
+		if err := scheduler.SetLifecycleSchedule(interval); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.BadRequest", err.Error())
+			return
+		}
+		status := lce.LifecycleStatus()
+		status["database"] = dbName
+		s.writeJSON(w, http.StatusOK, status)
+	case "mvcc/debt":
+		if r.Method != http.MethodGet {
+			s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.General.BadRequest", "GET required")
+			return
+		}
+		provider, ok := storageEngine.(storage.MVCCLifecycleDebtEngine)
+		if !ok {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Statement.NotSupported", "mvcc lifecycle debt inspection is not supported for this database")
+			return
+		}
+		limit := 10
+		const maxDebtKeyLimit = 100
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			parsed, err := strconv.Atoi(rawLimit)
+			if err != nil || parsed < 0 {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.BadRequest", "invalid limit")
+				return
+			}
+			limit = parsed
+		}
+		if limit > maxDebtKeyLimit {
+			limit = maxDebtKeyLimit
+		}
+		keys := provider.TopLifecycleDebtKeys(limit)
+		if keys == nil {
+			keys = []storage.MVCCLifecycleDebtKey{}
+		}
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"database": dbName,
+			"limit":    limit,
+			"keys":     keys,
+		})
+	default:
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.General.BadRequest", "not found")
 	}
 }
 

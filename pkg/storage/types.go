@@ -643,6 +643,82 @@ type MVCCEnumerationEngine interface {
 	IterateLatestVisibleEdges(yield func(*Edge) error) error
 }
 
+// SnapshotReaderInfo describes an active MVCC snapshot reader.
+type SnapshotReaderInfo struct {
+	ReaderID        string
+	SnapshotVersion MVCCVersion
+	StartTime       time.Time
+	Namespace       string
+}
+
+// PressureBand represents the MVCC storage pressure level.
+type PressureBand string
+
+const (
+	PressureNormal   PressureBand = "normal"
+	PressureHigh     PressureBand = "high"
+	PressureCritical PressureBand = "critical"
+)
+
+// ErrMVCCResourcePressure is returned when MVCC resource pressure exceeds snapshot lifetime.
+var ErrMVCCResourcePressure = errors.New("mvcc: resource pressure exceeded snapshot lifetime")
+
+// Snapshot expiration errors surface when an already-admitted reader is forced to stop.
+var (
+	ErrMVCCSnapshotGracefulCancel = errors.New("mvcc: snapshot cancelled due to resource pressure")
+	ErrMVCCSnapshotHardExpired    = errors.New("mvcc: snapshot forcibly expired due to critical resource pressure")
+)
+
+// SnapshotReaderRegistry exposes active snapshot-reader tracking.
+type SnapshotReaderRegistry interface {
+	Register(info SnapshotReaderInfo) (string, func())
+	ActiveCount() int64
+	Snapshot() []SnapshotReaderInfo
+}
+
+// MVCCLifecycleEngine is an optional extension interface for lifecycle management.
+type MVCCLifecycleEngine interface {
+	RegisterSnapshotReader(info SnapshotReaderInfo) func()
+	LifecycleStatus() map[string]interface{}
+	TriggerPruneNow(ctx context.Context) error
+	PauseLifecycle()
+	ResumeLifecycle()
+}
+
+// MVCCLifecycleScheduleEngine is an optional extension for runtime lifecycle cadence control.
+type MVCCLifecycleScheduleEngine interface {
+	SetLifecycleSchedule(interval time.Duration) error
+}
+
+// MVCCLifecycleDebtKey describes one logical key contributing lifecycle debt.
+type MVCCLifecycleDebtKey struct {
+	LogicalKey       string `json:"logical_key"`
+	Namespace        string `json:"namespace,omitempty"`
+	DebtBytes        int64  `json:"debt_bytes"`
+	TombstoneDepth   int    `json:"tombstone_depth"`
+	FloorLagVersions int    `json:"floor_lag_versions"`
+	VersionsToDelete int    `json:"versions_to_delete"`
+}
+
+// MVCCLifecycleDebtEngine is an optional extension for inspecting the highest-debt logical keys.
+type MVCCLifecycleDebtEngine interface {
+	TopLifecycleDebtKeys(limit int) []MVCCLifecycleDebtKey
+}
+
+// MVCCLifecycleController is the storage-facing control interface used by engines.
+// A concrete implementation can live outside the storage package and be injected.
+type MVCCLifecycleController interface {
+	MVCCLifecycleEngine
+	AcquireSnapshotReader(info SnapshotReaderInfo) (func(), error)
+	EvaluateSnapshotReader(info SnapshotReaderInfo) (graceful bool, hard bool)
+	RunPruneNow(ctx context.Context, opts MVCCPruneOptions) (int64, error)
+	StartLifecycle(ctx context.Context)
+	StopLifecycle()
+	IsLifecycleEnabled() bool
+	IsLifecycleRunning() bool
+	ReaderRegistry() SnapshotReaderRegistry
+}
+
 // NodeEventCallback is called when storage operations complete successfully.
 // This allows external services (like search indexes) to stay synchronized with storage.
 type NodeEventCallback func(node *Node)

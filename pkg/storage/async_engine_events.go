@@ -135,6 +135,60 @@ func (ae *AsyncEngine) PruneMVCCVersions(ctx context.Context, opts MVCCPruneOpti
 	return 0, ErrNotImplemented
 }
 
+// RegisterSnapshotReader delegates snapshot-reader registration when supported.
+func (ae *AsyncEngine) RegisterSnapshotReader(info SnapshotReaderInfo) func() {
+	if lce, ok := ae.engine.(MVCCLifecycleEngine); ok {
+		return lce.RegisterSnapshotReader(info)
+	}
+	return func() {}
+}
+
+// LifecycleStatus delegates lifecycle status when supported.
+func (ae *AsyncEngine) LifecycleStatus() map[string]interface{} {
+	if lce, ok := ae.engine.(MVCCLifecycleEngine); ok {
+		return lce.LifecycleStatus()
+	}
+	return map[string]interface{}{"enabled": false}
+}
+
+// TriggerPruneNow delegates lifecycle prune-now when supported.
+func (ae *AsyncEngine) TriggerPruneNow(ctx context.Context) error {
+	if lce, ok := ae.engine.(MVCCLifecycleEngine); ok {
+		return lce.TriggerPruneNow(ctx)
+	}
+	return nil
+}
+
+// PauseLifecycle delegates lifecycle pause when supported.
+func (ae *AsyncEngine) PauseLifecycle() {
+	if lce, ok := ae.engine.(MVCCLifecycleEngine); ok {
+		lce.PauseLifecycle()
+	}
+}
+
+// ResumeLifecycle delegates lifecycle resume when supported.
+func (ae *AsyncEngine) ResumeLifecycle() {
+	if lce, ok := ae.engine.(MVCCLifecycleEngine); ok {
+		lce.ResumeLifecycle()
+	}
+}
+
+// SetLifecycleSchedule delegates lifecycle cadence updates when supported.
+func (ae *AsyncEngine) SetLifecycleSchedule(interval time.Duration) error {
+	if scheduler, ok := ae.engine.(MVCCLifecycleScheduleEngine); ok {
+		return scheduler.SetLifecycleSchedule(interval)
+	}
+	return nil
+}
+
+// TopLifecycleDebtKeys delegates lifecycle debt inspection when supported.
+func (ae *AsyncEngine) TopLifecycleDebtKeys(limit int) []MVCCLifecycleDebtKey {
+	if provider, ok := ae.engine.(MVCCLifecycleDebtEngine); ok {
+		return provider.TopLifecycleDebtKeys(limit)
+	}
+	return nil
+}
+
 // OnNodeCreated sets a callback to be invoked when nodes are created.
 func (ae *AsyncEngine) OnNodeCreated(callback NodeEventCallback) {
 	ae.callbackMu.Lock()

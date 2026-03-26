@@ -164,6 +164,60 @@ func (w *WALEngine) GetEdgesBetweenVisibleAt(startID, endID NodeID, version MVCC
 	return nil, ErrNotImplemented
 }
 
+// RegisterSnapshotReader delegates snapshot-reader registration when supported.
+func (w *WALEngine) RegisterSnapshotReader(info SnapshotReaderInfo) func() {
+	if lce, ok := w.engine.(MVCCLifecycleEngine); ok {
+		return lce.RegisterSnapshotReader(info)
+	}
+	return func() {}
+}
+
+// LifecycleStatus delegates lifecycle status when supported.
+func (w *WALEngine) LifecycleStatus() map[string]interface{} {
+	if lce, ok := w.engine.(MVCCLifecycleEngine); ok {
+		return lce.LifecycleStatus()
+	}
+	return map[string]interface{}{"enabled": false}
+}
+
+// TriggerPruneNow delegates lifecycle prune-now when supported.
+func (w *WALEngine) TriggerPruneNow(ctx context.Context) error {
+	if lce, ok := w.engine.(MVCCLifecycleEngine); ok {
+		return lce.TriggerPruneNow(ctx)
+	}
+	return nil
+}
+
+// PauseLifecycle delegates lifecycle pause when supported.
+func (w *WALEngine) PauseLifecycle() {
+	if lce, ok := w.engine.(MVCCLifecycleEngine); ok {
+		lce.PauseLifecycle()
+	}
+}
+
+// ResumeLifecycle delegates lifecycle resume when supported.
+func (w *WALEngine) ResumeLifecycle() {
+	if lce, ok := w.engine.(MVCCLifecycleEngine); ok {
+		lce.ResumeLifecycle()
+	}
+}
+
+// SetLifecycleSchedule delegates lifecycle cadence updates when supported.
+func (w *WALEngine) SetLifecycleSchedule(interval time.Duration) error {
+	if scheduler, ok := w.engine.(MVCCLifecycleScheduleEngine); ok {
+		return scheduler.SetLifecycleSchedule(interval)
+	}
+	return nil
+}
+
+// TopLifecycleDebtKeys delegates lifecycle debt inspection when supported.
+func (w *WALEngine) TopLifecycleDebtKeys(limit int) []MVCCLifecycleDebtKey {
+	if provider, ok := w.engine.(MVCCLifecycleDebtEngine); ok {
+		return provider.TopLifecycleDebtKeys(limit)
+	}
+	return nil
+}
+
 // GetNodeCurrentHead delegates node head lookup when supported.
 func (w *WALEngine) GetNodeCurrentHead(id NodeID) (MVCCHead, error) {
 	if provider, ok := w.engine.(MVCCHeadEngine); ok {
@@ -186,6 +240,14 @@ func NewWALEngine(engine Engine, wal *WAL) *WALEngine {
 		engine: engine,
 		wal:    wal,
 	}
+}
+
+// GetInnerEngine returns the wrapped storage engine.
+func (w *WALEngine) GetInnerEngine() Engine {
+	if w == nil {
+		return nil
+	}
+	return w.engine
 }
 
 // EnableAutoCompaction starts automatic snapshot creation and WAL truncation.

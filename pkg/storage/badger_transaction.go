@@ -57,7 +57,10 @@ type BadgerTransaction struct {
 	skipCreateExistenceCheck bool
 
 	// Transaction metadata (for logging/debugging)
-	Metadata map[string]interface{}
+	Metadata           map[string]interface{}
+	snapshotReaderInfo SnapshotReaderInfo
+	snapshotDeregister func()
+	closedErr          error
 }
 
 func (b *BadgerEngine) currentMVCCReadVersion() MVCCVersion {
@@ -69,30 +72,50 @@ func (b *BadgerEngine) currentMVCCReadVersion() MVCCVersion {
 
 // BeginTransaction starts a new Badger transaction with ACID guarantees.
 func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
+	b.mu.RLock()
 	if b.closed {
+		b.mu.RUnlock()
 		return nil, fmt.Errorf("engine is closed")
 	}
+	badgerDB := b.db
+	b.mu.RUnlock()
 
 	readTS := b.currentMVCCReadVersion()
+	txID := generateTxID()
+	startTime := time.Now()
+	readerInfo := SnapshotReaderInfo{
+		ReaderID:        txID,
+		SnapshotVersion: readTS,
+		StartTime:       startTime,
+	}
+	var deregister func()
+	badgerTx := badgerDB.NewTransaction(true)
+	if !readTS.IsZero() {
+		var err error
+		deregister, err = b.acquireSnapshotReader(readerInfo)
+		if err != nil {
+			badgerTx.Discard()
+			return nil, err
+		}
+	}
 
 	return &BadgerTransaction{
-		ID:             generateTxID(),
-		StartTime:      time.Now(),
-		Status:         TxStatusActive,
-		readTS:         readTS,
-		badgerTx:       b.db.NewTransaction(true), // Read-write transaction
-		engine:         b,
-		pendingNodes:   make(map[NodeID]*Node),
-		pendingEdges:   make(map[EdgeID]*Edge),
-		deletedNodes:   make(map[NodeID]struct{}),
-		deletedEdges:   make(map[EdgeID]struct{}),
-		operations:     make([]Operation, 0),
-		pendingWrites:  make(map[string][]byte),
-		pendingDeletes: make(map[string]bool),
-		Metadata:       make(map[string]interface{}),
+		ID:                 txID,
+		StartTime:          startTime,
+		Status:             TxStatusActive,
+		readTS:             readTS,
+		badgerTx:           badgerTx,
+		engine:             b,
+		pendingNodes:       make(map[NodeID]*Node),
+		pendingEdges:       make(map[EdgeID]*Edge),
+		deletedNodes:       make(map[NodeID]struct{}),
+		deletedEdges:       make(map[EdgeID]struct{}),
+		operations:         make([]Operation, 0),
+		pendingWrites:      make(map[string][]byte),
+		pendingDeletes:     make(map[string]bool),
+		Metadata:           make(map[string]interface{}),
+		snapshotReaderInfo: readerInfo,
+		snapshotDeregister: deregister,
 	}, nil
 }
 
@@ -103,14 +126,50 @@ func (tx *BadgerTransaction) IsActive() bool {
 	return tx.Status == TxStatusActive
 }
 
+func (tx *BadgerTransaction) closeLocked(status TransactionStatus, discard bool, closedErr error) {
+	if discard && tx.badgerTx != nil {
+		tx.badgerTx.Discard()
+	}
+	tx.pendingWrites = make(map[string][]byte)
+	tx.pendingDeletes = make(map[string]bool)
+	tx.Status = status
+	tx.closedErr = closedErr
+	if tx.snapshotDeregister != nil {
+		tx.snapshotDeregister()
+		tx.snapshotDeregister = nil
+	}
+}
+
+func (tx *BadgerTransaction) ensureLifecycleActiveLocked() error {
+	if tx.Status != TxStatusActive {
+		if tx.closedErr != nil {
+			return tx.closedErr
+		}
+		return ErrTransactionClosed
+	}
+	if tx.snapshotReaderInfo.StartTime.IsZero() || tx.engine == nil {
+		return nil
+	}
+	graceful, hard := tx.engine.evaluateSnapshotReader(tx.snapshotReaderInfo)
+	if hard {
+		tx.closeLocked(TxStatusRolledBack, true, ErrMVCCSnapshotHardExpired)
+		return ErrMVCCSnapshotHardExpired
+	}
+	if graceful {
+		tx.closeLocked(TxStatusRolledBack, true, ErrMVCCSnapshotGracefulCancel)
+		return ErrMVCCSnapshotGracefulCancel
+	}
+	return nil
+}
+
 // SetDeferredConstraintValidation controls per-operation constraint checks.
 // When enabled, constraints are enforced at commit time only.
 func (tx *BadgerTransaction) SetDeferredConstraintValidation(deferValidation bool) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	tx.deferConstraintValidation = deferValidation
@@ -123,8 +182,8 @@ func (tx *BadgerTransaction) SetSkipCreateExistenceCheck(skip bool) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	tx.skipCreateExistenceCheck = skip
@@ -190,8 +249,8 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return "", ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return "", err
 	}
 
 	// Enforce namespace prefix at storage layer - all node IDs must be prefixed
@@ -283,8 +342,8 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Validate constraints
@@ -488,8 +547,8 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Capture old node state for constraint bookkeeping (e.g., unique value unregister).
@@ -535,8 +594,8 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Check nodes exist
@@ -601,8 +660,8 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 	if edge.ID == "" {
 		return ErrInvalidID
 	}
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 	if _, deleted := tx.deletedEdges[edge.ID]; deleted {
 		return ErrNotFound
@@ -675,8 +734,8 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Get edge to delete its indexes
@@ -726,6 +785,9 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
 
 	// Check deleted
 	if _, deleted := tx.deletedNodes[nodeID]; deleted {
@@ -746,27 +808,24 @@ func (tx *BadgerTransaction) Commit() error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Final constraint validation before commit
 	if err := tx.validateAllConstraints(); err != nil {
-		tx.badgerTx.Discard()
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return fmt.Errorf("constraint violation: %w", err)
 	}
 
 	if err := tx.validateSnapshotIsolationConflicts(); err != nil {
-		tx.badgerTx.Discard()
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return err
 	}
 
 	temporalTargets, err := tx.bufferTemporalIndexWrites()
 	if err != nil {
-		tx.badgerTx.Discard()
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return fmt.Errorf("buffering temporal index writes: %w", err)
 	}
 
@@ -778,14 +837,12 @@ func (tx *BadgerTransaction) Commit() error {
 	if len(tx.operations) > 0 || len(tx.pendingWrites) > 0 || len(tx.pendingDeletes) > 0 {
 		version, err := tx.engine.allocateMVCCVersion(tx.badgerTx, time.Now())
 		if err != nil {
-			tx.badgerTx.Discard()
-			tx.Status = TxStatusRolledBack
+			tx.closeLocked(TxStatusRolledBack, true, nil)
 			return fmt.Errorf("allocating mvcc commit version: %w", err)
 		}
 		tx.CommitVersion = version
 		if err := tx.engine.materializeMVCCCommitInTxn(tx.badgerTx, version, tx.operations); err != nil {
-			tx.badgerTx.Discard()
-			tx.Status = TxStatusRolledBack
+			tx.closeLocked(TxStatusRolledBack, true, nil)
 			return fmt.Errorf("materializing mvcc commit state: %w", err)
 		}
 	}
@@ -793,20 +850,18 @@ func (tx *BadgerTransaction) Commit() error {
 	// Flush all buffered writes before committing
 	// This batches all writes together for better performance while maintaining ACID guarantees
 	if err := tx.flushBufferedWrites(); err != nil {
-		tx.badgerTx.Discard()
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return fmt.Errorf("flushing buffered writes: %w", err)
 	}
 
 	if err := tx.refreshTemporalCurrentPointers(temporalTargets); err != nil {
-		tx.badgerTx.Discard()
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, true, nil)
 		return fmt.Errorf("refreshing temporal current pointers: %w", err)
 	}
 
 	// Commit Badger transaction (atomic!)
 	if err := tx.badgerTx.Commit(); err != nil {
-		tx.Status = TxStatusRolledBack
+		tx.closeLocked(TxStatusRolledBack, false, nil)
 		return normalizeTransactionCommitError(err)
 	}
 
@@ -925,7 +980,7 @@ func (tx *BadgerTransaction) Commit() error {
 		}
 	}
 
-	tx.Status = TxStatusCommitted
+	tx.closeLocked(TxStatusCommitted, false, nil)
 	return nil
 }
 
@@ -945,11 +1000,7 @@ func (tx *BadgerTransaction) Rollback() error {
 		return ErrTransactionClosed
 	}
 
-	tx.badgerTx.Discard()
-	// Clear buffered writes on rollback
-	tx.pendingWrites = make(map[string][]byte)
-	tx.pendingDeletes = make(map[string]bool)
-	tx.Status = TxStatusRolledBack
+	tx.closeLocked(TxStatusRolledBack, true, nil)
 	return nil
 }
 
@@ -958,8 +1009,8 @@ func (tx *BadgerTransaction) SetMetadata(metadata map[string]interface{}) error 
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
-	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return err
 	}
 
 	// Validate size

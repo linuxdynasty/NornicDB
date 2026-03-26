@@ -1357,6 +1357,62 @@ func (db *DB) PruneMVCCVersions(ctx context.Context, opts storage.MVCCPruneOptio
 	return 0, nil
 }
 
+// LifecycleStatus returns MVCC lifecycle status for the current database.
+func (db *DB) LifecycleStatus() (map[string]interface{}, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, ErrClosed
+	}
+	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+		return lce.LifecycleStatus(), nil
+	}
+	return map[string]interface{}{"enabled": false}, nil
+}
+
+// TriggerLifecyclePrune triggers an immediate MVCC lifecycle prune.
+func (db *DB) TriggerLifecyclePrune(ctx context.Context) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+		return lce.TriggerPruneNow(ctx)
+	}
+	return nil
+}
+
+// PauseLifecycle pauses the MVCC lifecycle manager.
+func (db *DB) PauseLifecycle() error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+		lce.PauseLifecycle()
+	}
+	return nil
+}
+
+// ResumeLifecycle resumes the MVCC lifecycle manager.
+func (db *DB) ResumeLifecycle() error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+	if lce, ok := db.baseStorage.(storage.MVCCLifecycleEngine); ok {
+		lce.ResumeLifecycle()
+	}
+	return nil
+}
+
 // Backup creates a database backup to the specified path.
 // For BadgerDB, this creates a streaming backup that is consistent and portable.
 // For in-memory databases, it exports all data as JSON.

@@ -2,13 +2,67 @@ package txsession
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
+
+type lifecycleControllerStub struct {
+	mu             sync.Mutex
+	gracefulExpire bool
+	hardExpire     bool
+}
+
+func (s *lifecycleControllerStub) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	_ = info
+	return func() {}
+}
+
+func (s *lifecycleControllerStub) LifecycleStatus() map[string]interface{} {
+	return map[string]interface{}{"enabled": true}
+}
+
+func (s *lifecycleControllerStub) TriggerPruneNow(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (s *lifecycleControllerStub) PauseLifecycle() {}
+
+func (s *lifecycleControllerStub) ResumeLifecycle() {}
+
+func (s *lifecycleControllerStub) AcquireSnapshotReader(info storage.SnapshotReaderInfo) (func(), error) {
+	_ = info
+	return func() {}, nil
+}
+
+func (s *lifecycleControllerStub) EvaluateSnapshotReader(info storage.SnapshotReaderInfo) (bool, bool) {
+	_ = info
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gracefulExpire, s.hardExpire
+}
+
+func (s *lifecycleControllerStub) RunPruneNow(ctx context.Context, opts storage.MVCCPruneOptions) (int64, error) {
+	_ = ctx
+	_ = opts
+	return 0, nil
+}
+
+func (s *lifecycleControllerStub) StartLifecycle(ctx context.Context) { _ = ctx }
+
+func (s *lifecycleControllerStub) StopLifecycle() {}
+
+func (s *lifecycleControllerStub) IsLifecycleEnabled() bool { return true }
+
+func (s *lifecycleControllerStub) IsLifecycleRunning() bool { return false }
+
+func (s *lifecycleControllerStub) ReaderRegistry() storage.SnapshotReaderRegistry { return nil }
 
 func newExecutorFactory(t *testing.T) ExecutorFactory {
 	t.Helper()
@@ -195,4 +249,36 @@ func TestManagerOpenWithExecutorCompositeBeginSupported(t *testing.T) {
 		t.Fatalf("expected non-nil session")
 	}
 	_ = mgr.RollbackAndDelete(context.Background(), session)
+}
+
+func TestManagerExecuteInSession_ReplaysTerminalLifecycleError(t *testing.T) {
+	engine, err := storage.NewBadgerEngineInMemory()
+	if err != nil {
+		t.Fatalf("failed to create badger engine: %v", err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	controller := &lifecycleControllerStub{}
+	engine.SetLifecycleController(controller)
+	exec := cypher.NewStorageExecutor(engine)
+	mgr := NewManager(time.Second, nil)
+	session, err := mgr.OpenWithExecutor(context.Background(), "neo4j", exec)
+	if err != nil {
+		t.Fatalf("open with executor failed: %v", err)
+	}
+
+	controller.mu.Lock()
+	controller.gracefulExpire = true
+	controller.mu.Unlock()
+
+	_, err = mgr.ExecuteInSession(context.Background(), session, "CREATE (n:Doc {name:'expired'})", nil)
+	if !errors.Is(err, storage.ErrMVCCSnapshotGracefulCancel) {
+		t.Fatalf("expected graceful snapshot cancel, got %v", err)
+	}
+	_, err = mgr.ExecuteInSession(context.Background(), session, "CREATE (n:Doc {name:'expired-again'})", nil)
+	if !errors.Is(err, storage.ErrMVCCSnapshotGracefulCancel) {
+		t.Fatalf("expected repeated graceful snapshot cancel, got %v", err)
+	}
+	if rollbackErr := mgr.RollbackAndDelete(context.Background(), session); rollbackErr != nil {
+		t.Fatalf("rollback after terminal error should succeed, got %v", rollbackErr)
+	}
 }

@@ -85,9 +85,11 @@ func effectiveFromGlobal(c *config.Config, m map[string]string) {
 	m["NORNICDB_EMBED_WORKER_NUM_WORKERS"] = strconv.Itoa(c.EmbeddingWorker.NumWorkers)
 	m["NORNICDB_EMBED_SCAN_INTERVAL"] = c.EmbeddingWorker.ScanInterval.String()
 	m["NORNICDB_EMBED_BATCH_DELAY"] = c.EmbeddingWorker.BatchDelay.String()
+	m["NORNICDB_EMBED_TRIGGER_DEBOUNCE"] = c.EmbeddingWorker.TriggerDebounceDelay.String()
 	m["NORNICDB_EMBED_MAX_RETRIES"] = strconv.Itoa(c.EmbeddingWorker.MaxRetries)
 	m["NORNICDB_EMBED_CHUNK_SIZE"] = strconv.Itoa(c.EmbeddingWorker.ChunkSize)
 	m["NORNICDB_EMBED_CHUNK_OVERLAP"] = strconv.Itoa(c.EmbeddingWorker.ChunkOverlap)
+	m["NORNICDB_MVCC_LIFECYCLE_INTERVAL"] = c.Database.MVCCLifecycleCycleInterval.String()
 	// Feature flags for Auto-TLP (from Features; K-means clustering is env-only in feature_flags)
 	m["NORNICDB_AUTO_TLP_ENABLED"] = boolStr(c.Features.TopologyAutoIntegrationEnabled)
 }

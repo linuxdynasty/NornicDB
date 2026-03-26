@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,65 @@ type sizeTrackingStreamingInner struct {
 	streamNodesCalls  int
 	streamPrefixCalls int
 	lastPrefix        string
+}
+
+type sizeTrackingLifecycleInner struct {
+	storage.Engine
+	status      map[string]interface{}
+	triggered   int
+	paused      int
+	resumed     int
+	readerCount int
+	interval    time.Duration
+	debtKeys    []storage.MVCCLifecycleDebtKey
+}
+
+func (e *sizeTrackingLifecycleInner) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	e.readerCount++
+	return func() {
+		e.readerCount--
+	}
+}
+
+func (e *sizeTrackingLifecycleInner) LifecycleStatus() map[string]interface{} {
+	if e.status == nil {
+		return map[string]interface{}{"enabled": true}
+	}
+	copyStatus := make(map[string]interface{}, len(e.status))
+	for key, value := range e.status {
+		copyStatus[key] = value
+	}
+	return copyStatus
+}
+
+func (e *sizeTrackingLifecycleInner) TriggerPruneNow(context.Context) error {
+	e.triggered++
+	return nil
+}
+
+func (e *sizeTrackingLifecycleInner) PauseLifecycle() {
+	e.paused++
+}
+
+func (e *sizeTrackingLifecycleInner) ResumeLifecycle() {
+	e.resumed++
+}
+
+func (e *sizeTrackingLifecycleInner) SetLifecycleSchedule(interval time.Duration) error {
+	e.interval = interval
+	if e.status == nil {
+		e.status = make(map[string]interface{})
+	}
+	e.status["cycle_interval"] = interval.String()
+	e.status["automatic"] = interval > 0
+	return nil
+}
+
+func (e *sizeTrackingLifecycleInner) TopLifecycleDebtKeys(limit int) []storage.MVCCLifecycleDebtKey {
+	if limit <= 0 || limit >= len(e.debtKeys) {
+		return append([]storage.MVCCLifecycleDebtKey(nil), e.debtKeys...)
+	}
+	return append([]storage.MVCCLifecycleDebtKey(nil), e.debtKeys[:limit]...)
 }
 
 func (e *sizeTrackingStreamingInner) StreamNodes(_ context.Context, fn func(node *storage.Node) error) error {
@@ -106,4 +166,50 @@ func TestSizeTrackingEngine_ForEachNodeIDByLabel_Delegates(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
+}
+
+func TestSizeTrackingEngine_MVCCLifecycleDelegates(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+
+	inner := &sizeTrackingLifecycleInner{
+		Engine: base,
+		status: map[string]interface{}{
+			"enabled":       true,
+			"pressure_band": string(storage.PressureNormal),
+		},
+		debtKeys: []storage.MVCCLifecycleDebtKey{{LogicalKey: "tenant_a:key", DebtBytes: 42}},
+	}
+
+	wrappedEngine := newSizeTrackingEngine(inner, &DatabaseManager{}, "tenant_a")
+	lifecycleEngine, ok := wrappedEngine.(storage.MVCCLifecycleEngine)
+	require.True(t, ok, "size tracking wrapper must preserve MVCCLifecycleEngine")
+
+	status := lifecycleEngine.LifecycleStatus()
+	assert.Equal(t, true, status["enabled"])
+	assert.Equal(t, string(storage.PressureNormal), status["pressure_band"])
+
+	deregister := lifecycleEngine.RegisterSnapshotReader(storage.SnapshotReaderInfo{Namespace: "tenant_a"})
+	assert.Equal(t, 1, inner.readerCount)
+	deregister()
+	assert.Equal(t, 0, inner.readerCount)
+
+	require.NoError(t, lifecycleEngine.TriggerPruneNow(context.Background()))
+	assert.Equal(t, 1, inner.triggered)
+
+	lifecycleEngine.PauseLifecycle()
+	lifecycleEngine.ResumeLifecycle()
+	assert.Equal(t, 1, inner.paused)
+	assert.Equal(t, 1, inner.resumed)
+
+	scheduler, ok := wrappedEngine.(storage.MVCCLifecycleScheduleEngine)
+	require.True(t, ok, "size tracking wrapper must preserve MVCCLifecycleScheduleEngine")
+	require.NoError(t, scheduler.SetLifecycleSchedule(3*time.Minute))
+	assert.Equal(t, 3*time.Minute, inner.interval)
+
+	debtProvider, ok := wrappedEngine.(storage.MVCCLifecycleDebtEngine)
+	require.True(t, ok, "size tracking wrapper must preserve MVCCLifecycleDebtEngine")
+	debtKeys := debtProvider.TopLifecycleDebtKeys(1)
+	require.Len(t, debtKeys, 1)
+	assert.Equal(t, int64(42), debtKeys[0].DebtBytes)
 }

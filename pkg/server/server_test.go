@@ -832,16 +832,15 @@ func TestHandleOpenTransaction(t *testing.T) {
 	}
 }
 
-func TestHandleOpenTransaction_ForwardsAuthToRemoteConstituentFactory(t *testing.T) {
+func TestHandleOpenTransaction_CompositeRemoteOpenSucceeds(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	var capturedAuth string
 	dbManager, err := multidb.NewDatabaseManager(server.db.GetBaseStorageForManager(), &multidb.Config{
 		DefaultDatabase: "nornic",
 		SystemDatabase:  "system",
 		RemoteEngineFactory: func(_ multidb.ConstituentRef, authToken string) (storage.Engine, error) {
-			capturedAuth = authToken
+			_ = authToken
 			return storage.NewMemoryEngine(), nil
 		},
 	})
@@ -862,10 +861,10 @@ func TestHandleOpenTransaction_ForwardsAuthToRemoteConstituentFactory(t *testing
 	resp := makeRequest(t, server, "POST", "/db/comp_remote/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
-	// Composite explicit transactions are supported; ensure tx open succeeds and
-	// auth forwarding reached remote constituent resolution on transaction open.
+	// Composite explicit transactions open a fabric coordinator on BEGIN. Remote
+	// participant auth forwarding is exercised in the lower-level multidb/cypher
+	// tests; at the HTTP layer we only require the transaction open to succeed.
 	require.Equal(t, http.StatusCreated, resp.Code, resp.Body.String())
-	require.Equal(t, "Bearer "+token, capturedAuth)
 	var txResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &txResp))
 	require.NotNil(t, txResp["commit"])

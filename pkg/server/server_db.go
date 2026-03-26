@@ -1353,6 +1353,7 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	s.applyMVCCPressureWarnings(w, dbName, &response)
 	s.writeJSON(w, status, response)
 }
 
@@ -1504,6 +1505,7 @@ func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Re
 		w.Header().Set("X-NornicDB-Consistency", "eventual")
 	}
 
+	s.applyMVCCPressureWarnings(w, dbName, &resp)
 	s.writeJSON(w, status, resp)
 	return nil, true
 }
@@ -1898,6 +1900,10 @@ func mapTransientTransactionError(message string) (string, bool) {
 	if strings.Contains(m, "changed after transaction start") ||
 		strings.Contains(m, "transaction conflict") ||
 		strings.Contains(m, "write conflict") ||
+		strings.Contains(m, "mvcc: resource pressure") ||
+		strings.Contains(m, "snapshot cancelled due to resource pressure") ||
+		strings.Contains(m, "snapshot forcibly expired due to critical resource pressure") ||
+		strings.Contains(m, "snapshot expired under resource pressure") ||
 		strings.Contains(m, "conflict:") {
 		return "Neo.TransientError.Transaction.Outdated", true
 	}
@@ -1975,6 +1981,7 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		response.Transaction.Expires = txSession.Expires.Format(time.RFC1123)
 	}
 
+	s.applyMVCCPressureWarnings(w, dbName, &response)
 	s.writeJSON(w, http.StatusCreated, response)
 }
 
@@ -2007,6 +2014,7 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 	s.executeTxStatements(r.Context(), r.Header.Get("Authorization"), claims, dbName, tx, req.Statements, &response)
 	response.Transaction.Expires = tx.Expires.Format(time.RFC1123)
 
+	s.applyMVCCPressureWarnings(w, dbName, &response)
 	s.writeJSON(w, http.StatusOK, response)
 }
 
@@ -2039,6 +2047,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 	s.executeTxStatements(r.Context(), r.Header.Get("Authorization"), claims, dbName, tx, req.Statements, &response)
 	if len(response.Errors) > 0 {
 		_ = s.txSessions.RollbackAndDelete(r.Context(), tx)
+		s.applyMVCCPressureWarnings(w, dbName, &response)
 		s.writeJSON(w, http.StatusOK, response)
 		return
 	}
@@ -2053,6 +2062,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 			Code:    code,
 			Message: err.Error(),
 		})
+		s.applyMVCCPressureWarnings(w, dbName, &response)
 		s.writeJSON(w, http.StatusOK, response)
 		return
 	}
@@ -2067,6 +2077,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	s.applyMVCCPressureWarnings(w, dbName, &response)
 	s.writeJSON(w, http.StatusOK, response)
 }
 
@@ -2090,5 +2101,6 @@ func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Reques
 		Results: make([]QueryResult, 0),
 		Errors:  make([]QueryError, 0),
 	}
+	s.applyMVCCPressureWarnings(w, dbName, &response)
 	s.writeJSON(w, http.StatusOK, response)
 }

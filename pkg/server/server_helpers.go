@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 )
 
 // =============================================================================
@@ -333,6 +336,70 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	json.NewEncoder(w).Encode(v)
 }
 
+func (s *Server) applyMVCCPressureWarnings(w http.ResponseWriter, dbName string, response *TransactionResponse) {
+	if s.dbManager == nil || dbName == "" || response == nil {
+		return
+	}
+	storageEngine, err := s.dbManager.GetStorage(dbName)
+	if err != nil {
+		return
+	}
+	lce, ok := storageEngine.(storage.MVCCLifecycleEngine)
+	if !ok {
+		return
+	}
+	status := lce.LifecycleStatus()
+	rawBand, ok := status["pressure_band"]
+	if !ok {
+		return
+	}
+	band := fmt.Sprint(rawBand)
+	if band != string(storage.PressureHigh) && band != string(storage.PressureCritical) {
+		return
+	}
+	pinnedBytes := int64FromStatus(status["mvcc_bytes_pinned_by_oldest_reader"])
+	oldestAgeSeconds := float64FromStatus(status["mvcc_oldest_reader_age_seconds"])
+	description := fmt.Sprintf("MVCC lifecycle pressure is %s on database '%s' (pinned_bytes=%d oldest_reader_age_seconds=%.3f)", band, dbName, pinnedBytes, oldestAgeSeconds)
+	response.Notifications = append(response.Notifications, ServerNotification{
+		Code:        "NornicDB.MVCC.Pressure",
+		Severity:    "WARNING",
+		Title:       fmt.Sprintf("MVCC pressure %s", band),
+		Description: description,
+	})
+	if w != nil {
+		w.Header().Set("X-NornicDB-MVCC-Pressure", band)
+		w.Header().Add("Warning", fmt.Sprintf("299 NornicDB \"%s\"", description))
+	}
+}
+
+func int64FromStatus(value interface{}) int64 {
+	switch typed := value.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	default:
+		return 0
+	}
+}
+
+func float64FromStatus(value interface{}) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	default:
+		return 0
+	}
+}
+
 func (s *Server) writeError(w http.ResponseWriter, status int, message string, err error) {
 	s.errorCount.Add(1)
 
@@ -426,5 +493,30 @@ func (s *Server) logAudit(r *http.Request, userID, eventType string, success boo
 		Success:     success,
 		Reason:      details,
 		RequestPath: r.URL.Path,
+	})
+}
+
+func (s *Server) logMVCCSnapshotExpiration(session *txsession.Session, err error) {
+	if s.audit == nil || session == nil || err == nil {
+		return
+	}
+	expirationKind := "graceful"
+	if errors.Is(err, storage.ErrMVCCSnapshotHardExpired) {
+		expirationKind = "hard"
+	}
+	s.audit.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSnapshotExpired,
+		UserID:     session.Owner,
+		Resource:   "database",
+		ResourceID: session.Database,
+		Action:     "mvcc_snapshot_expired",
+		Success:    false,
+		Reason:     err.Error(),
+		SessionID:  session.ID,
+		Metadata: map[string]string{
+			"expiration_kind": expirationKind,
+			"database":        session.Database,
+		},
 	})
 }

@@ -1,13 +1,21 @@
-import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { Login } from './pages/Login';
-import { Browser } from './pages/Browser';
-import { Security } from './pages/Security';
-import { AdminUsers } from './pages/AdminUsers';
-import { DatabaseAccess } from './pages/DatabaseAccess';
-import { Databases } from './pages/Databases';
-import { ProtectedRoute } from './components/ProtectedRoute';
-import { BASE_PATH } from './utils/basePath';
+import { useEffect } from "react";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
+import { Login } from "./pages/Login";
+import { Browser } from "./pages/Browser";
+import { Security } from "./pages/Security";
+import { AdminUsers } from "./pages/AdminUsers";
+import { DatabaseAccess } from "./pages/DatabaseAccess";
+import { Databases } from "./pages/Databases";
+import { LifecycleAdmin } from "./pages/LifecycleAdmin";
+import { ProtectedRoute } from "./components/ProtectedRoute";
+import { BASE_PATH } from "./utils/basePath";
 
 // Base path from environment variable (set at build time)
 // Env: VITE_BASE_PATH (same as NORNICDB_BASE_PATH on server)
@@ -19,7 +27,7 @@ function TrailingSlashCanonicalizer() {
 
   useEffect(() => {
     const { pathname, search, hash } = location;
-    if (!pathname || pathname === '/' || pathname.endsWith('/')) {
+    if (!pathname || pathname === "/" || pathname.endsWith("/")) {
       return;
     }
     navigate(`${pathname}/${search}${hash}`, { replace: true });
@@ -34,31 +42,54 @@ function App() {
       <TrailingSlashCanonicalizer />
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/" element={
-          <ProtectedRoute>
-            <Browser />
-          </ProtectedRoute>
-        } />
-        <Route path="/security" element={
-          <ProtectedRoute>
-            <Security />
-          </ProtectedRoute>
-        } />
-        <Route path="/security/admin" element={
-          <ProtectedRoute>
-            <AdminUsers />
-          </ProtectedRoute>
-        } />
-        <Route path="/security/database-access" element={
-          <ProtectedRoute>
-            <DatabaseAccess />
-          </ProtectedRoute>
-        } />
-        <Route path="/databases" element={
-          <ProtectedRoute>
-            <Databases />
-          </ProtectedRoute>
-        } />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <Browser />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/security"
+          element={
+            <ProtectedRoute>
+              <Security />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/security/admin"
+          element={
+            <ProtectedRoute>
+              <AdminUsers />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/security/database-access"
+          element={
+            <ProtectedRoute>
+              <DatabaseAccess />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/security/lifecycle"
+          element={
+            <ProtectedRoute>
+              <LifecycleAdmin />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/databases"
+          element={
+            <ProtectedRoute>
+              <Databases />
+            </ProtectedRoute>
+          }
+        />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

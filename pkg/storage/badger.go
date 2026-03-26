@@ -117,6 +117,7 @@ type BadgerEngine struct {
 
 	retentionPolicy           RetentionPolicy
 	activeMVCCSnapshotReaders atomic.Int64
+	lifecycleController       MVCCLifecycleController
 
 	// Cached per-namespace counts for O(1) multi-database stats.
 	// Keys are namespace prefixes like "nornic:".

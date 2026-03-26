@@ -59,12 +59,13 @@ type ServerMetrics struct {
 
 // DatabaseMetrics contains core database statistics.
 type DatabaseMetrics struct {
-	NodeCount        int64            `json:"node_count"`
-	EdgeCount        int64            `json:"edge_count"`
-	LabelCounts      map[string]int64 `json:"label_counts,omitempty"`
-	IndexCount       int              `json:"index_count"`
-	PropertyIndexes  int              `json:"property_indexes"`
-	CompositeIndexes int              `json:"composite_indexes"`
+	NodeCount        int64                  `json:"node_count"`
+	EdgeCount        int64                  `json:"edge_count"`
+	LabelCounts      map[string]int64       `json:"label_counts,omitempty"`
+	IndexCount       int                    `json:"index_count"`
+	PropertyIndexes  int                    `json:"property_indexes"`
+	CompositeIndexes int                    `json:"composite_indexes"`
+	MVCCLifecycle    map[string]interface{} `json:"mvcc_lifecycle,omitempty"`
 }
 
 // StorageMetrics contains storage engine statistics.
@@ -221,6 +222,10 @@ type ServerMetricsSource interface {
 	SlowQueryCount() int64
 }
 
+type mvccLifecycleMetricsSource interface {
+	LifecycleStatus() (map[string]interface{}, error)
+}
+
 // NewMetricsCollector creates a new metrics collector.
 func NewMetricsCollector(db DatabaseMetricsSource, server ServerMetricsSource) *MetricsCollector {
 	return &MetricsCollector{
@@ -251,6 +256,11 @@ func (c *MetricsCollector) Collect() *NornicDBMetrics {
 		GoroutineCount: runtime.NumGoroutine(),
 		MemoryAllocMB:  memStats.Alloc / 1024 / 1024,
 		NumGC:          memStats.NumGC,
+	}
+	if source, ok := c.db.(mvccLifecycleMetricsSource); ok {
+		if status, err := source.LifecycleStatus(); err == nil {
+			metrics.Database.MVCCLifecycle = status
+		}
 	}
 
 	// Note: Actual metric collection requires type assertions on the real types

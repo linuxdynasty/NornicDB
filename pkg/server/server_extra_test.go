@@ -36,6 +36,120 @@ func testUIAssetsFS() fs.FS {
 	}
 }
 
+type pressureWarningLifecycleController struct{}
+
+type expiringLifecycleController struct {
+	gracefulExpire bool
+	hardExpire     bool
+}
+
+func (pressureWarningLifecycleController) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	_ = info
+	return func() {}
+}
+
+func (pressureWarningLifecycleController) LifecycleStatus() map[string]interface{} {
+	return map[string]interface{}{
+		"enabled":                            true,
+		"pressure_band":                      string(storage.PressureHigh),
+		"mvcc_bytes_pinned_by_oldest_reader": 4096,
+		"mvcc_oldest_reader_age_seconds":     12.5,
+	}
+}
+
+func (pressureWarningLifecycleController) TriggerPruneNow(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (pressureWarningLifecycleController) PauseLifecycle() {}
+
+func (pressureWarningLifecycleController) ResumeLifecycle() {}
+
+func (pressureWarningLifecycleController) AcquireSnapshotReader(info storage.SnapshotReaderInfo) (func(), error) {
+	_ = info
+	return func() {}, nil
+}
+
+func (pressureWarningLifecycleController) EvaluateSnapshotReader(info storage.SnapshotReaderInfo) (bool, bool) {
+	_ = info
+	return false, false
+}
+
+func (pressureWarningLifecycleController) RunPruneNow(ctx context.Context, opts storage.MVCCPruneOptions) (int64, error) {
+	_ = ctx
+	_ = opts
+	return 0, nil
+}
+
+func (pressureWarningLifecycleController) StartLifecycle(ctx context.Context) { _ = ctx }
+
+func (pressureWarningLifecycleController) StopLifecycle() {}
+
+func (pressureWarningLifecycleController) IsLifecycleEnabled() bool { return true }
+
+func (pressureWarningLifecycleController) IsLifecycleRunning() bool { return false }
+
+func (pressureWarningLifecycleController) ReaderRegistry() storage.SnapshotReaderRegistry { return nil }
+
+func (c *expiringLifecycleController) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	_ = info
+	return func() {}
+}
+
+func (c *expiringLifecycleController) LifecycleStatus() map[string]interface{} {
+	return map[string]interface{}{"enabled": true, "pressure_band": string(storage.PressureCritical)}
+}
+
+func (c *expiringLifecycleController) TriggerPruneNow(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (c *expiringLifecycleController) PauseLifecycle() {}
+
+func (c *expiringLifecycleController) ResumeLifecycle() {}
+
+func (c *expiringLifecycleController) AcquireSnapshotReader(info storage.SnapshotReaderInfo) (func(), error) {
+	_ = info
+	return func() {}, nil
+}
+
+func (c *expiringLifecycleController) EvaluateSnapshotReader(info storage.SnapshotReaderInfo) (bool, bool) {
+	_ = info
+	return c.gracefulExpire, c.hardExpire
+}
+
+func (c *expiringLifecycleController) RunPruneNow(ctx context.Context, opts storage.MVCCPruneOptions) (int64, error) {
+	_ = ctx
+	_ = opts
+	return 0, nil
+}
+
+func (c *expiringLifecycleController) StartLifecycle(ctx context.Context) { _ = ctx }
+
+func (c *expiringLifecycleController) StopLifecycle() {}
+
+func (c *expiringLifecycleController) IsLifecycleEnabled() bool { return true }
+
+func (c *expiringLifecycleController) IsLifecycleRunning() bool { return false }
+
+func (c *expiringLifecycleController) ReaderRegistry() storage.SnapshotReaderRegistry { return nil }
+
+func unwrapInnerStorage(engine storage.Engine) storage.Engine {
+	for {
+		inner, ok := engine.(interface{ GetInnerEngine() storage.Engine })
+		if !ok {
+			return engine
+		}
+		next := inner.GetInnerEngine()
+		if next == nil {
+			return engine
+		}
+		engine = next
+	}
+}
+
 func TestServerExtra_CoreBranches_SharedFixture(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
@@ -1113,6 +1227,167 @@ func TestDBConfigHandlers(t *testing.T) {
 	assert.True(t, hasRebuild)
 }
 
+func TestDBLifecycleHandlers(t *testing.T) {
+	server, authn := setupTestServer(t)
+	token := getAuthToken(t, authn, "admin")
+
+	rec := makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var status map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	require.Equal(t, "nornic", status["database"])
+	require.Contains(t, status, "enabled")
+	require.Contains(t, status, "pressure_band")
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/pause", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/status", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	require.Equal(t, true, status["paused"])
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/resume", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	require.Equal(t, false, status["paused"])
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/prune", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "prune triggered")
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/schedule", map[string]any{"interval": "0s"}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	require.Equal(t, false, status["automatic"])
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/schedule", map[string]any{"interval": "2m"}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	require.Equal(t, true, status["automatic"])
+	require.Equal(t, "2m0s", status["cycle_interval"])
+
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/schedule", map[string]any{"interval": "-1s"}, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/debt?limit=1", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var debtResp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &debtResp))
+	require.Equal(t, "nornic", debtResp["database"])
+	require.Equal(t, float64(1), debtResp["limit"])
+	keys, ok := debtResp["keys"].([]any)
+	require.True(t, ok)
+	require.LessOrEqual(t, len(keys), 1)
+
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/debt?limit=1000", nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &debtResp))
+	require.Equal(t, float64(100), debtResp["limit"])
+
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/prune", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/schedule", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	rec = makeRequest(t, server, "POST", "/admin/databases/nornic/mvcc/debt", nil, "Bearer "+token)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/debt?limit=bad", nil, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/missing_db/mvcc", nil, "Bearer "+token)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/nornic/mvcc/unknown", nil, "Bearer "+token)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	rec = makeRequest(t, server, "GET", "/admin/databases/system/mvcc", nil, "Bearer "+token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestTransactionResponsesIncludeMVCCPressureWarnings(t *testing.T) {
+	server, authn := setupTestServer(t)
+	token := getAuthToken(t, authn, "admin")
+	storageEngine, err := server.dbManager.GetStorage("nornic")
+	require.NoError(t, err)
+	storageEngine = unwrapInnerStorage(storageEngine)
+	setter, ok := storageEngine.(interface {
+		SetLifecycleController(storage.MVCCLifecycleController)
+	})
+	require.True(t, ok)
+	setter.SetLifecycleController(pressureWarningLifecycleController{})
+
+	rec := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]any{
+		"statements": []map[string]any{{"statement": "RETURN 1 AS n"}},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, string(storage.PressureHigh), rec.Header().Get("X-NornicDB-MVCC-Pressure"))
+	require.Contains(t, rec.Header().Values("Warning"), "299 NornicDB \"MVCC lifecycle pressure is high on database 'nornic' (pinned_bytes=4096 oldest_reader_age_seconds=12.500)\"")
+
+	var response TransactionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.NotEmpty(t, response.Notifications)
+	require.Equal(t, "NornicDB.MVCC.Pressure", response.Notifications[0].Code)
+	require.Contains(t, response.Notifications[0].Description, "database 'nornic'")
+	require.Empty(t, response.Errors)
+
+	setter.SetLifecycleController(nil)
+}
+
+func TestExplicitTransactionLifecycleExpiration_ReplaysErrorAndAuditsOnce(t *testing.T) {
+	server, authn := setupTestServer(t)
+	token := getAuthToken(t, authn, "admin")
+	auditCfg := audit.DefaultConfig()
+	auditCfg.LogPath = filepath.Join(t.TempDir(), "audit.log")
+	logger, err := audit.NewLogger(auditCfg)
+	require.NoError(t, err)
+	defer logger.Close()
+	server.SetAuditLogger(logger)
+
+	storageEngine, err := server.dbManager.GetStorage("nornic")
+	require.NoError(t, err)
+	storageEngine = unwrapInnerStorage(storageEngine)
+	setter, ok := storageEngine.(interface {
+		SetLifecycleController(storage.MVCCLifecycleController)
+	})
+	require.True(t, ok)
+	controller := &expiringLifecycleController{}
+	setter.SetLifecycleController(controller)
+	defer setter.SetLifecycleController(nil)
+
+	openRec := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]any{"statements": []any{}}, "Bearer "+token)
+	require.Equal(t, http.StatusCreated, openRec.Code)
+	var openResp TransactionResponse
+	require.NoError(t, json.Unmarshal(openRec.Body.Bytes(), &openResp))
+	require.NotEmpty(t, openResp.Commit)
+	txPath := strings.TrimSuffix(openResp.Commit, "/commit")
+
+	controller.gracefulExpire = true
+
+	execRec := makeRequest(t, server, "POST", txPath, map[string]any{
+		"statements": []map[string]any{{"statement": "CREATE (n:Doc {name:'expired'})"}},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, execRec.Code)
+	var execResp TransactionResponse
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	require.Len(t, execResp.Errors, 1)
+	require.Equal(t, "Neo.TransientError.Transaction.Outdated", execResp.Errors[0].Code)
+	require.Contains(t, execResp.Errors[0].Message, storage.ErrMVCCSnapshotGracefulCancel.Error())
+
+	execRec = makeRequest(t, server, "POST", txPath, map[string]any{
+		"statements": []map[string]any{{"statement": "CREATE (n:Doc {name:'expired-again'})"}},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, execRec.Code)
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	require.Len(t, execResp.Errors, 1)
+	require.Equal(t, "Neo.TransientError.Transaction.Outdated", execResp.Errors[0].Code)
+	require.Contains(t, execResp.Errors[0].Message, storage.ErrMVCCSnapshotGracefulCancel.Error())
+
+	logBytes, err := os.ReadFile(auditCfg.LogPath)
+	require.NoError(t, err)
+	logText := string(logBytes)
+	require.Equal(t, 1, strings.Count(logText, string(audit.EventSnapshotExpired)))
+	require.Contains(t, logText, "mvcc_snapshot_expired")
+	require.Contains(t, logText, "\"resource_id\":\"nornic\"")
+}
+
 func TestHeimdallRouterAndHelpers(t *testing.T) {
 	server, _ := setupTestServer(t)
 	router := newHeimdallDBRouter(server.db, server.dbManager, nil)
@@ -1777,14 +2052,15 @@ func TestRouterRegistrationBranches(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "<html>ui</html>")
 
 	// registerMCPRoutes nil branch and active branch.
-	serverNoMCP := *server
-	serverNoMCP.mcpServer = nil
+	originalMCPServer := server.mcpServer
+	server.mcpServer = nil
 	mux = http.NewServeMux()
-	serverNoMCP.registerMCPRoutes(mux)
+	server.registerMCPRoutes(mux)
 	req = httptest.NewRequest(http.MethodGet, "/mcp/health", nil)
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	server.mcpServer = originalMCPServer
 
 	mux = http.NewServeMux()
 	server.registerMCPRoutes(mux)
@@ -1803,14 +2079,15 @@ func TestRouterRegistrationBranches(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
 	// registerGraphQLRoutes nil branch and active branch.
-	serverNoGraphQL := *server
-	serverNoGraphQL.graphqlHandler = nil
+	originalGraphQLHandler := server.graphqlHandler
+	server.graphqlHandler = nil
 	mux = http.NewServeMux()
-	serverNoGraphQL.registerGraphQLRoutes(mux)
+	server.registerGraphQLRoutes(mux)
 	req = httptest.NewRequest(http.MethodGet, "/graphql", nil)
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	server.graphqlHandler = originalGraphQLHandler
 
 	mux = http.NewServeMux()
 	server.registerGraphQLRoutes(mux)

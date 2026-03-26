@@ -170,8 +170,9 @@ const (
 	EventSchemaChange EventType = "SCHEMA_CHANGE"
 
 	// Security events
-	EventSecurityAlert EventType = "SECURITY_ALERT"
-	EventBreach        EventType = "BREACH_DETECTED"
+	EventSecurityAlert   EventType = "SECURITY_ALERT"
+	EventBreach          EventType = "BREACH_DETECTED"
+	EventSnapshotExpired EventType = "SNAPSHOT_EXPIRED"
 )
 
 // Event represents an immutable audit log entry for compliance tracking.

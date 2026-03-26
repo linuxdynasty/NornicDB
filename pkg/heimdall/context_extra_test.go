@@ -633,6 +633,44 @@ func TestMetricsCollector_Runtime(t *testing.T) {
 	assert.Greater(t, int(rt.GoroutineCount), 0)
 }
 
+type lifecycleMetricsSourceStub struct{}
+
+func (l *lifecycleMetricsSourceStub) Stats() interface{}                      { return nil }
+func (l *lifecycleMetricsSourceStub) NodeCount() (int64, error)               { return 0, nil }
+func (l *lifecycleMetricsSourceStub) EdgeCount() (int64, error)               { return 0, nil }
+func (l *lifecycleMetricsSourceStub) EmbedQueueStats() interface{}            { return nil }
+func (l *lifecycleMetricsSourceStub) GetAsyncEngine() AsyncEngineStats        { return nil }
+func (l *lifecycleMetricsSourceStub) GetWAL() WALStats                        { return nil }
+func (l *lifecycleMetricsSourceStub) GetSchemaManager() SchemaManagerStats    { return nil }
+func (l *lifecycleMetricsSourceStub) GetQueryCache() QueryCacheStats          { return nil }
+func (l *lifecycleMetricsSourceStub) GetGPUManager() GPUManagerStats          { return nil }
+func (l *lifecycleMetricsSourceStub) EncryptionStats() map[string]interface{} { return nil }
+func (l *lifecycleMetricsSourceStub) LifecycleStatus() (map[string]interface{}, error) {
+	return map[string]interface{}{"enabled": true, "pressure_band": "normal"}, nil
+}
+
+type lifecycleMetricsErrorStub struct{ lifecycleMetricsSourceStub }
+
+func (l *lifecycleMetricsErrorStub) LifecycleStatus() (map[string]interface{}, error) {
+	return nil, errors.New("status failed")
+}
+
+func TestMetricsCollector_Collect_MVCCLifecycleStatus(t *testing.T) {
+	collector := NewMetricsCollector(&lifecycleMetricsSourceStub{}, nil)
+	collector.cacheTTL = 0
+	metrics := collector.Collect()
+	require.NotNil(t, metrics.Database.MVCCLifecycle)
+	assert.Equal(t, true, metrics.Database.MVCCLifecycle["enabled"])
+	assert.Equal(t, "normal", metrics.Database.MVCCLifecycle["pressure_band"])
+}
+
+func TestMetricsCollector_Collect_MVCCLifecycleStatusError(t *testing.T) {
+	collector := NewMetricsCollector(&lifecycleMetricsErrorStub{}, nil)
+	collector.cacheTTL = 0
+	metrics := collector.Collect()
+	assert.Nil(t, metrics.Database.MVCCLifecycle)
+}
+
 // ============================================================================
 // RealMetricsReader
 // ============================================================================

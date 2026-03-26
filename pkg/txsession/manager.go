@@ -2,6 +2,7 @@ package txsession
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // ExecutorFactory creates a fresh executor scoped to a database.
@@ -23,7 +25,8 @@ type Session struct {
 	Executor *cypher.StorageExecutor
 	Expires  time.Time
 
-	mu sync.Mutex
+	mu          sync.Mutex
+	terminalErr error
 }
 
 // Manager tracks explicit transaction sessions and lifecycle operations.
@@ -35,7 +38,8 @@ type Manager struct {
 	nowFunc func() time.Time
 	idFunc  func() string
 
-	factory ExecutorFactory
+	factory               ExecutorFactory
+	terminalErrorObserver func(*Session, error)
 }
 
 func NewManager(ttl time.Duration, factory ExecutorFactory) *Manager {
@@ -131,6 +135,12 @@ func (m *Manager) Delete(txID string) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) SetTerminalErrorObserver(observer func(*Session, error)) {
+	m.mu.Lock()
+	m.terminalErrorObserver = observer
+	m.mu.Unlock()
+}
+
 func (m *Manager) Touch(session *Session) {
 	if session == nil {
 		return
@@ -143,13 +153,21 @@ func (m *Manager) ExecuteInSession(ctx context.Context, session *Session, query 
 		return nil, fmt.Errorf("transaction session is not available")
 	}
 	session.mu.Lock()
-	defer session.mu.Unlock()
+	if session.terminalErr != nil {
+		err := session.terminalErr
+		session.mu.Unlock()
+		return nil, err
+	}
 
 	result, err := session.Executor.Execute(ctx, query, params)
 	if err != nil {
-		return nil, err
+		terminalErr, notify := m.rememberTerminalErrorLocked(session, err)
+		session.mu.Unlock()
+		m.notifyTerminalError(session, terminalErr, notify)
+		return nil, terminalErr
 	}
-	m.Touch(session)
+	session.Expires = m.nowFunc().Add(m.ttl)
+	session.mu.Unlock()
 	return result, nil
 }
 
@@ -157,21 +175,75 @@ func (m *Manager) CommitAndDelete(ctx context.Context, session *Session) (*cyphe
 	if session == nil || session.Executor == nil {
 		return nil, fmt.Errorf("transaction session is not available")
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
 	defer m.Delete(session.ID)
+	session.mu.Lock()
+	if session.terminalErr != nil {
+		err := session.terminalErr
+		session.mu.Unlock()
+		return nil, err
+	}
 
-	return session.Executor.Execute(ctx, "COMMIT", nil)
+	result, err := session.Executor.Execute(ctx, "COMMIT", nil)
+	if err != nil {
+		terminalErr, notify := m.rememberTerminalErrorLocked(session, err)
+		session.mu.Unlock()
+		m.notifyTerminalError(session, terminalErr, notify)
+		return nil, terminalErr
+	}
+	session.mu.Unlock()
+	return result, nil
 }
 
 func (m *Manager) RollbackAndDelete(ctx context.Context, session *Session) error {
 	if session == nil || session.Executor == nil {
 		return fmt.Errorf("transaction session is not available")
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
 	defer m.Delete(session.ID)
+	session.mu.Lock()
+	if session.terminalErr != nil {
+		session.mu.Unlock()
+		return nil
+	}
 
 	_, err := session.Executor.Execute(ctx, "ROLLBACK", nil)
+	session.mu.Unlock()
 	return err
+}
+
+func (m *Manager) rememberTerminalErrorLocked(session *Session, err error) (error, bool) {
+	if session == nil || err == nil {
+		return err, false
+	}
+	if session.terminalErr != nil {
+		return session.terminalErr, false
+	}
+	if !isTerminalLifecycleError(err) {
+		return err, false
+	}
+	session.terminalErr = err
+	return session.terminalErr, true
+}
+
+func (m *Manager) notifyTerminalError(session *Session, err error, notify bool) {
+	if !notify || err == nil || session == nil {
+		return
+	}
+	m.mu.RLock()
+	observer := m.terminalErrorObserver
+	m.mu.RUnlock()
+	if observer != nil {
+		observer(session, err)
+	}
+}
+
+func isTerminalLifecycleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, storage.ErrMVCCSnapshotGracefulCancel) || errors.Is(err, storage.ErrMVCCSnapshotHardExpired) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "snapshot cancelled due to resource pressure") ||
+		strings.Contains(message, "snapshot forcibly expired due to critical resource pressure")
 }

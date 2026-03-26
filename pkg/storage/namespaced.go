@@ -650,6 +650,73 @@ func (n *NamespacedEngine) GetEdgeCurrentHead(id EdgeID) (MVCCHead, error) {
 	return provider.GetEdgeCurrentHead(n.prefixEdgeID(id))
 }
 
+// RegisterSnapshotReader registers a reader scoped to the namespace when supported.
+func (n *NamespacedEngine) RegisterSnapshotReader(info SnapshotReaderInfo) func() {
+	provider, ok := n.inner.(MVCCLifecycleEngine)
+	if !ok {
+		return func() {}
+	}
+	copyInfo := info
+	if copyInfo.Namespace == "" {
+		copyInfo.Namespace = n.namespace
+	}
+	return provider.RegisterSnapshotReader(copyInfo)
+}
+
+// LifecycleStatus delegates lifecycle status when supported.
+func (n *NamespacedEngine) LifecycleStatus() map[string]interface{} {
+	provider, ok := n.inner.(MVCCLifecycleEngine)
+	if !ok {
+		return map[string]interface{}{"enabled": false}
+	}
+	status := provider.LifecycleStatus()
+	status["namespace"] = n.namespace
+	return status
+}
+
+// TriggerPruneNow delegates lifecycle prune-now when supported.
+func (n *NamespacedEngine) TriggerPruneNow(ctx context.Context) error {
+	provider, ok := n.inner.(MVCCLifecycleEngine)
+	if !ok {
+		return nil
+	}
+	return provider.TriggerPruneNow(ctx)
+}
+
+// PauseLifecycle delegates lifecycle pause when supported.
+func (n *NamespacedEngine) PauseLifecycle() {
+	provider, ok := n.inner.(MVCCLifecycleEngine)
+	if ok {
+		provider.PauseLifecycle()
+	}
+}
+
+// ResumeLifecycle delegates lifecycle resume when supported.
+func (n *NamespacedEngine) ResumeLifecycle() {
+	provider, ok := n.inner.(MVCCLifecycleEngine)
+	if ok {
+		provider.ResumeLifecycle()
+	}
+}
+
+// SetLifecycleSchedule delegates lifecycle cadence updates when supported.
+func (n *NamespacedEngine) SetLifecycleSchedule(interval time.Duration) error {
+	provider, ok := n.inner.(MVCCLifecycleScheduleEngine)
+	if !ok {
+		return nil
+	}
+	return provider.SetLifecycleSchedule(interval)
+}
+
+// TopLifecycleDebtKeys delegates lifecycle debt inspection when supported.
+func (n *NamespacedEngine) TopLifecycleDebtKeys(limit int) []MVCCLifecycleDebtKey {
+	provider, ok := n.inner.(MVCCLifecycleDebtEngine)
+	if !ok {
+		return nil
+	}
+	return provider.TopLifecycleDebtKeys(limit)
+}
+
 // ============================================================================
 // Bulk Operations
 // ============================================================================

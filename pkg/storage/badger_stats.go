@@ -181,6 +181,9 @@ func (b *BadgerEngine) Close() error {
 	if b.closed {
 		return nil
 	}
+	if b.lifecycleController != nil {
+		b.lifecycleController.StopLifecycle()
+	}
 
 	b.closed = true
 	return b.db.Close()

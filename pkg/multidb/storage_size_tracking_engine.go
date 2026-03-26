@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -22,6 +23,7 @@ var _ storage.Engine = (*sizeTrackingEngine)(nil)
 // can keep LIMIT short-circuit behavior on hot paths.
 var _ storage.StreamingEngine = (*sizeTrackingEngine)(nil)
 var _ storage.LabelNodeIDLookupEngine = (*sizeTrackingEngine)(nil)
+var _ storage.MVCCLifecycleEngine = (*sizeTrackingEngine)(nil)
 
 func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbName string) storage.Engine {
 	return &sizeTrackingEngine{
@@ -33,6 +35,61 @@ func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbNa
 
 func (t *sizeTrackingEngine) GetInnerEngine() storage.Engine {
 	return t.Engine
+}
+
+// RegisterSnapshotReader preserves MVCC lifecycle admission and tracking across
+// size-tracking wrapper boundaries.
+func (t *sizeTrackingEngine) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleEngine); ok {
+		return provider.RegisterSnapshotReader(info)
+	}
+	return func() {}
+}
+
+// LifecycleStatus delegates lifecycle status when supported by the wrapped engine.
+func (t *sizeTrackingEngine) LifecycleStatus() map[string]interface{} {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleEngine); ok {
+		return provider.LifecycleStatus()
+	}
+	return map[string]interface{}{"enabled": false}
+}
+
+// TriggerPruneNow delegates lifecycle prune-now when supported by the wrapped engine.
+func (t *sizeTrackingEngine) TriggerPruneNow(ctx context.Context) error {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleEngine); ok {
+		return provider.TriggerPruneNow(ctx)
+	}
+	return nil
+}
+
+// PauseLifecycle delegates lifecycle pause when supported by the wrapped engine.
+func (t *sizeTrackingEngine) PauseLifecycle() {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleEngine); ok {
+		provider.PauseLifecycle()
+	}
+}
+
+// ResumeLifecycle delegates lifecycle resume when supported by the wrapped engine.
+func (t *sizeTrackingEngine) ResumeLifecycle() {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleEngine); ok {
+		provider.ResumeLifecycle()
+	}
+}
+
+// SetLifecycleSchedule delegates lifecycle cadence updates when supported by the wrapped engine.
+func (t *sizeTrackingEngine) SetLifecycleSchedule(interval time.Duration) error {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleScheduleEngine); ok {
+		return provider.SetLifecycleSchedule(interval)
+	}
+	return nil
+}
+
+// TopLifecycleDebtKeys delegates lifecycle debt inspection when supported by the wrapped engine.
+func (t *sizeTrackingEngine) TopLifecycleDebtKeys(limit int) []storage.MVCCLifecycleDebtKey {
+	if provider, ok := t.Engine.(storage.MVCCLifecycleDebtEngine); ok {
+		return provider.TopLifecycleDebtKeys(limit)
+	}
+	return nil
 }
 
 // StreamNodes delegates streaming iteration to the wrapped engine when available.

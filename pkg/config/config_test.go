@@ -369,6 +369,10 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	t.Setenv("NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS", "true")
 	t.Setenv("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_COUNT", "5")
 	t.Setenv("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_AGE", "24h")
+	t.Setenv("NORNICDB_MVCC_LIFECYCLE_ENABLED", "false")
+	t.Setenv("NORNICDB_MVCC_LIFECYCLE_INTERVAL", "45s")
+	t.Setenv("NORNICDB_MVCC_LIFECYCLE_MAX_SNAPSHOT_AGE", "2h")
+	t.Setenv("NORNICDB_MVCC_LIFECYCLE_MAX_CHAIN_CAP", "321")
 	t.Setenv("NORNICDB_PERSIST_SEARCH_INDEXES", "true")
 	t.Setenv("NORNICDB_BOLT_ENABLED", "false")
 	t.Setenv("NORNICDB_BOLT_ADDRESS", "127.0.0.1")
@@ -404,6 +408,7 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	t.Setenv("NORNICDB_AUTO_LINKS_THRESHOLD", "0.67")
 	t.Setenv("NORNICDB_EMBED_SCAN_INTERVAL", "5m")
 	t.Setenv("NORNICDB_EMBED_BATCH_DELAY", "3s")
+	t.Setenv("NORNICDB_EMBED_TRIGGER_DEBOUNCE", "4s")
 	t.Setenv("NORNICDB_EMBED_MAX_RETRIES", "7")
 	t.Setenv("NORNICDB_EMBED_CHUNK_SIZE", "2048")
 	t.Setenv("NORNICDB_EMBED_CHUNK_OVERLAP", "33")
@@ -493,6 +498,9 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	if !cfg.Database.WALRetentionLedgerDefaults || cfg.Database.WALSnapshotRetentionMaxCount != 5 || cfg.Database.WALSnapshotRetentionMaxAge != 24*time.Hour {
 		t.Fatalf("unexpected wal snapshot config: %+v", cfg.Database)
 	}
+	if cfg.Database.MVCCLifecycleEnabled || cfg.Database.MVCCLifecycleCycleInterval != 45*time.Second || cfg.Database.MVCCLifecycleMaxSnapshotAge != 2*time.Hour || cfg.Database.MVCCLifecycleMaxChainCap != 321 {
+		t.Fatalf("unexpected mvcc lifecycle config: %+v", cfg.Database)
+	}
 	if !cfg.Database.PersistSearchIndexes || !cfg.Database.EncryptionEnabled || cfg.Database.EncryptionPassword != "env-password" {
 		t.Fatalf("unexpected database feature config: %+v", cfg.Database)
 	}
@@ -529,7 +537,7 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	if cfg.Memory.AutoLinksEnabled || cfg.Memory.AutoLinksSimilarityThreshold != 0.67 || cfg.Memory.ArchiveThreshold != 0.3 {
 		t.Fatalf("unexpected autolink/archive config: %+v", cfg.Memory)
 	}
-	if cfg.EmbeddingWorker.ScanInterval != 5*time.Minute || cfg.EmbeddingWorker.BatchDelay != 3*time.Second || cfg.EmbeddingWorker.MaxRetries != 7 {
+	if cfg.EmbeddingWorker.ScanInterval != 5*time.Minute || cfg.EmbeddingWorker.BatchDelay != 3*time.Second || cfg.EmbeddingWorker.TriggerDebounceDelay != 4*time.Second || cfg.EmbeddingWorker.MaxRetries != 7 {
 		t.Fatalf("unexpected embedding worker timings: %+v", cfg.EmbeddingWorker)
 	}
 	if cfg.EmbeddingWorker.ChunkSize != 2048 || cfg.EmbeddingWorker.ChunkOverlap != 33 || cfg.EmbeddingWorker.IncludeLabels {
@@ -619,6 +627,16 @@ func TestLoadDefaults_EmbeddingWorkerChunkSize(t *testing.T) {
 	if cfg.EmbeddingWorker.ChunkSize != 8192 {
 		t.Fatalf("expected default chunk size 8192, got %d", cfg.EmbeddingWorker.ChunkSize)
 	}
+}
+
+func TestLoadDefaults_MVCCLifecycle(t *testing.T) {
+	clearEnvVars(t)
+	cfg := LoadDefaults()
+	require.True(t, cfg.Database.MVCCLifecycleEnabled)
+	require.Equal(t, 30*time.Second, cfg.Database.MVCCLifecycleCycleInterval)
+	require.Equal(t, time.Hour, cfg.Database.MVCCLifecycleMaxSnapshotAge)
+	require.Equal(t, 1000, cfg.Database.MVCCLifecycleMaxChainCap)
+	require.Equal(t, 2*time.Second, cfg.EmbeddingWorker.TriggerDebounceDelay)
 }
 
 // TestLoadDefaults_HeimdallMCPDefaults tests that Heimdall MCP defaults are set correctly.
@@ -828,6 +846,21 @@ embedding_worker:
 	if cfg.EmbeddingWorker.IncludeLabels {
 		t.Error("expected include_labels false from YAML")
 	}
+}
+
+func TestLoadFromFile_MVCCLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte("\ndatabase:\n  mvcc_lifecycle_enabled: false\n  mvcc_lifecycle_interval: 75s\n  mvcc_lifecycle_max_snapshot_age: 90m\n  mvcc_lifecycle_max_chain_cap: 222\nembedding_worker:\n  trigger_debounce: 9s\n"), 0o600)
+	require.NoError(t, err)
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.False(t, cfg.Database.MVCCLifecycleEnabled)
+	require.Equal(t, 75*time.Second, cfg.Database.MVCCLifecycleCycleInterval)
+	require.Equal(t, 90*time.Minute, cfg.Database.MVCCLifecycleMaxSnapshotAge)
+	require.Equal(t, 222, cfg.Database.MVCCLifecycleMaxChainCap)
+	require.Equal(t, 9*time.Second, cfg.EmbeddingWorker.TriggerDebounceDelay)
 }
 
 func TestLoadFromFile_ComprehensiveSectionsAndEnvPrecedence(t *testing.T) {
@@ -1323,6 +1356,42 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "invalid embedding dimensions",
+		},
+		{
+			name: "negative mvcc lifecycle interval",
+			modify: func(c *Config) {
+				c.Auth.InitialPassword = "longenoughpassword"
+				c.Database.MVCCLifecycleCycleInterval = -time.Second
+			},
+			wantErr: true,
+			errMsg:  "invalid mvcc lifecycle interval",
+		},
+		{
+			name: "negative mvcc lifecycle max snapshot age",
+			modify: func(c *Config) {
+				c.Auth.InitialPassword = "longenoughpassword"
+				c.Database.MVCCLifecycleMaxSnapshotAge = -time.Minute
+			},
+			wantErr: true,
+			errMsg:  "invalid mvcc lifecycle max snapshot age",
+		},
+		{
+			name: "negative mvcc lifecycle max chain cap",
+			modify: func(c *Config) {
+				c.Auth.InitialPassword = "longenoughpassword"
+				c.Database.MVCCLifecycleMaxChainCap = -1
+			},
+			wantErr: true,
+			errMsg:  "invalid mvcc lifecycle max chain cap",
+		},
+		{
+			name: "negative embed trigger debounce",
+			modify: func(c *Config) {
+				c.Auth.InitialPassword = "longenoughpassword"
+				c.EmbeddingWorker.TriggerDebounceDelay = -time.Second
+			},
+			wantErr: true,
+			errMsg:  "invalid embed trigger debounce",
 		},
 	}
 

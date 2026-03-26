@@ -1001,6 +1001,9 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		executors:      make(map[string]*cypher.StorageExecutor),
 	}
 	s.txSessions = txsession.NewManager(30*time.Second, s.newExecutorForDatabase)
+	s.txSessions.SetTerminalErrorObserver(func(session *txsession.Session, err error) {
+		s.logMVCCSnapshotExpiration(session, err)
+	})
 
 	// ==========================================================================
 	// Heimdall - AI Assistant for Database Management

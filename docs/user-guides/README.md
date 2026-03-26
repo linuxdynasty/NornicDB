@@ -5,9 +5,11 @@
 ## 📚 Available Guides
 
 ### Core Features
+
 - **[Vector Search](vector-search.md)** - Semantic search with embeddings
 - **[Hybrid Search (RRF)](hybrid-search.md)** - Combine vector + BM25 search
 - **[Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md)** - Snapshot reads, pruning, and retention knobs
+- **[MVCC Lifecycle Admin API](mvcc-lifecycle-admin-api.md)** - Inspect lifecycle pressure, use the admin UI, trigger prune runs, and control automatic scheduling
 - **[Neo4j-Style Infinigraph Topology](infinigraph-topology.md)** - Build a logical distributed graph with local and remote composite constituents
 - **[Canonical Graph + Mutation Log](canonical-graph-ledger.md)** - Build a canonical truth store with constraints, temporal validity, receipts, and a WAL-backed mutation log
 - **[Qdrant gRPC Endpoint](qdrant-grpc.md)** - Use Qdrant SDKs against NornicDB
@@ -22,6 +24,7 @@
 - **[Complete Examples](complete-examples.md)** - Full application examples
 
 ### Query & Data Management
+
 - **[GraphQL API](graphql.md)** - GraphQL queries, mutations, and real-time subscriptions
 - **[Cypher Queries](cypher-queries.md)** - Complete Cypher language guide
 - **[Graph Traversal](graph-traversal.md)** - Path queries and pattern matching
@@ -29,6 +32,7 @@
 - **[Data Import/Export](data-import-export.md)** - Neo4j compatibility
 
 ### Operations
+
 - **[Clustering](clustering.md)** - Hot Standby, Raft, Multi-Region replication
 - **[Plugin System](plugin-system.md)** - APOC functions and custom plugins
 - **[Heimdall Plugins](heimdall-plugins.md)** - Extend the AI assistant with custom actions
@@ -57,6 +61,9 @@
 
 **Query historical state or tune MVCC history retention**
 → [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md)
+
+**Control MVCC pruning windows and lifecycle scheduling from the API or admin UI**
+→ [MVCC Lifecycle Admin API](mvcc-lifecycle-admin-api.md)
 
 **Build a distributed logical graph across local and remote databases**
 → [Neo4j-Style Infinigraph Topology](infinigraph-topology.md)
@@ -98,25 +105,27 @@
 
 Heimdall plugins support advanced capabilities:
 
-| Feature | Description |
-|---------|-------------|
-| **Lifecycle Hooks** | Modify prompts, validate actions, log results |
-| **Database Events** | React to CRUD operations, queries, transactions |
-| **Autonomous Actions** | Trigger SLM analysis based on accumulated events |
-| **Inline Notifications** | Send ordered messages to the chat interface |
-| **Request Cancellation** | Cancel requests with reasons from any hook |
+| Feature                  | Description                                      |
+| ------------------------ | ------------------------------------------------ |
+| **Lifecycle Hooks**      | Modify prompts, validate actions, log results    |
+| **Database Events**      | React to CRUD operations, queries, transactions  |
+| **Autonomous Actions**   | Trigger SLM analysis based on accumulated events |
+| **Inline Notifications** | Send ordered messages to the chat interface      |
+| **Request Cancellation** | Cancel requests with reasons from any hook       |
 
 See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
 
 ## 📖 Learning Path
 
 ### Beginner
+
 1. [Getting Started](../getting-started/)
 2. [First Queries](../getting-started/first-queries.md)
 3. [Cypher Queries](cypher-queries.md)
 4. [Complete Examples](complete-examples.md)
 
 ### Intermediate
+
 1. [GraphQL API](graphql.md)
 2. [Vector Search](vector-search.md)
 3. [Graph Traversal](graph-traversal.md)
@@ -125,6 +134,7 @@ See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
 6. [Data Import/Export](data-import-export.md)
 
 ### Advanced
+
 1. [Hybrid Search](hybrid-search.md)
 2. [Advanced Topics](../advanced/) - K-Means clustering, embeddings
 3. [Performance Tuning](../performance/http-optimization-options.md)
@@ -143,6 +153,7 @@ See [Vector Search](vector-search.md) and [Hybrid Search](hybrid-search.md) for 
 ## 📊 Common Use Cases
 
 ### Knowledge Graphs
+
 - Store and query interconnected information
 - Find relationships between concepts
 - Semantic search across documents
@@ -150,6 +161,7 @@ See [Vector Search](vector-search.md) and [Hybrid Search](hybrid-search.md) for 
 **Example:** [Personal Knowledge Graph](complete-examples.md#3-personal-knowledge-graph)
 
 ### AI Agent Memory
+
 - User preferences and context
 - Project decisions and architecture
 - Semantic memory with decay
@@ -157,6 +169,7 @@ See [Vector Search](vector-search.md) and [Hybrid Search](hybrid-search.md) for 
 **Example:** [AI Agent Memory System](complete-examples.md#1-ai-agent-memory-system)
 
 ### Code Knowledge Bases
+
 - Code structure and dependencies
 - Documentation search
 - Pattern recognition
@@ -164,6 +177,7 @@ See [Vector Search](vector-search.md) and [Hybrid Search](hybrid-search.md) for 
 **Example:** [Code Knowledge Base](complete-examples.md#2-code-knowledge-base)
 
 ### Document Management
+
 - Semantic document search
 - Automatic categorization
 - Related document discovery
@@ -173,21 +187,31 @@ See [Vector Search](vector-search.md) and [Hybrid Search](hybrid-search.md) for 
 ## 🆘 Common Questions
 
 ### How do I search by meaning?
+
 Use [Vector Search](vector-search.md) with automatic embeddings.
 
 ### How do I ensure data consistency?
+
 Use [Transactions](transactions.md) for ACID guarantees.
 
 ### How do I inspect older versions or control history growth?
+
 Use [Historical Reads & MVCC Retention](historical-reads-mvcc-retention.md).
 
+### How do I pause lifecycle work or run prune on demand?
+
+Use [MVCC Lifecycle Admin API](mvcc-lifecycle-admin-api.md).
+
 ### How do I query relationships?
+
 See [Graph Traversal](graph-traversal.md) for pattern matching.
 
 ### How do I migrate from Neo4j?
+
 Check [Data Import/Export](data-import-export.md) for compatibility.
 
 ### Where are code examples?
+
 See [Complete Examples](complete-examples.md) for full applications.
 
 ## 📚 Related Documentation

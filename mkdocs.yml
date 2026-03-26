@@ -92,6 +92,7 @@ nav:
       - Vector Search: user-guides/vector-search.md
       - Hybrid Search: user-guides/hybrid-search.md
       - Historical Reads & MVCC Retention: user-guides/historical-reads-mvcc-retention.md
+      - MVCC Lifecycle Admin API: user-guides/mvcc-lifecycle-admin-api.md
       - Neo4j-Style Infinigraph Topology: user-guides/infinigraph-topology.md
       - Cypher Queries: user-guides/cypher-queries.md
       - Graph Traversal: user-guides/graph-traversal.md
@@ -109,6 +110,7 @@ nav:
   - Architecture:
       - Overview: architecture/README.md
       - System Design: architecture/system-design.md
+      - MVCC Lifecycle and Background Work: architecture/mvcc-lifecycle-background-work.md
       - Replication: architecture/replication.md
       - Plugin System: architecture/plugin-system.md
   - API Reference:

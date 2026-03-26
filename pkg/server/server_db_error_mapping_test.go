@@ -24,6 +24,18 @@ func TestMapTransientTransactionError(t *testing.T) {
 			ok:      true,
 		},
 		{
+			name:    "graceful snapshot expiration",
+			message: "failed to create node: mvcc: snapshot cancelled due to resource pressure",
+			want:    "Neo.TransientError.Transaction.Outdated",
+			ok:      true,
+		},
+		{
+			name:    "hard snapshot expiration",
+			message: "mvcc: snapshot forcibly expired due to critical resource pressure",
+			want:    "Neo.TransientError.Transaction.Outdated",
+			ok:      true,
+		},
+		{
 			name:    "syntax error passthrough",
 			message: "invalid input 'RETURNN'",
 			want:    "",

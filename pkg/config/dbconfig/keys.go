@@ -65,9 +65,11 @@ func AllowedKeys() []KeyMeta {
 		{"NORNICDB_EMBED_WORKER_NUM_WORKERS", "number", "Embed worker"},
 		{"NORNICDB_EMBED_SCAN_INTERVAL", "duration", "Embed worker"},
 		{"NORNICDB_EMBED_BATCH_DELAY", "duration", "Embed worker"},
+		{"NORNICDB_EMBED_TRIGGER_DEBOUNCE", "duration", "Embed worker"},
 		{"NORNICDB_EMBED_MAX_RETRIES", "number", "Embed worker"},
 		{"NORNICDB_EMBED_CHUNK_SIZE", "number", "Embed worker"},
 		{"NORNICDB_EMBED_CHUNK_OVERLAP", "number", "Embed worker"},
+		{"NORNICDB_MVCC_LIFECYCLE_INTERVAL", "duration", "MVCC lifecycle"},
 	}
 }
 

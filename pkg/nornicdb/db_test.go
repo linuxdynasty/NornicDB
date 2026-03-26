@@ -45,18 +45,23 @@ type allNodesErrorEngine struct {
 
 type temporalMaintenanceTestEngine struct {
 	storage.Engine
-	rebuildCalls     int
-	pruneCalls       int
-	rebuildErr       error
-	pruneErr         error
-	pruneResult      int64
-	lastPrune        storage.TemporalPruneOptions
-	mvccRebuildCalls int
-	mvccPruneCalls   int
-	mvccRebuildErr   error
-	mvccPruneErr     error
-	mvccPruneResult  int64
-	lastMVCCPrune    storage.MVCCPruneOptions
+	rebuildCalls      int
+	pruneCalls        int
+	rebuildErr        error
+	pruneErr          error
+	pruneResult       int64
+	lastPrune         storage.TemporalPruneOptions
+	mvccRebuildCalls  int
+	mvccPruneCalls    int
+	mvccRebuildErr    error
+	mvccPruneErr      error
+	mvccPruneResult   int64
+	lastMVCCPrune     storage.MVCCPruneOptions
+	lifecycleStatus   map[string]interface{}
+	lifecycleErr      error
+	lifecyclePruneCtx context.Context
+	lifecyclePaused   int
+	lifecycleResumed  int
 }
 
 func (e *allNodesErrorEngine) AllNodes() ([]*storage.Node, error) {
@@ -86,6 +91,35 @@ func (e *temporalMaintenanceTestEngine) PruneMVCCVersions(ctx context.Context, o
 	e.mvccPruneCalls++
 	e.lastMVCCPrune = opts
 	return e.mvccPruneResult, e.mvccPruneErr
+}
+
+func (e *temporalMaintenanceTestEngine) RegisterSnapshotReader(info storage.SnapshotReaderInfo) func() {
+	_ = info
+	return func() {}
+}
+
+func (e *temporalMaintenanceTestEngine) LifecycleStatus() map[string]interface{} {
+	if e.lifecycleStatus == nil {
+		return map[string]interface{}{"enabled": false}
+	}
+	status := make(map[string]interface{}, len(e.lifecycleStatus))
+	for key, value := range e.lifecycleStatus {
+		status[key] = value
+	}
+	return status
+}
+
+func (e *temporalMaintenanceTestEngine) TriggerPruneNow(ctx context.Context) error {
+	e.lifecyclePruneCtx = ctx
+	return e.lifecycleErr
+}
+
+func (e *temporalMaintenanceTestEngine) PauseLifecycle() {
+	e.lifecyclePaused++
+}
+
+func (e *temporalMaintenanceTestEngine) ResumeLifecycle() {
+	e.lifecycleResumed++
 }
 
 type closeErrReplicator struct {
@@ -2747,6 +2781,56 @@ func TestDB_TemporalMaintenance(t *testing.T) {
 		require.ErrorIs(t, db.RebuildTemporalIndexes(ctx), ErrClosed)
 		_, err := db.PruneTemporalHistory(ctx, storage.TemporalPruneOptions{MaxVersionsPerKey: 1})
 		require.ErrorIs(t, err, ErrClosed)
+	})
+
+	t.Run("lifecycle admin methods delegate to base storage", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		maint := &temporalMaintenanceTestEngine{
+			Engine:          baseEngine,
+			lifecycleStatus: map[string]interface{}{"enabled": true, "paused": false, "pressure_band": storage.PressureNormal},
+		}
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(maint, "nornic"),
+			baseStorage: maint,
+			config:      DefaultConfig(),
+		}
+
+		status, err := db.LifecycleStatus()
+		require.NoError(t, err)
+		require.Equal(t, true, status["enabled"])
+		require.Equal(t, storage.PressureNormal, status["pressure_band"])
+
+		require.NoError(t, db.TriggerLifecyclePrune(ctx))
+		require.Equal(t, ctx, maint.lifecyclePruneCtx)
+		require.NoError(t, db.PauseLifecycle())
+		require.NoError(t, db.ResumeLifecycle())
+		require.Equal(t, 1, maint.lifecyclePaused)
+		require.Equal(t, 1, maint.lifecycleResumed)
+	})
+
+	t.Run("lifecycle admin methods fallback and closed handling", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		t.Cleanup(func() { _ = baseEngine.Close() })
+		db := &DB{
+			storage:     storage.NewNamespacedEngine(baseEngine, "nornic"),
+			baseStorage: baseEngine,
+			config:      DefaultConfig(),
+		}
+
+		status, err := db.LifecycleStatus()
+		require.NoError(t, err)
+		require.Equal(t, false, status["enabled"])
+		require.NoError(t, db.TriggerLifecyclePrune(ctx))
+		require.NoError(t, db.PauseLifecycle())
+		require.NoError(t, db.ResumeLifecycle())
+
+		db.closed = true
+		_, err = db.LifecycleStatus()
+		require.ErrorIs(t, err, ErrClosed)
+		require.ErrorIs(t, db.TriggerLifecyclePrune(ctx), ErrClosed)
+		require.ErrorIs(t, db.PauseLifecycle(), ErrClosed)
+		require.ErrorIs(t, db.ResumeLifecycle(), ErrClosed)
 	})
 }
 
