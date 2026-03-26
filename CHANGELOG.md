@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.34] - 2026-03-25
+
+### Added
+
+- **Operator MVCC lifecycle control plane**:
+  - added a full admin-facing MVCC lifecycle manager with reader tracking, safe-floor computation, debt planning, fenced prune apply, pressure bands, emergency behavior, and runtime cadence changes.
+  - added admin HTTP endpoints to inspect lifecycle state, pause or resume automatic work, trigger prune-now, change schedule intervals live, and inspect top debt keys.
+
+- **End-to-end lifecycle admin UI**:
+  - added a dedicated `MVCC Lifecycle` page under `Security` so operators can manage lifecycle behavior without direct API calls.
+  - added confirmation-gated controls for pause, resume, prune-now, and schedule changes, plus views for pressure, debt, readers, per-namespace summaries, and short-window rollups.
+
+- **Lifecycle architecture and operator documentation**:
+  - added architecture documentation for MVCC lifecycle and background work behavior.
+  - added a user guide for lifecycle API and UI workflows, including interval tuning guidance for mixed, churn-heavy, and manual-only operating modes.
+
+### Changed
+
+- **Storage engine lifecycle integration**:
+  - propagated lifecycle support through Badger, async, WAL, namespaced, and multi-database wrappers so MVCC controls remain available across wrapped deployments.
+  - wired database runtime startup to initialize lifecycle management from config and expose status through DB admin methods and Heimdall metrics.
+
+- **Runtime lifecycle configurability**:
+  - added config support for enabling lifecycle management, setting the cycle interval, bounding snapshot lifetime, capping pathological chain growth, and debouncing write-triggered embedding work.
+  - lifecycle cadence can now be changed at runtime, including switching a database into manual-only mode with `0s`.
+
+- **Operator visibility and protection signals**:
+  - transaction responses now surface MVCC pressure warnings so clients can see when pinned history is building.
+  - lifecycle metrics now expose pressure, debt, readers, rollups, and debt hotspots for easier diagnosis before maintenance pressure becomes an incident.
+
+### Fixed
+
+- **Pressure-driven snapshot handling**:
+  - fixed explicit transaction/session behavior so MVCC snapshot expiration is surfaced consistently as a retryable transient lifecycle error instead of leaking inconsistent terminal behavior.
+  - added audit logging for forced snapshot expiration so pressure-driven cancellations are visible in operator trails.
+
+- **Background indexing and lifecycle coordination under write load**:
+  - fixed mutation-triggered search indexing to debounce queued work instead of amplifying one background execution path per write burst.
+  - fixed search-service build completion signaling to avoid duplicate-close races during concurrent build and shutdown paths.
+
+- **MVCC churn retention behavior**:
+  - fixed lifecycle prune behavior to stay bounded under repeated update/delete/recreate churn while preserving current visible heads and retained-floor semantics.
+
+### Tests
+
+- Added and expanded regression coverage for:
+  - lifecycle manager planning, pressure hysteresis, fairness scheduling, emergency behavior, and metrics rollups
+  - lifecycle delegation through storage wrappers and DB admin entry points
+  - transaction admission, graceful snapshot cancellation, and hard-expiration behavior under MVCC pressure
+  - server lifecycle handlers, pressure warnings, and audit logging for expired snapshots
+  - search-service debounce behavior and idempotent build completion signaling
+  - real-engine churn pruning bounds and tombstone compaction behavior
+
+### Technical Details
+
+- **Range covered**: `5ae74b0..HEAD` (from the commit that recorded the v1.0.33 changelog entry to current `main` head)
+- **Commits in range**: 1 (non-merge)
+- **Repository delta**: 57 files changed, +7,643 / -690 lines
+- **Primary focus areas**: MVCC lifecycle control, operator visibility, runtime scheduling, pressure-aware snapshot handling, and safer background maintenance behavior.
+
 ## [v1.0.33] - 2026-03-25
 
 ### Added
