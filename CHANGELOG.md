@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bolt autocommit database executor reuse**:
+  - fixed the Bolt multi-database autocommit path to reuse cached database-scoped executors instead of rebuilding a fresh Cypher executor on each `RUN`.
+  - preserved auth-forwarded remote routing behavior by keeping auth-scoped database executor resolution uncached.
+
 - **llama.cpp upgrade compatibility on macOS and Heimdall generation paths**:
   - fixed the local llama generation context initialization used by Heimdall after the llama.cpp upgrade, eliminating a macOS CGO crash during generation-model loading.
   - added generation-context normalization so native model initialization stays within safe runtime bounds after dependency roll-forwards.
@@ -38,9 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - Added and updated regression coverage for:
+  - Bolt database-scoped executor cache reuse for non-auth paths and cache bypass for auth-forwarded routing
   - llama generation context resolution and safe initialization behavior after the llama.cpp upgrade
   - Heimdall CGO generation-model loading on the upgraded llama runtime
-  - Bolt/database-scoped executor maintenance behavior introduced during the same maintenance window
 
 ### Technical Details
 
