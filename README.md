@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.34-success" alt="Version 1.0.34">
+  <img src="https://img.shields.io/badge/version-1.0.35-success" alt="Version 1.0.35">
   <a href="https://coveralls.io/github/orneryd/NornicDB?branch=main"><img src="https://coveralls.io/repos/github/orneryd/NornicDB/badge.svg?branch=main" alt="Coveralls Report"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
@@ -106,12 +106,12 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 
 **Local benchmark** (67,280 nodes, 40,921 edges, 67,298 embeddings, HNSW CPU-only index):
 
-| Workload | Transport | Throughput | Mean | P50 | P95 | P99 | Max |
-| -------- | --------- | ----------: | ---: | --: | --: | --: | --: |
-| Vector only | HTTP | 14,950 req/s | 663 us | 627 us | 969 us | 2.18 ms | 2.73 ms |
-| Vector only | Bolt | 8,802 req/s | 1.13 ms | 983 us | 1.77 ms | 4.50 ms | 5.15 ms |
-| Vector + 1 hop | HTTP | 11,523 req/s | 859 us | 699 us | 1.54 ms | 3.46 ms | 4.71 ms |
-| Vector + 1 hop | Bolt | 7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
+| Workload       | Transport |   Throughput |    Mean |     P50 |     P95 |     P99 |     Max |
+| -------------- | --------- | -----------: | ------: | ------: | ------: | ------: | ------: |
+| Vector only    | HTTP      | 14,950 req/s |  663 us |  627 us |  969 us | 2.18 ms | 2.73 ms |
+| Vector only    | Bolt      |  8,802 req/s | 1.13 ms |  983 us | 1.77 ms | 4.50 ms | 5.15 ms |
+| Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |
+| Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
 
 **Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
 
