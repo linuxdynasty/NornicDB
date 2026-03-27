@@ -1,38 +1,29 @@
 # Performance
 
-**Benchmarks, optimization guides, and performance tuning.**
+This section contains benchmark evidence, profiling guides, and tuning playbooks.
 
-## 📚 Documentation
+## Start Here
 
-- **[Search Methodology](searching.md)** - Complete guide to vector, full-text, RRF, and reranking
-- **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** - Performance comparison
-- **[Test Results](test-results.md)** - Test suite results
-- **[Optimization Guide](http-optimization-options.md)** - Performance tuning
-- **[Hot Path Query Cookbook](hot-path-query-cookbook.md)** - Optimized Cypher shapes for high-traffic read/write paths
-- **[GPU Acceleration](../features/gpu-acceleration.md)** - GPU performance
-- **[Query Optimization](searching.md)** - Query tuning
+- Benchmark comparison against Neo4j: [benchmarks-vs-neo4j.md](benchmarks-vs-neo4j.md)
+- Search methodology and tuning model: [searching.md](searching.md)
+- HTTP/API optimization options: [http-optimization-options.md](http-optimization-options.md)
+- Hot-path query cookbook: [hot-path-query-cookbook.md](hot-path-query-cookbook.md)
 
-## ⚡ Performance Highlights
+## Benchmark and Analysis Reports
 
-### Vector Search
-- **10-100x faster** with GPU acceleration
-- **O(log N)** HNSW index lookups
-- **Sub-millisecond** queries on 1M vectors
+- Hybrid query benchmarks: [hybrid-query-benchmarks.md](hybrid-query-benchmarks.md)
+- HTTP API vs Neo4j measurements: [http-api-vs-neo4j.md](http-api-vs-neo4j.md)
+- Single-request benchmark: [single-request-benchmark.md](single-request-benchmark.md)
+- Aggregated test results: [test-results.md](test-results.md)
 
-### Query Execution
-- **Parallel execution** for independent operations
-- **Query caching** with LRU eviction
-- **Index-backed** property lookups
+## Profiling and Runtime Tuning
 
-### Storage
-- **Badger LSM** for write-heavy workloads
-- **Batch writes** for bulk imports
-- **Compression** for reduced disk usage
+- pprof quick guide: [pprof-quick-guide.md](pprof-quick-guide.md)
+- HTTP optimization options: [http-optimization-options.md](http-optimization-options.md)
+- GPU capability notes: [../features/gpu-acceleration.md](../features/gpu-acceleration.md)
 
-## 📊 Benchmarks
+## Related Docs
 
-See **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** for detailed comparisons.
-
----
-
-**Optimize your database** → **[Optimization Guide](http-optimization-options.md)**
+- Product usage guides: [../user-guides/README.md](../user-guides/README.md)
+- Operations runbooks: [../operations/README.md](../operations/README.md)
+- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)

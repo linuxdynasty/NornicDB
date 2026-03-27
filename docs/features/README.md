@@ -1,111 +1,36 @@
 # Features
 
-**Explore NornicDB's advanced features and capabilities.**
+This section indexes capability-specific documentation.
 
-## 🚀 Core Features
+Use this page to find a feature area quickly, then follow links to canonical how-to or API docs.
 
-### Search & Discovery
-- **[Vector Search](../user-guides/vector-search.md)** - Semantic search with embeddings
-- **[Hybrid Search](../user-guides/hybrid-search.md)** - RRF fusion of vector + BM25
-- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Two-stage retrieval (local GGUF or external API)
-- **[Link Prediction](link-prediction.md)** - ML-based relationship prediction
+## Search & Retrieval
 
-### AI & Machine Learning
-- **[MCP Integration](mcp-integration.md)** - Model Context Protocol tools
-- **[Memory Decay](memory-decay.md)** - Time-based importance scoring
-- **[Vector Embeddings](vector-embeddings.md)** - Automatic embedding generation
-- **[GPU Acceleration](gpu-acceleration.md)** - 10-100x speedup
-- **[Auto-TLP](auto-tlp.md)** - Automatic relationship inference
+- Vector search workflow: [../user-guides/vector-search.md](../user-guides/vector-search.md)
+- Hybrid retrieval workflow: [../user-guides/hybrid-search.md](../user-guides/hybrid-search.md)
+- Reranking capability: [cross-encoder-reranking.md](cross-encoder-reranking.md)
+- Link prediction: [link-prediction.md](link-prediction.md)
 
-### APIs & Interfaces
-- **[GraphQL API](../user-guides/graphql.md)** - GraphQL queries, mutations, and real-time subscriptions
-- **[APOC Functions](apoc-functions.md)** - 983 Neo4j-compatible functions
+## AI & Memory
 
-### Configuration & Extensibility
-- **[Feature Flags](feature-flags.md)** - Runtime configuration
-- **[Plugin System](plugin-system.md)** - Extensible architecture with function & Heimdall plugins
+- MCP integration: [mcp-integration.md](mcp-integration.md)
+- Memory decay model: [memory-decay.md](memory-decay.md)
+- Embedding generation: [vector-embeddings.md](vector-embeddings.md)
+- Auto relationship inference: [auto-tlp.md](auto-tlp.md)
 
-## 📚 Feature Categories
+## Runtime & Performance Features
 
-### Search Features
-NornicDB provides three complementary search methods:
+- GPU acceleration: [gpu-acceleration.md](gpu-acceleration.md)
+- Feature flags: [feature-flags.md](feature-flags.md)
+- Performance docs and benchmarks: [../performance/README.md](../performance/README.md)
 
-1. **Vector Search** - Semantic similarity using embeddings
-2. **Full-Text Search** - BM25 keyword matching  
-3. **Hybrid Search** - RRF fusion combining both
+## Extensibility
 
-[Learn more about search →](../user-guides/vector-search.md)
+- Plugin system overview: [plugin-system.md](plugin-system.md)
+- APOC functions overview: [apoc-functions.md](apoc-functions.md)
 
-### AI Integration
-- Automatic embedding generation
-- MCP tool integration
-- Memory decay simulation
-- Link prediction
-- Auto-TLP (automatic relationship inference)
+## Related Canonical Guides
 
-[Learn more about AI features →](mcp-integration.md)
-
-### Performance
-- GPU acceleration (Metal, CUDA, OpenCL)
-- Query caching
-- Index optimization
-- Parallel execution
-
-[Learn more about performance →](../performance/)
-
-## 🎯 Popular Features
-
-### Vector Search
-Search by meaning, not just keywords. Automatically generates embeddings for semantic search.
-
-```cypher
-// Semantic search with string query
-CALL nornicdb.search.vector("machine learning algorithms", 10)
-YIELD node, score
-RETURN node.title, score
-```
-
-[Complete guide →](../user-guides/vector-search.md)
-
-### GPU Acceleration
-10-100x speedup for vector operations on Apple Silicon, NVIDIA, and AMD GPUs.
-
-```yaml
-gpu:
-  enabled: true
-  backend: metal  # or cuda, opencl
-```
-
-[Complete guide →](gpu-acceleration.md)
-
-### Memory Decay
-Simulate human memory with time-based importance scoring.
-
-```cypher
-// Get decay scores
-MATCH (n)
-RETURN n.title, n.decayScore
-ORDER BY n.decayScore DESC
-```
-
-[Complete guide →](memory-decay.md)
-
-## 📖 Feature Guides
-
-- **[Plugin System](plugin-system.md)** - Create custom function & Heimdall plugins
-- **[APOC Functions](apoc-functions.md)** - 983 collection, text, math, graph functions
-- **[Auto-TLP](auto-tlp.md)** - Automatic relationship inference
-- **[Feature Flags](feature-flags.md)** - Runtime configuration
-- **[Link Prediction](link-prediction.md)** - Predict missing relationships
-- **[MCP Integration](mcp-integration.md)** - AI agent tools
-- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Improve search accuracy (local BGE-reranker or Cohere/TEI)
-
-## ⏭️ Next Steps
-
-- **[User Guides](../user-guides/)** - Learn how to use features
-- **[API Reference](../api-reference/)** - Function documentation
-- **[Advanced Topics](../advanced/)** - Deep dive into internals
-
----
-
-**Explore features** → **[Vector Search](../user-guides/vector-search.md)**
+- Task-oriented usage: [../user-guides/README.md](../user-guides/README.md)
+- Protocol/API details: [../api-reference/README.md](../api-reference/README.md)
+- Symptom-to-doc routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)

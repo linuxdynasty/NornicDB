@@ -1,109 +1,30 @@
 # Compliance & Security
 
-**GDPR, HIPAA, SOC2 compliance and security features.**
+This section maps regulatory requirements to NornicDB controls and procedures.
 
-## 📚 Documentation
+## Start Here
 
-- **[GDPR Compliance](gdpr-compliance.md)** - EU data protection
-- **[HIPAA Compliance](hipaa-compliance.md)** - Healthcare data security
-- **[SOC2 Compliance](soc2-compliance.md)** - Service organization controls
-- **[Encryption](encryption.md)** - Data encryption at rest and in transit
-- **[Audit Logging](audit-logging.md)** - Comprehensive audit trails
-- **[RBAC](rbac.md)** - Role-based access control
+- GDPR requirements and workflows: [gdpr-compliance.md](gdpr-compliance.md)
+- HIPAA controls and operational mapping: [hipaa-compliance.md](hipaa-compliance.md)
+- SOC2 control coverage: [soc2-compliance.md](soc2-compliance.md)
+- Encryption controls: [encryption.md](encryption.md)
+- Audit evidence and logging posture: [audit-logging.md](audit-logging.md)
+- RBAC/compliance access model: [rbac.md](rbac.md)
 
-## 🔒 Security Features
+## Control Domains
 
-### Encryption
-- **AES-256-GCM** encryption at rest
-- **TLS 1.3** for data in transit
-- **Full At-Rest encryption** for sensitive data
-- **Key rotation** support
+- Data protection and crypto: [encryption.md](encryption.md)
+- Access control: [rbac.md](rbac.md)
+- Auditability and retention: [audit-logging.md](audit-logging.md)
 
-[Encryption guide →](encryption.md)
+## Standards Mapping
 
-### Access Control
-- **JWT authentication** with RBAC
-- **Fine-grained permissions** (read/write/admin)
-- **API key management**
-- **Session management**
+- GDPR: [gdpr-compliance.md](gdpr-compliance.md)
+- HIPAA: [hipaa-compliance.md](hipaa-compliance.md)
+- SOC2: [soc2-compliance.md](soc2-compliance.md)
 
-[RBAC guide →](rbac.md)
+## Related Security/Operations Docs
 
-### Audit Logging
-- **Comprehensive audit trails** for all operations
-- **HIPAA-compliant** logging
-- **Tamper-proof** log storage
-- **Log retention** policies
-
-[Audit logging guide →](audit-logging.md)
-
-## 📋 Compliance Standards
-
-### GDPR (EU)
-- Right of access (Art. 15)
-- Right to erasure (Art. 17)
-- Data portability (Art. 20)
-- Privacy by design
-
-[GDPR compliance →](gdpr-compliance.md)
-
-### HIPAA (US Healthcare)
-- PHI encryption
-- Access controls
-- Audit trails
-- Breach notification
-
-[HIPAA compliance →](hipaa-compliance.md)
-
-### SOC2 (Service Organizations)
-- Security controls
-- Availability
-- Processing integrity
-- Confidentiality
-
-[SOC2 compliance →](soc2-compliance.md)
-
-## 🚀 Quick Start
-
-### Enable Encryption
-
-```yaml
-encryption:
-  enabled: true
-  algorithm: AES-256-GCM
-  key_rotation: 90d
-```
-
-### Enable Audit Logging
-
-```yaml
-audit:
-  enabled: true
-  log_all_queries: true
-  retention_days: 365
-```
-
-### Configure RBAC
-
-```yaml
-auth:
-  enabled: true
-  rbac:
-    roles:
-      - name: admin
-        permissions: [read, write, admin]
-      - name: user
-        permissions: [read, write]
-      - name: readonly
-        permissions: [read]
-```
-
-## 📖 Learn More
-
-- **[Encryption](encryption.md)** - Data protection
-- **[RBAC](rbac.md)** - Access control
-- **[Audit Logging](audit-logging.md)** - Compliance trails
-
----
-
-**Secure your database** → **[Encryption Guide](encryption.md)**
+- Runtime security controls: [../security/README.md](../security/README.md)
+- Production operations and runbooks: [../operations/README.md](../operations/README.md)
+- Symptom-based routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)

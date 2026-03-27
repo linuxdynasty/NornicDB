@@ -1,69 +1,42 @@
-# Getting Started with NornicDB
+# Getting Started
 
-Welcome to NornicDB! This guide will get you up and running in 5 minutes.
+Use this section to install NornicDB quickly and run your first successful query.
 
-## 📋 Quick Navigation
+## Fast Path
 
-- **[Installation Guide](installation.md)** - Install NornicDB on your system
-- **[Quick Start](quick-start.md)** - Docker setup and first queries
-- **[Docker Image Quick Reference](image-quick-reference.md)** - Full image command matrix by platform/profile
-- **[First Queries](first-queries.md)** - Learn basic Cypher queries
-- **[Docker Deployment](docker-deployment.md)** - Production Docker setup
+1. [installation.md](installation.md)
+2. [quick-start.md](quick-start.md)
+3. [first-queries.md](first-queries.md)
 
-## 🎯 What You'll Learn
+## Choose Your Path
 
-1. **Install NornicDB** - Get the database running locally
-2. **Connect to the database** - Use Bolt protocol or HTTP API
-3. **Run your first queries** - Create nodes, relationships, and search
-4. **Understand the basics** - Graph concepts and Cypher syntax
+### I want to try NornicDB locally
 
-## 🚀 Fastest Path
+- [quick-start.md](quick-start.md)
+- [image-quick-reference.md](image-quick-reference.md)
 
-If you just want to try NornicDB right now:
+### I need Docker deployment details
 
-```bash
-# Pull and run Docker image
-docker pull timothyswt/nornicdb-arm64-metal:latest
-docker run -p 7474:7474 -p 7687:7687 timothyswt/nornicdb-arm64-metal:latest
+- [docker-deployment.md](docker-deployment.md)
+- [image-quick-reference.md](image-quick-reference.md)
 
-# Open browser to http://localhost:7474
-# Start querying!
-```
+### I am migrating from Neo4j
 
-See **[Quick Start](quick-start.md)** for details.
+- [../neo4j-migration/README.md](../neo4j-migration/README.md)
+- [../neo4j-migration/feature-parity.md](../neo4j-migration/feature-parity.md)
 
-## 📚 Learning Path
+### I need API details after setup
 
-### For Complete Beginners
-1. Read [Installation Guide](installation.md)
-2. Follow [Quick Start](quick-start.md)
-3. Try [First Queries](first-queries.md)
-4. Explore [User Guides](../user-guides/)
+- [../api-reference/README.md](../api-reference/README.md)
+- [../user-guides/README.md](../user-guides/README.md)
 
-### For Neo4j Users
-1. Check [Neo4j Migration Guide](../neo4j-migration/)
-2. Review [Feature Parity](../neo4j-migration/feature-parity.md)
-3. See [Cypher Compatibility](../neo4j-migration/cypher-compatibility.md)
+## After Setup
 
-### For AI Developers
-1. Start with [Quick Start](quick-start.md)
-2. Read [AI Integration Guide](../ai-agents/)
-3. Try [Vector Search](../user-guides/vector-search.md)
+- Query patterns and workflows: [../user-guides/README.md](../user-guides/README.md)
+- Endpoint and protocol references: [../api-reference/README.md](../api-reference/README.md)
+- Production operations: [../operations/README.md](../operations/README.md)
 
-## 🆘 Need Help?
+## If Something Fails During Setup
 
-- **Questions?** Check [User Guides](../user-guides/)
-- **API Reference?** See [API Documentation](../api-reference/)
-- **Issues?** Visit [Operations Guide](../operations/troubleshooting.md)
-
-## ⏭️ Next Steps
-
-After completing the getting started guides:
-
-- **[User Guides](../user-guides/)** - Learn advanced features
-- **[Features](../features/)** - Explore GPU acceleration, vector search
-- **[API Reference](../api-reference/)** - Complete function documentation
-
----
-
-**Ready to begin?** → **[Installation Guide](installation.md)**
+- Symptom-based index: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
+- Ops troubleshooting: [../operations/troubleshooting.md](../operations/troubleshooting.md)

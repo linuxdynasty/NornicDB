@@ -25,13 +25,12 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
-  <a href="#why-switch-from-neo4j">Why Switch</a> •
-  <a href="#what-problem-does-this-solve">Problem</a> •
-  <a href="#why-nornicdb-is-different">Why Different</a> •
+  <a href="#what-nornicdb-is">What It Is</a> •
+  <a href="#why-nornicdb-is-different">Why NornicDB</a> •
   <a href="#performance-snapshot">Benchmarks</a> •
   <a href="#features">Features</a> •
-  <a href="#docker-images">Docker</a> •
   <a href="#documentation">Docs</a> •
+  <a href="#comparison">Comparison</a> •
   <a href="#contributors">Contributors</a>
 </p>
 
@@ -49,39 +48,37 @@ Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA
 
 ---
 
-## What Problem Does This Solve?
+## What NornicDB Is
 
-NornicDB is a high-performance graph database designed for AI agents and knowledge systems. It speaks Neo4j's language (Bolt protocol + Cypher) so you can switch with zero code changes, while adding intelligent features that traditional databases lack.
+NornicDB is a graph database for workloads that need graph traversal, vector retrieval, and historical truth in the same system. It speaks Neo4j's language through Bolt and Cypher, exposes REST, GraphQL, and gRPC interfaces, and can preserve Qdrant-style client workflows where that helps migration.
 
-NornicDB automatically discovers and manages relationships in your data, weaving connections that let meaning emerge from your knowledge graph.
-
-## Transactional Guarantees & Isolation
-
-NornicDB implements Snapshot Isolation at the storage layer. Every transaction is anchored to a specific MVCC version at begin time, providing a consistent point-in-time view of the graph across nodes, edges, and properties.
-
-Read consistency is repeatable within a transaction. A transaction sees its own buffered writes, but it does not observe commits from concurrent writers that land after its read snapshot. Point lookups and snapshot-visible graph scans resolve against the same anchored version, so readers do not see partial commits or mid-transaction phantom changes.
-
-Conflict detection follows first-updater-wins semantics at commit. If two transactions modify the same node or edge, or if one transaction deletes a node while another transaction changes adjacent graph structure against an older snapshot, the later committer receives a normalized `ErrConflict`.
-
-Historical lookups remain explicit. MVCC pruning preserves the current head and a retained floor per logical key, which acts as the Minimum Retained Snapshot for that key. Requests below that retained floor fail safely with `ErrNotFound` rather than scanning sparse history.
-
-Current-only search remains intentionally separate from historical MVCC state, and the MVCC prune/search benchmark is a structural integrity smoke test rather than a blanket claim about every workload. NornicDB implements standard Snapshot Isolation semantics at the storage layer.
-
-Note: As a standard Snapshot Isolation implementation, NornicDB permits write skew.
+It is built for knowledge systems, agent memory, Graph-RAG, and canonical truth stores where semantic search is only part of the query. The design goal is not to bolt a vector store onto a graph database. The design goal is one execution path for graph, vector, temporal, and audit-oriented workloads.
 
 ## Why NornicDB Is Different
 
 - **Neo4j-compatible by default**: Bolt + Cypher support for existing drivers and applications.
 - **Built for AI-native workloads**: vector search, memory decay, and auto-relationships are first-class features.
+- **Graph, vector, and ledger semantics in one engine**: hybrid retrieval, graph traversal, canonical graph ledger modeling, tritemporal facts, as-of reads, txlog queries, and receipts do not require a second database.
+- **Protocol flexibility without splitting the system**: REST, GraphQL, Bolt/Cypher, Qdrant-compatible gRPC, and additive Nornic gRPC live on the same platform.
 - **Hardware-accelerated execution**: Metal/CUDA/Vulkan pathways for high-throughput graph + semantic workloads.
 - **Operational flexibility**: full images (models included), BYOM images, and headless API-only deployments.
-- **Canonical graph ledger support**: versioned facts, temporal validity, as-of reads, queryable txlog, and receipts for audit-oriented systems.
+
+## Transactional Guarantees & Isolation
+
+NornicDB implements Snapshot Isolation at the storage layer. Each transaction is anchored to a specific MVCC version, so point reads, label scans, and snapshot-visible graph traversals resolve against the same committed view of the graph.
+
+- **Repeatable reads within a transaction**: transactions see their own buffered writes, but not commits that land after their read snapshot.
+- **Conflict detection at commit**: concurrent graph mutations against the same logical state fail with a normalized `ErrConflict` instead of silently overwriting newer data.
+- **Explicit historical reads**: MVCC pruning preserves the current head and a retained floor per logical key; requests below that retained floor fail safely with `ErrNotFound`.
+- **Search remains current-state focused**: current search paths are intentionally separate from historical MVCC state.
+
+See [transaction implementation details](docs/user-guides/transactions.md), [historical reads and MVCC retention](docs/user-guides/historical-reads-mvcc-retention.md), and the [canonical graph ledger guide](docs/user-guides/canonical-graph-ledger.md).
 
 ### What Recent Deep-Dives Show
 
 - **Hybrid execution model (streaming fast paths + general engine)**: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.
-- **Runtime parser mode switching**: the default `nornic` mode minimizes hot-path overhead, while `antlr` mode prioritizes strict parsing and diagnostics when debugging/query validation matters.
-- **Measured parser-path deltas on benchmark suites**: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why default production mode is optimized for lower overhead.
+- **Runtime parser mode switching**: the default `nornic` parser is optimized for low-overhead hot-path routing, while `antlr` mode prioritizes strict parsing and diagnostics when debugging and validation matter more than throughput.
+- **Measured parser-path deltas on benchmark suites**: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why the production default remains the custom parser path.
 - **HNSW build acceleration from insertion-order optimization**: BM25-seeded insertion order reduced a 1M embedding build from ~27 minutes to ~10 minutes (~2.7x) in published tests by reducing traversal waste during construction, without changing core quality knobs.
 - **Shared seed strategy across indexing stages**: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.
 
@@ -103,6 +100,29 @@ Read more:
 
 > See [full benchmark results](docs/performance/benchmarks-vs-neo4j.md) for complete methodology and additional workloads.
 
+### Hybrid Retrieval Benchmarks
+
+Hybrid retrieval is where NornicDB is materially different from vector-only stacks: the query shape is vector search followed by graph expansion in the same engine.
+
+**Local benchmark** (67,280 nodes, 40,921 edges, 67,298 embeddings, HNSW CPU-only index):
+
+| Workload | Transport | Throughput | Mean | P50 | P95 | P99 | Max |
+| -------- | --------- | ----------: | ---: | --: | --: | --: | --: |
+| Vector only | HTTP | 14,950 req/s | 663 us | 627 us | 969 us | 2.18 ms | 2.73 ms |
+| Vector only | Bolt | 8,802 req/s | 1.13 ms | 983 us | 1.77 ms | 4.50 ms | 5.15 ms |
+| Vector + 1 hop | HTTP | 11,523 req/s | 859 us | 699 us | 1.54 ms | 3.46 ms | 4.71 ms |
+| Vector + 1 hop | Bolt | 7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
+
+**Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
+
+- Vector only: ~110.7 ms P50
+- Vector + 1 hop: ~112.9 ms P50
+- The delta between local and remote matched network RTT closely enough that end-to-end latency was network-bound rather than compute-bound.
+
+This is the practical point: once vector search plus one-hop traversal stays in low single-digit milliseconds locally, the bottleneck shifts from retrieval logic to deployment topology.
+
+See the [hybrid retrieval benchmark write-up](docs/performance/hybrid-query-benchmarks.md) for methodology, caveats, and reproduction queries, and see [Graph-RAG: NornicDB vs Typical](docs/architecture/graph-rag-nornicdb-comparison.md) for the architectural implications.
+
 ## Quick Start
 
 ### Docker (Recommended)
@@ -122,6 +142,7 @@ Need a different image/profile (Heimdall, BYOM, CPU-only, Vulkan, headless)?
 
 - [Docker image quick reference](docs/getting-started/image-quick-reference.md)
 - [Docker images section](#docker-images)
+- [Quick start guide](docs/getting-started/quick-start.md)
 
 ### From Source
 
@@ -150,22 +171,15 @@ with driver.session() as session:
 - **Native graph + vector** in one engine (no separate vector sidecar required).
 - **GPU acceleration paths** (Metal/CUDA/Vulkan) for semantic + graph workloads.
 - **Drop-in compatibility** via Bolt + Cypher for existing applications.
-- **Canonical graph ledger model** for temporal validity, as-of reads, and audit-oriented mutation tracking.
+- **Canonical graph ledger model** for temporal validity, tritemporal fact modeling, as-of reads, and audit-oriented mutation tracking.
 
 ## Why Switch from Qdrant?
 
 - **Graph + vector in one engine**: combine semantic retrieval with native graph traversal and Cypher queries.
 - **Qdrant gRPC compatibility preserved**: keep Qdrant-style gRPC workflows while adding graph-native capabilities.
 - **Hybrid retrieval built in**: vector + BM25 fusion and optional reranking in the same query pipeline.
-- **Canonical truth modeling**: versioned facts, temporal validity windows, and as-of reads for governance-heavy use cases.
+- **Canonical truth modeling**: versioned facts, temporal validity windows, tritemporal facts, and as-of reads for governance-heavy use cases.
 - **Protocol flexibility**: use REST, GraphQL, Bolt/Cypher, Qdrant-compatible gRPC, and additive Nornic gRPC on one platform.
-
-## Build It Yourself
-
-Detailed local build, cross-compile, and packaging instructions:
-
-- [DIY instructions](DIY.md)
-- [Building section](#building)
 
 ## Features
 
@@ -388,6 +402,11 @@ memory:
 
 ## Documentation
 
+Start with the docs hub for role/task navigation, then use the issue index for symptom-first troubleshooting:
+
+- [Documentation Hub](docs/README.md)
+- [Issue Index](docs/ISSUES-INDEX.md)
+
 | Guide                                                                         | Description                    |
 | ----------------------------------------------------------------------------- | ------------------------------ |
 | [Getting Started](docs/getting-started/README.md)                             | Installation & quick start     |
@@ -399,6 +418,13 @@ memory:
 | [Architecture](docs/architecture/README.md)                                   | System design & internals      |
 | [Docker Guide](docker/README.md)                                              | Build & deployment             |
 | [Development](docs/development/README.md)                                     | Contributing & development     |
+
+Additional deep dives referenced above:
+
+- [Hybrid query benchmarks](docs/performance/hybrid-query-benchmarks.md)
+- [Canonical graph ledger](docs/user-guides/canonical-graph-ledger.md)
+- [Historical reads and MVCC retention](docs/user-guides/historical-reads-mvcc-retention.md)
+- [Cypher parser modes](docs/architecture/cypher-parser-modes.md)
 
 ## Star History
 

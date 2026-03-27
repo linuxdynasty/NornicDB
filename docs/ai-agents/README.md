@@ -1,72 +1,22 @@
 # AI Agents & Integration
 
-**Integrate NornicDB with AI agents and tools.**
+Use this section to connect NornicDB with IDE copilots, MCP clients, and Heimdall agent workflows.
 
-## 📚 Documentation
+## Start Here
 
-- **[Chat Modes](chat-modes.md)** - Use with Cursor IDE and AI assistants
-- **[MCP Tools Reference](../features/mcp-integration.md)** - Model Context Protocol tools
-- **[Cursor Integration](chat-modes.md)** - Cursor IDE setup
-- **[Agent Examples](../user-guides/heimdall-agentic-loop.md)** - Agent patterns and examples
+- Cursor/chat-mode setup: [chat-modes.md](chat-modes.md)
+- MCP integration overview: [../features/mcp-integration.md](../features/mcp-integration.md)
+- Agent loop behavior: [../user-guides/heimdall-agentic-loop.md](../user-guides/heimdall-agentic-loop.md)
 
-## 🤖 AI Integration Features
+## Integration Paths
 
-### Model Context Protocol (MCP)
-NornicDB provides 6 MCP tools for AI agents:
-- `search` - Semantic search
-- `cypher` - Execute queries
-- `schema` - Get graph schema
-- `neighbors` - Find related nodes
-- `path` - Find paths between nodes
-- `stats` - Get statistics
+- IDE-assisted workflows: [chat-modes.md](chat-modes.md)
+- MCP tools and usage patterns: [../user-guides/heimdall-mcp-tools.md](../user-guides/heimdall-mcp-tools.md)
+- Heimdall plugin/event automation: [../user-guides/heimdall-plugins.md](../user-guides/heimdall-plugins.md), [../user-guides/heimdall-event-triggers-remediation.md](../user-guides/heimdall-event-triggers-remediation.md)
 
-[MCP Tools Reference →](../features/mcp-integration.md)
+## Related Docs
 
-### Cursor IDE Integration
-Use NornicDB as a knowledge base for your codebase.
-
-[Cursor Setup Guide →](chat-modes.md)
-
-### Chat Modes
-Three modes for different use cases:
-- **Ask** - Question answering
-- **Search** - Information retrieval
-- **Analyze** - Data analysis
-
-[Chat Modes Guide →](chat-modes.md)
-
-## 🚀 Quick Start
-
-### With Cursor IDE
-
-1. Install NornicDB MCP server
-2. Configure in Cursor settings
-3. Start chatting with your knowledge base
-
-[Complete setup →](chat-modes.md)
-
-### With Custom Agents
-
-```python
-from nornicdb import MCP Client
-
-client = MCPClient("http://localhost:7474")
-
-# Search knowledge base
-results = client.search("machine learning algorithms")
-
-# Execute Cypher
-data = client.cypher("MATCH (n:Concept) RETURN n LIMIT 10")
-```
-
-[Agent examples →](../user-guides/heimdall-agentic-loop.md)
-
-## 📖 Learn More
-
-- **[MCP Tools](../features/mcp-integration.md)** - Complete tool reference
-- **[Chat Modes](chat-modes.md)** - Usage patterns
-- **[Examples](../user-guides/heimdall-agentic-loop.md)** - Real-world patterns
-
----
-
-**Get started** → **[Cursor Integration](chat-modes.md)**
+- Capability-level feature docs: [../features/README.md](../features/README.md)
+- Task-level product usage: [../user-guides/README.md](../user-guides/README.md)
+- API and endpoint references: [../api-reference/README.md](../api-reference/README.md)
+- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)

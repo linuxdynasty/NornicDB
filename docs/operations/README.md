@@ -1,124 +1,36 @@
 # Operations Guide
 
-**Deploy, monitor, and maintain NornicDB in production.**
+This section is the canonical runbook set for deploying, operating, and recovering NornicDB.
 
-## 📚 Documentation
+## Start Here
 
-- **[Configuration](configuration.md)** - YAML and runtime tuning options
-- **[CLI Commands](cli-commands.md)** - Command-line interface for database management
-- **[Deployment](deployment.md)** - Production deployment guide
-- **[Docker](docker.md)** - Docker and Kubernetes
-- **[Low Memory Mode](low-memory-mode.md)** - Run NornicDB with minimal RAM (Docker, Pi, VMs)
-- **[Monitoring](monitoring.md)** - Metrics and alerting
-- **[Environment Variables](environment-variables.md)** - Canonical `NORNICDB_*` inventory
-- **[Backup & Restore](backup-restore.md)** - Data protection
-- **[WAL Compaction](wal-compaction.md)** - Automatic disk space management
-- **[Durability Configuration](durability.md)** - Data safety vs performance tuning
-- **[Storage Serialization](storage-serialization.md)** - gob vs msgpack and migration
-- **[Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md)** - Snapshot history, pruning, and retention policy
-- **[Scaling](scaling.md)** - Horizontal and vertical scaling
-- **[Cluster Security](cluster-security.md)** - Authentication for clusters
-- **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
+- Production setup: [deployment.md](deployment.md)
+- Runtime configuration: [configuration.md](configuration.md)
+- Environment variables: [environment-variables.md](environment-variables.md)
+- Symptom-based triage: [troubleshooting.md](troubleshooting.md)
+- Global issue map: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
 
-## 🚀 Quick Start
+## Common Tasks
 
-### Docker Deployment
+- Deploy on Docker/Kubernetes: [docker.md](docker.md)
+- Monitor health/metrics: [monitoring.md](monitoring.md)
+- Backup and restore: [backup-restore.md](backup-restore.md)
+- Control WAL growth and recovery behavior: [wal-compaction.md](wal-compaction.md)
+- Tune durability/performance: [durability.md](durability.md)
+- Run low-memory deployments: [low-memory-mode.md](low-memory-mode.md)
+- Scale capacity: [scaling.md](scaling.md)
+- Secure cluster communication: [cluster-security.md](cluster-security.md)
 
-```bash
-docker run -d \
-  --name nornicdb \
-  -p 7474:7474 \
-  -p 7687:7687 \
-  -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal:latest
-```
+## Related Operational Topics
 
-[Complete Docker guide →](docker.md)
+- MVCC retention and historical reads: [../user-guides/historical-reads-mvcc-retention.md](../user-guides/historical-reads-mvcc-retention.md)
+- Storage encoding format and migration details: [storage-serialization.md](storage-serialization.md)
+- CLI workflows: [cli-commands.md](cli-commands.md)
 
-### Monitoring
+## Incident Routing
 
-```bash
-# Prometheus metrics
-curl http://localhost:9090/metrics
-
-# Health check
-curl http://localhost:7474/health
-```
-
-[Complete monitoring guide →](monitoring.md)
-
-### Backup
-
-```bash
-# Backup database
-nornicdb backup --output=backup-$(date +%Y%m%d).tar.gz
-
-# Restore database
-nornicdb restore --input=backup-20251201.tar.gz
-```
-
-[Complete backup guide →](backup-restore.md)
-
-### WAL Compaction
-
-NornicDB automatically manages WAL (Write-Ahead Log) size to prevent unbounded disk growth:
-
-```go
-// Enable automatic compaction (recommended)
-wal.EnableAutoCompaction("/data/snapshots")
-
-// Manual truncation after snapshot
-wal.TruncateAfterSnapshot(snapshotSequence)
-```
-
-**Benefits:**
-
-- 99%+ disk savings vs unbounded WAL
-- 300x faster crash recovery
-- Automatic hourly snapshots
-
-[Complete WAL compaction guide →](wal-compaction.md)
-
-## 📖 Operations Topics
-
-### Deployment
-
-- Docker deployment
-- Kubernetes deployment
-- Bare metal installation
-- Cloud providers (AWS, GCP, Azure)
-
-[Deployment guide →](deployment.md)
-
-### Monitoring
-
-- Prometheus metrics
-- Grafana dashboards
-- Health checks
-- Log aggregation
-
-[Monitoring guide →](monitoring.md)
-
-### Scaling
-
-- Read replicas
-- Sharding
-- Load balancing
-- Resource optimization
-
-[Scaling guide →](scaling.md)
-
-## 🆘 Troubleshooting
-
-Common issues and solutions:
-
-- Connection problems
-- Performance issues
-- Memory errors
-- GPU problems
-
-[Troubleshooting guide →](troubleshooting.md)
-
----
-
-**Deploy to production** → **[Deployment Guide](deployment.md)**
+- Service down / cannot connect: [troubleshooting.md#connection-issues](troubleshooting.md#connection-issues)
+- Auth errors (401/403): [troubleshooting.md#authentication-issues](troubleshooting.md#authentication-issues)
+- Slow queries or high CPU: [troubleshooting.md#performance-issues](troubleshooting.md#performance-issues)
+- OOM or memory pressure: [troubleshooting.md#high-memory-usage](troubleshooting.md#high-memory-usage)
+- Crash recovery or corruption: [troubleshooting.md#data-integrity--recovery](troubleshooting.md#data-integrity--recovery)

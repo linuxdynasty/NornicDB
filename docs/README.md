@@ -1,155 +1,80 @@
-# NornicDB Documentation
+# NornicDB Documentation Hub
 
-Welcome to **NornicDB** - A high-performance graph database with GPU acceleration, Neo4j compatibility, and advanced AI integration.
+This is the primary navigation page for NornicDB docs.
 
-## 🚀 Quick Start Paths
+If you know your goal, start in **"Find by task"**. If you are debugging, start in **"Find by issue"**.
 
-### New to NornicDB?
+## Start Here
 
-👉 **[Getting Started Guide](getting-started/)** - Installation and first queries in 5 minutes
+- New user: [Getting Started](getting-started/README.md)
+- Migrating from Neo4j: [Neo4j Migration](neo4j-migration/README.md)
+- Building apps and queries: [User Guides](user-guides/README.md)
+- Looking for endpoint/function specs: [API Reference](api-reference/README.md)
+- Running in production: [Operations](operations/README.md)
+- Security/compliance review: [Security](security/README.md), [Compliance](compliance/README.md)
+- Performance optimization: [Performance](performance/README.md)
 
-### Migrating from Neo4j?
+## Find by Task
 
-👉 **[Neo4j Migration Guide](neo4j-migration/)** - 96% feature parity, easy migration
+- Install and run: [Quick Start](getting-started/quick-start.md)
+- Run first queries: [First Queries](getting-started/first-queries.md)
+- Learn Cypher usage patterns: [Cypher Queries](user-guides/cypher-queries.md)
+- Use vector/hybrid search: [Vector Search](user-guides/vector-search.md), [Hybrid Search](user-guides/hybrid-search.md)
+- Configure deployment/runtime: [Configuration](operations/configuration.md), [Environment Variables](operations/environment-variables.md)
+- Deploy with Docker: [Docker Deployment](getting-started/docker-deployment.md), [Operations Docker](operations/docker.md)
+- Observe/operate production: [Monitoring](operations/monitoring.md), [Backup & Restore](operations/backup-restore.md)
+- Migrate from Neo4j drivers/schemas: [Migration Guide](neo4j-migration/README.md)
 
-### Building AI Agents?
+## Find by Issue
 
-👉 **[AI Integration Guide](ai-agents/)** - Cursor, MCP, and agent patterns
+- Symptom-driven index: [Issue Index](ISSUES-INDEX.md)
+- Ops troubleshooting: [Operations Troubleshooting](operations/troubleshooting.md)
 
-### Need API Reference?
+## Find by Role
 
-👉 **[API Documentation](api-reference/)** - Complete function reference
+### Application Developers
 
----
+- [Getting Started](getting-started/README.md)
+- [User Guides](user-guides/README.md)
+- [API Reference](api-reference/README.md)
 
-## 📖 Documentation Sections
+### Platform/SRE Teams
 
-### For Users
+- [Operations](operations/README.md)
+- [Security](security/README.md)
+- [Compliance](compliance/README.md)
 
-- **[Getting Started](getting-started/)** - Installation, quick start, first queries
-- **[User Guides](user-guides/)** - Cypher queries, vector search, transactions
-- **[API Reference](api-reference/)** - Complete function and endpoint documentation
-- **[Features](features/)** - Memory decay, GPU acceleration, link prediction
+### Contributors
 
-### For Developers
+- [Development](development/README.md)
+- [Architecture](architecture/README.md)
+- [Advanced](advanced/README.md)
 
-- **[Architecture](architecture/)** - System design, storage engine, query execution
-- **[Performance](performance/)** - Benchmarks, optimization, GPU acceleration
-- **[Advanced Topics](advanced/)** - K-Means clustering, embeddings, custom functions
-- **[Development](development/)** - Contributing, testing, code style
+## Documentation Map
 
-### For Operations
+- [Getting Started](getting-started/README.md)
+- [User Guides](user-guides/README.md)
+- [API Reference](api-reference/README.md)
+- [Features](features/README.md)
+- [Operations](operations/README.md)
+- [Security](security/README.md)
+- [Compliance](compliance/README.md)
+- [Performance](performance/README.md)
+- [Architecture](architecture/README.md)
+- [Development](development/README.md)
+- [AI Agents](ai-agents/README.md)
+- [Neo4j Migration](neo4j-migration/README.md)
+- [Packaging](packaging/README.md)
+- [Plans](plans/)
 
-- **[Operations Guide](operations/)** - Deployment, monitoring, backup, scaling
-- **[Security Guide](security/)** - HTTP security, CSRF/SSRF/XSS protection
-- **[Clustering Guide](user-guides/clustering.md)** - Hot Standby, Raft, Multi-Region
-- **[Compliance](compliance/)** - GDPR, HIPAA, SOC2, encryption, audit logging
+## Canonical Source Policy
 
-### For AI Integration
+To avoid drift and duplicated guidance:
 
-- **[AI Agents](ai-agents/)** - Cursor integration, chat modes, MCP tools
-- **[Neo4j Migration](neo4j-migration/)** - Feature parity, migration guide
+- API behavior is canonical in `docs/api-reference/`.
+- Operational runbooks are canonical in `docs/operations/`.
+- Security controls are canonical in `docs/security/`.
+- Compliance interpretation is canonical in `docs/compliance/`.
+- How-to walkthroughs are canonical in `docs/user-guides/`.
 
-## 🎯 Key Features
-
-### 🧠 Graph-Powered Memory
-
-- Semantic relationships between data
-- Multi-hop graph traversal
-- Automatic relationship inference
-- Memory decay simulation
-
-### 🚀 GPU Acceleration
-
-- 10-100x speedup for vector search
-- Multi-backend support (CUDA, OpenCL, Metal, Vulkan)
-- Automatic CPU fallback
-- Memory-optimized embeddings
-
-### 🔍 Advanced Search
-
-- Vector similarity search with cosine similarity
-- Full-text search with BM25 scoring
-- Hybrid search (RRF) combining both methods
-- Cross-encoder reranking (Stage 2 retrieval; local GGUF or external API)
-- MMR diversification for result variety
-- HNSW indexing for O(log N) performance
-- Eval harness for search quality validation
-
-### 🔗 Neo4j Compatible
-
-- Bolt protocol support
-- Cypher query language
-- Standard Neo4j drivers work out-of-the-box
-- Easy migration from Neo4j
-
-### 📡 GraphQL API
-
-- Full GraphQL API with queries and mutations
-- Real-time subscriptions for live updates
-- Schema introspection and auto-complete
-- GraphQL Playground for interactive exploration
-
-### 📋 OpenAPI/Swagger Specification
-
-- Complete OpenAPI 3.0 specification for all REST endpoints
-- Interactive API documentation with Swagger UI
-- Easy integration with API testing tools (Postman, Insomnia)
-- Client library generation support
-
-### 🔐 Enterprise-Ready
-
-- **High Availability** - Hot Standby, Raft consensus, Multi-Region
-- **Security Middleware** - CSRF/SSRF/XSS protection on all HTTP endpoints
-- **WAL Auto-Compaction** - Automatic snapshots prevent unbounded disk growth
-- **Historical Reads with MVCC** - Snapshot visibility with configurable pruning defaults
-- GDPR, HIPAA, SOC2 compliance
-- RBAC and audit logging
-- ACID transactions
-
-## 📊 Documentation Statistics
-
-- **21 packages** fully documented
-- **13,400+ lines** of GoDoc comments
-- **350+ functions** with examples
-- **40+ ELI12 explanations** for complex concepts
-- **4.1:1 documentation-to-code ratio**
-
-## 🎯 Popular Topics
-
-- [HTTP Security Guide](security/http-security.md) ⭐ **NEW**
-- [WAL Compaction Guide](operations/wal-compaction.md) ⭐ **NEW**
-- [Durability Configuration](operations/durability.md) ⭐ **NEW**
-- [Historical Reads & MVCC Retention](user-guides/historical-reads-mvcc-retention.md) ⭐ **NEW**
-- [Clustering & High Availability](user-guides/clustering.md)
-- [GraphQL API Guide](user-guides/graphql.md) ⭐ **NEW**
-- [Vector Search Guide](user-guides/vector-search.md)
-- [Hybrid Search (RRF)](user-guides/hybrid-search.md)
-- [GPU Acceleration](features/gpu-acceleration.md)
-- [Memory Decay System](features/memory-decay.md)
-- [Cypher Function Reference](api-reference/cypher-functions/)
-- [Benchmarks vs Neo4j](performance/benchmarks-vs-neo4j.md)
-- [Docker Deployment](getting-started/docker-deployment.md)
-- [Feature Flags](features/feature-flags.md)
-
-## 📋 Project Status
-
-- **Version:** 1.0.0 🎉
-- **Status:** Production Ready ✅
-- **Docker:** `timothyswt/nornicdb-arm64-metal:latest`
-- **[Changelog](../CHANGELOG.md)** - Version history and release notes
-
-## 🤝 Contributing
-
-Found an issue or want to improve documentation? Check out our [Contributing Guide](../CONTRIBUTING.md).
-
-## 📄 License
-
-NornicDB is MIT licensed. See [LICENSE](../LICENSE.md) for details.
-
----
-
-**Last Updated:** December 4, 2025  
-**Version:** 1.0.0 🎉  
-**Docker:** `timothyswt/nornicdb-arm64-metal:latest`  
-**Status:** Production Ready ✅
+Section READMEs should summarize and link to canonical pages instead of duplicating full procedures.

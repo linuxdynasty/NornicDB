@@ -1,78 +1,23 @@
 # Neo4j Migration
 
-**Migrate from Neo4j to NornicDB with 96% feature parity.**
+Use this section to plan and execute migration from Neo4j workloads to NornicDB.
 
-## 📚 Documentation
+## Start Here
 
-- **[Feature Parity](feature-parity.md)** - 96% Neo4j compatibility
-- **[Cypher Compatibility](cypher-compatibility.md)** - Cypher language support
-- **[Migration Guide](../MIGRATION_NOTICE.md)** - Step-by-step migration
-- **[Driver Compatibility](../api-reference/bolt-protocol.md)** - Client driver support
+- Migration notice and process: [../MIGRATION_NOTICE.md](../MIGRATION_NOTICE.md)
+- Feature parity matrix: [feature-parity.md](feature-parity.md)
+- Cypher compatibility notes: [cypher-compatibility.md](cypher-compatibility.md)
+- Bolt/protocol references: [../api-reference/bolt-protocol.md](../api-reference/bolt-protocol.md)
 
-## 🎯 Why Migrate?
+## Migration Checklist
 
-### NornicDB Advantages
-- **GPU Acceleration** - 10-100x faster vector search
-- **Automatic Embeddings** - Built-in semantic search
-- **Memory Decay** - Time-based importance
-- **Link Prediction** - ML-based relationship inference
-- **Lower Cost** - No licensing fees
+1. Validate feature parity for your workload: [feature-parity.md](feature-parity.md)
+2. Validate query compatibility: [cypher-compatibility.md](cypher-compatibility.md)
+3. Execute migration procedure: [../MIGRATION_NOTICE.md](../MIGRATION_NOTICE.md)
+4. Run application smoke tests against Bolt/HTTP APIs: [../api-reference/README.md](../api-reference/README.md)
 
-### Neo4j Compatibility
-- **96% Feature Parity** - Most features work identically
-- **Bolt Protocol** - Use existing drivers
-- **Cypher Language** - Same query language
-- **JSON Export/Import** - Easy data migration
+## Related Docs
 
-## 🚀 Quick Migration
-
-### 1. Export from Neo4j
-
-```bash
-# Export Neo4j data
-neo4j-admin dump --database=neo4j --to=neo4j-dump.dump
-```
-
-### 2. Import to NornicDB
-
-```bash
-# Import to NornicDB
-nornicdb import --from=neo4j-dump.dump
-```
-
-### 3. Update Connection Strings
-
-```python
-# Before (Neo4j)
-driver = GraphDatabase.driver("bolt://neo4j-server:7687")
-
-# After (NornicDB)
-driver = GraphDatabase.driver("bolt://nornicdb-server:7687")
-```
-
-[Complete migration guide →](../MIGRATION_NOTICE.md)
-
-## 📊 Feature Comparison
-
-| Feature | Neo4j | NornicDB |
-|---------|-------|----------|
-| Cypher Queries | ✅ | ✅ 96% |
-| Bolt Protocol | ✅ | ✅ |
-| ACID Transactions | ✅ | ✅ |
-| Indexes | ✅ | ✅ |
-| Vector Search | ❌ | ✅ |
-| GPU Acceleration | ❌ | ✅ |
-| Auto Embeddings | ❌ | ✅ |
-| Memory Decay | ❌ | ✅ |
-
-[Complete comparison →](feature-parity.md)
-
-## 📖 Learn More
-
-- **[Feature Parity](feature-parity.md)** - Detailed comparison
-- **[Migration Guide](../MIGRATION_NOTICE.md)** - Step-by-step process
-- **[Cypher Compatibility](cypher-compatibility.md)** - Language support
-
----
-
-**Start migrating** → **[Migration Guide](../MIGRATION_NOTICE.md)**
+- Post-migration usage and patterns: [../user-guides/README.md](../user-guides/README.md)
+- Performance validation: [../performance/README.md](../performance/README.md)
+- Symptom-based issue routing: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
