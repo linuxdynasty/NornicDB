@@ -1,9 +1,13 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@config "../tailwind.config.js";
 
 body {
-  @apply bg-norse-night text-gray-100 font-display antialiased;
+  background-color: #0a0e1a;
+  color: #f3f4f6;
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* Custom scrollbar */
@@ -13,58 +17,77 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-norse-shadow;
+  background-color: #141824;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-norse-rune rounded-full hover:bg-nornic-primary;
+  background-color: #2a3247;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #10b981;
 }
 
 /* Code editor styling */
 .cypher-editor {
-  @apply font-mono text-sm bg-norse-shadow border border-norse-rune rounded-lg;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.875rem;
+  background-color: #141824;
+  border: 1px solid #2a3247;
+  border-radius: 0.5rem;
 }
 
 .cypher-editor:focus {
-  @apply ring-2 ring-nornic-primary border-transparent outline-none;
+  outline: none;
+  border-color: transparent;
+  box-shadow: 0 0 0 2px #10b981;
 }
 
 /* Result table styling */
 .result-table {
-  @apply w-full text-sm;
+  width: 100%;
+  font-size: 0.875rem;
 }
 
 .result-table th {
-  @apply bg-norse-stone text-left px-4 py-2 font-medium text-nornic-accent border-b border-norse-rune;
+  background-color: #1e2433;
+  text-align: left;
+  padding: 0.5rem 1rem;
+  font-weight: 500;
+  color: #34d399;
+  border-bottom: 1px solid #2a3247;
 }
 
 .result-table td {
-  @apply px-4 py-2 border-b border-norse-rune/50;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid rgb(42 50 71 / 0.5);
 }
 
 .result-table tr:hover {
-  @apply bg-norse-stone/50;
+  background-color: rgb(30 36 51 / 0.5);
 }
 
 /* JSON viewer */
 .json-key {
-  @apply text-frost-ice;
+  color: #4a9eff;
 }
 
 .json-string {
-  @apply text-nornic-accent;
+  color: #34d399;
 }
 
 .json-number {
-  @apply text-valhalla-gold;
+  color: #d4af37;
 }
 
 .json-boolean {
-  @apply text-purple-400;
+  color: #c084fc;
 }
 
 .json-null {
-  @apply text-norse-silver italic;
+  color: #9ca3af;
+  font-style: italic;
 }
 
 /* Animations */

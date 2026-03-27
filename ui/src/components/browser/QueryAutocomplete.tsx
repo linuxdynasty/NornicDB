@@ -11,7 +11,7 @@ interface QueryAutocompleteProps {
   query: string;
   onSuggestionSelect: (suggestion: string) => void;
   enabled?: boolean;
-  textareaRef?: React.RefObject<HTMLTextAreaElement>;
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }
 
 interface Suggestion {
