@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.35] - 2026-03-27
+
+### Changed
+
+- **llama.cpp roll-forward and runtime alignment**:
+  - upgraded the vendored llama.cpp integration and shipped local llama artifacts to `b8547`.
+  - synchronized version pins across build scripts, packaged libraries, and Docker builder images so local, CI, and container builds use the same llama baseline.
+
+- **Container and CI dependency maintenance**:
+  - rolled forward Docker build dependencies and CI image references used for CPU, CUDA, Vulkan, and Metal packaging.
+  - updated the bundled Heimdall and BGE image variants so embeddings are enabled by default in the batteries-included deployment paths.
+
+- **UI and build-tool dependency refresh**:
+  - updated frontend/package dependencies and related build configuration used by the shipped UI bundle.
+  - refreshed release/build assumptions tied to current toolchain behavior so maintenance packaging stays reproducible.
+
+### Fixed
+
+- **llama.cpp upgrade compatibility on macOS and Heimdall generation paths**:
+  - fixed the local llama generation context initialization used by Heimdall after the llama.cpp upgrade, eliminating a macOS CGO crash during generation-model loading.
+  - added generation-context normalization so native model initialization stays within safe runtime bounds after dependency roll-forwards.
+
+- **llama build portability and packaging behavior**:
+  - fixed `scripts/build-llama.sh` to remain compatible with macOS Bash 3.2.
+  - updated the ARM64 Metal Heimdall image to prefer locally available models before falling back to network downloads, improving reproducibility in restricted build environments.
+
+### Tests
+
+- Added and updated regression coverage for:
+  - llama generation context resolution and safe initialization behavior after the llama.cpp upgrade
+  - Heimdall CGO generation-model loading on the upgraded llama runtime
+  - Bolt/database-scoped executor maintenance behavior introduced during the same maintenance window
+
+### Technical Details
+
+- **Range covered**: `v1.0.34..HEAD`
+- **Commits in range**: 5 (non-merge)
+- **Repository delta**: 44 files changed, +1,635 / -1,984 lines
+- **Primary focus areas**: dependency roll-forwards, llama.cpp packaging/runtime compatibility, and release engineering maintenance.
+
 ## [v1.0.34] - 2026-03-25
 
 ### Added

@@ -33,10 +33,12 @@ type mockDBManager struct {
 	defaultDB string
 	lastGetDB string
 	lastAuth  string
+	getCalls  int
 }
 
 func (m *mockDBManager) GetStorage(name string) (storage.Engine, error) {
 	m.lastGetDB = name
+	m.getCalls++
 	if s, ok := m.stores[name]; ok {
 		return s, nil
 	}

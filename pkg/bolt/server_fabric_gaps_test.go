@@ -28,6 +28,69 @@ func TestSessionGetExecutorForDatabaseUsesForwardedAuth(t *testing.T) {
 	}
 }
 
+func TestSessionGetExecutorForDatabase_CachesExecutorsWithoutForwardedAuth(t *testing.T) {
+	manager := &mockDBManager{
+		stores: map[string]storage.Engine{
+			"nornic": storage.NewMemoryEngine(),
+		},
+		defaultDB: "nornic",
+	}
+
+	session := &Session{
+		server: &Server{
+			dbManager: manager,
+			executors: make(map[string]QueryExecutor),
+		},
+	}
+
+	execA, err := session.getExecutorForDatabase("nornic")
+	if err != nil {
+		t.Fatalf("first getExecutorForDatabase failed: %v", err)
+	}
+	execB, err := session.getExecutorForDatabase("nornic")
+	if err != nil {
+		t.Fatalf("second getExecutorForDatabase failed: %v", err)
+	}
+	if execA != execB {
+		t.Fatalf("expected cached executor reuse")
+	}
+	if manager.getCalls != 1 {
+		t.Fatalf("expected one storage lookup with cache reuse, got %d", manager.getCalls)
+	}
+}
+
+func TestSessionGetExecutorForDatabase_DoesNotCacheAuthScopedExecutors(t *testing.T) {
+	manager := &mockDBManager{
+		stores: map[string]storage.Engine{
+			"nornic": storage.NewMemoryEngine(),
+		},
+		defaultDB: "nornic",
+	}
+
+	session := &Session{
+		server: &Server{
+			dbManager: manager,
+			executors: make(map[string]QueryExecutor),
+		},
+		forwardedAuthHeader: "Bearer forwarded-token",
+	}
+
+	execA, err := session.getExecutorForDatabase("nornic")
+	if err != nil {
+		t.Fatalf("first getExecutorForDatabase failed: %v", err)
+	}
+	execB, err := session.getExecutorForDatabase("nornic")
+	if err != nil {
+		t.Fatalf("second getExecutorForDatabase failed: %v", err)
+	}
+	if execA == execB {
+		t.Fatalf("expected auth-scoped executor lookup to bypass cache")
+	}
+	if manager.getCalls != 2 {
+		t.Fatalf("expected two storage lookups for auth-scoped routing, got %d", manager.getCalls)
+	}
+}
+
 func TestHandleRunRejectsDatabaseSwitchInExplicitTransaction(t *testing.T) {
 	manager := &mockDBManager{
 		stores: map[string]storage.Engine{

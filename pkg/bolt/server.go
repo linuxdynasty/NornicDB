@@ -197,6 +197,9 @@ type Server struct {
 	sessions map[string]*Session
 	closed   atomic.Bool
 
+	executorsMu sync.RWMutex
+	executors   map[string]QueryExecutor
+
 	// Query executor (injected dependency) - used if dbManager is nil
 	executor QueryExecutor
 
@@ -706,6 +709,7 @@ func NewWithDatabaseManager(config *Config, executor QueryExecutor, dbManager Da
 	return &Server{
 		config:    config,
 		sessions:  make(map[string]*Session),
+		executors: make(map[string]QueryExecutor),
 		executor:  executor,
 		dbManager: dbManager,
 	}
@@ -2339,11 +2343,26 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 		GetStorageWithAuth(name string, authToken string) (storage.Engine, error)
 	}
 
+	useAuthScopedResolver := false
+	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && strings.TrimSpace(s.forwardedAuthHeader) != "" {
+		_ = resolver
+		useAuthScopedResolver = true
+	}
+
+	if !useAuthScopedResolver {
+		s.server.executorsMu.RLock()
+		if executor, ok := s.server.executors[dbName]; ok {
+			s.server.executorsMu.RUnlock()
+			return executor, nil
+		}
+		s.server.executorsMu.RUnlock()
+	}
+
 	var (
 		storageEngine storage.Engine
 		err           error
 	)
-	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && strings.TrimSpace(s.forwardedAuthHeader) != "" {
+	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && useAuthScopedResolver {
 		storageEngine, err = resolver.GetStorageWithAuth(dbName, s.forwardedAuthHeader)
 	} else {
 		storageEngine, err = s.server.dbManager.GetStorage(dbName)
@@ -2392,7 +2411,23 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 		executor.SetDatabaseManager(&boltDatabaseManagerAdapter{manager: mgr})
 	}
 
-	return &boltQueryExecutorAdapter{executor: executor}, nil
+	dbExecutor := &boltQueryExecutorAdapter{executor: executor}
+	if useAuthScopedResolver {
+		return dbExecutor, nil
+	}
+
+	s.server.executorsMu.Lock()
+	if s.server.executors == nil {
+		s.server.executors = make(map[string]QueryExecutor)
+	}
+	if existing, ok := s.server.executors[dbName]; ok {
+		s.server.executorsMu.Unlock()
+		return existing, nil
+	}
+	s.server.executors[dbName] = dbExecutor
+	s.server.executorsMu.Unlock()
+
+	return dbExecutor, nil
 }
 
 // boltDatabaseManagerAdapter wraps multidb.DatabaseManager to implement
