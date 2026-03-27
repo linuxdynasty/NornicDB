@@ -10,14 +10,14 @@
 #   - Make (from MinGW or MSYS2)
 #
 # Usage:
-#   .\scripts\build-llama-cuda.ps1 [-Version b8157] [-Clean]
+#   .\scripts\build-llama-cuda.ps1 [-Version b8547] [-Clean]
 #
 # Output:
 #   lib\llama\libllama_windows_amd64.a (static library, CPU-only)
 #   lib\llama\llama.h, ggml*.h (headers)
 
 param(
-    [string]$Version = "b8157",  # Latest stable llama.cpp release tag
+    [string]$Version = "b8547",  # Latest stable llama.cpp release tag
     [switch]$Clean
 )
 

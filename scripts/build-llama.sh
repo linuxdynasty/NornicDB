@@ -5,7 +5,7 @@
 #   ./scripts/build-llama.sh [version]
 #
 # Examples:
-#   ./scripts/build-llama.sh          # Uses default version (b8157)
+#   ./scripts/build-llama.sh          # Uses default version (b8547)
 #   ./scripts/build-llama.sh b8000    # Specific version
 #
 # Output:
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-VERSION="${1:-b8157}"
+VERSION="${1:-b8547}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTDIR="$PROJECT_ROOT/lib/llama"
@@ -83,7 +83,10 @@ LIB_NAME="libllama_${OS}_${ARCH}${GPU_SUFFIX}.a"
 echo "📦 Creating combined library: $OUTDIR/$LIB_NAME"
 
 # Find all static libraries (absolute paths so extraction works after cwd changes)
-mapfile -t LIBS < <(find "$TMPDIR/build" -name "*.a" -type f 2>/dev/null | grep -E "(libllama|libggml|libcommon)" | sort -u)
+LIBS=()
+while IFS= read -r lib; do
+    LIBS+=("$lib")
+done < <(find "$TMPDIR/build" -name "*.a" -type f 2>/dev/null | grep -E "(libllama|libggml|libcommon)" | sort -u)
 if [[ ${#LIBS[@]} -eq 0 ]]; then
     echo "❌ Error: No static libraries found in build directory"
     exit 1

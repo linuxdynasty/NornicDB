@@ -14,7 +14,7 @@
 # This is a "batteries included" deployment - no additional model downloads required.
 # Heimdall provides: anomaly detection, runtime diagnosis, and memory curation via Bifrost chat.
 
-ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:b8157
+ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:b8547
 
 # =============================================================================
 # Stage 1: UI
@@ -120,6 +120,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
+    NORNICDB_EMBEDDING_ENABLED=true \
     NORNICDB_EMBEDDING_PROVIDER=local \
     NORNICDB_EMBEDDING_MODEL=bge-m3 \
     NORNICDB_EMBEDDING_DIMENSIONS=1024 \

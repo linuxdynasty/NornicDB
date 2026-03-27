@@ -9,7 +9,7 @@
 # Headless (no UI):
 #         docker build -f docker/Dockerfile.amd64-vulkan-heimdall --build-arg HEADLESS=true -t nornicdb-amd64-vulkan-heimdall-headless .
 
-ARG LLAMA_CPU_IMAGE=timothyswt/llama-cpu-libs:b8157
+ARG LLAMA_CPU_IMAGE=timothyswt/llama-cpu-libs:b8547
 
 # =============================================================================
 # Stage 1: UI (skipped in headless mode)
@@ -130,6 +130,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
+  NORNICDB_EMBEDDING_ENABLED=true \
     NORNICDB_EMBEDDING_PROVIDER=local \
     NORNICDB_EMBEDDING_MODEL=bge-m3 \
     NORNICDB_EMBEDDING_DIMENSIONS=1024 \

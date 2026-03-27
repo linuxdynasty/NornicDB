@@ -100,6 +100,57 @@ func TestResolveEmbeddingContextAndBatch(t *testing.T) {
 	}
 }
 
+func TestResolveGenerationContextAndBatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      GenerationOptions
+		trainCtx  int
+		wantCtx   int
+		wantBatch int
+	}{
+		{
+			name:      "defaults use train context and default batch",
+			opts:      GenerationOptions{},
+			trainCtx:  8192,
+			wantCtx:   8192,
+			wantBatch: 512,
+		},
+		{
+			name:      "defaults fall back when train context unknown",
+			opts:      GenerationOptions{},
+			trainCtx:  0,
+			wantCtx:   2048,
+			wantBatch: 512,
+		},
+		{
+			name:      "explicit context clamps to model context",
+			opts:      GenerationOptions{ContextSize: 12000, BatchSize: 1024},
+			trainCtx:  8192,
+			wantCtx:   8192,
+			wantBatch: 1024,
+		},
+		{
+			name:      "batch clamps to effective context",
+			opts:      GenerationOptions{ContextSize: 384, BatchSize: 1024},
+			trainCtx:  0,
+			wantCtx:   384,
+			wantBatch: 384,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCtx, gotBatch := resolveGenerationContextAndBatch(tt.opts, tt.trainCtx)
+			if gotCtx != tt.wantCtx {
+				t.Fatalf("ctx=%d want=%d", gotCtx, tt.wantCtx)
+			}
+			if gotBatch != tt.wantBatch {
+				t.Fatalf("batch=%d want=%d", gotBatch, tt.wantBatch)
+			}
+		})
+	}
+}
+
 // TestLoadModel_FileNotFound verifies error on missing model file
 func TestLoadModel_FileNotFound(t *testing.T) {
 	t.Skip("Skipping: requires llama.cpp static library")

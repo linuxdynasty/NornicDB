@@ -231,18 +231,12 @@ struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, i
 
     params.n_ctx = n_ctx;
     params.n_batch = n_batch;
-    params.n_ubatch = n_batch;
     params.n_threads = n_threads;
     params.n_threads_batch = n_threads;
 
-    // Generation mode: we need logits, not embeddings
+	// Generation mode: keep the context params as close as possible to
+	// llama.cpp defaults and only flip the fields we actually need.
     params.embeddings = 0;
-
-    // Set attention type for generation (causal)
-    params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
-
-    // Flash attention for speed
-    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     // logits_all removed - controlled per-batch now
 
@@ -986,6 +980,35 @@ func DefaultGenerationOptions(modelPath string) GenerationOptions {
 	}
 }
 
+func resolveGenerationContextAndBatch(opts GenerationOptions, modelCtxTrain int) (ctxSize, batchSize int) {
+	if opts.ContextSize > 0 {
+		ctxSize = opts.ContextSize
+	} else if modelCtxTrain > 0 {
+		ctxSize = modelCtxTrain
+	} else {
+		ctxSize = 2048
+	}
+	if modelCtxTrain > 0 && ctxSize > modelCtxTrain {
+		ctxSize = modelCtxTrain
+	}
+	if ctxSize < 1 {
+		ctxSize = 1
+	}
+
+	if opts.BatchSize > 0 {
+		batchSize = opts.BatchSize
+	} else {
+		batchSize = 512
+	}
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	if batchSize > ctxSize {
+		batchSize = ctxSize
+	}
+	return ctxSize, batchSize
+}
+
 // LoadGenerationModel loads a GGUF model for text generation.
 func LoadGenerationModel(opts GenerationOptions) (*GenerationModel, error) {
 	cPath := C.CString(opts.ModelPath)
@@ -996,7 +1019,9 @@ func LoadGenerationModel(opts GenerationOptions) (*GenerationModel, error) {
 		return nil, fmt.Errorf("failed to load generation model: %s", opts.ModelPath)
 	}
 
-	ctx := C.create_gen_context(model, C.int(opts.ContextSize), C.int(opts.BatchSize), C.int(opts.Threads))
+	modelCtxTrain := int(C.get_n_ctx_train(model))
+	ctxSize, batchSize := resolveGenerationContextAndBatch(opts, modelCtxTrain)
+	ctx := C.create_gen_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads))
 	if ctx == nil {
 		C.free_model(model)
 		return nil, fmt.Errorf("failed to create generation context: %s", opts.ModelPath)
@@ -1006,8 +1031,8 @@ func LoadGenerationModel(opts GenerationOptions) (*GenerationModel, error) {
 		model:       model,
 		ctx:         ctx,
 		modelPath:   opts.ModelPath,
-		batchSize:   opts.BatchSize,
-		contextSize: opts.ContextSize,
+		batchSize:   batchSize,
+		contextSize: ctxSize,
 	}, nil
 }
 
