@@ -8,7 +8,13 @@ The search package (`pkg/search/`) implements a **hybrid search system** combini
 2. **BM25 Full-Text Search** - Keyword search with TF-IDF scoring
 3. **RRF (Reciprocal Rank Fusion)** - Industry-standard algorithm to merge rankings
 
+By default, **both sides see all node properties**:
+
+- **Embedding text / vector search**: the embedding worker builds text from **all node properties plus node labels** by default, excluding built-in metadata fields like `embedding`, `has_embedding`, timestamps, and similar internal keys. This is configurable through embedding include/exclude settings if you want to restrict which properties contribute to embeddings.
+- **BM25 full-text search**: BM25 also indexes **all node properties**. A small set of common text fields such as `content`, `text`, `title`, and `name` are added first for better ranking, but searchability is not limited to those fields.
+
 This is the same approach used by:
+
 - Azure AI Search
 - Elasticsearch
 - Weaviate
@@ -39,26 +45,43 @@ This is the same approach used by:
 
 ## Full-Text Search Properties
 
-The BM25 search indexes these node properties (matching Mimir's Neo4j `node_search` index):
+BM25 indexes **all node properties**, but these properties are treated as **priority fields** for ranking and are added first (matching Mimir's Neo4j `node_search` index):
 
-| Property       | Description                    |
-|----------------|--------------------------------|
-| `content`      | Main content field             |
-| `text`         | Text content (file chunks)     |
-| `title`        | Node titles                    |
-| `name`         | Node names                     |
-| `description`  | Node descriptions              |
-| `path`         | File paths                     |
-| `workerRole`   | Agent worker roles             |
-| `requirements` | Task requirements              |
+| Property       | Description                |
+| -------------- | -------------------------- |
+| `content`      | Main content field         |
+| `text`         | Text content (file chunks) |
+| `title`        | Node titles                |
+| `name`         | Node names                 |
+| `description`  | Node descriptions          |
+| `path`         | File paths                 |
+| `workerRole`   | Agent worker roles         |
+| `requirements` | Task requirements          |
 
-**All properties are concatenated and indexed together** - a search for "docker configuration" will match nodes where any of these fields contain those terms.
+After those priority fields, **all remaining properties are also indexed**. Property names are included alongside values, so searches can match both general text and field-oriented content.
+
+Example: a search for `docker configuration` can match a node through `content`, `title`, or any other indexed property that contains those terms.
+
+## Embedding Text Inputs
+
+The vector side of hybrid search depends on whatever text was embedded for the node.
+
+By default, managed embeddings are generated from:
+
+- node labels
+- all node properties
+- excluding built-in metadata/internal fields
+
+That means hybrid search is not limited to a single `content` field unless you configure it that way.
+
+If you set embedding include/exclude options, the vector side follows those rules, while the BM25 side still indexes all properties.
 
 ## RRF Algorithm
 
 **Formula**: `RRF_score(doc) = Σ (weight_i / (k + rank_i))`
 
 Where:
+
 - `k` = constant (default: 60)
 - `rank_i` = rank of document in result set i (1-indexed)
 - `weight_i` = importance weight for result set i
@@ -67,10 +90,10 @@ Where:
 
 The system automatically adjusts weights based on query characteristics:
 
-| Query Type | Words | Vector Weight | BM25 Weight | Rationale |
-|------------|-------|---------------|-------------|-----------|
+| Query Type | Words | Vector Weight | BM25 Weight | Rationale              |
+| ---------- | ----- | ------------- | ----------- | ---------------------- |
 | Short      | 1-2   | 0.5           | 1.5         | Exact keyword matching |
-| Medium     | 3-5   | 1.0           | 1.0         | Balanced |
+| Medium     | 3-5   | 1.0           | 1.0         | Balanced               |
 | Long       | 6+    | 1.5           | 0.5         | Semantic understanding |
 
 ## Usage
@@ -107,7 +130,7 @@ type SearchOptions struct {
     Limit         int       // Max results (default: 50)
     MinSimilarity float64   // Vector threshold (default: 0.5)
     Types         []string  // Filter by node labels
-    
+
     // RRF configuration
     RRFK         float64   // RRF constant (default: 60)
     VectorWeight float64   // Vector weight (default: 1.0)
@@ -136,12 +159,12 @@ Use the same query and options for repeated calls to benefit from the cache (e.g
 
 ## Performance (Apple M3 Max)
 
-| Operation | Scale | Time |
-|-----------|-------|------|
-| Vector Search | 10K vectors | ~8.5ms |
-| BM25 Search | 10K documents | ~255µs |
-| RRF Fusion | 100 candidates | ~27µs |
-| Index Build | 38K nodes | ~5.4s |
+| Operation     | Scale          | Time   |
+| ------------- | -------------- | ------ |
+| Vector Search | 10K vectors    | ~8.5ms |
+| BM25 Search   | 10K documents  | ~255µs |
+| RRF Fusion    | 100 candidates | ~27µs  |
+| Index Build   | 38K nodes      | ~5.4s  |
 
 ## Test Coverage
 
