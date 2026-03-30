@@ -145,32 +145,33 @@ go test ./pkg/nornicdb/...
 
 ### Core Settings
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `NORNICDB_DATA_DIR` | Data directory | `./data` |
-| `NORNICDB_HTTP_PORT` | HTTP API port | `7474` |
-| `NORNICDB_BOLT_PORT` | Bolt port | `7687` |
-| `NORNICDB_NO_AUTH` | Disable auth | `false` |
-| `NORNICDB_JWT_SECRET` | JWT secret | Required for auth |
-| `NORNICDB_HEADLESS` | Disable web UI | `false` |
+| Variable              | Description    | Default           |
+| --------------------- | -------------- | ----------------- |
+| `NORNICDB_DATA_DIR`   | Data directory | `./data`          |
+| `NORNICDB_HTTP_PORT`  | HTTP API port  | `7474`            |
+| `NORNICDB_BOLT_PORT`  | Bolt port      | `7687`            |
+| `NORNICDB_NO_AUTH`    | Disable auth   | `false`           |
+| `NORNICDB_JWT_SECRET` | JWT secret     | Required for auth |
+| `NORNICDB_HEADLESS`   | Disable web UI | `false`           |
 
 ### Embedding & AI Features
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `NORNICDB_EMBEDDING_PROVIDER` | Embedding provider | `local` |
-| `NORNICDB_EMBEDDING_MODEL` | Model path/name | `models/bge-m3.gguf` |
-| `NORNICDB_HEIMDALL_ENABLED` | Enable Heimdall AI | `false` |
-| `NORNICDB_HEIMDALL_MODEL` | Heimdall LLM model | `models/qwen3-0.6b-instruct-q4_k_m.gguf` |
-| `NORNICDB_SEARCH_RERANK_ENABLED` | Enable Stage-2 search reranking | `false` |
-| `NORNICDB_SEARCH_RERANK_PROVIDER` | Reranker backend: `local`, `ollama`, `openai`, `http` | `local` |
-| `NORNICDB_PLUGINS_DIR` | APOC plugins directory | `apoc/built-plugins` |
+| Variable                          | Description                                           | Default                                  |
+| --------------------------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `NORNICDB_EMBEDDING_PROVIDER`     | Embedding provider                                    | `local`                                  |
+| `NORNICDB_EMBEDDING_MODEL`        | Model path/name                                       | `models/bge-m3.gguf`                     |
+| `NORNICDB_HEIMDALL_ENABLED`       | Enable Heimdall AI                                    | `false`                                  |
+| `NORNICDB_HEIMDALL_MODEL`         | Heimdall LLM model                                    | `models/qwen3-0.6b-instruct-q4_k_m.gguf` |
+| `NORNICDB_SEARCH_RERANK_ENABLED`  | Enable Stage-2 search reranking                       | `false`                                  |
+| `NORNICDB_SEARCH_RERANK_PROVIDER` | Reranker backend: `local`, `ollama`, `openai`, `http` | `local`                                  |
+| `NORNICDB_PLUGINS_DIR`            | APOC plugins directory                                | `apoc/built-plugins`                     |
 
 ## IDE Setup
 
 ### VS Code
 
 Recommended extensions:
+
 - Go (official)
 - Go Test Explorer
 - GitLens
@@ -268,5 +269,4 @@ See [Heimdall AI Assistant Guide](../user-guides/heimdall-ai-assistant.md) for d
 - **[Code Style](code-style.md)** - Code conventions
 - **[Heimdall Plugins](../user-guides/heimdall-plugins.md)** - Create custom AI actions
 - **[APOC Plugins](../features/plugin-system.md)** - Extend Cypher with custom functions
-- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
-
+- **[Contributing](../contributing.md)** - Contribution process

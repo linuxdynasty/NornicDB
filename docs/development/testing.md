@@ -5,6 +5,7 @@
 ## Test Structure
 
 Tests live alongside the code they test:
+
 - `db.go` → `db_test.go`
 - `server.go` → `server_test.go`
 
@@ -110,7 +111,7 @@ import (
 func TestWithTestify(t *testing.T) {
     // assert continues on failure
     assert.Equal(t, expected, actual)
-    
+
     // require stops on failure
     require.NoError(t, err)
 }
@@ -143,6 +144,7 @@ func TestParallel(t *testing.T) {
 ## CI/CD
 
 Tests run automatically on:
+
 - Pull request creation
 - Push to main branch
 - Release tags
@@ -151,5 +153,4 @@ Tests run automatically on:
 
 - **[Setup](setup.md)** - Development setup
 - **[Code Style](code-style.md)** - Code conventions
-- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
-
+- **[Contributing](../contributing.md)** - Contribution process

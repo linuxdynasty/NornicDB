@@ -70,10 +70,10 @@ Heimdall is the cognitive guardian of NornicDB - a subsystem that enables AI-pow
 
 ### Plugin Types
 
-| Plugin Type | Interface | Purpose | Example |
-|-------------|-----------|---------|---------|
-| Regular (APOC) | `nornicdb.Plugin` | Cypher functions | `apoc.coll.sum()` |
-| **Heimdall** | `heimdall.HeimdallPlugin` | SLM-managed subsystems | `heimdall.anomaly.detect` |
+| Plugin Type    | Interface                 | Purpose                | Example                   |
+| -------------- | ------------------------- | ---------------------- | ------------------------- |
+| Regular (APOC) | `nornicdb.Plugin`         | Cypher functions       | `apoc.coll.sum()`         |
+| **Heimdall**   | `heimdall.HeimdallPlugin` | SLM-managed subsystems | `heimdall.anomaly.detect` |
 
 ### Key Components
 
@@ -143,8 +143,8 @@ func (p *MyPlugin) handleAnalyze(ctx heimdall.ActionContext) (*heimdall.ActionRe
 
 Heimdall actions are aligned with the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) tool format:
 
-- **Name** – Full action name (e.g. `heimdall_watcher_query`)  
-- **Description** – Plain-text description for the model  
+- **Name** – Full action name (e.g. `heimdall_watcher_query`)
+- **Description** – Plain-text description for the model
 - **InputSchema** – Optional JSON Schema for parameters (same as MCP `inputSchema`)
 
 When you define an action, you can set `InputSchema` so that MCP clients and the assistant know the expected parameters:
@@ -395,6 +395,7 @@ cp myplugin.so $NORNICDB_HEIMDALL_PLUGINS_DIR/
 ```
 
 **Requirements for .so plugins:**
+
 - Must export `var Plugin heimdall.HeimdallPlugin = &YourType{}`
 - Built with same Go version as NornicDB
 - Same CGO settings (important for llama.cpp)
@@ -429,7 +430,7 @@ import _ "github.com/orneryd/nornicdb/plugins/myplugin"
 ```go
 func TestMyPlugin_Actions(t *testing.T) {
     plugin := &MyPlugin{}
-    
+
     // Test initialization
     ctx := heimdall.SubsystemContext{
         Config:  heimdall.DefaultConfig(),
@@ -437,19 +438,19 @@ func TestMyPlugin_Actions(t *testing.T) {
     }
     err := plugin.Initialize(ctx)
     require.NoError(t, err)
-    
+
     // Test action
     actions := plugin.Actions()
     action, ok := actions["analyze"]
     require.True(t, ok)
-    
+
     actCtx := heimdall.ActionContext{
         Context:     context.Background(),
         UserMessage: "analyze the graph",
         Params:      map[string]interface{}{"threshold": 0.5},
         Bifrost:     &heimdall.NoOpBifrost{},
     }
-    
+
     result, err := action.Handler(actCtx)
     require.NoError(t, err)
     assert.True(t, result.Success)
@@ -511,7 +512,7 @@ func (p *AnomalyPlugin) Description() string { return "Graph anomaly detection s
 func (p *AnomalyPlugin) Initialize(ctx heimdall.SubsystemContext) error {
     p.mu.Lock()
     defer p.mu.Unlock()
-    
+
     p.ctx = ctx
     p.status = heimdall.StatusReady
     p.events = make([]heimdall.SubsystemEvent, 0, 100)
@@ -634,7 +635,7 @@ func (p *AnomalyPlugin) actionScan(ctx heimdall.ActionContext) (*heimdall.Action
     if d, ok := ctx.Params["depth"].(float64); ok {
         depth = int(d)
     }
-    
+
     threshold := 0.8
     if t, ok := ctx.Params["threshold"].(float64); ok {
         threshold = t
@@ -642,12 +643,12 @@ func (p *AnomalyPlugin) actionScan(ctx heimdall.ActionContext) (*heimdall.Action
 
     // Notify user of progress
     if ctx.Bifrost.IsConnected() {
-        ctx.Bifrost.SendNotification("info", "Scan Started", 
+        ctx.Bifrost.SendNotification("info", "Scan Started",
             fmt.Sprintf("Scanning with depth=%d, threshold=%.2f", depth, threshold))
     }
 
     // Your anomaly detection logic here...
-    
+
     return &heimdall.ActionResult{
         Success: true,
         Message: "Full scan complete",
@@ -712,12 +713,12 @@ Plugins can implement optional interfaces to hook into the request lifecycle. Th
 
 ### Available Hooks
 
-| Interface | When Called | Purpose |
-|-----------|-------------|---------|
-| `PrePromptHook` | Before SLM request | Modify prompts, add context, validate |
-| `PreExecuteHook` | Before action execution | Validate params, fetch data, authorize |
-| `PostExecuteHook` | After action execution | Logging, metrics, cleanup |
-| `DatabaseEventHook` | On database operations | Audit, monitoring, triggers |
+| Interface           | When Called             | Purpose                                |
+| ------------------- | ----------------------- | -------------------------------------- |
+| `PrePromptHook`     | Before SLM request      | Modify prompts, add context, validate  |
+| `PreExecuteHook`    | Before action execution | Validate params, fetch data, authorize |
+| `PostExecuteHook`   | After action execution  | Logging, metrics, cleanup              |
+| `DatabaseEventHook` | On database operations  | Audit, monitoring, triggers            |
 
 ### PrePromptHook (Modify Prompts)
 
@@ -731,10 +732,10 @@ type PrePromptHook interface {
 func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
     // Add context to the prompt
     ctx.AdditionalInstructions += "\nUser is querying the analytics database."
-    
+
     // Send notification (appears before AI response)
     ctx.NotifyInfo("Context", "Added analytics context")
-    
+
     // Optionally cancel the request
     if !p.isAuthorized(ctx.UserMessage) {
         ctx.Cancel("Unauthorized request", "PrePrompt:myplugin")
@@ -761,7 +762,7 @@ func (p *MyPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(heimdal
             done(heimdall.PreExecuteResult{Error: err})
             return
         }
-        
+
         // Modify parameters
         ctx.Action.Params["extra_data"] = data
         done(heimdall.PreExecuteResult{})
@@ -825,10 +826,10 @@ The `SubsystemContext` provides a `Heimdall` invoker for this purpose.
 type HeimdallInvoker interface {
     // Directly invoke a registered action
     InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
-    
+
     // Send a natural language prompt to the SLM
     SendPrompt(prompt string) (*ActionResult, error)
-    
+
     // Async versions (fire-and-forget, results via Bifrost)
     InvokeActionAsync(action string, params map[string]interface{})
     SendPromptAsync(prompt string)
@@ -875,7 +876,7 @@ func (p *SecurityPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
 **Use Cases for Autonomous Actions:**
 
 1. **Security Monitoring**: Track failed auth attempts → trigger security analysis
-2. **Performance Alerts**: Monitor slow queries → trigger optimization suggestions  
+2. **Performance Alerts**: Monitor slow queries → trigger optimization suggestions
 3. **Anomaly Detection**: Detect unusual patterns → trigger investigation
 4. **Resource Management**: Monitor memory usage → trigger cleanup recommendations
 5. **Compliance Auditing**: Track sensitive operations → trigger audit reports
@@ -889,7 +890,7 @@ Within lifecycle hooks, use `PromptContext` notification methods:
 ```go
 // All notifications are queued and sent inline with the streaming response
 ctx.NotifyInfo("Title", "Message")      // ℹ️ Info
-ctx.NotifyWarning("Title", "Message")   // ⚠️ Warning  
+ctx.NotifyWarning("Title", "Message")   // ⚠️ Warning
 ctx.NotifyError("Title", "Message")     // ❌ Error
 ctx.NotifyProgress("Title", "Message")  // 🔄 Progress
 ctx.Notify("success", "Title", "Msg")   // ✅ Custom type
@@ -1023,11 +1024,13 @@ Write clear descriptions - they're shown to both the SLM and users:
 ### Plugin Not Loading
 
 1. Check plugin type returns "heimdall":
+
    ```go
    func (p *MyPlugin) Type() string { return "heimdall" }
    ```
 
 2. Verify export variable exists:
+
    ```go
    var Plugin heimdall.HeimdallPlugin = &MyPlugin{}
    ```
@@ -1040,6 +1043,7 @@ Write clear descriptions - they're shown to both the SLM and users:
 ### Action Not Triggering
 
 1. Verify action is registered:
+
    ```go
    // Check in Bifrost chat:
    /help
@@ -1075,6 +1079,7 @@ Notifications from lifecycle hooks are **queued and sent inline** with the strea
 - No separate EventSource subscription is needed in the UI
 
 If you see ordering issues:
+
 1. Ensure you're using `ctx.NotifyInfo()` etc. in PrePrompt hooks
 2. Action handler notifications via `ctx.Bifrost.SendNotification()` may arrive later
 
@@ -1085,7 +1090,7 @@ If you see ordering issues:
 ### Available Categories
 
 - `monitoring` - Status, health, metrics
-- `analysis` - Detection, scanning, diagnostics  
+- `analysis` - Detection, scanning, diagnostics
 - `configuration` - Config get/set
 - `optimization` - Query/storage tuning
 - `curation` - Memory/data management
@@ -1094,13 +1099,13 @@ If you see ordering issues:
 
 ### Example Prompts → Actions
 
-| User Says | Maps To |
-|-----------|---------|
-| "check the status" | `heimdall_watcher_status` |
-| "detect anomalies" | `heimdall.anomaly.detect` |
-| "say hello" | `heimdall_watcher_hello` |
-| "what's the health" | `heimdall_watcher_health` |
-| "show me metrics" | `heimdall_watcher_metrics` |
+| User Says           | Maps To                    |
+| ------------------- | -------------------------- |
+| "check the status"  | `heimdall_watcher_status`  |
+| "detect anomalies"  | `heimdall.anomaly.detect`  |
+| "say hello"         | `heimdall_watcher_hello`   |
+| "what's the health" | `heimdall_watcher_health`  |
+| "show me metrics"   | `heimdall_watcher_metrics` |
 
 ---
 
@@ -1108,7 +1113,7 @@ If you see ordering issues:
 
 - [Heimdall Architecture](../architecture/COGNITIVE_SLM_PROPOSAL.md)
 - [Bifrost UI Guide](./heimdall-ai-assistant.md)
-- [Example Plugin: Watcher](../../plugins/heimdall/plugin.go)
+- [Example Plugin: Watcher](https://github.com/orneryd/nornicdb/blob/main/plugins/heimdall/plugin.go)
 
 ---
 

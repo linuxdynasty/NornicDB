@@ -15,10 +15,10 @@ NornicDB supports extensible Cypher functions through a plugin system. This allo
 
 ## Why Plugins vs Built-in?
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **All Built-in** | Simple deployment | Bloat, maintenance burden, slow startup |
-| **Plugin System** | Modular, community-driven, lean core | Slightly more complex setup |
+| Approach          | Pros                                 | Cons                                    |
+| ----------------- | ------------------------------------ | --------------------------------------- |
+| **All Built-in**  | Simple deployment                    | Bloat, maintenance burden, slow startup |
+| **Plugin System** | Modular, community-driven, lean core | Slightly more complex setup             |
 
 **Decision:** Plugin system - keeps core fast and focused while enabling extensibility.
 
@@ -59,6 +59,7 @@ func (p *TextAnalysisPlugin) Functions() []FunctionDef {
 ```
 
 **Usage in Cypher:**
+
 ```cypher
 MATCH (n:Document)
 RETURN n.title, text.sentiment(n.content) AS sentiment
@@ -91,6 +92,7 @@ func (p *GraphAlgoPlugin) Procedures() []ProcedureDef {
 ```
 
 **Usage:**
+
 ```cypher
 CALL algo.pageRank(20) YIELD nodeId, score
 RETURN nodeId, score ORDER BY score DESC LIMIT 10
@@ -153,16 +155,16 @@ package plugin
 type Plugin interface {
     // Name returns the plugin identifier (e.g., "text-analysis")
     Name() string
-    
+
     // Version returns semantic version (e.g., "1.0.0")
     Version() string
-    
+
     // Description returns human-readable description
     Description() string
-    
+
     // Initialize is called when the plugin is loaded
     Initialize(ctx PluginContext) error
-    
+
     // Shutdown is called when the plugin is unloaded
     Shutdown() error
 }
@@ -173,7 +175,7 @@ type FunctionPlugin interface {
     Functions() []FunctionDefinition
 }
 
-// ProcedurePlugin provides custom CALL procedures  
+// ProcedurePlugin provides custom CALL procedures
 type ProcedurePlugin interface {
     Plugin
     Procedures() []ProcedureDefinition
@@ -183,10 +185,10 @@ type ProcedurePlugin interface {
 type PluginContext interface {
     // Storage access (read-only by default)
     Storage() StorageReader
-    
+
     // Logger for plugin output
     Logger() *log.Logger
-    
+
     // Config access
     Config(key string) interface{}
 }
@@ -246,17 +248,20 @@ temporal.add
 ## Implementation Phases
 
 ### Phase 1: Foundation (v0.2.0)
+
 - [ ] Plugin interface definition
 - [ ] Plugin loader/unloader
 - [ ] Basic function registration
 - [ ] `dbms.plugins.*` procedures
 
 ### Phase 2: Core Plugins (v0.3.0)
+
 - [ ] `apoc-core` plugin with 20 most-used functions
 - [ ] `graph-algorithms` plugin
 - [ ] Plugin distribution mechanism
 
 ### Phase 3: Community (v0.4.0)
+
 - [ ] Plugin registry/marketplace
 - [ ] Plugin development SDK
 - [ ] Documentation and examples
@@ -301,16 +306,19 @@ var NornicDBPlugin plugin.Plugin = &MyPlugin{}
 ```
 
 **Build:**
+
 ```bash
 go build -buildmode=plugin -o myplugin.so myplugin/plugin.go
 ```
 
 **Load:**
+
 ```bash
 cp myplugin.so /etc/nornicdb/plugins/
 ```
 
 **Use:**
+
 ```cypher
 RETURN my.hello('World') AS greeting
 // Returns: "Hello, World!"
@@ -320,7 +328,7 @@ RETURN my.hello('World') AS greeting
 
 - [Functions Index](../api-reference/cypher-functions/) - Built-in functions
 - [APOC Compatibility](../features/apoc-functions.md) - APOC function status
-- [Contributing](../../CONTRIBUTING.md) - How to contribute plugins
+- [Contributing](../contributing.md) - How to contribute plugins
 
 ---
 

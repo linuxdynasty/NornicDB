@@ -128,7 +128,7 @@ func complex() {
     if err := validate(); err != nil {
         return err
     }
-    
+
     // Step 2: Process data
     // This algorithm is O(n log n) due to...
     process()
@@ -216,5 +216,4 @@ golangci-lint run
 
 - **[Testing](testing.md)** - Testing guidelines
 - **[Setup](setup.md)** - Development setup
-- **[Contributing](../../CONTRIBUTING.md)** - Contribution process
-
+- **[Contributing](../contributing.md)** - Contribution process

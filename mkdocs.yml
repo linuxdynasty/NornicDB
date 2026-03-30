@@ -6,39 +6,39 @@ repo_name: orneryd/nornicdb
 edit_uri: edit/main/docs/
 
 theme:
-    name: material
-    logo: assets/logos/nornicdb-logo.svg
-    favicon: assets/logos/nornic.svg
-    font:
-        text: Inter
-        code: JetBrains Mono
-    palette:
-        - scheme: slate
-            primary: black
-            accent: green
-            toggle:
-                icon: material/brightness-7
-                name: Switch to light mode
-        - scheme: default
-            primary: black
-            accent: green
-            toggle:
-                icon: material/brightness-4
-                name: Switch to dark mode
-    features:
-        - navigation.instant
-        - navigation.tracking
-        - navigation.tabs
-        - navigation.tabs.sticky
-        - navigation.sections
-        - navigation.expand
-        - navigation.top
-        - search.suggest
-        - search.highlight
-        - content.tabs.link
-        - content.code.copy
-        - content.code.select
-        - toc.follow
+  name: material
+  logo: assets/logos/nornicdb-logo.svg
+  favicon: assets/logos/nornic.svg
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - scheme: slate
+      primary: black
+      accent: green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to light mode
+    - scheme: default
+      primary: black
+      accent: green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.select
+    - toc.follow
 
 plugins:
   - search
@@ -85,7 +85,7 @@ markdown_extensions:
   - pymdownx.tilde
 
 extra_css:
-    - assets/stylesheets/nornic-docs.css
+  - assets/stylesheets/nornic-docs.css
 
 nav:
   - Home: README.md
@@ -159,8 +159,8 @@ nav:
   - AI Agents:
       - Overview: ai-agents/README.md
       - Chat Modes: ai-agents/chat-modes.md
-  - Contributing: CONTRIBUTING.md
-  - Changelog: CHANGELOG.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md
 
 extra:
   social:

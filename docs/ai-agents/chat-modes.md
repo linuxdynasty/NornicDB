@@ -91,14 +91,14 @@ After configuring MCP, restart Cursor to load the new server.
 
 NornicDB provides **8 tools** via MCP:
 
-| Tool | Purpose | Required Params |
-|------|---------|-----------------|
-| `store` | Save knowledge/decisions/memories | `content` |
-| `recall` | Retrieve by ID or filters | (none - all optional) |
-| `discover` | Semantic search by meaning | `query` |
-| `link` | Connect related concepts | `from`, `to`, `relation` |
-| `task` | Create/update single task | `title` (create) or `id` (update) |
-| `tasks` | Query multiple tasks | (none - all optional) |
+| Tool       | Purpose                           | Required Params                   |
+| ---------- | --------------------------------- | --------------------------------- |
+| `store`    | Save knowledge/decisions/memories | `content`                         |
+| `recall`   | Retrieve by ID or filters         | (none - all optional)             |
+| `discover` | Semantic search by meaning        | `query`                           |
+| `link`     | Connect related concepts          | `from`, `to`, `relation`          |
+| `task`     | Create/update single task         | `title` (create) or `id` (update) |
+| `tasks`    | Query multiple tasks              | (none - all optional)             |
 
 > **Note:** `index` and `unindex` tools are now handled by Mimir (the intelligence layer), not NornicDB directly.
 
@@ -111,6 +111,7 @@ NornicDB provides **8 tools** via MCP:
 **User:** "Remember that we're using PostgreSQL for this project"
 
 **Agent:** "Storing that decision..."
+
 ```
 → store(content="Using PostgreSQL as primary database for ACID compliance and team familiarity", type="decision", tags=["database", "architecture"])
 ← node-abc123 created
@@ -123,6 +124,7 @@ NornicDB provides **8 tools** via MCP:
 **User:** "What did we decide about the database?"
 
 **Agent:** "Checking memory..."
+
 ```
 → discover(query="database decision architecture")
 ← Found: node-abc123 "Using PostgreSQL..."
@@ -135,6 +137,7 @@ NornicDB provides **8 tools** via MCP:
 **User:** "I'm getting authentication errors"
 
 **Agent:** "Let me search for related issues..."
+
 ```
 → discover(query="authentication errors", depth=2)
 ← Found: node-456 "CORS credentials issue"
@@ -154,6 +157,7 @@ The root cause might be in Redis configuration. Let me check..."
 **User:** "What should I work on next?"
 
 **Agent:**
+
 ```
 → tasks(status=["pending"], priority=["high", "critical"], unblocked_only=true)
 ← Found 3 tasks, recommended: task-123 "Implement auth"
@@ -174,7 +178,7 @@ The mimir-v2 chat mode enforces a **memory-first** approach:
 ### Search Order (Mandatory)
 
 1. **`discover()`** - Check memory FIRST for any question
-2. **`recall()`** - Get specific nodes by ID or criteria  
+2. **`recall()`** - Get specific nodes by ID or criteria
 3. **Local files** - Only if memory has no results
 4. **External search** - Last resort
 
@@ -207,9 +211,10 @@ User: "I need to add user authentication to our Go API"
 Agent: Discovering similar work in memory...
 → discover(query="user authentication Go API")
 ← Found: node-892 "JWT implementation pattern"
-         node-893 "Go middleware authentication"
+node-893 "Go middleware authentication"
 
 "Found 2 related items:
+
 - JWT implementation pattern (node-892)
 - Go middleware auth (node-893)
 
@@ -222,11 +227,12 @@ Creating a task to track this work..."
 ← edge created
 
 "Created task-456: Implement user authentication
+
 - Linked to existing JWT pattern (node-892)
 - Status: pending
 - Priority: high
 
-Based on node-892, I recommend using the middleware pattern with JWT tokens. 
+Based on node-892, I recommend using the middleware pattern with JWT tokens.
 Shall I start implementation?"
 
 User: "Yes, go ahead"
@@ -253,18 +259,18 @@ Agent: Starting work on task-456...
 
 When using `link()`, use these standard relations:
 
-| Relation | Use Case | Example |
-|----------|----------|---------|
-| `depends_on` | Task dependencies | task-A depends_on task-B |
-| `relates_to` | General association | concept relates_to concept |
-| `implements` | Code/task implements design | code implements decision |
-| `caused_by` | Error root cause | bug caused_by change |
-| `blocks` | Blocking dependency | issue blocks task |
-| `contains` | Parent-child | project contains task |
-| `references` | Documentation links | doc references code |
-| `uses` | Library/pattern usage | code uses library |
-| `evolved_from` | Version iteration | v2 evolved_from v1 |
-| `contradicts` | Conflicting info | new_decision contradicts old |
+| Relation       | Use Case                    | Example                      |
+| -------------- | --------------------------- | ---------------------------- |
+| `depends_on`   | Task dependencies           | task-A depends_on task-B     |
+| `relates_to`   | General association         | concept relates_to concept   |
+| `implements`   | Code/task implements design | code implements decision     |
+| `caused_by`    | Error root cause            | bug caused_by change         |
+| `blocks`       | Blocking dependency         | issue blocks task            |
+| `contains`     | Parent-child                | project contains task        |
+| `references`   | Documentation links         | doc references code          |
+| `uses`         | Library/pattern usage       | code uses library            |
+| `evolved_from` | Version iteration           | v2 evolved_from v1           |
+| `contradicts`  | Conflicting info            | new_decision contradicts old |
 
 ---
 
@@ -287,6 +293,7 @@ Use `depth` parameter to explore connected knowledge:
 ```
 discover(query="authentication", depth=2)
 ```
+
 - `depth=1`: Direct matches only (default)
 - `depth=2`: Includes 1-hop neighbors
 - `depth=3`: 2-hop expansion (slower)
@@ -296,6 +303,7 @@ discover(query="authentication", depth=2)
 > **Note:** File indexing is handled by Mimir (the intelligence layer). When using the full Mimir+NornicDB stack, Mimir's `index()` tool handles file indexing.
 
 Search indexed code by meaning:
+
 ```
 discover(query="database connection pooling", type=["file"])
 ```
@@ -309,6 +317,7 @@ task(title="Deploy to staging", depends_on=["task-123", "task-456"])
 ```
 
 Query only unblocked tasks:
+
 ```
 tasks(status=["pending"], unblocked_only=true)
 ```
@@ -343,10 +352,9 @@ tasks(status=["pending"], unblocked_only=true)
 - **[MCP Tools Quick Reference](../features/mcp-integration.md)** - Tool cheat sheet
 - **[Vector Search Guide](../user-guides/vector-search.md)** - Semantic search details
 - **[Getting Started](../getting-started/README.md)** - NornicDB basics
-- **[Agent Preamble](../../AGENTS.md)** - Full chat mode config
+- **[Agent Preamble](agent-preamble.md)** - Full chat mode config
 
 ---
 
 **Last Updated:** 2025-11-28  
 **Version:** 0.1.3
-
