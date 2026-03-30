@@ -6,34 +6,39 @@ repo_name: orneryd/nornicdb
 edit_uri: edit/main/docs/
 
 theme:
-  name: material
-  palette:
-    - scheme: slate
-      primary: amber
-      accent: purple
-      toggle:
-        icon: material/brightness-7
-        name: Switch to light mode
-    - scheme: default
-      primary: amber
-      accent: purple
-      toggle:
-        icon: material/brightness-4
-        name: Switch to dark mode
-  features:
-    - navigation.instant
-    - navigation.tracking
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - navigation.sections
-    - navigation.expand
-    - navigation.top
-    - search.suggest
-    - search.highlight
-    - content.tabs.link
-    - content.code.copy
-    - content.code.select
-    - toc.follow
+    name: material
+    logo: assets/logos/nornicdb-logo.svg
+    favicon: assets/logos/nornic.svg
+    font:
+        text: Inter
+        code: JetBrains Mono
+    palette:
+        - scheme: slate
+            primary: black
+            accent: green
+            toggle:
+                icon: material/brightness-7
+                name: Switch to light mode
+        - scheme: default
+            primary: black
+            accent: green
+            toggle:
+                icon: material/brightness-4
+                name: Switch to dark mode
+    features:
+        - navigation.instant
+        - navigation.tracking
+        - navigation.tabs
+        - navigation.tabs.sticky
+        - navigation.sections
+        - navigation.expand
+        - navigation.top
+        - search.suggest
+        - search.highlight
+        - content.tabs.link
+        - content.code.copy
+        - content.code.select
+        - toc.follow
 
 plugins:
   - search
@@ -78,6 +83,9 @@ markdown_extensions:
   - pymdownx.tasklist:
       custom_checkbox: true
   - pymdownx.tilde
+
+extra_css:
+    - assets/stylesheets/nornic-docs.css
 
 nav:
   - Home: README.md
@@ -145,6 +153,7 @@ nav:
       - HTTP Security: security/http-security.md
   - Compliance:
       - Overview: compliance/README.md
+      - Background Workers, MVCC, and Audit Evidence: compliance/background-workers-mvcc-audit-guide.md
   - Development:
       - Overview: development/README.md
   - AI Agents:

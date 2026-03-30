@@ -12,14 +12,14 @@ The goal is not to claim a universal leaderboard result. The goal is to show wha
 
 ## Test Setup
 
-| Item | Value |
-| ---- | ----- |
-| Nodes | 67,280 |
-| Edges | 40,921 |
-| Embeddings | 67,298 |
-| Vector index | HNSW, CPU-only |
-| Request count | 800 per query type |
-| Query types | Vector top-k; Vector top-k + 1-hop traversal |
+| Item          | Value                                        |
+| ------------- | -------------------------------------------- |
+| Nodes         | 67,280                                       |
+| Edges         | 40,921                                       |
+| Embeddings    | 67,298                                       |
+| Vector index  | HNSW, CPU-only                               |
+| Request count | 800 per query type                           |
+| Query types   | Vector top-k; Vector top-k + 1-hop traversal |
 
 Local environment:
 
@@ -35,21 +35,21 @@ Remote environment:
 
 ## Local Results
 
-| Workload | Transport | Throughput | Mean | P50 | P95 | P99 | Max | Allocs/op |
-| -------- | --------- | ----------: | ---: | --: | --: | --: | --: | --------: |
-| Vector only | HTTP | 14,950 req/s | 663 us | 627 us | 969 us | 2.18 ms | 2.73 ms | 113,328 |
-| Vector only | Bolt | 8,802 req/s | 1.13 ms | 983 us | 1.77 ms | 4.50 ms | 5.15 ms | 175,784 |
-| Vector + 1 hop | HTTP | 11,523 req/s | 859 us | 699 us | 1.54 ms | 3.46 ms | 4.71 ms | 123,352 |
-| Vector + 1 hop | Bolt | 7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms | 181,790 |
+| Workload       | Transport |   Throughput |    Mean |     P50 |     P95 |     P99 |     Max | Allocs/op |
+| -------------- | --------- | -----------: | ------: | ------: | ------: | ------: | ------: | --------: |
+| Vector only    | HTTP      | 14,950 req/s |  663 us |  627 us |  969 us | 2.18 ms | 2.73 ms |   113,328 |
+| Vector only    | Bolt      |  8,802 req/s | 1.13 ms |  983 us | 1.77 ms | 4.50 ms | 5.15 ms |   175,784 |
+| Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |   123,352 |
+| Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |   181,790 |
 
 ## Remote Results
 
 Client-to-server latency was about **110 ms**.
 
-| Workload | Environment | P50 |
-| -------- | ----------- | ---: |
-| Vector only | Remote GCP | 110.7 ms |
-| Vector + 1 hop | Remote GCP | 112.9 ms |
+| Workload       | Environment |      P50 |
+| -------------- | ----------- | -------: |
+| Vector only    | Remote GCP  | 110.7 ms |
+| Vector + 1 hop | Remote GCP  | 112.9 ms |
 
 The practical result is straightforward: once local compute for hybrid retrieval is in low single-digit milliseconds, network RTT dominates the user-visible latency budget.
 

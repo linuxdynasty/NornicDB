@@ -20,6 +20,7 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 - Run first queries: [First Queries](getting-started/first-queries.md)
 - Learn Cypher usage patterns: [Cypher Queries](user-guides/cypher-queries.md)
 - Use vector/hybrid search: [Vector Search](user-guides/vector-search.md), [Hybrid Search](user-guides/hybrid-search.md)
+- Prepare for audit review of background workers and version history: [Background Workers, MVCC, and Audit Evidence](compliance/background-workers-mvcc-audit-guide.md)
 - Configure deployment/runtime: [Configuration](operations/configuration.md), [Environment Variables](operations/environment-variables.md)
 - Deploy with Docker: [Docker Deployment](getting-started/docker-deployment.md), [Operations Docker](operations/docker.md)
 - Observe/operate production: [Monitoring](operations/monitoring.md), [Backup & Restore](operations/backup-restore.md)
@@ -43,6 +44,12 @@ If you know your goal, start in **"Find by task"**. If you are debugging, start 
 - [Operations](operations/README.md)
 - [Security](security/README.md)
 - [Compliance](compliance/README.md)
+
+### Auditors And Reviewers
+
+- [Compliance](compliance/README.md)
+- [Background Workers, MVCC, and Audit Evidence](compliance/background-workers-mvcc-audit-guide.md)
+- [Audit Logging](compliance/audit-logging.md)
 
 ### Contributors
 
