@@ -37,8 +37,8 @@ Remote environment:
 
 | Workload       | Transport |   Throughput |    Mean |     P50 |     P95 |     P99 |     Max | Allocs/op |
 | -------------- | --------- | -----------: | ------: | ------: | ------: | ------: | ------: | --------: |
-| Vector only    | HTTP      | 14,950 req/s |  663 us |  627 us |  969 us | 2.18 ms | 2.73 ms |   113,328 |
-| Vector only    | Bolt      |  8,802 req/s | 1.13 ms |  983 us | 1.77 ms | 4.50 ms | 5.15 ms |   175,784 |
+| Vector only    | HTTP      | 19,342 req/s |  511 us |  470 us |  750 us |  869 us | 1.02 ms |   138,031 |
+| Vector only    | Bolt      | 22,309 req/s |  444 us |  428 us |  629 us |  814 us |  968 us |   206,710 |
 | Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |   123,352 |
 | Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |   181,790 |
 
