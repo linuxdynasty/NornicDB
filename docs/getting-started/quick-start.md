@@ -36,7 +36,7 @@ git clone https://github.com/orneryd/nornicdb.git
 cd nornicdb
 
 # Build the CLI
-go build -o nornicdb ./cmd/nornicdb
+make build
 
 # Start the server
 ./nornicdb serve
