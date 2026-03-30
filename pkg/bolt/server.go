@@ -1239,17 +1239,18 @@ func (s *Session) handleHello(data []byte) error {
 	// Store database for this session
 	s.database = dbName
 
-	// Log successful auth (always-on access log style)
-	remoteAddr := "unknown"
-	if s.conn != nil {
-		remoteAddr = s.conn.RemoteAddr().String()
+	if s.server != nil && s.server.config.LogQueries {
+		remoteAddr := "unknown"
+		if s.conn != nil {
+			remoteAddr = s.conn.RemoteAddr().String()
+		}
+		dbInfo := ""
+		if dbName != "" {
+			dbInfo = fmt.Sprintf(" db=%s", dbName)
+		}
+		fmt.Printf("[BOLT] HELLO %s user=%s roles=%v%s\n",
+			remoteAddr, s.authResult.Username, s.authResult.Roles, dbInfo)
 	}
-	dbInfo := ""
-	if dbName != "" {
-		dbInfo = fmt.Sprintf(" db=%s", dbName)
-	}
-	fmt.Printf("[BOLT] HELLO %s user=%s roles=%v%s\n",
-		remoteAddr, s.authResult.Username, s.authResult.Roles, dbInfo)
 
 	return s.sendSuccess(map[string]any{
 		"server":        "NornicDB/0.1.0",
@@ -1534,6 +1535,11 @@ func (s *Session) handleRun(data []byte) error {
 }
 
 func (s *Session) logRunTiming(status, dbName, query string, duration time.Duration, rows int, runErr error) {
+	includeQuery := s.server != nil && s.server.config.LogQueries
+	if runErr == nil && !includeQuery {
+		return
+	}
+
 	remoteAddr := "unknown"
 	if s.conn != nil {
 		remoteAddr = s.conn.RemoteAddr().String()
@@ -1543,7 +1549,6 @@ func (s *Session) logRunTiming(status, dbName, query string, duration time.Durat
 		user = s.authResult.Username
 	}
 
-	includeQuery := s.server != nil && s.server.config.LogQueries
 	if runErr != nil {
 		if includeQuery {
 			fmt.Printf("[BOLT] RUN user=%s remote=%s db=%s status=%s rows=%d %v query=%s err=%v\n",
