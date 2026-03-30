@@ -1,211 +1,261 @@
-# NornicDB Quick Start Guide
+# Quick Start Guide
 
-Get NornicDB running locally, verify that it is healthy, and execute a first query.
+**Get NornicDB running in minutes with Docker.**
 
-## Run NornicDB Locally
+## 🚀 Option 1: Docker (Recommended)
 
-### Option 1: Docker
-
-This is the fastest way to get a working local instance.
+### Apple Silicon (Mac)
 
 ```bash
-# Apple Silicon / arm64
 docker run -d \
   --name nornicdb \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
   timothyswt/nornicdb-arm64-metal-bge:latest
+```
 
-# x86_64 / CPU-only
+### NVIDIA GPU (Linux)
+
+```bash
+docker run -d \
+  --name nornicdb \
+  --gpus all \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-amd64-cuda-bge:latest
+```
+
+### CPU Only (Windows/Linux)
+
+```bash
 docker run -d \
   --name nornicdb \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cpu-bge:latest
+  timothyswt/nornicdb-amd64-cpu:latest
 ```
 
-Open `http://localhost:7474` for the admin UI.
-
-### Option 2: Run From Source
+## ✅ Verify Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/orneryd/nornicdb.git
-cd nornicdb
+# Check container is running
+docker ps
 
-# Build the CLI
-make build
-
-# Start the server
-./nornicdb serve
-```
-
-Run with a custom data directory or ports when needed:
-
-```bash
-./nornicdb serve \
-  --data-dir ./mydata \
-  --bolt-port 7688 \
-  --http-port 7475
-```
-
-## Verify The Server
-
-```bash
+# Test HTTP API
 curl http://localhost:7474/health
+
+# Test with a Neo4j-compatible Cypher HTTP request
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"CREATE (n:Person {name: \"Alice\"}) RETURN n"}]}'
 ```
 
-Expected result:
+## 🔗 Access NornicDB
 
-```json
-{ "status": "ok" }
-```
+- **HTTP API:** http://localhost:7474
+- **Bolt Protocol:** bolt://localhost:7687
+- **Health Check:** http://localhost:7474/health
 
-## Default Local Ports
+## 🧪 Try Your First Query
 
-- Bolt: `7687`
-- HTTP/UI: `7474`
-- Default data directory: `./data` when running from source
-- Default database: `nornic`
-
-## Run Your First Query
-
-### Browser UI
-
-1. Open `http://localhost:7474`
-2. Run:
-
-```cypher
-CREATE (n:Person {name: 'Alice'}) RETURN n;
-```
-
-Then verify it:
-
-```cypher
-MATCH (n:Person) RETURN n.name;
-```
-
-### Neo4j-Compatible Driver
-
-Python example:
-
-```python
-from neo4j import GraphDatabase
-
-driver = GraphDatabase.driver("bolt://localhost:7687")
-with driver.session() as session:
-    result = session.run("CREATE (n:Person {name: 'Alice'}) RETURN n.name AS name")
-    print(result.single()["name"])
-```
-
-Go example:
-
-```go
-import "github.com/neo4j/neo4j-go-driver/v5/neo4j"
-
-driver, err := neo4j.NewDriver("bolt://localhost:7687", neo4j.NoAuth())
-if err != nil {
-    panic(err)
-}
-defer driver.Close(ctx)
-```
-
-## Enable Semantic Search
-
-Embedding generation is disabled by default in current releases. If you want NornicDB to generate embeddings automatically for semantic and hybrid search, enable it explicitly.
+NornicDB's Cypher-over-HTTP flow follows the Neo4j transaction endpoint shape.
 
 ```bash
-./nornicdb serve --embedding-enabled
+# Create a node
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"CREATE (n:Person {name: \"Alice\", age: 30}) RETURN n"}]}'
+
+# Query nodes
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"MATCH (n:Person) RETURN n.name, n.age"}]}'
+
+# Create a relationship in one request
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"MERGE (a:Person {name: \"Alice\"}) MERGE (b:Person {name: \"Bob\"}) MERGE (a)-[:KNOWS]->(b) RETURN a, b"}]}'
 ```
 
-Or with Docker:
+## 🧠 Enable Semantic Search (Optional)
+
+For embedding-powered search:
+
+```bash
+# Stop current container
+docker stop nornicdb
+docker rm nornicdb
+
+# Start with Ollama for embeddings
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  -e NORNICDB_EMBEDDING_ENABLED=true \
+  -e NORNICDB_EMBEDDING_PROVIDER=ollama \
+  -e NORNICDB_EMBEDDING_MODEL=mxbai-embed-large \
+  timothyswt/nornicdb-arm64-metal-bge:latest
+
+# Or use docker-compose with Ollama
+cat > docker-compose.yml << EOF
+version: '3.8'
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  nornicdb:
+    image: timothyswt/nornicdb-arm64-metal-bge:latest
+    depends_on:
+      - ollama
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - nornicdb-data:/data
+    environment:
+      - NORNICDB_EMBEDDING_ENABLED=true
+      - NORNICDB_EMBEDDING_PROVIDER=ollama
+      - NORNICDB_EMBEDDING_URL=http://ollama:11434
+      - NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+
+volumes:
+  ollama-data:
+  nornicdb-data:
+EOF
+
+docker-compose up -d
+```
+
+## 🔧 Common CLI Commands
+
+```bash
+# View logs
+docker logs nornicdb
+
+# Follow logs
+docker logs -f nornicdb
+
+# Access container shell
+docker exec -it nornicdb sh
+
+# Stop container
+docker stop nornicdb
+
+# Start container
+docker start nornicdb
+
+# Remove container
+docker rm nornicdb
+
+# Backup data
+docker run --rm \
+  -v nornicdb-data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/nornicdb-backup-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+## 🧪 Testing
+
+```bash
+# Run basic functionality tests
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"RETURN 1 as test"}]}'
+
+# Test Bolt connection (requires nc command)
+nc -z localhost 7687 && echo "Bolt port open" || echo "Bolt port closed"
+
+# Performance test
+time curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"MATCH (n) RETURN count(n)"}]}'
+```
+
+## 🛑 Stopping NornicDB
+
+```bash
+# Graceful stop
+docker stop nornicdb
+
+# Remove container (keeps data)
+docker rm nornicdb
+
+# Remove data volume (deletes all data)
+docker volume rm nornicdb-data
+```
+
+## 🔧 Troubleshooting
+
+### Container Won't Start
+
+```bash
+# Check logs
+docker logs nornicdb
+
+# Check if ports are available
+lsof -i :7474
+lsof -i :7687
+
+# Check Docker resources
+docker system df
+```
+
+### Connection Issues
+
+```bash
+# Verify container is running
+docker ps
+
+# Check network connectivity
+docker network ls
+docker network inspect bridge
+
+# Test from inside container
+docker exec -it nornicdb curl http://localhost:7474/health
+```
+
+### GPU Not Working
+
+```bash
+# Check GPU availability (NVIDIA)
+docker run --rm --gpus all nvidia/cuda:11.8-base-ubuntu20.04 nvidia-smi
+
+# Check Metal support (macOS)
+docker run --rm timothyswt/nornicdb-arm64-metal-bge:latest \
+  /bin/sh -c "system_profiler SPDisplaysDataType | grep Metal"
+```
+
+### Out of Memory
+
+NornicDB uses ~1GB RAM by default. Enable low memory mode:
 
 ```bash
 docker run -d \
   --name nornicdb \
   -p 7474:7474 \
   -p 7687:7687 \
-  -e NORNICDB_EMBEDDING_ENABLED=true \
   -v nornicdb-data:/data \
+  -e NORNICDB_LOW_MEMORY=true \
   timothyswt/nornicdb-arm64-metal-bge:latest
 ```
 
-See [Vector Search](../user-guides/vector-search.md) and [Hybrid Search](../user-guides/hybrid-search.md) for search behavior and configuration.
+## ⏭️ Next Steps
 
-## Common CLI Commands
+- **[Docker Deployment Guide](./docker-deployment.md)** - Production deployment with Docker
+- **[Operations Guide](../operations/README.md)** - Production operations and monitoring
+- **[Cypher Query Language](../user-guides/cypher-queries.md)** - Learn the query language
+- **[API Documentation](../api-reference/README.md)** - REST and compatibility reference
+- **[Performance Tuning](../performance/README.md)** - Optimize your setup
 
-```bash
-# Version and help
-./nornicdb version
-./nornicdb --help
+---
 
-# Initialize a data directory
-./nornicdb init --data-dir ./data
-
-# Start the server
-./nornicdb serve
-
-# Interactive shell
-./nornicdb shell
-```
-
-## Run Tests
-
-NornicDB uses Go tooling for tests, not npm scripts.
-
-```bash
-# Full test suite
-go test ./...
-
-# Focused packages
-go test ./pkg/cypher/...
-go test ./pkg/storage/...
-go test ./pkg/bolt/...
-
-# Coverage
-go test ./... -coverprofile=coverage.out
-go tool cover -func=coverage.out
-```
-
-## Stop The Server
-
-- Docker: `docker stop nornicdb`
-- Foreground process: `Ctrl+C`
-
-## Troubleshooting
-
-### Port Already In Use
-
-```bash
-lsof -i :7687
-lsof -i :7474
-```
-
-Then either stop the conflicting process or run NornicDB on different ports:
-
-```bash
-./nornicdb serve --bolt-port 7688 --http-port 7475
-```
-
-### Build Errors
-
-```bash
-go clean
-go build -o nornicdb ./cmd/nornicdb
-```
-
-### Connection Refused
-
-- Ensure the server is running with `./nornicdb serve` or Docker
-- Check that you are connecting to the correct Bolt and HTTP ports
-- Verify that `curl http://localhost:7474/health` succeeds
-
-## Next Steps
-
-- [Installation](installation.md)
-- [First Queries](first-queries.md)
-- [Vector Search](../user-guides/vector-search.md)
-- [Hybrid Search](../user-guides/hybrid-search.md)
-- [Feature Parity](../neo4j-migration/feature-parity.md)
+**Need help?** → **[Troubleshooting Guide](../operations/troubleshooting.md)**  
+**Production ready?** → **[Docker Deployment Guide](./docker-deployment.md)**

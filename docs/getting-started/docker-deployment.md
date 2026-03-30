@@ -14,18 +14,34 @@
 ### Pull and Run
 
 ```bash
-# Pull the latest image
-docker pull timothyswt/nornicdb-arm64-metal:latest
-
-# Run with default settings
+# Apple Silicon (recommended for most users)
 docker run -d \
   --name nornicdb \
   -p 7474:7474 \
   -p 7687:7687 \
-  timothyswt/nornicdb-arm64-metal:latest
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-arm64-metal-bge:latest
+
+# NVIDIA GPU (Linux)
+docker run -d \
+  --name nornicdb \
+  --gpus all \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-amd64-cuda-bge:latest
+
+# CPU only (Windows/Linux)
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-amd64-cpu:latest
 ```
 
 Access NornicDB at:
+
 - **HTTP API:** http://localhost:7474
 - **Bolt Protocol:** bolt://localhost:7687
 
@@ -41,7 +57,7 @@ docker run -d \
   -v nornicdb-data:/data \
   -v nornicdb-logs:/logs \
   --restart unless-stopped \
-  timothyswt/nornicdb-arm64-metal:latest
+  timothyswt/nornicdb-arm64-metal-bge:latest
 ```
 
 ### With Environment Variables
@@ -52,15 +68,15 @@ docker run -d \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
-  -e NORNICDB_AUTH_ENABLED=true \
-  -e NORNICDB_AUTH_USERNAME=admin \
-  -e NORNICDB_AUTH_PASSWORD=secure_password \
-  -e NORNICDB_GPU_ENABLED=true \
+  -e NORNICDB_LOG_LEVEL=info \
+  -e NORNICDB_LOW_MEMORY=true \
   -e NORNICDB_EMBEDDING_PROVIDER=ollama \
   -e NORNICDB_EMBEDDING_MODEL=mxbai-embed-large \
   --restart unless-stopped \
-  timothyswt/nornicdb-arm64-metal:latest
+  timothyswt/nornicdb-arm64-metal-bge:latest
 ```
+
+For the full supported environment-variable surface, use the canonical [Environment Variables Reference](../operations/environment-variables.md).
 
 ## 🐳 Docker Compose
 
@@ -69,26 +85,21 @@ docker run -d \
 Create `docker-compose.yml`:
 
 ```yaml
-version: '3.8'
+version: "3.8"
 
 services:
   nornicdb:
-    image: timothyswt/nornicdb-arm64-metal:latest
+    image: timothyswt/nornicdb-arm64-metal-bge:latest
     container_name: nornicdb
     ports:
-      - "7474:7474"  # HTTP API
-      - "7687:7687"  # Bolt protocol
+      - "7474:7474" # HTTP API
+      - "7687:7687" # Bolt protocol
     volumes:
       - nornicdb-data:/data
       - nornicdb-logs:/logs
-    environment:
-      - NORNICDB_AUTH_ENABLED=true
-      - NORNICDB_AUTH_USERNAME=admin
-      - NORNICDB_AUTH_PASSWORD=${NORNICDB_PASSWORD}
-      - NORNICDB_GPU_ENABLED=true
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7474/"]
+      test: ["CMD", "curl", "-f", "http://localhost:7474/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -102,14 +113,13 @@ volumes:
 Start with:
 
 ```bash
-export NORNICDB_PASSWORD=your_secure_password
 docker-compose up -d
 ```
 
 ### With Ollama for Embeddings
 
 ```yaml
-version: '3.8'
+version: "3.8"
 
 services:
   ollama:
@@ -122,32 +132,22 @@ services:
     restart: unless-stopped
 
   nornicdb:
-    image: timothyswt/nornicdb-arm64-metal:latest
+    image: timothyswt/nornicdb-arm64-metal-bge:latest
     container_name: nornicdb
     depends_on:
       - ollama
     ports:
       - "7474:7474"
       - "7687:7687"
-      - "6334:6334"  # Qdrant gRPC (optional)
+      - "6334:6334" # Qdrant gRPC (optional)
     volumes:
       - nornicdb-data:/data
       - nornicdb-logs:/logs
-      # Optional: mount a YAML config file and point NornicDB at it
-      # - ./nornicdb.yaml:/config/nornicdb.yaml:ro
     environment:
-      - NORNICDB_AUTH_ENABLED=true
-      - NORNICDB_AUTH_USERNAME=admin
-      - NORNICDB_AUTH_PASSWORD=${NORNICDB_PASSWORD}
-      - NORNICDB_GPU_ENABLED=true
       - NORNICDB_EMBEDDING_PROVIDER=ollama
       - NORNICDB_EMBEDDING_URL=http://ollama:11434
       - NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
-      # Enable semantic search (embedding generation). Disabled by default in current releases.
       - NORNICDB_EMBEDDING_ENABLED=true
-      # If using a mounted config file:
-      # - NORNICDB_CONFIG=/config/nornicdb.yaml
-      # Qdrant gRPC endpoint (optional, disabled by default)
       - NORNICDB_QDRANT_GRPC_ENABLED=true
       - NORNICDB_QDRANT_GRPC_LISTEN_ADDR=:6334
     restart: unless-stopped
@@ -160,31 +160,18 @@ volumes:
 
 ## ⚙️ Configuration
 
-### Environment Variables
+Use the canonical operational docs for supported settings instead of a shortened deployment-only table:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NORNICDB_AUTH_ENABLED` | `false` | Enable authentication |
-| `NORNICDB_AUTH_USERNAME` | `admin` | Admin username |
-| `NORNICDB_AUTH_PASSWORD` | - | Admin password (required if auth enabled) |
-| `NORNICDB_GPU_ENABLED` | `true` | Enable GPU acceleration |
-| `NORNICDB_LOW_MEMORY` | `false` | Enable low memory mode (~50MB vs ~1GB RAM) |
-| `NORNICDB_EMBEDDING_PROVIDER` | `ollama` | Embedding provider (ollama/openai/local) |
-| `NORNICDB_EMBEDDING_URL` | `http://localhost:11434` | Ollama URL |
-| `NORNICDB_EMBEDDING_MODEL` | `mxbai-embed-large` | Embedding model |
-| `NORNICDB_EMBEDDING_ENABLED` | `false` | Enable embedding generation (semantic search) |
-| `NORNICDB_OPENAI_API_KEY` | - | OpenAI API key (if using OpenAI) |
-| `NORNICDB_QDRANT_GRPC_ENABLED` | `false` | Enable Qdrant-compatible gRPC endpoint |
-| `NORNICDB_LOG_LEVEL` | `info` | Log level (debug/info/warn/error) |
-| `NORNICDB_MAX_MEMORY` | `4GB` | Maximum memory usage |
-| `NORNICDB_CACHE_SIZE` | `1000` | Query cache size |
+- [Environment Variables Reference](../operations/environment-variables.md)
+- [Configuration Guide](../operations/configuration.md)
+- [Docker Operations Guide](../operations/docker.md)
 
 ### Volume Mounts
 
-| Path | Purpose |
-|------|---------|
-| `/data` | Database storage (persistent) |
-| `/logs` | Application logs |
+| Path      | Purpose                        |
+| --------- | ------------------------------ |
+| `/data`   | Database storage (persistent)  |
+| `/logs`   | Application logs               |
 | `/config` | Configuration files (optional) |
 
 ## 🔒 Security Best Practices
@@ -201,17 +188,7 @@ export NORNICDB_PASSWORD=$(openssl rand -base64 32)
 
 ### 2. Enable TLS/HTTPS
 
-```yaml
-services:
-  nornicdb:
-    # ... other config
-    volumes:
-      - ./certs:/certs:ro
-    environment:
-      - NORNICDB_TLS_ENABLED=true
-      - NORNICDB_TLS_CERT=/certs/server.crt
-      - NORNICDB_TLS_KEY=/certs/server.key
-```
+Terminate TLS at a reverse proxy or ingress in front of the container, then pass traffic to NornicDB on its internal HTTP/Bolt ports. See the reverse-proxy and scaling patterns in [Scaling](../operations/scaling.md).
 
 ### 3. Restrict Network Access
 
@@ -227,22 +204,6 @@ services:
 networks:
   backend:
     internal: true
-```
-
-### 4. Use Docker Secrets
-
-```yaml
-services:
-  nornicdb:
-    # ... other config
-    secrets:
-      - nornicdb_password
-    environment:
-      - NORNICDB_AUTH_PASSWORD_FILE=/run/secrets/nornicdb_password
-
-secrets:
-  nornicdb_password:
-    file: ./secrets/password.txt
 ```
 
 ## 📊 Monitoring
@@ -265,16 +226,7 @@ docker stats nornicdb
 
 ### Prometheus Metrics
 
-```yaml
-services:
-  nornicdb:
-    # ... other config
-    environment:
-      - NORNICDB_METRICS_ENABLED=true
-      - NORNICDB_METRICS_PORT=9090
-    ports:
-      - "9090:9090"  # Metrics endpoint
-```
+For metrics exposure, scrape the supported endpoints described in [API Reference](../api-reference/OPENAPI.md) and the monitoring guidance in [Operations](../operations/README.md). Keep deployment docs focused on container topology and leave runtime observability settings to the canonical operations pages.
 
 ## 🔄 Backup & Restore
 
@@ -310,62 +262,6 @@ docker run --rm \
 docker start nornicdb
 ```
 
-## 🚀 Scaling
-
-### Horizontal Scaling (Read Replicas)
-
-```yaml
-version: '3.8'
-
-services:
-  nornicdb-primary:
-    image: timothyswt/nornicdb-arm64-metal:latest
-    # ... primary config
-    environment:
-      - NORNICDB_ROLE=primary
-
-  nornicdb-replica-1:
-    image: timothyswt/nornicdb-arm64-metal:latest
-    # ... replica config
-    environment:
-      - NORNICDB_ROLE=replica
-      - NORNICDB_PRIMARY_URL=http://nornicdb-primary:7474
-
-  nornicdb-replica-2:
-    image: timothyswt/nornicdb-arm64-metal:latest
-    # ... replica config
-    environment:
-      - NORNICDB_ROLE=replica
-      - NORNICDB_PRIMARY_URL=http://nornicdb-primary:7474
-
-  load-balancer:
-    image: nginx:alpine
-    ports:
-      - "7474:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - nornicdb-primary
-      - nornicdb-replica-1
-      - nornicdb-replica-2
-```
-
-### Resource Limits
-
-```yaml
-services:
-  nornicdb:
-    # ... other config
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '2'
-          memory: 4G
-```
-
 ## 🐛 Troubleshooting
 
 ### Container Won't Start
@@ -387,7 +283,7 @@ docker run ...
 
 ```bash
 # Check GPU availability
-docker run --rm timothyswt/nornicdb-arm64-metal:latest \
+docker run --rm timothyswt/nornicdb-arm64-metal-bge:latest \
   /bin/sh -c "ls -la /dev/dri || echo 'No GPU devices found'"
 
 # Enable GPU access (Linux)
@@ -406,7 +302,7 @@ NornicDB's default high-performance mode uses ~1GB RAM. Combined with embedding 
 services:
   nornicdb:
     environment:
-      - NORNICDB_LOW_MEMORY=true  # Reduces RAM to ~50MB
+      - NORNICDB_LOW_MEMORY=true # Reduces RAM to ~50MB
       - GOGC=100
 ```
 
@@ -424,73 +320,15 @@ services:
 
 See **[Low Memory Mode Guide](../operations/low-memory-mode.md)** for details.
 
-### Data Corruption
-
-```bash
-# Stop container
-docker stop nornicdb
-
-# Restore from backup
-# (see Backup & Restore section)
-
-# Or start fresh
-docker volume rm nornicdb-data
-docker start nornicdb
-```
-
-## 📚 Advanced Configuration
-
-### Custom Configuration File
-
-Create `nornicdb.yaml`:
-
-```yaml
-server:
-  port: 7474
-  bolt_port: 7687
-  
-auth:
-  enabled: true
-  jwt_secret: "your-secret-key"
-  
-gpu:
-  enabled: true
-  backend: metal
-  
-embedding:
-  provider: ollama
-  url: http://ollama:11434
-  model: mxbai-embed-large
-  cache_size: 10000
-  
-storage:
-  path: /data
-  max_size: 100GB
-  
-performance:
-  query_cache_size: 1000
-  max_connections: 100
-```
-
-Mount in Docker:
-
-```yaml
-services:
-  nornicdb:
-    # ... other config
-    volumes:
-      - ./nornicdb.yaml:/config/nornicdb.yaml:ro
-    environment:
-      - NORNICDB_CONFIG=/config/nornicdb.yaml
-```
-
 ## ⏭️ Next Steps
 
-- **[Operations Guide](../operations/)** - Monitoring, backup, scaling
+- **[Operations Guide](../operations/README.md)** - Monitoring, backup, scaling
+- **[Scaling Guide](../operations/scaling.md)** - Reverse proxies, capacity planning, and topology
+- **[Configuration Guide](../operations/configuration.md)** - Supported runtime and YAML settings
 - **[Performance Tuning](../performance/http-optimization-options.md)** - Optimize for your workload
-- **[Security Guide](../compliance/)** - GDPR, HIPAA, SOC2 compliance
+- **[Security Guide](../compliance/README.md)** - GDPR, HIPAA, SOC2 compliance
 
 ---
 
 **Need help?** → **[Troubleshooting Guide](../operations/troubleshooting.md)**  
-**Production ready?** → **[Operations Guide](../operations/)**
+**Production ready?** → **[Operations Guide](../operations/README.md)**

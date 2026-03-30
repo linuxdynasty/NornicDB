@@ -1,98 +1,200 @@
 # Docker Image Quick Reference
 
-This page represents the full startup command matrix for common deployment profiles.
+**Quick reference for NornicDB Docker images and common commands.**
 
-## Apple Silicon (M1/M2/M3)
+## 📦 Production Images
 
-```bash
-# bge-m3 embedding model + heimdall
-docker pull timothyswt/nornicdb-arm64-metal-bge-heimdall:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal-bge-heimdall
+| Platform | Architecture | GPU Support | Image | Command |
+|----------|-------------|-------------|-------|---------|
+| Apple Silicon | ARM64 | Metal | `timothyswt/nornicdb-arm64-metal-bge` | `docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-arm64-metal-bge:latest` |
+| NVIDIA GPU | AMD64 | CUDA | `timothyswt/nornicdb-amd64-cuda-bge` | `docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-amd64-cuda-bge:latest` |
+| CPU Only | AMD64 | None | `timothyswt/nornicdb-amd64-cpu` | `docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-amd64-cpu:latest` |
 
-# bge-m3 embedding model
-docker pull timothyswt/nornicdb-arm64-metal-bge:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal-bge
+## 🛠️ Development Images
 
-# BYOM
-docker pull timothyswt/nornicdb-arm64-metal:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal
+| Platform | Architecture | Features | Image | Command |
+|----------|-------------|----------|-------|---------|
+| Apple Silicon | ARM64 | Metal + Heimdall AI | `timothyswt/nornicdb-arm64-metal-bge-heimdall` | `docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-arm64-metal-bge-heimdall:latest` |
+| NVIDIA GPU | AMD64 | CUDA + Heimdall AI | `timothyswt/nornicdb-amd64-cuda-bge-heimdall` | `docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest` |
 
-# BYOM + no UI
-docker pull timothyswt/nornicdb-arm64-metal-headless:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-headless
-```
+## 🚀 Quick Start Commands
 
-## NVIDIA GPU (Windows/Linux)
+### Basic Setup
 
 ```bash
-# bge-m3 embedding model + heimdall
-docker pull timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda-bge-heimdall
+# Apple Silicon (Mac)
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-arm64-metal-bge:latest
 
-# bge-m3 embedding model
-docker pull timothyswt/nornicdb-amd64-cuda-bge:latest
-docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda-bge
+# NVIDIA GPU (Linux)
+docker run -d \
+  --name nornicdb \
+  --gpus all \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-amd64-cuda-bge:latest
 
-# BYOM
-docker pull timothyswt/nornicdb-amd64-cuda:latest
-docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda
+# CPU Only (Windows/Linux)
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-amd64-cpu:latest
 ```
 
-## CPU Only (Windows/Linux)
+### With Authentication
+
+Authentication and access-control settings are documented centrally in the [Environment Variables Reference](../operations/environment-variables.md). Use this page for image selection and container commands, and use the operations docs for the supported auth configuration surface.
+
+### With Semantic Search
 
 ```bash
-# BYOM
-docker pull timothyswt/nornicdb-amd64-cpu:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cpu
-
-# BYOM + no UI
-docker pull timothyswt/nornicdb-amd64-cpu-headless:latest
-docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cpu-headless
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  -e NORNICDB_EMBEDDING_ENABLED=true \
+  -e NORNICDB_EMBEDDING_PROVIDER=ollama \
+  -e NORNICDB_EMBEDDING_MODEL=mxbai-embed-large \
+  timothyswt/nornicdb-arm64-metal-bge:latest
 ```
 
-## Vulkan (Linux)
+### Low Memory Mode
 
 ```bash
-docker pull timothyswt/nornicdb-amd64-vulkan:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan:latest
-
-docker pull timothyswt/nornicdb-amd64-vulkan-bge:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan-bge:latest
-
-docker pull timothyswt/nornicdb-amd64-vulkan-headless:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan-headless:latest
+docker run -d \
+  --name nornicdb \
+  -p 7474:7474 \
+  -p 7687:7687 \
+  -v nornicdb-data:/data \
+  -e NORNICDB_LOW_MEMORY=true \
+  timothyswt/nornicdb-arm64-metal-bge:latest
 ```
 
-## Build Prerequisites
+## 🔧 Common Operations
 
-- Go 1.26 (for builds and cross-compilation)
-- Docker (for image builds)
-- curl (for model downloads)
-- GNU make
-- For local GGUF embeddings: working `llama.cpp` build (`scripts/build-llama.sh`)
-- For CUDA builds on Linux/Windows: NVIDIA drivers + CUDA Toolkit (12.x recommended)
-- For Vulkan builds on Linux: Vulkan runtime + GPU drivers
-- On macOS (Apple Silicon): Docker + `--platform linux/arm64` for arm64 images
-- Optional: `gh` CLI for GitHub release workflows
+### Container Management
 
-Model files:
-- BGE: `models/bge-m3.gguf` (`make download-bge`)
-- Qwen: `models/qwen3-0.6b-instruct.gguf` (`make download-qwen`)
+```bash
+# View logs
+docker logs nornicdb
 
-## Common Make Flags
+# Follow logs
+docker logs -f nornicdb
 
-- Force no cache: `NO_CACHE=1`
-- Set registry (default `timothyswt`): `REGISTRY=yourdockerid`
-- Set tag version (default `latest`): `VERSION=1.0.6`
+# Stop container
+docker stop nornicdb
+
+# Start container
+docker start nornicdb
+
+# Remove container
+docker rm nornicdb
+
+# Access shell
+docker exec -it nornicdb sh
+```
+
+### Data Management
+
+```bash
+# Backup data
+docker run --rm \
+  -v nornicdb-data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/nornicdb-backup-$(date +%Y%m%d).tar.gz -C /data .
+
+# Restore data
+docker run --rm \
+  -v nornicdb-data:/data \
+  -v $(pwd):/backup \
+  alpine tar xzf /backup/nornicdb-backup-20251201.tar.gz -C /data
+
+# List volumes
+docker volume ls | grep nornicdb
+```
+
+### Health Checks
+
+```bash
+# Check container status
+docker ps
+
+# Test HTTP API
+curl -f http://localhost:7474/health
+
+# Test Bolt protocol
+nc -z localhost 7687
+
+# Test query
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{"statements":[{"statement":"RETURN 1 as test"}]}'
+```
+
+## 🏗️ Building Images
+
+### Prerequisites
+
+- Docker 20.10+
+- Make tool
+- Go 1.21+ (for building from source)
+
+### Build Commands
+
+```bash
+# Clone repository
+git clone https://github.com/timothyswt/nornicdb.git
+cd nornicdb
+
+# Build Apple Silicon image
+make build-arm64-metal-bge
+
+# Build NVIDIA GPU image
+make build-amd64-cuda-bge
+
+# Build CPU only image
+make build-amd64-cpu
+
+# Build with Heimdall AI
+make build-arm64-metal-bge-heimdall
+```
+
+### Custom Build
+
+```bash
+# Build without cache
+DOCKER_NO_CACHE=1 make build-arm64-metal-bge
+```
+
+## 🌐 Access Points
+
+| Service | Port | Protocol | URL |
+|---------|------|----------|-----|
+| HTTP API | 7474 | HTTP | http://localhost:7474 |
+| Bolt Protocol | 7687 | Bolt | bolt://localhost:7687 |
+| Health Check | 7474 | HTTP | http://localhost:7474/health |
+| Metrics (optional) | 9090 | HTTP | http://localhost:9090/metrics |
+
+## 🔒 Environment Variables
+
+Use the canonical [Environment Variables Reference](../operations/environment-variables.md) for supported settings and defaults. This quick reference intentionally stays focused on image choice, startup commands, and operational shortcuts.
+
+## 📚 Documentation Links
+
+- **[Docker Deployment Guide](./docker-deployment.md)** - Complete deployment guide
+- **[Operations Guide](../operations/README.md)** - Production operations
+- **[Docker Operations Guide](../operations/docker.md)** - Docker-specific operations
+- **[Troubleshooting Guide](../operations/troubleshooting.md)** - Common issues
+
+---
+
+**Need help?** → **[Troubleshooting Guide](../operations/troubleshooting.md)**  
+**Production deployment?** → **[Docker Deployment Guide](./docker-deployment.md)**
