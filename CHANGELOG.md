@@ -9,7 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.0.35] - 2026-03-27
+## [v1.0.36] "Gold on the Cieling" - 2026-03-30
+
+### Added
+
+- **Deterministic token-aware text chunking infrastructure**:
+  - added `pkg/textchunk` as a reusable deterministic chunk splitter driven by caller-supplied token counters instead of heuristic token estimation.
+  - added exact tokenizer-backed chunking support to the local GGUF/llama embedding path so local models can split oversized text using the real model vocabulary limits.
+
+### Changed
+
+- **Embedding and semantic-search query chunking architecture**:
+  - widened embedding/query interfaces to require provider-owned `ChunkText(...)` behavior so Cypher, HTTP search, MCP, Heimdall, gRPC, and DB-level query embedding all route chunking through the active embedder instead of a shared heuristic utility.
+  - added DB query-chunk helper paths for global and per-database embedders so query chunking stays aligned with the same model configuration used for query embeddings.
+
+- **Documentation, publishing, and quick-start guidance**:
+  - refreshed docs navigation, README and deployment/search/transaction guidance, and updated quick-start instructions to better match current runtime behavior.
+  - enabled and aligned GitHub Pages publishing behavior and corrected documentation link/navigation issues discovered during the doc refresh.
+
+- **Benchmarking and build maintenance**:
+  - updated benchmark assets and related build assumptions used during performance comparison work.
+  - refreshed release/build housekeeping associated with the current toolchain and packaging flow.
+
+### Fixed
+
+- **Tokenizer overflow handling for long embedding inputs**:
+  - fixed long-query and long-document embedding paths to stop relying on approximate token counting, preventing deterministic tokenizer overflows and repeated retry loops for text that exceeded the true model token cap.
+  - removed the old heuristic chunker entirely and migrated affected call sites and tests to deterministic chunking behavior.
+
+- **Bolt hot-path logging overhead**:
+  - removed unconditional success-path logging from the Bolt query hot path so normal successful `RUN` execution no longer pays avoidable logging overhead.
+  - preserved error-path timing/log visibility with regression coverage for the default-silent success behavior.
+
+- **Background worker write-back observability**:
+  - added auditing information for background workers that persist changes back to storage so asynchronous maintenance/update flows are easier to inspect operationally.
+
+### Tests
+
+- Added and updated regression coverage for:
+  - deterministic chunk splitting limits, overlap behavior, and embedder-owned chunking across Cypher, DB, MCP, Heimdall, server, gRPC, Bolt, and embed-cache test doubles
+  - tokenizer-aware long-query and long-document embedding behavior, including dimension-mismatch and chunk-cap branch coverage
+  - Bolt hot-path logging behavior so successful executions remain silent by default while failures still log
+
+### Technical Details
+
+- **Range covered**: `v1.0.35..HEAD`
+- **Commits in range**: 14 (non-merge)
+- **Repository delta**: 71 files changed, +2,889 / -2,472 lines
+- **Primary focus areas**: deterministic token-aware embedding chunking, Bolt hot-path overhead reduction, documentation/publishing updates, and release/benchmark maintenance.
+
+## [v1.0.35] "Clean Up Before She Comes" - 2026-03-27
 
 ### Changed
 
@@ -53,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Repository delta**: 44 files changed, +1,635 / -1,984 lines
 - **Primary focus areas**: dependency roll-forwards, llama.cpp packaging/runtime compatibility, and release engineering maintenance.
 
-## [v1.0.34] - 2026-03-25
+## [v1.0.34] "Hello, Operator" - 2026-03-25
 
 ### Added
 
