@@ -63,6 +63,13 @@ It is built for knowledge systems, agent memory, Graph-RAG, and canonical truth 
 - **Hardware-accelerated execution**: Metal/CUDA/Vulkan pathways for high-throughput graph + semantic workloads.
 - **Operational flexibility**: full images (models included), BYOM images, and headless API-only deployments.
 
+## Production Deployment Patterns
+
+NornicDB is currently in production at a Fortune 100 company (awaiting legal approval to say who). The current deployment patterns are not theoretical migration slides; they are active stack consolidation projects.
+
+- **Parallel workload systems**: replacing a Neo4j + Qdrant + OpenAI stack with a single Docker deployment to manage and track tasks and dependencies of LLM swarms and automated graph-rag retreival pipleines.
+- **LLM translation quality systems**: replacing a Mongo Atlas plus Azure embeddings pipeline stack with a single Docker deployment to improve the quality of LLM-generated translations.
+
 ## Transactional Guarantees & Isolation
 
 NornicDB implements Snapshot Isolation at the storage layer. Each transaction is anchored to a specific MVCC version, so point reads, label scans, and snapshot-visible graph traversals resolve against the same committed view of the graph.
@@ -108,10 +115,12 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 
 | Workload       | Transport |   Throughput |    Mean |     P50 |     P95 |     P99 |     Max |
 | -------------- | --------- | -----------: | ------: | ------: | ------: | ------: | ------: |
-| Vector only    | HTTP      | 14,950 req/s |  663 us |  627 us |  969 us | 2.18 ms | 2.73 ms |
-| Vector only    | Bolt      |  8,802 req/s | 1.13 ms |  983 us | 1.77 ms | 4.50 ms | 5.15 ms |
+| Vector only    | HTTP      | 19,342 req/s |  511 us |  470 us |  750 us |  869 us | 1.02 ms |
+| Vector only    | Bolt      | 22,309 req/s |  444 us |  428 us |  629 us |  814 us |  968 us |
 | Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |
 | Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
+
+Bolt is now ahead on both throughput and tail latency for this vector-only path.
 
 **Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
 
