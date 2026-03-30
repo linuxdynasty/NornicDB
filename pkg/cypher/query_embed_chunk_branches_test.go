@@ -28,7 +28,7 @@ func TestEmbedQueryChunked_Branches_MaxChunkCapAndDimMismatch(t *testing.T) {
 			{0, 1},
 		},
 	}
-	emb, err := embedQueryChunked(ctx, dimMismatch, strings.Repeat("chunk ", 900))
+	emb, err := embedQueryChunked(ctx, dimMismatch, strings.Repeat("chunk ", 1400))
 	require.NoError(t, err)
 	require.Len(t, emb, 2)
 	// Average of [1,0] and [0,1], normalized.

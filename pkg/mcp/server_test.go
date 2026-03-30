@@ -13,7 +13,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 	"github.com/stretchr/testify/require"
 )
 
@@ -163,6 +163,14 @@ type mockEmbedder struct {
 	embedding        []float32
 }
 
+func countTestTokens(text string) (int, error) {
+	return len(strings.Fields(text)), nil
+}
+
+func chunkTestText(text string, maxTokens, overlap int) ([]string, error) {
+	return textchunk.ChunkByTokenCount(text, maxTokens, overlap, countTestTokens)
+}
+
 func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	m.embedCalled = true
 	if m.embedding != nil {
@@ -183,6 +191,9 @@ func (m *mockEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]floa
 
 func (m *mockEmbedder) Model() string   { return "mock-embed" }
 func (m *mockEmbedder) Dimensions() int { return 1024 }
+func (m *mockEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
 
 func TestSetEmbedder(t *testing.T) {
 	server := NewServer(nil, nil)
@@ -854,8 +865,12 @@ func TestHandleDiscover_ChunksLongQueryForEmbedding(t *testing.T) {
 		t.Errorf("expected query to be chunked into multiple parts, got %d", len(embedder.batchTexts))
 	}
 	for i, c := range embedder.batchTexts {
-		if util.CountApproxTokens(c) > 520 {
-			t.Errorf("expected chunk %d to be <= ~512 tokens, got %d", i, util.CountApproxTokens(c))
+		tokens, err := countTestTokens(c)
+		if err != nil {
+			t.Fatalf("countTestTokens: %v", err)
+		}
+		if tokens > 520 {
+			t.Errorf("expected chunk %d to be <= ~512 tokens, got %d", i, tokens)
 		}
 	}
 

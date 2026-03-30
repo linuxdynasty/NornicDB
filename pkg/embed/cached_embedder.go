@@ -208,6 +208,11 @@ func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	return results, nil
 }
 
+// ChunkText delegates chunking to the wrapped embedder.
+func (c *CachedEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return c.base.ChunkText(text, maxTokens, overlap)
+}
+
 // Dimensions returns the embedding vector dimension.
 func (c *CachedEmbedder) Dimensions() int {
 	return c.base.Dimensions()

@@ -335,6 +335,20 @@ func (e *LocalGGUFEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][
 	return results, firstErr
 }
 
+// ChunkText deterministically splits text using the model tokenizer so every
+// returned chunk fits within the provided token cap.
+func (e *LocalGGUFEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return nil, fmt.Errorf("embedder is closed")
+	}
+	if e.model == nil {
+		return nil, fmt.Errorf("embedding model is not loaded")
+	}
+	return e.model.ChunkText(text, maxTokens, overlap)
+}
+
 // Dimensions returns the embedding vector dimension.
 //
 // Common values:

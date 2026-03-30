@@ -53,6 +53,10 @@ func (f *fixedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]flo
 func (f *fixedEmbedder) Dimensions() int { return f.dims }
 func (f *fixedEmbedder) Model() string   { return "fixed" }
 
+func (f *fixedEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return []string{text}, nil
+}
+
 type providerBackedExecutor struct {
 	base *cypher.StorageExecutor
 }

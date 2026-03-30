@@ -519,6 +519,7 @@ import (
 	"unsafe"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 )
 
 // Model wraps a GGUF model for embedding generation.
@@ -755,6 +756,47 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 	// Normalize to unit vector for cosine similarity
 	vector.NormalizeInPlace(emb)
 	return emb, nil
+}
+
+// CountTokens returns the exact tokenizer count for text using the model's vocab.
+func (m *Model) CountTokens(text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.countTokensLocked(text)
+}
+
+// ChunkText deterministically splits text using the model tokenizer so every
+// returned chunk fits within the provided token cap.
+func (m *Model) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	if text == "" {
+		return []string{""}, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return textchunk.ChunkByTokenCount(text, maxTokens, overlap, m.countTokensLocked)
+}
+
+func (m *Model) countTokensLocked(text string) (int, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	var scratch C.int
+	n := C.tokenize(m.model, cText, C.int(len(text)), &scratch, 1)
+	if n >= 0 {
+		return int(n), nil
+	}
+	required := -int(n)
+	if required > 0 {
+		return required, nil
+	}
+	return 0, fmt.Errorf("tokenization failed for text of length %d", len(text))
 }
 
 // EmbedRaw returns the pooled output from the model without normalizing.

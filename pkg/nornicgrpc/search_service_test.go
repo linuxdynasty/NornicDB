@@ -12,11 +12,28 @@ import (
 	gen "github.com/orneryd/nornicdb/pkg/nornicgrpc/gen"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func countTestTokens(text string) (int, error) {
+	return len(strings.Fields(text)), nil
+}
+
+func mustCountTestTokens(text string) int {
+	tokens, err := countTestTokens(text)
+	if err != nil {
+		panic(err)
+	}
+	return tokens
+}
+
+func chunkTestText(ctx context.Context, text string) ([]string, error) {
+	_ = ctx
+	return textchunk.ChunkByTokenCount(text, 512, 50, countTestTokens)
+}
 
 type stubSearcher struct {
 	lastQuery     string
@@ -71,13 +88,13 @@ func (s *sequenceSearcher) Search(ctx context.Context, query string, embedding [
 }
 
 func TestNewService_DefaultsAndValidation(t *testing.T) {
-	svc, err := NewService(Config{}, nil, nil)
+	svc, err := NewService(Config{}, nil, nil, nil)
 	require.Error(t, err)
 	require.Nil(t, svc)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
 	searcher := &stubSearcher{}
-	svc, err = NewService(Config{RerankEnabled: true}, nil, searcher)
+	svc, err = NewService(Config{RerankEnabled: true}, nil, nil, searcher)
 	require.NoError(t, err)
 	require.Equal(t, "nornic", svc.defaultDatabase)
 	require.Equal(t, 1000, svc.maxLimit)
@@ -85,7 +102,7 @@ func TestNewService_DefaultsAndValidation(t *testing.T) {
 	require.Equal(t, searcher, svc.searcher)
 	require.Nil(t, svc.embedQuery)
 
-	svc, err = NewService(Config{DefaultDatabase: "tenant_a", MaxLimit: 25}, nil, searcher)
+	svc, err = NewService(Config{DefaultDatabase: "tenant_a", MaxLimit: 25}, nil, nil, searcher)
 	require.NoError(t, err)
 	require.Equal(t, "tenant_a", svc.defaultDatabase)
 	require.Equal(t, 25, svc.maxLimit)
@@ -93,7 +110,7 @@ func TestNewService_DefaultsAndValidation(t *testing.T) {
 
 func TestService_SearchText_ValidationAndFallback(t *testing.T) {
 	t.Run("rejects nil request and empty query", func(t *testing.T) {
-		svc, err := NewService(Config{}, nil, &stubSearcher{})
+		svc, err := NewService(Config{}, nil, nil, &stubSearcher{})
 		require.NoError(t, err)
 
 		_, err = svc.SearchText(context.Background(), nil)
@@ -116,7 +133,7 @@ func TestService_SearchText_ValidationAndFallback(t *testing.T) {
 		}
 		svc, err := NewService(Config{MaxLimit: 5, RerankEnabled: true}, func(ctx context.Context, query string) ([]float32, error) {
 			return nil, nil
-		}, searcher)
+		}, nil, searcher)
 		require.NoError(t, err)
 
 		minSim := float32(0.75)
@@ -143,7 +160,7 @@ func TestService_SearchText_ValidationAndFallback(t *testing.T) {
 		searcher := &stubSearcher{
 			resp: &search.SearchResponse{SearchMethod: "bm25"},
 		}
-		svc, err := NewService(Config{MaxLimit: 100}, nil, searcher)
+		svc, err := NewService(Config{MaxLimit: 100}, nil, nil, searcher)
 		require.NoError(t, err)
 
 		_, err = svc.SearchText(context.Background(), &gen.SearchTextRequest{Query: "default limit", Limit: 0})
@@ -156,7 +173,7 @@ func TestService_SearchText_ValidationAndFallback(t *testing.T) {
 func TestService_SearchText_ErrorHandling(t *testing.T) {
 	t.Run("returns internal error when fallback search fails", func(t *testing.T) {
 		searcher := &stubSearcher{err: fmt.Errorf("search backend failed")}
-		svc, err := NewService(Config{}, nil, searcher)
+		svc, err := NewService(Config{}, nil, nil, searcher)
 		require.NoError(t, err)
 
 		_, err = svc.SearchText(context.Background(), &gen.SearchTextRequest{Query: "broken"})
@@ -178,7 +195,7 @@ func TestService_SearchText_ErrorHandling(t *testing.T) {
 		}
 		svc, err := NewService(Config{}, func(ctx context.Context, query string) ([]float32, error) {
 			return []float32{0.1, 0.2}, nil
-		}, searcher)
+		}, nil, searcher)
 		require.NoError(t, err)
 
 		resp, err := svc.SearchText(context.Background(), &gen.SearchTextRequest{Query: "single chunk"})
@@ -220,6 +237,7 @@ func TestService_SearchText_EmbedsAndConvertsResults(t *testing.T) {
 			require.Equal(t, "database performance", query)
 			return []float32{0.1, 0.2}, nil
 		},
+		nil,
 		st,
 	)
 	require.NoError(t, err)
@@ -304,16 +322,17 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 			if len(query) > embedMax {
 				embedMax = len(query)
 			}
-			if tok := util.CountApproxTokens(query); tok > tokenMax {
+			if tok := mustCountTestTokens(query); tok > tokenMax {
 				tokenMax = tok
 			}
 			mu.Unlock()
 
-			if util.CountApproxTokens(query) > 512 {
-				return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", util.CountApproxTokens(query))
+			if mustCountTestTokens(query) > 512 {
+				return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", mustCountTestTokens(query))
 			}
 			return []float32{0.1, 0.2}, nil
 		},
+		chunkTestText,
 		st,
 	)
 	require.NoError(t, err)
@@ -327,7 +346,7 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 	// Keep marker tokens so the stub searcher can return deterministic per-chunk
 	// results for fusion assertions.
 	longQuery := base + "\nONE\n" + base + "\nTWO\n" + base + "\nTHREE\n" + base
-	require.Greater(t, util.CountApproxTokens(longQuery), 512)
+	require.Greater(t, mustCountTestTokens(longQuery), 512)
 
 	resp, err := svc.SearchText(context.Background(), &gen.SearchTextRequest{
 		Query: longQuery,
@@ -353,7 +372,7 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 	require.GreaterOrEqual(t, len(qs), 2, "expected multiple per-chunk searches")
 	maxQTokens := 0
 	for _, q := range qs {
-		tok := util.CountApproxTokens(q)
+		tok := mustCountTestTokens(q)
 		if tok > maxQTokens {
 			maxQTokens = tok
 		}

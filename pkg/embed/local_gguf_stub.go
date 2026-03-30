@@ -32,6 +32,11 @@ func (e *LocalGGUFEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][
 	return nil, errLocalLLMNotBuilt
 }
 
+// ChunkText returns an error (stub).
+func (e *LocalGGUFEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return nil, errLocalLLMNotBuilt
+}
+
 // Dimensions returns 0 (stub).
 func (e *LocalGGUFEmbedder) Dimensions() int {
 	return 0

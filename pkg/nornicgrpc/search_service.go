@@ -7,7 +7,6 @@ import (
 
 	gen "github.com/orneryd/nornicdb/pkg/nornicgrpc/gen"
 	"github.com/orneryd/nornicdb/pkg/search"
-	"github.com/orneryd/nornicdb/pkg/util"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -16,6 +15,9 @@ import (
 // EmbedQueryFunc embeds a query string into a vector.
 // Returning (nil, nil) is treated as "embeddings unavailable".
 type EmbedQueryFunc func(ctx context.Context, query string) ([]float32, error)
+
+// ChunkQueryFunc splits a query string into embedder-safe chunks.
+type ChunkQueryFunc func(ctx context.Context, query string) ([]string, error)
 
 // Searcher is the minimal interface this service needs from the search layer.
 type Searcher interface {
@@ -31,6 +33,7 @@ type Service struct {
 	rerankEnabled   bool
 
 	embedQuery EmbedQueryFunc
+	chunkQuery ChunkQueryFunc
 	searcher   Searcher
 }
 
@@ -42,7 +45,7 @@ type Config struct {
 }
 
 // NewService creates a NornicDB-native search service.
-func NewService(cfg Config, embedQuery EmbedQueryFunc, searcher Searcher) (*Service, error) {
+func NewService(cfg Config, embedQuery EmbedQueryFunc, chunkQuery ChunkQueryFunc, searcher Searcher) (*Service, error) {
 	if searcher == nil {
 		return nil, status.Error(codes.InvalidArgument, "searcher is required")
 	}
@@ -57,6 +60,7 @@ func NewService(cfg Config, embedQuery EmbedQueryFunc, searcher Searcher) (*Serv
 		maxLimit:        cfg.MaxLimit,
 		rerankEnabled:   cfg.RerankEnabled,
 		embedQuery:      embedQuery,
+		chunkQuery:      chunkQuery,
 		searcher:        searcher,
 	}, nil
 }
@@ -106,7 +110,13 @@ func (s *Service) SearchText(ctx context.Context, req *gen.SearchTextRequest) (*
 	)
 
 	if s.embedQuery != nil {
-		queryChunks := util.ChunkText(req.Query, queryChunkSize, queryChunkOverlap)
+		queryChunks := []string{req.Query}
+		if s.chunkQuery != nil {
+			queryChunks, err = s.chunkQuery(ctx, req.Query)
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "failed to chunk query: %v", err)
+			}
+		}
 		if len(queryChunks) > maxQueryChunks {
 			queryChunks = queryChunks[:maxQueryChunks]
 		}

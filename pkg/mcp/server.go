@@ -59,7 +59,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 const cypherMutationConflictRetries = 5
@@ -68,6 +67,7 @@ const cypherMutationConflictRetries = 5
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+	ChunkText(text string, maxTokens, overlap int) ([]string, error)
 	Model() string
 	Dimensions() int
 }
@@ -866,7 +866,10 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 					outerRRFK         = 60 // RRF constant for cross-chunk fusion
 				)
 
-				queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+				queryChunks, chunkErr := s.embed.ChunkText(query, queryChunkSize, queryChunkOverlap)
+				if chunkErr != nil {
+					return nil, chunkErr
+				}
 				if len(queryChunks) > maxQueryChunks {
 					queryChunks = queryChunks[:maxQueryChunks]
 				}

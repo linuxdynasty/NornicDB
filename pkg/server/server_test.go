@@ -28,8 +28,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 	"github.com/orneryd/nornicdb/pkg/txsession"
-	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,8 +198,18 @@ func loadLargeDocQuery(t *testing.T) string {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	query := string(data)
-	require.Greater(t, util.CountApproxTokens(query), 512)
+	tokens, err := countTestTokens(query)
+	require.NoError(t, err)
+	require.Greater(t, tokens, 512)
 	return query
+}
+
+func countTestTokens(text string) (int, error) {
+	return len(strings.Fields(text)), nil
+}
+
+func chunkTestText(text string, maxTokens, overlap int) ([]string, error) {
+	return textchunk.ChunkByTokenCount(text, maxTokens, overlap, countTestTokens)
 }
 
 type countingEmbedder struct {
@@ -220,7 +230,11 @@ func (e *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 	if len(text) > e.maxLen {
 		e.maxLen = len(text)
 	}
-	tokens := util.CountApproxTokens(text)
+	tokens, err := countTestTokens(text)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
 	if tokens > e.maxTokens {
 		e.maxTokens = tokens
 	}
@@ -256,6 +270,9 @@ func (e *countingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]
 
 func (e *countingEmbedder) Dimensions() int { return e.dims }
 func (e *countingEmbedder) Model() string   { return "counting-embedder" }
+func (e *countingEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
 
 // =============================================================================
 // Server Creation Tests

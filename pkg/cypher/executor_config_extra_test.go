@@ -17,6 +17,10 @@ func (testEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	return []float32{1, 2, 3}, nil
 }
 
+func (testEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 type testInferenceManager struct{}
 
 func (testInferenceManager) Generate(ctx context.Context, prompt string, params heimdall.GenerateParams) (string, error) {

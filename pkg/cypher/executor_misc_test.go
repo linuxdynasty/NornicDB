@@ -45,6 +45,10 @@ func (s *sequenceEmbedder) Embed(_ context.Context, _ string) ([]float32, error)
 	return []float32{1, 0}, nil
 }
 
+func (s *sequenceEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func TestCallDbLabelsWithError(t *testing.T) {
 	// This is tricky - MemoryEngine doesn't error on AllNodes
 	// Just verify normal behavior

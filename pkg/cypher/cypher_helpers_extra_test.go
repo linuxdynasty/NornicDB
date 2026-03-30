@@ -60,6 +60,10 @@ func (f *failingEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return nil, f.err
 }
 
+func (f *failingEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func TestCypherHelpers_DecodeMapAndAssignValue(t *testing.T) {
 	m := map[string]interface{}{
 		"name":       "alice",

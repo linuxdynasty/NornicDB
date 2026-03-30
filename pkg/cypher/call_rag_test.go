@@ -21,6 +21,10 @@ func (s *stubVectorEmbedder) Embed(ctx context.Context, text string) ([]float32,
 	return s.vec, nil
 }
 
+func (s *stubVectorEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func (s *stubInferenceManager) Generate(ctx context.Context, prompt string, params heimdall.GenerateParams) (string, error) {
 	return "generated: " + prompt, nil
 }

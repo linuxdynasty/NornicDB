@@ -377,6 +377,7 @@ type DatabaseInfoInterface interface {
 // This is a minimal interface to avoid import cycles with embed package.
 type QueryEmbedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+	ChunkText(text string, maxTokens, overlap int) ([]string, error)
 }
 
 // InferenceManager is the minimal LLM contract used by Cypher db.infer.

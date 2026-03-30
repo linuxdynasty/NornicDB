@@ -75,6 +75,9 @@ type Embedder interface {
 	// EmbedBatch generates embeddings for multiple texts
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
 
+	// ChunkText splits text into provider-appropriate chunks for embedding.
+	ChunkText(text string, maxTokens, overlap int) ([]string, error)
+
 	// Dimensions returns the embedding vector dimension
 	Dimensions() int
 
@@ -455,6 +458,10 @@ func (e *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	return results, nil
 }
 
+func (e *OllamaEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return []string{text}, nil
+}
+
 // Dimensions returns the expected embedding dimensions.
 func (e *OllamaEmbedder) Dimensions() int {
 	return e.config.Dimensions
@@ -762,6 +769,10 @@ func (e *OpenAIEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	}
 
 	return results, nil
+}
+
+func (e *OpenAIEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return []string{text}, nil
 }
 
 // Dimensions returns the expected embedding dimensions.

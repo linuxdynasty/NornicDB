@@ -5,13 +5,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/orneryd/nornicdb/pkg/util"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 	"github.com/stretchr/testify/require"
 )
+
+func countTestTokens(text string) (int, error) {
+	return len(strings.Fields(text)), nil
+}
+
+func chunkTestText(text string, maxTokens, overlap int) ([]string, error) {
+	return textchunk.ChunkByTokenCount(text, maxTokens, overlap, countTestTokens)
+}
 
 type stubQueryDB struct{}
 
@@ -42,7 +51,11 @@ func (e *testEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 	if len(text) > e.maxLen {
 		e.maxLen = len(text)
 	}
-	tokens := util.CountApproxTokens(text)
+	tokens, err := countTestTokens(text)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
 	if tokens > e.maxTokens {
 		e.maxTokens = tokens
 	}
@@ -53,6 +66,10 @@ func (e *testEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", tokens)
 	}
 	return []float32{0.1, 0.2}, nil
+}
+
+func (e *testEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
 }
 
 type testSearcher struct {
@@ -100,7 +117,9 @@ func loadLargeDocQuery(t *testing.T) string {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	query := string(data)
-	require.Greater(t, util.CountApproxTokens(query), 512)
+	tokens, err := countTestTokens(query)
+	require.NoError(t, err)
+	require.Greater(t, tokens, 512)
 	return query
 }
 
@@ -131,7 +150,8 @@ func TestQueryExecutor_Discover_ChunksLongQueriesForVectorSearch(t *testing.T) {
 
 	maxQTokens := 0
 	for _, q := range hybridCalls {
-		tok := util.CountApproxTokens(q)
+		tok, err := countTestTokens(q)
+		require.NoError(t, err)
 		if tok > maxQTokens {
 			maxQTokens = tok
 		}

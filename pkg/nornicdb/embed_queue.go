@@ -12,8 +12,11 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
 )
+
+type deterministicTextChunker interface {
+	ChunkText(text string, maxTokens, overlap int) ([]string, error)
+}
 
 // EmbedWorker manages async embedding generation using a pull-based model.
 // On each cycle, it scans for nodes without embeddings and processes them.
@@ -601,6 +604,12 @@ func (ew *EmbedWorker) processNextBatch() bool {
 
 	// Check if this node was recently processed (prevents re-processing before DB commit is visible)
 	ew.mu.Lock()
+	if ew.recentlyProcessed == nil {
+		ew.recentlyProcessed = make(map[string]time.Time)
+	}
+	if ew.loggedSkip == nil {
+		ew.loggedSkip = make(map[string]bool)
+	}
 	if lastProcessed, ok := ew.recentlyProcessed[string(node.ID)]; ok {
 		if time.Since(lastProcessed) < 30*time.Second {
 			if !ew.loggedSkip[string(node.ID)] {
@@ -641,8 +650,22 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	}
 	text := buildEmbeddingText(node.Properties, node.Labels, opts)
 
-	// Chunk text if needed (no limit on number of chunks per node).
-	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
+	chunker, ok := ew.embedder.(deterministicTextChunker)
+	if !ok {
+		fmt.Printf("⚠️  Failed to chunk node %s: embedder %T does not support deterministic token chunking\n", node.ID, ew.embedder)
+		ew.addNodeToPendingEmbeddings(node.ID)
+		ew.failed.Add(1)
+		return true
+	}
+
+	// Chunk text using the embedder's tokenizer so every chunk respects the true token cap.
+	chunks, err := chunker.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
+	if err != nil {
+		fmt.Printf("⚠️  Failed to chunk node %s: %v\n", node.ID, err)
+		ew.addNodeToPendingEmbeddings(node.ID)
+		ew.failed.Add(1)
+		return true
+	}
 
 	// Embed chunks in micro-batches to avoid oversized single requests for large files.
 	embeddings, err := ew.embedChunksInBatches(chunks, node.ID)
@@ -749,6 +772,9 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	ew.processed.Add(1)
 	// Track this node as recently processed to prevent re-processing before DB commit is visible
 	ew.mu.Lock()
+	if ew.recentlyProcessed == nil {
+		ew.recentlyProcessed = make(map[string]time.Time)
+	}
 	ew.recentlyProcessed[string(node.ID)] = time.Now()
 	ew.mu.Unlock()
 

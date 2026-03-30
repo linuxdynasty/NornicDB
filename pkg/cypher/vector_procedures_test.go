@@ -10,11 +10,19 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func countTestTokens(text string) (int, error) {
+	return len(strings.Fields(text)), nil
+}
+
+func chunkTestText(text string, maxTokens, overlap int) ([]string, error) {
+	return textchunk.ChunkByTokenCount(text, maxTokens, overlap, countTestTokens)
+}
 
 func TestCallDbIndexVectorCreateNodeIndex(t *testing.T) {
 	baseEngine := newTestMemoryEngine(t)
@@ -426,6 +434,10 @@ func (m *mockQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 	return m.embedding, nil
 }
 
+func (m *mockQueryEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 type countingQueryEmbedder struct {
 	embedding []float32
 	calls     int
@@ -434,6 +446,10 @@ type countingQueryEmbedder struct {
 func (m *countingQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	m.calls++
 	return m.embedding, nil
+}
+
+func (m *countingQueryEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
 }
 
 type failingOnLongQueryEmbedder struct {
@@ -449,7 +465,10 @@ func (m *failingOnLongQueryEmbedder) Embed(ctx context.Context, text string) ([]
 	if len(text) > m.maxLen {
 		m.maxLen = len(text)
 	}
-	tok := util.CountApproxTokens(text)
+	tok, err := countTestTokens(text)
+	if err != nil {
+		return nil, err
+	}
 	if tok > m.maxTokens {
 		m.maxTokens = tok
 	}
@@ -459,13 +478,19 @@ func (m *failingOnLongQueryEmbedder) Embed(ctx context.Context, text string) ([]
 	return m.embedding, nil
 }
 
+func (m *failingOnLongQueryEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func loadLargeDocQuery(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join("..", "..", "docs", "features", "gpu-acceleration.md")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	query := string(data)
-	require.Greater(t, util.CountApproxTokens(query), 512)
+	tokens, err := countTestTokens(query)
+	require.NoError(t, err)
+	require.Greater(t, tokens, 512)
 	return query
 }
 

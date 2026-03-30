@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
-	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // embedQueryChunked embeds a potentially long string query safely by chunking it
@@ -15,8 +14,8 @@ import (
 //   - CALL db.index.vector.queryNodes(..., "search text")
 //   - CALL db.index.vector.queryRelationships(..., "search text")
 //
-// The Cypher layer uses a minimal QueryEmbedder interface (Embed-only), so we
-// embed chunks sequentially.
+// The Cypher layer uses a minimal QueryEmbedder interface, so chunking and
+// sequential embedding stay provider-specific without importing embed.
 func embedQueryChunked(ctx context.Context, embedder QueryEmbedder, text string) ([]float32, error) {
 	if embedder == nil {
 		return nil, fmt.Errorf("no embedder configured")
@@ -28,7 +27,10 @@ func embedQueryChunked(ctx context.Context, embedder QueryEmbedder, text string)
 		maxQueryChunks    = 32
 	)
 
-	chunks := util.ChunkText(text, queryChunkSize, queryChunkOverlap)
+	chunks, err := embedder.ChunkText(text, queryChunkSize, queryChunkOverlap)
+	if err != nil {
+		return nil, err
+	}
 	if len(chunks) > maxQueryChunks {
 		chunks = chunks[:maxQueryChunks]
 	}

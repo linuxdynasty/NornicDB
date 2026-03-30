@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/embed"
-	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,15 +32,15 @@ func (e *chunkingTestEmbedder) Embed(ctx context.Context, text string) ([]float3
 	if len(text) > e.maxTextLen {
 		e.maxTextLen = len(text)
 	}
-	if tok := util.CountApproxTokens(text); tok > e.maxTokens {
+	if tok := mustCountTestTokens(text); tok > e.maxTokens {
 		e.maxTokens = tok
 	}
 	dims := e.dims
 	e.mu.Unlock()
 
 	// Simulate a tokenizer limit.
-	if util.CountApproxTokens(text) > 512 {
-		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", util.CountApproxTokens(text))
+	if mustCountTestTokens(text) > 512 {
+		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", mustCountTestTokens(text))
 	}
 	if dims <= 0 {
 		dims = 4
@@ -58,7 +57,7 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 		if len(t) > e.maxTextLen {
 			e.maxTextLen = len(t)
 		}
-		if tok := util.CountApproxTokens(t); tok > e.maxTokens {
+		if tok := mustCountTestTokens(t); tok > e.maxTokens {
 			e.maxTokens = tok
 		}
 	}
@@ -70,8 +69,8 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 	}
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
-		if util.CountApproxTokens(t) > 512 {
-			return nil, fmt.Errorf("chunk too long: tokens=%d", util.CountApproxTokens(t))
+		if mustCountTestTokens(t) > 512 {
+			return nil, fmt.Errorf("chunk too long: tokens=%d", mustCountTestTokens(t))
 		}
 		vec := make([]float32, dims)
 		vec[0] = 1
@@ -82,6 +81,9 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 
 func (e *chunkingTestEmbedder) Dimensions() int { return e.dims }
 func (e *chunkingTestEmbedder) Model() string   { return "chunking-test-embedder" }
+func (e *chunkingTestEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
 
 type scriptedBatchEmbedder struct {
 	embedVec  []float32
@@ -112,6 +114,9 @@ func (e *scriptedBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) 
 
 func (e *scriptedBatchEmbedder) Dimensions() int { return 0 }
 func (e *scriptedBatchEmbedder) Model() string   { return "scripted-batch" }
+func (e *scriptedBatchEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
 
 func loadLargeDocQuery(t *testing.T) string {
 	t.Helper()
@@ -119,7 +124,7 @@ func loadLargeDocQuery(t *testing.T) string {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	query := string(data)
-	require.Greater(t, util.CountApproxTokens(query), 512)
+	require.Greater(t, mustCountTestTokens(query), 512)
 	return query
 }
 
@@ -373,6 +378,9 @@ func (e *factoryTestEmbedder) EmbedBatch(ctx context.Context, texts []string) ([
 }
 func (e *factoryTestEmbedder) Dimensions() int { return e.dims }
 func (e *factoryTestEmbedder) Model() string   { return "factory-test" }
+func (e *factoryTestEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
 
 func TestDB_GetOrCreateEmbedderForDB_SingleFlightAndNoStatsBlocking(t *testing.T) {
 	fallback := &chunkingTestEmbedder{dims: 8}

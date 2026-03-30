@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +60,10 @@ func (m *mockEmbedder) Dimensions() int {
 	return m.dims
 }
 
+func (m *mockEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func (m *mockEmbedder) GetEmbedCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -104,6 +107,10 @@ func (m *recordingBatchEmbedder) Model() string {
 
 func (m *recordingBatchEmbedder) Dimensions() int {
 	return m.dims
+}
+
+func (m *recordingBatchEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
 }
 
 func (m *recordingBatchEmbedder) MaxBatchSize() int {
@@ -724,7 +731,8 @@ func TestBuildEmbeddingText_IncludeExclude(t *testing.T) {
 func TestChunkText(t *testing.T) {
 	t.Run("short_text_single_chunk", func(t *testing.T) {
 		text := "Short text"
-		chunks := util.ChunkText(text, 512, 50)
+		chunks, err := chunkTestText(text, 512, 50)
+		require.NoError(t, err)
 
 		assert.Len(t, chunks, 1)
 		assert.Equal(t, text, chunks[0])
@@ -737,19 +745,21 @@ func TestChunkText(t *testing.T) {
 			text += "This is sentence number " + string(rune('0'+i%10)) + ". "
 		}
 
-		chunks := util.ChunkText(text, 100, 20)
+		chunks, err := chunkTestText(text, 100, 20)
+		require.NoError(t, err)
 
 		assert.Greater(t, len(chunks), 1, "Should create multiple chunks")
 
 		// Verify each chunk is within token size limit (with small boundary tolerance)
 		for _, chunk := range chunks {
-			assert.LessOrEqual(t, util.CountApproxTokens(chunk), 110, "Chunk should be near token chunk size")
+			assert.LessOrEqual(t, mustCountTestTokens(chunk), 110, "Chunk should be near token chunk size")
 		}
 	})
 
 	t.Run("respects_overlap", func(t *testing.T) {
 		text := "Word1 Word2 Word3 Word4 Word5 Word6 Word7 Word8 Word9 Word10"
-		chunks := util.ChunkText(text, 30, 10)
+		chunks, err := chunkTestText(text, 30, 10)
+		require.NoError(t, err)
 
 		if len(chunks) >= 2 {
 			// Check that there's some overlap between consecutive chunks
@@ -875,9 +885,10 @@ func (a *Application) Stop(ctx context.Context) error {
 }
 `
 		// Use a smaller token size here to force multi-chunk behavior in test.
-		chunks := util.ChunkText(largeContent, 128, 16)
+		chunks, err := chunkTestText(largeContent, 128, 16)
+		require.NoError(t, err)
 
-		t.Logf("Large content: %d tokens, chunked into %d pieces", util.CountApproxTokens(largeContent), len(chunks))
+		t.Logf("Large content: %d tokens, chunked into %d pieces", mustCountTestTokens(largeContent), len(chunks))
 
 		assert.Greater(t, len(chunks), 1, "Large content should produce multiple chunks")
 		// No cap on chunks per node - number depends only on content length and chunk size
@@ -885,13 +896,13 @@ func (a *Application) Stop(ctx context.Context) error {
 		// Verify all content is preserved (approximately - overlap means some duplication)
 		totalChunkLength := 0
 		for i, chunk := range chunks {
-			totalChunkLength += util.CountApproxTokens(chunk)
-			t.Logf("  Chunk %d: %d tokens", i+1, util.CountApproxTokens(chunk))
+			totalChunkLength += mustCountTestTokens(chunk)
+			t.Logf("  Chunk %d: %d tokens", i+1, mustCountTestTokens(chunk))
 			assert.NotEmpty(t, chunk, "No empty chunks allowed")
 		}
 
 		// Total should be >= original (due to overlap) but not excessively more
-		assert.GreaterOrEqual(t, totalChunkLength, util.CountApproxTokens(largeContent)-20,
+		assert.GreaterOrEqual(t, totalChunkLength, mustCountTestTokens(largeContent)-20,
 			"Chunks should cover all content")
 	})
 
@@ -903,16 +914,17 @@ func (a *Application) Stop(ctx context.Context) error {
 		}
 		veryLargeContent := sb.String()
 
-		t.Logf("Very large content: %d tokens", util.CountApproxTokens(veryLargeContent))
+		t.Logf("Very large content: %d tokens", mustCountTestTokens(veryLargeContent))
 
-		chunks := util.ChunkText(veryLargeContent, 512, 50)
+		chunks, err := chunkTestText(veryLargeContent, 512, 50)
+		require.NoError(t, err)
 
 		t.Logf("Chunked into %d pieces", len(chunks))
 
 		// Verify no empty chunks and reasonable token sizes
 		for _, chunk := range chunks {
 			assert.NotEmpty(t, chunk)
-			assert.LessOrEqual(t, util.CountApproxTokens(chunk), 560, "Chunks should not exceed token budget by much")
+			assert.LessOrEqual(t, mustCountTestTokens(chunk), 560, "Chunks should not exceed token budget by much")
 		}
 
 		// Verify we can reconstruct approximately
@@ -1641,6 +1653,10 @@ func (e *emptyBatchEmbedder) Model() string { return "empty" }
 
 func (e *emptyBatchEmbedder) Dimensions() int { return e.dims }
 
+func (e *emptyBatchEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 type flakyBatchEmbedder struct {
 	mu         sync.Mutex
 	dims       int
@@ -1675,6 +1691,40 @@ func (f *flakyBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([]
 func (f *flakyBatchEmbedder) Model() string { return "flaky" }
 
 func (f *flakyBatchEmbedder) Dimensions() int { return f.dims }
+
+func (f *flakyBatchEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
+type deterministicChunkEmbedder struct {
+	mu         sync.Mutex
+	dims       int
+	chunks     []string
+	batchCalls [][]string
+}
+
+func (d *deterministicChunkEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return make([]float32, d.dims), nil
+}
+
+func (d *deterministicChunkEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.batchCalls = append(d.batchCalls, append([]string(nil), texts...))
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = make([]float32, d.dims)
+	}
+	return out, nil
+}
+
+func (d *deterministicChunkEmbedder) Model() string { return "deterministic" }
+
+func (d *deterministicChunkEmbedder) Dimensions() int { return d.dims }
+
+func (d *deterministicChunkEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return append([]string(nil), d.chunks...), nil
+}
 
 func (p *pendingAdderEngine) AddToPendingEmbeddings(id storage.NodeID) {
 	p.added = append(p.added, id)
@@ -1828,6 +1878,37 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.True(t, didWork)
 		require.Equal(t, int64(1), ew.failed.Load())
 		require.Equal(t, []storage.NodeID{"n1"}, qe.added)
+	})
+
+	t.Run("processNextBatch uses deterministic chunker from embedder", func(t *testing.T) {
+		base := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(base, "test")
+		node := &storage.Node{
+			ID:         storage.NodeID("n-deterministic"),
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"content": "hello world"},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		emb := &deterministicChunkEmbedder{dims: 3, chunks: []string{"chunk-one", "chunk-two"}}
+		qe := &queueBranchEngine{
+			Engine:   engine,
+			findNode: &storage.Node{ID: storage.NodeID("n-deterministic")},
+		}
+		ew := &EmbedWorker{
+			embedder: emb,
+			storage:  qe,
+			config:   &EmbedWorkerConfig{BatchDelay: time.Millisecond, MaxRetries: 1, ChunkSize: 8192, ChunkOverlap: 50},
+			ctx:      context.Background(),
+			trigger:  make(chan struct{}, 1),
+		}
+
+		didWork := ew.processNextBatch()
+		require.True(t, didWork)
+		require.Equal(t, int64(1), ew.processed.Load())
+		require.Len(t, emb.batchCalls, 1)
+		require.Equal(t, []string{"chunk-one", "chunk-two"}, emb.batchCalls[0])
 	})
 
 	t.Run("processNextBatch empty embedding is treated as failure", func(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // =============================================================================
@@ -403,7 +402,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		embedTimeout      = 8 * time.Second
 	)
 
-	queryChunks := util.ChunkText(req.Query, queryChunkSize, queryChunkOverlap)
+	queryChunks, err := s.db.ChunkQueryForDB(ctx, dbName, req.Query)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "failed to chunk query", ErrBadRequest)
+		return
+	}
 	if len(queryChunks) > maxQueryChunks {
 		queryChunks = queryChunks[:maxQueryChunks]
 	}

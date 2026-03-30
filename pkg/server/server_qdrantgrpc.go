@@ -103,6 +103,9 @@ func (s *Server) startQdrantGRPC() error {
 		func(ctx context.Context, query string) ([]float32, error) {
 			return s.db.EmbedQuery(ctx, query)
 		},
+		func(ctx context.Context, query string) ([]string, error) {
+			return s.db.ChunkQueryForDB(ctx, dbName, query)
+		},
 		searchSvc,
 	)
 	if err != nil {

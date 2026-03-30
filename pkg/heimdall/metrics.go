@@ -8,8 +8,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // ============================================================================
@@ -352,6 +350,7 @@ type NodeData struct {
 // Embedder generates embeddings for text.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+	ChunkText(text string, maxTokens, overlap int) ([]string, error)
 }
 
 // NewQueryExecutor creates a query executor with the given database.
@@ -407,7 +406,7 @@ func (e *QueryExecutor) Discover(ctx context.Context, query string, nodeTypes []
 	var err error
 
 	// Try vector search if embedder is available.
-	// For long queries, proactively chunk by length and fuse results across chunks.
+	// For long queries, chunk using the embedder's own chunking method and fuse results across chunks.
 	if e.embedder != nil {
 		const (
 			queryChunkSize    = 512
@@ -416,7 +415,10 @@ func (e *QueryExecutor) Discover(ctx context.Context, query string, nodeTypes []
 			outerRRFK         = 60
 		)
 
-		queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+		queryChunks, chunkErr := e.embedder.ChunkText(query, queryChunkSize, queryChunkOverlap)
+		if chunkErr != nil {
+			return nil, chunkErr
+		}
 		if len(queryChunks) > maxQueryChunks {
 			queryChunks = queryChunks[:maxQueryChunks]
 		}

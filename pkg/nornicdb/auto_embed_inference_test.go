@@ -42,6 +42,10 @@ func (e *staticTestEmbedder) EmbedBatch(ctx context.Context, texts []string) ([]
 func (e *staticTestEmbedder) Dimensions() int { return e.dims }
 func (e *staticTestEmbedder) Model() string   { return "static-test" }
 
+func (e *staticTestEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return chunkTestText(text, maxTokens, overlap)
+}
+
 func TestAutoTLP_ServerSideEmbeddingsTriggerInferenceOnEmbedded(t *testing.T) {
 	ctx := context.Background()
 

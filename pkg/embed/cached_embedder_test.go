@@ -33,6 +33,10 @@ func (m *mockEmbedder) Model() string    { return "mock" }
 func (m *mockEmbedder) Dimensions() int  { return 3 }
 func (m *mockEmbedder) CallCount() int64 { return atomic.LoadInt64(&m.calls) }
 
+func (m *mockEmbedder) ChunkText(text string, maxTokens, overlap int) ([]string, error) {
+	return []string{text}, nil
+}
+
 func TestCachedEmbedder_CacheHit(t *testing.T) {
 	mock := &mockEmbedder{}
 	cached := NewCachedEmbedder(mock, 100)

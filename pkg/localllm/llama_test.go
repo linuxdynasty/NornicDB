@@ -6,7 +6,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/textchunk"
 )
+
+func wordTokenCount(text string) (int, error) {
+	fields := strings.Fields(text)
+	return len(fields), nil
+}
 
 // skipOnConstrainedEnv skips tests in memory-constrained environments
 func skipOnConstrainedEnv(t testing.TB) {
@@ -148,6 +155,55 @@ func TestResolveGenerationContextAndBatch(t *testing.T) {
 				t.Fatalf("batch=%d want=%d", gotBatch, tt.wantBatch)
 			}
 		})
+	}
+}
+
+func TestChunkTextByTokenCount_DeterministicLimits(t *testing.T) {
+	text := strings.Join([]string{
+		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+	}, " ")
+
+	chunks, err := textchunk.ChunkByTokenCount(text, 4, 1, wordTokenCount)
+	if err != nil {
+		t.Fatalf("chunkTextByTokenCount failed: %v", err)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("expected multiple chunks, got %v", chunks)
+	}
+	for i, chunk := range chunks {
+		tok, err := wordTokenCount(chunk)
+		if err != nil {
+			t.Fatalf("count tokens for chunk %d: %v", i, err)
+		}
+		if tok > 4 {
+			t.Fatalf("chunk %d exceeds token cap: got %d tokens in %q", i, tok, chunk)
+		}
+	}
+	if chunks[0] != "one two three four" {
+		t.Fatalf("unexpected first chunk: %q", chunks[0])
+	}
+	if chunks[1] != "four five six seven" {
+		t.Fatalf("unexpected overlapped second chunk: %q", chunks[1])
+	}
+}
+
+func TestChunkTextByTokenCount_OverlapClamped(t *testing.T) {
+	text := "alpha beta gamma delta"
+	chunks, err := textchunk.ChunkByTokenCount(text, 2, 5, wordTokenCount)
+	if err != nil {
+		t.Fatalf("chunkTextByTokenCount failed: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks")
+	}
+	for i, chunk := range chunks {
+		tok, err := wordTokenCount(chunk)
+		if err != nil {
+			t.Fatalf("count tokens for chunk %d: %v", i, err)
+		}
+		if tok > 2 {
+			t.Fatalf("chunk %d exceeds clamped cap: got %d tokens in %q", i, tok, chunk)
+		}
 	}
 }
 

@@ -146,7 +146,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/storage/lifecycle"
-	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // Errors returned by DB operations.
@@ -1909,17 +1908,18 @@ func (db *DB) embedQueryWithEmbedder(ctx context.Context, emb embed.Embedder, qu
 	if emb == nil {
 		return nil, nil
 	}
-	const (
-		queryChunkSize    = 512
-		queryChunkOverlap = 50
-		maxQueryChunks    = 32
-	)
-	chunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
-	if len(chunks) > maxQueryChunks {
-		chunks = chunks[:maxQueryChunks]
+	chunks, err := db.chunkQueryWithEmbedder(ctx, emb, query)
+	if err != nil {
+		return nil, err
 	}
 	if len(chunks) <= 1 {
 		return emb.Embed(ctx, query)
+	}
+	const (
+		maxQueryChunks = 32
+	)
+	if len(chunks) > maxQueryChunks {
+		chunks = chunks[:maxQueryChunks]
 	}
 	embs, err := emb.EmbedBatch(ctx, chunks)
 	if len(embs) == 0 {
@@ -1959,6 +1959,25 @@ func (db *DB) embedQueryWithEmbedder(ctx context.Context, emb embed.Embedder, qu
 	return sum, nil
 }
 
+func (db *DB) chunkQueryWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]string, error) {
+	if emb == nil {
+		return nil, nil
+	}
+	const (
+		queryChunkSize    = 512
+		queryChunkOverlap = 50
+		maxQueryChunks    = 32
+	)
+	chunks, err := emb.ChunkText(query, queryChunkSize, queryChunkOverlap)
+	if err != nil {
+		return nil, err
+	}
+	if len(chunks) > maxQueryChunks {
+		chunks = chunks[:maxQueryChunks]
+	}
+	return chunks, nil
+}
+
 // EmbedQuery generates an embedding for a search query.
 // Returns nil if embeddings are not enabled or embedder is not yet set (e.g. still loading).
 func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
@@ -1966,6 +1985,14 @@ func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
 		return nil, nil // Not an error - just no embedding available
 	}
 	return db.embedQueryWithEmbedder(ctx, db.embedQueue.embedder, query)
+}
+
+// ChunkQuery splits a search query using the configured global embedder.
+func (db *DB) ChunkQuery(ctx context.Context, query string) ([]string, error) {
+	if db.embedQueue == nil || db.embedQueue.embedder == nil {
+		return []string{query}, nil
+	}
+	return db.chunkQueryWithEmbedder(ctx, db.embedQueue.embedder, query)
 }
 
 // EmbedQueryForDB generates an embedding for a search query using the embedder for the given database.
@@ -2005,6 +2032,23 @@ func (db *DB) EmbedQueryForDB(ctx context.Context, dbName string, query string) 
 			dbName, ErrQueryEmbeddingDimensionMismatch, resolvedDims, len(vec))
 	}
 	return vec, nil
+}
+
+// ChunkQueryForDB splits a search query using the embedder configured for the given database.
+func (db *DB) ChunkQueryForDB(ctx context.Context, dbName string, query string) ([]string, error) {
+	db.mu.RLock()
+	useRegistry := db.embedConfigForDB != nil
+	db.mu.RUnlock()
+	if useRegistry {
+		emb, err := db.getOrCreateEmbedderForDB(dbName)
+		if err != nil {
+			return nil, err
+		}
+		if emb != nil {
+			return db.chunkQueryWithEmbedder(ctx, emb, query)
+		}
+	}
+	return db.ChunkQuery(ctx, query)
 }
 
 // Store creates a new memory with automatic relationship inference.
