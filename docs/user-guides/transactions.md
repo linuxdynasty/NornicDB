@@ -1,42 +1,17 @@
 # NornicDB Transaction Implementation
 
-## Summary
-
-Transaction atomicity has been implemented for NornicDB storage operations.
-
-## Implementation Details
-
-### Files Added/Modified
-
-1. **`pkg/storage/transaction.go`** (NEW)
-   - `Transaction` struct with operation buffering
-   - `CreateNode`, `UpdateNode`, `DeleteNode` - Node operations
-   - `CreateEdge`, `DeleteEdge` - Edge operations  
-   - `Commit()` - Apply all buffered operations atomically
-   - `Rollback()` - Discard all buffered operations
-   - Read-your-writes support via `GetNode()`
-
-2. **`pkg/storage/memory.go`** (MODIFIED)
-   - Added `BeginTransaction()` method to create new transactions
-   - Added internal unlocked methods for atomic commit:
-     - `createNodeUnlocked()`
-     - `updateNodeUnlocked()`
-     - `deleteNodeUnlocked()`
-     - `createEdgeUnlocked()`
-     - `deleteEdgeUnlocked()`
-
-3. **`pkg/storage/transaction_test.go`** (NEW)
-   - 12 comprehensive unit tests
-   - 2 benchmarks
-
 ## Transaction Semantics
 
 ### What's Implemented
 
 ✅ **Atomicity** - All operations commit together or none do
+
 ✅ **Operation Buffering** - Changes are invisible until commit
+
 ✅ **Read-Your-Writes** - Transaction can see its own uncommitted changes
+
 ✅ **Rollback** - Discard all buffered operations
+
 ✅ **Closed Transaction Detection** - Error if operating on closed tx
 
 ### Isolation Semantics
@@ -80,19 +55,20 @@ BenchmarkTransaction_RollbackNodes-16    224,329    5,403 ns/op    6,776 B/op   
 ```
 
 **Interpretation:**
+
 - Committing 10 nodes takes ~10.6μs (~1μs per node)
 - Rolling back 10 nodes takes ~5.4μs (faster - no storage writes)
 - Memory overhead: ~1KB per node in transaction buffer
 
 ## Test Coverage
 
-| Package | Coverage |
-|---------|----------|
-| `pkg/storage` | 85.2% |
-| `pkg/filter` | 96.0% |
-| `pkg/search` | 89.8% |
-| `pkg/decay` | 87.4% |
-| `pkg/inference` | 85.5% |
+| Package         | Coverage |
+| --------------- | -------- |
+| `pkg/storage`   | 85.2%    |
+| `pkg/filter`    | 96.0%    |
+| `pkg/search`    | 89.8%    |
+| `pkg/decay`     | 87.4%    |
+| `pkg/inference` | 85.5%    |
 
 ## Test Results
 
