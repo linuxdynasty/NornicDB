@@ -404,7 +404,7 @@ memory:
 
 Start with the docs hub for role/task navigation, then use the issue index for symptom-first troubleshooting:
 
-- Public documentation site: [https://orneryd.github.io/nornicdb/](https://orneryd.github.io/nornicdb/)
+- Public documentation site: [https://orneryd.github.io/NornicDB/](https://orneryd.github.io/NornicDB/)
 - [Documentation Hub](docs/README.md)
 - [Issue Index](docs/ISSUES-INDEX.md)
 

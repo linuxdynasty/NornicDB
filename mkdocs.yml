@@ -1,6 +1,6 @@
 site_name: NornicDB Documentation
 site_description: Production-ready graph database with GPU acceleration and Neo4j compatibility
-site_url: https://orneryd.github.io/nornicdb/
+site_url: https://orneryd.github.io/NornicDB/
 repo_url: https://github.com/orneryd/nornicdb
 repo_name: orneryd/nornicdb
 edit_uri: edit/main/docs/
