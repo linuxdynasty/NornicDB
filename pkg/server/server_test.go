@@ -2160,6 +2160,7 @@ func TestHandleImplicitTransaction_AsyncWriteAccepted(t *testing.T) {
 	cfg.Port = 0
 	srv, err := New(db, authn, cfg)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
 
 	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", strings.NewReader(`{"statements":[{"statement":"CREATE (n:Doc {name:'async'})"}]}`))
 	req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
@@ -2199,6 +2200,7 @@ func TestHandleImplicitTransaction_AsyncEnabledSyncFallbackReturnsOK(t *testing.
 	cfg.Port = 0
 	srv, err := New(db, authn, cfg)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
 
 	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", strings.NewReader(`{"statements":[{"statement":"CREATE (n:Doc {name:'sync'}) SET n.updatedAt = datetime() RETURN n.name"}]}`))
 	req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
