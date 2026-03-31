@@ -1051,6 +1051,9 @@ func (ae *AsyncEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) boo
 
 	seen := make(map[NodeID]struct{}, len(cachedIDs))
 	for _, id := range cachedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
 		seen[id] = struct{}{}
 		if !visit(id) {
 			return nil
