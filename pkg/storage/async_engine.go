@@ -614,6 +614,36 @@ func (ae *AsyncEngine) GetEngine() Engine {
 	return ae.engine
 }
 
+func (ae *AsyncEngine) addNodeToLabelIndexLocked(node *Node) {
+	if node == nil {
+		return
+	}
+	for _, label := range node.Labels {
+		normalLabel := strings.ToLower(label)
+		if ae.labelIndex[normalLabel] == nil {
+			ae.labelIndex[normalLabel] = make(map[NodeID]bool)
+		}
+		ae.labelIndex[normalLabel][node.ID] = true
+	}
+}
+
+func (ae *AsyncEngine) removeNodeIDFromLabelIndexLocked(id NodeID) {
+	for label, ids := range ae.labelIndex {
+		delete(ids, id)
+		if len(ids) == 0 {
+			delete(ae.labelIndex, label)
+		}
+	}
+}
+
+func (ae *AsyncEngine) syncNodeLabelIndexLocked(node *Node) {
+	if node == nil {
+		return
+	}
+	ae.removeNodeIDFromLabelIndexLocked(node.ID)
+	ae.addNodeToLabelIndexLocked(node)
+}
+
 // CreateNode adds to cache and returns immediately.
 func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 	if node == nil {
@@ -661,15 +691,7 @@ func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 
 	ae.nodeCache[node.ID] = node
 	delete(ae.nodeUpdateBaseline, node.ID)
-
-	// Update label index
-	for _, label := range node.Labels {
-		normalLabel := strings.ToLower(label)
-		if ae.labelIndex[normalLabel] == nil {
-			ae.labelIndex[normalLabel] = make(map[NodeID]bool)
-		}
-		ae.labelIndex[normalLabel][node.ID] = true
-	}
+	ae.syncNodeLabelIndexLocked(node)
 
 	ae.pendingWrites++
 	return node.ID, nil
@@ -708,6 +730,7 @@ func (ae *AsyncEngine) UpdateNode(node *Node) error {
 	}
 
 	ae.nodeCache[node.ID] = node
+	ae.syncNodeLabelIndexLocked(node)
 	ae.pendingWrites++
 	return nil
 }
@@ -774,20 +797,14 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 		isInFlight := ae.inFlightNodes[id]
 
 		// Check if node was created/updated in this transaction (still in cache)
-		if node, existsInCache := ae.nodeCache[id]; existsInCache {
+		if _, existsInCache := ae.nodeCache[id]; existsInCache {
 			// If this is a pending CREATE (not an update of an existing node), deleting it
 			// will never hit the inner engine, so no inner OnNodeDeleted callback will fire.
 			// Emit a best-effort delete notification so external services (search indexes,
 			// embedding counts) can drop any speculative state for this node.
 			shouldNotify := !ae.updateNodes[id]
 
-			// Remove from label index
-			for _, label := range node.Labels {
-				normalLabel := strings.ToLower(label)
-				if ae.labelIndex[normalLabel] != nil {
-					delete(ae.labelIndex[normalLabel], id)
-				}
-			}
+			ae.removeNodeIDFromLabelIndexLocked(id)
 			// Remove from cache
 			delete(ae.nodeCache, id)
 			delete(ae.nodeUpdateBaseline, id)
@@ -1015,6 +1032,21 @@ func (ae *AsyncEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) boo
 			cachedIDs = append(cachedIDs, id)
 		}
 	}
+	for _, node := range ae.nodeCache {
+		if node == nil || deletedIDs[node.ID] {
+			continue
+		}
+		matched := false
+		for _, l := range node.Labels {
+			if strings.EqualFold(l, label) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			cachedIDs = append(cachedIDs, node.ID)
+		}
+	}
 	ae.mu.RUnlock()
 
 	seen := make(map[NodeID]struct{}, len(cachedIDs))
@@ -1068,6 +1100,27 @@ func (ae *AsyncEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) boo
 func (ae *AsyncEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	ae.mu.RLock()
 	normalLabel := strings.ToLower(label)
+	deletedIDs := make(map[NodeID]bool, len(ae.deleteNodes))
+	overriddenIDs := make(map[NodeID]bool, len(ae.nodeCache))
+	for id := range ae.deleteNodes {
+		deletedIDs[id] = true
+	}
+	var scannedMatch *Node
+	for id, node := range ae.nodeCache {
+		overriddenIDs[id] = true
+		if node == nil || deletedIDs[id] {
+			continue
+		}
+		for _, l := range node.Labels {
+			if strings.EqualFold(l, label) {
+				scannedMatch = node
+				break
+			}
+		}
+		if scannedMatch != nil {
+			break
+		}
+	}
 
 	// Use label index for O(1) lookup instead of scanning entire cache
 	if nodeIDs := ae.labelIndex[normalLabel]; len(nodeIDs) > 0 {
@@ -1082,13 +1135,30 @@ func (ae *AsyncEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	}
 	ae.mu.RUnlock()
 
-	return ae.engine.GetFirstNodeByLabel(label)
+	if scannedMatch != nil {
+		return scannedMatch, nil
+	}
+
+	first, err := ae.engine.GetFirstNodeByLabel(label)
+	if err != nil {
+		return nil, err
+	}
+	if first != nil && !deletedIDs[first.ID] && !overriddenIDs[first.ID] {
+		return first, nil
+	}
+
+	nodes, err := ae.GetNodesByLabel(label)
+	if err != nil || len(nodes) == 0 {
+		return nil, err
+	}
+	return nodes[0], nil
 }
 
 func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	ae.mu.RLock()
 	cachedNodes := make([]*Node, 0)
 	deletedIDs := make(map[NodeID]bool)
+	overriddenIDs := make(map[NodeID]bool, len(ae.nodeCache))
 
 	// Normalize label for case-insensitive matching (Neo4j compatible)
 	normalLabel := strings.ToLower(label)
@@ -1096,7 +1166,8 @@ func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	for id := range ae.deleteNodes {
 		deletedIDs[id] = true
 	}
-	for _, node := range ae.nodeCache {
+	for id, node := range ae.nodeCache {
+		overriddenIDs[id] = true
 		for _, l := range node.Labels {
 			if strings.ToLower(l) == normalLabel { // Case-insensitive comparison
 				cachedNodes = append(cachedNodes, node)
@@ -1124,7 +1195,7 @@ func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 
 	// Add engine nodes not in cache or deleted
 	for _, node := range engineNodes {
-		if !seenIDs[node.ID] && !deletedIDs[node.ID] {
+		if !seenIDs[node.ID] && !deletedIDs[node.ID] && !overriddenIDs[node.ID] {
 			result = append(result, node)
 		}
 	}
@@ -1294,11 +1365,13 @@ func (ae *AsyncEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
 	normalizedType := strings.ToLower(edgeType)
 	cachedEdges := make([]*Edge, 0)
 	deletedIDs := make(map[EdgeID]bool)
+	overriddenIDs := make(map[EdgeID]bool, len(ae.edgeCache))
 
 	for id := range ae.deleteEdges {
 		deletedIDs[id] = true
 	}
-	for _, edge := range ae.edgeCache {
+	for id, edge := range ae.edgeCache {
+		overriddenIDs[id] = true
 		if strings.ToLower(edge.Type) == normalizedType {
 			cachedEdges = append(cachedEdges, edge)
 		}
@@ -1318,7 +1391,7 @@ func (ae *AsyncEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
 		seenIDs[edge.ID] = true
 	}
 	for _, edge := range engineEdges {
-		if !seenIDs[edge.ID] && !deletedIDs[edge.ID] {
+		if !seenIDs[edge.ID] && !deletedIDs[edge.ID] && !overriddenIDs[edge.ID] {
 			result = append(result, edge)
 		}
 	}
@@ -1332,7 +1405,9 @@ func (ae *AsyncEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	// Check cache first for this node's outgoing edges
 	ae.mu.RLock()
 	var cached []*Edge
-	for _, edge := range ae.edgeCache {
+	overriddenIDs := make(map[EdgeID]bool, len(ae.edgeCache))
+	for id, edge := range ae.edgeCache {
+		overriddenIDs[id] = true
 		if edge.StartNode == nodeID && !ae.deleteEdges[edge.ID] {
 			cached = append(cached, edge)
 		}
@@ -1356,7 +1431,7 @@ func (ae *AsyncEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 		seenIDs[e.ID] = true
 	}
 	for _, e := range engineEdges {
-		if !seenIDs[e.ID] && !deletedIDs[e.ID] {
+		if !seenIDs[e.ID] && !deletedIDs[e.ID] && !overriddenIDs[e.ID] {
 			result = append(result, e)
 		}
 	}
@@ -1366,7 +1441,9 @@ func (ae *AsyncEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 func (ae *AsyncEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	ae.mu.RLock()
 	var cached []*Edge
-	for _, edge := range ae.edgeCache {
+	overriddenIDs := make(map[EdgeID]bool, len(ae.edgeCache))
+	for id, edge := range ae.edgeCache {
+		overriddenIDs[id] = true
 		if edge.EndNode == nodeID && !ae.deleteEdges[edge.ID] {
 			cached = append(cached, edge)
 		}
@@ -1389,7 +1466,7 @@ func (ae *AsyncEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 		seenIDs[e.ID] = true
 	}
 	for _, e := range engineEdges {
-		if !seenIDs[e.ID] && !deletedIDs[e.ID] {
+		if !seenIDs[e.ID] && !deletedIDs[e.ID] && !overriddenIDs[e.ID] {
 			result = append(result, e)
 		}
 	}
@@ -1397,11 +1474,57 @@ func (ae *AsyncEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 }
 
 func (ae *AsyncEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
-	return ae.engine.GetEdgesBetween(startID, endID)
+	ae.mu.RLock()
+	deletedIDs := make(map[EdgeID]bool, len(ae.deleteEdges))
+	overriddenIDs := make(map[EdgeID]bool, len(ae.edgeCache))
+	cachedEdges := make([]*Edge, 0)
+	for id := range ae.deleteEdges {
+		deletedIDs[id] = true
+	}
+	for id, edge := range ae.edgeCache {
+		overriddenIDs[id] = true
+		if edge != nil && edge.StartNode == startID && edge.EndNode == endID && !deletedIDs[id] {
+			cachedEdges = append(cachedEdges, edge)
+		}
+	}
+	ae.mu.RUnlock()
+
+	engineEdges, err := ae.engine.GetEdgesBetween(startID, endID)
+	if err != nil {
+		return cachedEdges, nil
+	}
+
+	result := make([]*Edge, 0, len(cachedEdges)+len(engineEdges))
+	seenIDs := make(map[EdgeID]bool, len(cachedEdges))
+	for _, edge := range cachedEdges {
+		result = append(result, edge)
+		seenIDs[edge.ID] = true
+	}
+	for _, edge := range engineEdges {
+		if edge == nil {
+			continue
+		}
+		if !seenIDs[edge.ID] && !deletedIDs[edge.ID] && !overriddenIDs[edge.ID] {
+			result = append(result, edge)
+		}
+	}
+	return result, nil
 }
 
 func (ae *AsyncEngine) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
-	return ae.engine.GetEdgeBetween(startID, endID, edgeType)
+	edges, err := ae.GetEdgesBetween(startID, endID)
+	if err != nil {
+		return nil
+	}
+	for _, edge := range edges {
+		if edge == nil {
+			continue
+		}
+		if edgeType == "" || strings.EqualFold(edge.Type, edgeType) {
+			return edge
+		}
+	}
+	return nil
 }
 
 func (ae *AsyncEngine) GetAllNodes() []*Node {
@@ -1410,11 +1533,19 @@ func (ae *AsyncEngine) GetAllNodes() []*Node {
 }
 
 func (ae *AsyncEngine) GetInDegree(nodeID NodeID) int {
-	return ae.engine.GetInDegree(nodeID)
+	edges, err := ae.GetIncomingEdges(nodeID)
+	if err != nil {
+		return 0
+	}
+	return len(edges)
 }
 
 func (ae *AsyncEngine) GetOutDegree(nodeID NodeID) int {
-	return ae.engine.GetOutDegree(nodeID)
+	edges, err := ae.GetOutgoingEdges(nodeID)
+	if err != nil {
+		return 0
+	}
+	return len(edges)
 }
 
 func (ae *AsyncEngine) GetSchema() *SchemaManager {
@@ -1765,7 +1896,10 @@ func (ae *AsyncEngine) BulkCreateNodes(nodes []*Node) error {
 
 	for _, node := range nodes {
 		delete(ae.deleteNodes, node.ID)
+		delete(ae.updateNodes, node.ID)
+		delete(ae.nodeUpdateBaseline, node.ID)
 		ae.nodeCache[node.ID] = node
+		ae.syncNodeLabelIndexLocked(node)
 	}
 	ae.pendingWrites += int64(len(nodes))
 	return nil
@@ -2098,6 +2232,7 @@ func (ae *AsyncEngine) BulkCreateEdges(edges []*Edge) error {
 
 	for _, edge := range edges {
 		delete(ae.deleteEdges, edge.ID)
+		delete(ae.updateEdges, edge.ID)
 		ae.edgeCache[edge.ID] = edge
 	}
 	ae.pendingWrites += int64(len(edges))
@@ -2115,7 +2250,10 @@ func (ae *AsyncEngine) BulkDeleteNodes(ids []NodeID) error {
 		if _, ok := ae.nodeCache[id]; ok && !ae.updateNodes[id] {
 			notifyDeletes = append(notifyDeletes, id)
 		}
+		ae.removeNodeIDFromLabelIndexLocked(id)
 		delete(ae.nodeCache, id)
+		delete(ae.updateNodes, id)
+		delete(ae.nodeUpdateBaseline, id)
 		ae.deleteNodes[id] = true
 	}
 	ae.pendingWrites += int64(len(ids))

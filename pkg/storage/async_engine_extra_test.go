@@ -463,6 +463,23 @@ func TestAsyncEngine_GetEdgesBetween(t *testing.T) {
 	assert.GreaterOrEqual(t, len(edges), 1)
 }
 
+func TestAsyncEngine_GetEdgesBetween_ReadYourOwnWritesBeforeFlush(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+	_, _ = ae.CreateNode(makeNode("pending-gb1"))
+	_, _ = ae.CreateNode(makeNode("pending-gb2"))
+	pending := makeEdge("pending-gb-e1", "pending-gb1", "pending-gb2")
+	require.NoError(t, ae.CreateEdge(pending))
+
+	edges, err := ae.GetEdgesBetween(NodeID(prefixTestID("pending-gb1")), NodeID(prefixTestID("pending-gb2")))
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, pending.ID, edges[0].ID)
+
+	edge := ae.GetEdgeBetween(NodeID(prefixTestID("pending-gb1")), NodeID(prefixTestID("pending-gb2")), pending.Type)
+	require.NotNil(t, edge)
+	assert.Equal(t, pending.ID, edge.ID)
+}
+
 func TestAsyncEngine_GetEdgesBetween_Empty(t *testing.T) {
 	ae := newAsyncTestEngine(t)
 	edges, err := ae.GetEdgesBetween(NodeID(prefixTestID("x")), NodeID(prefixTestID("y")))
@@ -497,6 +514,16 @@ func TestAsyncEngine_GetInOutDegree(t *testing.T) {
 	out := ae.GetOutDegree(NodeID(prefixTestID("deg1")))
 	assert.GreaterOrEqual(t, in, 0)
 	assert.GreaterOrEqual(t, out, 0)
+}
+
+func TestAsyncEngine_GetInOutDegree_ReadYourOwnWritesBeforeFlush(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+	_, _ = ae.CreateNode(makeNode("pending-deg1"))
+	_, _ = ae.CreateNode(makeNode("pending-deg2"))
+	require.NoError(t, ae.CreateEdge(makeEdge("pending-deg-e1", "pending-deg1", "pending-deg2")))
+
+	assert.Equal(t, 1, ae.GetOutDegree(NodeID(prefixTestID("pending-deg1"))))
+	assert.Equal(t, 1, ae.GetInDegree(NodeID(prefixTestID("pending-deg2"))))
 }
 
 // ============================================================================
@@ -1406,6 +1433,37 @@ func TestAsyncEngine_GetFirstAndGetNodesByLabel_CaseInsensitive(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, nodes, 1)
 		assert.Equal(t, NodeID(prefixTestID("label-cache-only")), nodes[0].ID)
+	})
+
+	t.Run("pending relabel hides stale persisted label view", func(t *testing.T) {
+		ae := newAsyncTestEngine(t)
+		node := &Node{
+			ID:         NodeID(prefixTestID("relabel-node")),
+			Labels:     []string{"OldLabel"},
+			Properties: map[string]interface{}{"name": "before"},
+		}
+		_, err := ae.CreateNode(node)
+		require.NoError(t, err)
+		require.NoError(t, ae.Flush())
+
+		updated := CopyNode(node)
+		updated.Labels = []string{"NewLabel"}
+		updated.Properties = map[string]interface{}{"name": "after"}
+		require.NoError(t, ae.UpdateNode(updated))
+
+		oldNodes, err := ae.GetNodesByLabel("oldlabel")
+		require.NoError(t, err)
+		assert.Empty(t, oldNodes)
+
+		newNodes, err := ae.GetNodesByLabel("newlabel")
+		require.NoError(t, err)
+		require.Len(t, newNodes, 1)
+		assert.Equal(t, updated.ID, newNodes[0].ID)
+
+		first, err := ae.GetFirstNodeByLabel("newlabel")
+		require.NoError(t, err)
+		require.NotNil(t, first)
+		assert.Equal(t, updated.ID, first.ID)
 	})
 
 	t.Run("for-each fallback propagates get-nodes error", func(t *testing.T) {

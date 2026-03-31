@@ -2179,6 +2179,44 @@ func TestHandleImplicitTransaction_AsyncWriteAccepted(t *testing.T) {
 	require.NotEmpty(t, createdIDs)
 }
 
+func TestHandleImplicitTransaction_AsyncEnabledSyncFallbackReturnsOK(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbCfg := nornicdb.DefaultConfig()
+	dbCfg.Memory.DecayEnabled = false
+	dbCfg.Database.AsyncWritesEnabled = true
+	db, err := nornicdb.Open(tmpDir, dbCfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	authn, err := auth.NewAuthenticator(auth.AuthConfig{
+		SecurityEnabled: true,
+		JWTSecret:       []byte("test-secret-key-for-testing-only-32b"),
+	}, storage.NewMemoryEngine())
+	require.NoError(t, err)
+	_, _ = authn.CreateUser("admin", "password123", []auth.Role{auth.RoleAdmin})
+
+	cfg := DefaultConfig()
+	cfg.Port = 0
+	srv, err := New(db, authn, cfg)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", strings.NewReader(`{"statements":[{"statement":"CREATE (n:Doc {name:'sync'}) SET n.updatedAt = datetime() RETURN n.name"}]}`))
+	req = req.WithContext(context.WithValue(context.Background(), contextKeyClaims, &auth.JWTClaims{
+		Username: "admin",
+		Roles:    []string{"admin"},
+	}))
+	rec := httptest.NewRecorder()
+	srv.handleImplicitTransaction(rec, req, "nornic")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Header().Get("X-NornicDB-Consistency"))
+
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	_, hasReceipt := payload["receipt"]
+	require.True(t, hasReceipt, "sync fallback should expose durable receipt metadata")
+}
+
 func TestHandleSimilar(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")

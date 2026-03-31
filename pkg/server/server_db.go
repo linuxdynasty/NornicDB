@@ -1343,9 +1343,10 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			// with errors in the response body (Neo4j standard behavior)
 		}
 	} else if s.db.IsAsyncWritesEnabled() {
-		// For eventual consistency (async writes), mutations return 202 Accepted
+		// Only return 202 for mutations that actually completed through the
+		// eventual-consistency path.
 		for _, stmt := range req.Statements {
-			if isMutationQuery(stmt.Statement) {
+			if isMutationQuery(stmt.Statement) && shouldUseAcceptedStatusForMutation(&response) {
 				status = http.StatusAccepted
 				w.Header().Set("X-NornicDB-Consistency", "eventual")
 				break
@@ -1500,7 +1501,7 @@ func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Re
 	}
 
 	status := http.StatusOK
-	if s.db.IsAsyncWritesEnabled() && isMutationQuery(stmt.Statement) {
+	if s.db.IsAsyncWritesEnabled() && isMutationQuery(stmt.Statement) && shouldUseAcceptedStatusForMutation(&resp) {
 		status = http.StatusAccepted
 		w.Header().Set("X-NornicDB-Consistency", "eventual")
 	}
@@ -1799,6 +1800,16 @@ func (s *Server) appendStatementResult(response *TransactionResponse, result *cy
 			response.Optimistic = optimistic
 		}
 	}
+}
+
+func shouldUseAcceptedStatusForMutation(resp *TransactionResponse) bool {
+	if resp == nil {
+		return false
+	}
+	// Only report eventual consistency when the request completed without a
+	// durable receipt and instead exposed optimistic metadata. This reflects the
+	// actual async write-behind path rather than the global config toggle.
+	return resp.Receipt == nil && resp.Optimistic != nil
 }
 
 func (s *Server) executeTxStatements(

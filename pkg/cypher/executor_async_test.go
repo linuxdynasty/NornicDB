@@ -82,6 +82,33 @@ func TestExecuteImplicitAsync_CreateNode(t *testing.T) {
 	}
 }
 
+func TestExecuteImplicitAsync_CreateNodeWithDatetimeFunction_UsesAsyncPath(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	result, err := executor.Execute(ctx, `CREATE (p:SystemPrompt {
+	  promptId: "prompt-id",
+	  text: "this is a system prompt",
+	  createdAt: datetime(),
+	  updatedAt: datetime()
+	}) RETURN p.promptId`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "prompt-id", result.Rows[0][0])
+	require.NotNil(t, result.Metadata)
+	require.Nil(t, result.Metadata["receipt"], "async simple create should not have a durable receipt")
+	require.NotNil(t, result.Metadata["optimistic"], "async simple create should expose optimistic metadata")
+
+	countResult, err := executor.Execute(ctx, "MATCH (p:SystemPrompt {promptId: 'prompt-id'}) RETURN count(p)", nil)
+	require.NoError(t, err)
+	require.Len(t, countResult.Rows, 1)
+	require.Equal(t, int64(1), countResult.Rows[0][0])
+}
+
 // TestExecuteImplicitAsync_CreateRelationship verifies that relationship creation
 // works correctly through the async path.
 func TestExecuteImplicitAsync_CreateRelationship(t *testing.T) {
