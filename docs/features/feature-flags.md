@@ -496,14 +496,16 @@ db, err := nornicdb.Open("./data", config)
 **HTTP Response Behavior**:
 | Mode | Mutation Status | Header |
 |------|-----------------|--------|
-| Sync | `200 OK` | - |
-| Async | `202 Accepted` | `X-NornicDB-Consistency: eventual` |
+| Sync / durable path | `200 OK` | - |
+| Async-eligible eventual path | `202 Accepted` | `X-NornicDB-Consistency: eventual` |
 
 **What it does**:
-- Writes (CREATE, DELETE, SET) return immediately after updating in-memory cache
+- Async-eligible auto-commit `CREATE` queries can return immediately after updating the in-memory cache
 - Background goroutine flushes pending writes every `AsyncFlushInterval`
 - Reads check pending cache first, then underlying storage
 - Combined with WAL for crash safety
+- Mutations that still require the implicit transactional path return `200 OK` with durable `receipt` metadata
+- Eventual responses expose `optimistic` metadata instead of a durable `receipt`
 
 **Trade-offs**:
 - ✅ ~100x faster writes
@@ -511,7 +513,7 @@ db, err := nornicdb.Open("./data", config)
 - ✅ Reduced disk I/O pressure
 - ⚠️ Data may be lost if crash before flush (mitigated by WAL)
 - ⚠️ Reads may see slightly stale data (within flush interval)
-- ⚠️ `202 Accepted` indicates operation queued, not completed
+- ⚠️ `202 Accepted` indicates the mutation used the eventual-consistency path and was queued, not durably completed
 
 **When to enable (default)**:
 - High write throughput workloads

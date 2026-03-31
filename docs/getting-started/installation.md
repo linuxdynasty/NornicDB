@@ -28,6 +28,7 @@ go build -o nornicdb ./cmd/nornicdb
 ```
 
 **Available Commands:**
+
 - `nornicdb serve` - Start the database server
 - `nornicdb shell` - Interactive Cypher query shell
 - `nornicdb decay` - Memory decay management (recalculate, archive, stats)
@@ -58,6 +59,7 @@ curl http://localhost:7474/health
 ```
 
 **Available Tags:**
+
 - `timothyswt/nornicdb-arm64-metal:v1.0.0` - Current stable release
 - `timothyswt/nornicdb-arm64-metal:latest` - Latest build
 
@@ -84,7 +86,7 @@ package main
 import (
     "context"
     "log"
-    
+
     "github.com/orneryd/nornicdb/pkg/nornicdb"
 )
 
@@ -95,9 +97,9 @@ func main() {
         log.Fatal(err)
     }
     defer db.Close()
-    
+
     ctx := context.Background()
-    
+
     // Store a memory
     memory := &nornicdb.Memory{
         Content: "Machine learning is a subset of AI",
@@ -105,12 +107,12 @@ func main() {
         Tier:    nornicdb.TierSemantic,
         Tags:    []string{"AI", "ML"},
     }
-    
+
     stored, err := db.Store(ctx, memory)
     if err != nil {
         log.Fatal(err)
     }
-    
+
     log.Printf("Stored memory: %s\n", stored.ID)
 }
 ```
@@ -119,7 +121,7 @@ func main() {
 
 ```go
 // Execute Cypher queries
-result, err := db.ExecuteCypher(ctx, 
+result, err := db.ExecuteCypher(ctx,
     "MATCH (n) RETURN count(n)", nil)
 if err != nil {
     log.Fatal(err)
@@ -138,7 +140,7 @@ if err != nil {
 }
 
 for _, result := range results {
-    log.Printf("Found: %s (score: %.3f)\n", 
+    log.Printf("Found: %s (score: %.3f)\n",
         result.Title, result.Score)
 }
 ```
@@ -186,29 +188,34 @@ db, err := nornicdb.Open("./data", config)
 
 NornicDB supports two write consistency modes:
 
-| Mode | Config | Write Latency | Durability | HTTP Status |
-|------|--------|---------------|------------|-------------|
-| **Strong** | `AsyncWritesEnabled: false` | ~50-100ms | Immediate | `200 OK` |
-| **Eventual** | `AsyncWritesEnabled: true` | <1ms | Within flush interval | `202 Accepted` |
+| Mode                 | Config                      | Write Latency            | Durability                                | HTTP Status                              |
+| -------------------- | --------------------------- | ------------------------ | ----------------------------------------- | ---------------------------------------- |
+| **Strong**           | `AsyncWritesEnabled: false` | ~50-100ms                | Immediate                                 | `200 OK`                                 |
+| **Eventual-capable** | `AsyncWritesEnabled: true`  | <1ms for eligible writes | Within flush interval for eligible writes | `202 Accepted` only on the eventual path |
 
 **Strong Consistency** (default off, but recommended for critical data):
+
 ```go
 config.AsyncWritesEnabled = false  // Writes block until persisted
 ```
 
 **Eventual Consistency** (default on, faster writes):
+
 ```go
 config.AsyncWritesEnabled = true           // Writes return immediately
 config.AsyncFlushInterval = 50 * time.Millisecond  // Flush every 50ms
 ```
 
 When `AsyncWritesEnabled` is true:
-- Write operations (CREATE, DELETE, SET) return immediately
+
+- Async-eligible auto-commit `CREATE` operations return immediately
 - Data is flushed to disk every `AsyncFlushInterval`
-- HTTP responses include header `X-NornicDB-Consistency: eventual`
-- Mutations return `202 Accepted` instead of `200 OK`
+- HTTP responses include header `X-NornicDB-Consistency: eventual` only when the eventual path was used
+- Those eventual responses return `202 Accepted` with `optimistic` metadata
+- Mutations that stay on the transactional path still return `200 OK` and include durable `receipt` metadata
 
 **Trade-offs:**
+
 - ✅ Much faster writes (~100x improvement)
 - ✅ Better throughput for batch operations
 - ⚠️ Data may be lost if crash before flush (use with WAL for durability)
@@ -256,11 +263,11 @@ User guide: `docs/user-guides/qdrant-grpc.md`
 
 NornicDB simulates human memory with three tiers:
 
-| Tier | Half-Life | Use Case | Example |
-|------|-----------|----------|---------|
-| **Episodic** | 7 days | Short-term events | "I ran a test yesterday" |
-| **Semantic** | 69 days | Facts and concepts | "Python is a programming language" |
-| **Procedural** | 693 days | Skills and procedures | "How to deploy to production" |
+| Tier           | Half-Life | Use Case              | Example                            |
+| -------------- | --------- | --------------------- | ---------------------------------- |
+| **Episodic**   | 7 days    | Short-term events     | "I ran a test yesterday"           |
+| **Semantic**   | 69 days   | Facts and concepts    | "Python is a programming language" |
+| **Procedural** | 693 days  | Skills and procedures | "How to deploy to production"      |
 
 ```go
 // Create episodic memory (short-term)
@@ -291,12 +298,14 @@ NornicDB includes a native MCP (Model Context Protocol) server for AI agent inte
 The MCP server is **enabled by default**. You can disable it if you don't need AI agent integration:
 
 **CLI Flag:**
+
 ```bash
 # Disable MCP server
 ./nornicdb serve --mcp-enabled=false
 ```
 
 **Environment Variable:**
+
 ```bash
 # Disable MCP server via environment
 export NORNICDB_MCP_ENABLED=false
@@ -304,6 +313,7 @@ export NORNICDB_MCP_ENABLED=false
 ```
 
 **Go Config:**
+
 ```go
 import "github.com/orneryd/nornicdb/pkg/server"
 
@@ -312,6 +322,7 @@ config.MCPEnabled = false  // Disable MCP server
 ```
 
 When MCP is disabled:
+
 - The `/mcp` endpoint will not be registered
 - All other HTTP API endpoints remain functional
 - Memory is saved (no MCP overhead)
@@ -335,16 +346,16 @@ Add to `~/.cursor/mcp.json`:
 
 ### Available MCP Tools
 
-| Tool | Purpose |
-|------|---------|
-| `store` | Save knowledge/decisions |
-| `recall` | Retrieve by ID or filters |
-| `discover` | Semantic search |
-| `link` | Connect concepts |
-| `index` | Index files |
-| `unindex` | Remove indexed files |
-| `task` | Manage single task |
-| `tasks` | Query multiple tasks |
+| Tool       | Purpose                   |
+| ---------- | ------------------------- |
+| `store`    | Save knowledge/decisions  |
+| `recall`   | Retrieve by ID or filters |
+| `discover` | Semantic search           |
+| `link`     | Connect concepts          |
+| `index`    | Index files               |
+| `unindex`  | Remove indexed files      |
+| `task`     | Manage single task        |
+| `tasks`    | Query multiple tasks      |
 
 See **[Cursor Chat Mode Guide](../ai-agents/chat-modes.md)** for detailed usage.
 

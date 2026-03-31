@@ -153,6 +153,78 @@ func TestExecuteImplicitAsync_CreateRelationship(t *testing.T) {
 	}
 }
 
+func TestExecuteImplicitAsync_CreateOnlyRelationship_UsesAsyncPath(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	result, err := executor.Execute(ctx, "CREATE (a:Person {name: 'Alice'})-[r:KNOWS {since: 2024}]->(b:Person {name: 'Bob'}) RETURN type(r), a.name, b.name", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "KNOWS", result.Rows[0][0])
+	require.Equal(t, "Alice", result.Rows[0][1])
+	require.Equal(t, "Bob", result.Rows[0][2])
+	require.NotNil(t, result.Metadata)
+	require.Nil(t, result.Metadata["receipt"], "async create-only relationship should not have a durable receipt")
+	require.NotNil(t, result.Metadata["optimistic"], "async create-only relationship should expose optimistic metadata")
+
+	countResult, err := executor.Execute(ctx, "MATCH ()-[r:KNOWS]->() RETURN count(r)", nil)
+	require.NoError(t, err)
+	require.Len(t, countResult.Rows, 1)
+	require.Equal(t, int64(1), countResult.Rows[0][0])
+}
+
+func TestExecuteImplicitAsync_MultipleCreateChain_UsesAsyncPath(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	result, err := executor.Execute(ctx, "CREATE (a:Person {name: 'Alice'}) CREATE (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.Metadata)
+	require.Nil(t, result.Metadata["receipt"], "create-only chains should stay on the async path")
+	require.NotNil(t, result.Metadata["optimistic"], "create-only chains should expose optimistic metadata")
+
+	nodeCount, err := executor.Execute(ctx, "MATCH (n:Person) RETURN count(n)", nil)
+	require.NoError(t, err)
+	require.Len(t, nodeCount.Rows, 1)
+	require.Equal(t, int64(2), nodeCount.Rows[0][0])
+
+	relCount, err := executor.Execute(ctx, "MATCH ()-[r:KNOWS]->() RETURN count(r)", nil)
+	require.NoError(t, err)
+	require.Len(t, relCount.Rows, 1)
+	require.Equal(t, int64(1), relCount.Rows[0][0])
+}
+
+func TestExecuteImplicitAsync_CreateSet_RemainsTransactional(t *testing.T) {
+	tmpDir := t.TempDir()
+	badgerEngine, err := storage.NewBadgerEngine(tmpDir)
+	require.NoError(t, err)
+
+	wal, err := storage.NewWAL(tmpDir+"/wal", nil)
+	require.NoError(t, err)
+
+	walEngine := storage.NewWALEngine(badgerEngine, wal)
+	asyncBase := storage.NewAsyncEngine(walEngine, nil)
+	defer asyncBase.Close()
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	result, err := executor.Execute(ctx, "CREATE (n:Doc {name: 'sync'}) SET n.updatedAt = datetime() RETURN n.name", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Equal(t, "sync", result.Rows[0][0])
+	require.NotNil(t, result.Metadata)
+	require.NotNil(t, result.Metadata["receipt"], "CREATE ... SET should remain on the transactional path")
+}
+
 // TestExecuteImplicitAsync_AggregationEmptyDB verifies that aggregation queries
 // return correct results even when the database is empty.
 func TestExecuteImplicitAsync_AggregationEmptyDB(t *testing.T) {

@@ -222,7 +222,7 @@ Receipts provide:
 - `wal_seq_end`
 - `hash`
 
-**HTTP:** `TransactionResponse.receipt` is returned for mutations.  
+**HTTP:** `TransactionResponse.receipt` is returned for durable transactional mutations. Eventual async responses expose `optimistic` metadata instead and do not include a durable receipt until the write is flushed/committed through the durable path.  
 **MCP:** `store`, `link`, `task` responses include `receipt`.
 
 You can use the receipt to fetch the associated WAL entries via `db.txlog.byTxId`.

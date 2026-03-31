@@ -1372,6 +1372,24 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 	return result, nil, true
 }
 
+func (e *StorageExecutor) isEventualAsyncEligible(info *QueryInfo, cypher string) bool {
+	if info == nil || !info.IsWriteQuery {
+		return false
+	}
+	if info.HasSchema || info.IsSchemaQuery || isSystemCommandNoGraph(cypher) || isCreateProcedureCommand(cypher) {
+		return false
+	}
+	if info.FirstClause != ClauseCreate || !info.HasCreate {
+		return false
+	}
+	if info.HasMatch || info.HasOptionalMatch || info.HasMerge || info.HasDelete || info.HasDetachDelete ||
+		info.HasSet || info.HasRemove || info.HasWith || info.HasUnwind || info.HasCall ||
+		info.HasForeach || info.HasLoadCSV || info.HasUnion {
+		return false
+	}
+	return true
+}
+
 // executeImplicitAsync executes a single query using implicit transactions for writes.
 // For write operations, wraps execution in an implicit transaction that can be
 // rolled back on error, preventing partial data corruption from failed queries.
@@ -1388,6 +1406,9 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 		if engines.asyncEngine != nil {
 			if result, err, handled := e.tryAsyncCreateNodeBatch(ctx, cypher); handled {
 				return result, err
+			}
+			if e.isEventualAsyncEligible(info, cypher) {
+				return e.executeWithoutTransaction(ctx, cypher, upperQuery)
 			}
 		}
 		return e.executeWithImplicitTransaction(ctx, cypher, upperQuery)

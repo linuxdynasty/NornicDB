@@ -123,7 +123,12 @@ server:
 
 ## Async Write Settings ⭐ New
 
-The async write engine provides write-behind caching for improved throughput. Writes return immediately after updating the cache and are flushed to disk asynchronously.
+The async write engine provides write-behind caching for improved throughput. Async-eligible auto-commit writes return immediately after updating the cache and are flushed to disk asynchronously. Mutations that still need the implicit transactional path continue to execute synchronously and produce durable receipts.
+
+Current behavior:
+- Pure auto-commit `CREATE` statements are the primary eventual-consistency path
+- Schema commands, system commands, and read-modify-write mutations such as `MATCH ... CREATE`, `CREATE ... SET`, `MERGE`, `DELETE`, and `SET` remain on the durable transactional path
+- Eventual HTTP responses return `202 Accepted`, `X-NornicDB-Consistency: eventual`, and `optimistic` metadata instead of a durable `receipt`
 
 ### Configuration
 
@@ -171,6 +176,8 @@ async_writes:
 async_writes:
   enabled: false                   # Disable async writes
 ```
+
+With `enabled: true`, do not assume every mutation becomes eventual. The setting enables the async write-behind engine and lets eligible queries use it; durable transactional mutations still return `200 OK` and include `receipt` metadata.
 
 ### Memory Management
 
