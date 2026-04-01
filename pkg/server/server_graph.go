@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -10,10 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 var errGraphForbidden = fmt.Errorf("graph access forbidden")
+var errGraphPathLimitExceeded = fmt.Errorf("path search limit exceeded before target was found")
 
 type graphRequest struct {
 	NodeIDs           []string `json:"node_ids,omitempty"`
@@ -75,6 +78,26 @@ type graphCollection struct {
 	truncated bool
 }
 
+func normalizeGraphNodeIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 func (s *Server) handleGraphNeighborhood(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required", ErrMethodNotAllowed)
@@ -86,12 +109,13 @@ func (s *Server) handleGraphNeighborhood(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusBadRequest, "invalid request body", ErrBadRequest)
 		return
 	}
+	req.NodeIDs = normalizeGraphNodeIDs(req.NodeIDs)
 	if len(req.NodeIDs) == 0 {
 		s.writeError(w, http.StatusBadRequest, "node_ids is required", ErrBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.AsOf) != "" {
-		s.writeError(w, http.StatusBadRequest, "historical neighborhood traversal is exposed via /nornicdb/graph/temporal or /nornicdb/graph/diff", ErrBadRequest)
+		s.writeError(w, http.StatusBadRequest, "historical neighborhood traversal is exposed via /nornicdb/graph/{database}/temporal or /nornicdb/graph/{database}/diff", ErrBadRequest)
 		return
 	}
 
@@ -138,7 +162,7 @@ func (s *Server) handleGraphPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(req.AsOf) != "" {
-		s.writeError(w, http.StatusBadRequest, "historical path traversal is not yet exposed on /nornicdb/graph/path; use /nornicdb/graph/temporal for snapshot reconstruction", ErrBadRequest)
+		s.writeError(w, http.StatusBadRequest, "historical path traversal is not yet exposed on /nornicdb/graph/{database}/path; use /nornicdb/graph/{database}/temporal for snapshot reconstruction", ErrBadRequest)
 		return
 	}
 
@@ -154,6 +178,8 @@ func (s *Server) handleGraphPath(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if err == storage.ErrNotFound {
 			status = http.StatusNotFound
+		} else if err == errGraphPathLimitExceeded {
+			status = http.StatusBadRequest
 		}
 		s.writeError(w, status, err.Error(), err)
 		return
@@ -176,6 +202,7 @@ func (s *Server) handleGraphTemporal(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid request body", ErrBadRequest)
 		return
 	}
+	req.NodeIDs = normalizeGraphNodeIDs(req.NodeIDs)
 	if len(req.NodeIDs) == 0 {
 		s.writeError(w, http.StatusBadRequest, "node_ids is required", ErrBadRequest)
 		return
@@ -221,6 +248,7 @@ func (s *Server) handleGraphDiff(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid request body", ErrBadRequest)
 		return
 	}
+	req.NodeIDs = normalizeGraphNodeIDs(req.NodeIDs)
 	if len(req.NodeIDs) == 0 {
 		s.writeError(w, http.StatusBadRequest, "node_ids is required", ErrBadRequest)
 		return
@@ -273,18 +301,18 @@ func (s *Server) handleGraphDiff(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		baseline, err = s.collectSnapshotInducedSubgraph(engine, req.NodeIDs, targetVersion, filterSet)
+		baseline, err = s.collectLatestInducedSubgraph(engine, req.NodeIDs, filterSet)
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
+			return
+		}
+
+		target, err = s.collectSnapshotInducedSubgraph(engine, req.NodeIDs, targetVersion, filterSet)
 		if err != nil {
 			if err == storage.ErrNotImplemented {
 				s.writeError(w, http.StatusBadRequest, "temporal graph diff is not supported by the configured storage engine", err)
 				return
 			}
-			s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
-			return
-		}
-
-		target, err = s.collectLatestInducedSubgraph(engine, req.NodeIDs, filterSet)
-		if err != nil {
 			s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
 			return
 		}
@@ -333,8 +361,10 @@ func (s *Server) writeGraphResolveError(w http.ResponseWriter, err error) {
 	}
 	message := err.Error()
 	status := http.StatusBadRequest
-	if strings.Contains(strings.ToLower(message), "not found") {
+	if errors.Is(err, multidb.ErrDatabaseNotFound) {
 		status = http.StatusNotFound
+	} else if errors.Is(err, multidb.ErrDatabaseOffline) {
+		status = http.StatusServiceUnavailable
 	}
 	s.writeError(w, status, message, err)
 }
@@ -486,6 +516,11 @@ func (s *Server) collectLatestNeighborhood(ctx context.Context, engine storage.E
 	}
 
 	for len(queue) > 0 {
+		select {
+		case <-ctx.Done():
+			return collection, ctx.Err()
+		default:
+		}
 		current := queue[0]
 		queue = queue[1:]
 		if current.depth >= depth {
@@ -497,6 +532,11 @@ func (s *Server) collectLatestNeighborhood(ctx context.Context, engine storage.E
 			return collection, err
 		}
 		for _, edge := range edges {
+			select {
+			case <-ctx.Done():
+				return collection, ctx.Err()
+			default:
+			}
 			if !filters.allowEdge(edge) {
 				continue
 			}
@@ -512,15 +552,18 @@ func (s *Server) collectLatestNeighborhood(ctx context.Context, engine storage.E
 				continue
 			}
 
-			if len(collection.nodes) >= maxNodes {
+			nextDepth := current.depth + 1
+			prevDepth, seen := visited[otherID]
+			if !seen && len(collection.nodes) >= maxNodes {
 				collection.truncated = true
 				continue
 			}
 
-			collection.addNode(neighbor, "")
+			if !seen {
+				collection.addNode(neighbor, "")
+			}
 			collection.addEdge(edge, "")
-			nextDepth := current.depth + 1
-			if prevDepth, seen := visited[otherID]; !seen || nextDepth < prevDepth {
+			if !seen || nextDepth < prevDepth {
 				visited[otherID] = nextDepth
 				queue = append(queue, queueEntry{nodeID: otherID, depth: nextDepth})
 			}
@@ -555,7 +598,13 @@ func (s *Server) collectLatestPath(ctx context.Context, engine storage.Engine, s
 	}
 
 	found := false
-	for len(queue) > 0 && len(visited) <= maxVisited {
+	limitExceeded := false
+	for len(queue) > 0 {
+		select {
+		case <-ctx.Done():
+			return graphCollection{}, ctx.Err()
+		default:
+		}
 		current := queue[0]
 		queue = queue[1:]
 
@@ -564,6 +613,11 @@ func (s *Server) collectLatestPath(ctx context.Context, engine storage.Engine, s
 			return graphCollection{}, err
 		}
 		for _, edge := range edges {
+			select {
+			case <-ctx.Done():
+				return graphCollection{}, ctx.Err()
+			default:
+			}
 			if !filters.allowEdge(edge) {
 				continue
 			}
@@ -576,6 +630,10 @@ func (s *Server) collectLatestPath(ctx context.Context, engine storage.Engine, s
 				continue
 			}
 			if _, ok := visited[nextID]; ok {
+				continue
+			}
+			if len(visited) >= maxVisited {
+				limitExceeded = true
 				continue
 			}
 			visited[nextID] = struct{}{}
@@ -592,6 +650,9 @@ func (s *Server) collectLatestPath(ctx context.Context, engine storage.Engine, s
 	}
 
 	if !found {
+		if limitExceeded {
+			return graphCollection{}, errGraphPathLimitExceeded
+		}
 		return graphCollection{}, storage.ErrNotFound
 	}
 
@@ -628,19 +689,27 @@ func (s *Server) collectLatestInducedSubgraph(engine storage.Engine, nodeIDs []s
 	}
 
 	resolvedIDs := sortedNodeIDs(collection.nodes)
+	resolvedSet := make(map[storage.NodeID]struct{}, len(resolvedIDs))
+	for _, id := range resolvedIDs {
+		resolvedSet[storage.NodeID(id)] = struct{}{}
+	}
 	for _, startID := range resolvedIDs {
-		for _, endID := range resolvedIDs {
-			if startID == endID {
+		edges, err := engine.GetOutgoingEdges(storage.NodeID(startID))
+		if err != nil {
+			return collection, err
+		}
+		for _, edge := range edges {
+			if edge == nil || edge.StartNode == edge.EndNode {
 				continue
 			}
-			edges, err := engine.GetEdgesBetween(storage.NodeID(startID), storage.NodeID(endID))
-			if err != nil {
-				return collection, err
+			if _, ok := resolvedSet[edge.StartNode]; !ok {
+				continue
 			}
-			for _, edge := range edges {
-				if filters.allowEdge(edge) {
-					collection.addEdge(edge, "")
-				}
+			if _, ok := resolvedSet[edge.EndNode]; !ok {
+				continue
+			}
+			if filters.allowEdge(edge) {
+				collection.addEdge(edge, "")
 			}
 		}
 	}
@@ -815,10 +884,19 @@ func cloneInterfaceMap(input map[string]interface{}) map[string]interface{} {
 }
 
 func graphEdgesForNode(ctx context.Context, engine storage.Engine, nodeID storage.NodeID) ([]*storage.Edge, error) {
-	_ = ctx
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	outgoing, err := engine.GetOutgoingEdges(nodeID)
 	if err != nil {
 		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
 	incoming, err := engine.GetIncomingEdges(nodeID)
 	if err != nil {
@@ -827,6 +905,11 @@ func graphEdgesForNode(ctx context.Context, engine storage.Engine, nodeID storag
 	edges := make([]*storage.Edge, 0, len(outgoing)+len(incoming))
 	seen := make(map[string]struct{}, len(outgoing)+len(incoming))
 	for _, edge := range outgoing {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		if edge == nil {
 			continue
 		}
@@ -838,6 +921,11 @@ func graphEdgesForNode(ctx context.Context, engine storage.Engine, nodeID storag
 		edges = append(edges, edge)
 	}
 	for _, edge := range incoming {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		if edge == nil {
 			continue
 		}

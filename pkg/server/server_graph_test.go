@@ -60,6 +60,43 @@ func TestGraphNeighborhoodEndpoint(t *testing.T) {
 	require.Equal(t, []string{"a", "b", "c"}, []string{payload.Nodes[0].ID, payload.Nodes[1].ID, payload.Nodes[2].ID})
 }
 
+func TestGraphNeighborhoodEndpoint_RejectsWhitespaceOnlyNodeIDs(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "neighborhood"), map[string]interface{}{
+		"node_ids": []string{" ", "\t", "\n"},
+		"depth":    1,
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
+}
+
+func TestGraphNeighborhoodEndpoint_LimitPreservesEdgesBetweenIncludedNodes(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS"}))
+
+	// limit=2 means only the two seed nodes are allowed in the node set.
+	// The connecting edge between those already-included nodes must still be returned.
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "neighborhood"), map[string]interface{}{
+		"node_ids": []string{"a", "b"},
+		"depth":    1,
+		"limit":    2,
+	}, "Bearer "+token)
+	require.Equal(t, 200, resp.Code)
+
+	payload := decodeGraphPayload(t, resp.Body)
+	require.Equal(t, 2, payload.Meta.NodeCount)
+	require.Equal(t, 1, payload.Meta.EdgeCount)
+	require.Equal(t, "ab", payload.Edges[0].ID)
+}
+
 func TestGraphPathEndpoint(t *testing.T) {
 	server, authenticator := setupTestServer(t)
 	token := getAuthToken(t, authenticator, "admin")
@@ -86,6 +123,28 @@ func TestGraphPathEndpoint(t *testing.T) {
 	require.Equal(t, "query", payload.Meta.GeneratedFrom)
 	require.Equal(t, "ab", payload.Edges[0].ID)
 	require.Equal(t, "bc", payload.Edges[1].ID)
+}
+
+func TestGraphPathEndpoint_LimitExceededDoesNotReturnNotFound(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	for _, id := range []string{"a", "b", "c"} {
+		_, err := engine.CreateNode(&storage.Node{ID: storage.NodeID(id), Labels: []string{"Node"}, Properties: map[string]interface{}{"name": id}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "LINKS"}))
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "bc", StartNode: "b", EndNode: "c", Type: "LINKS"}))
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "path"), map[string]interface{}{
+		"source_node_id":     "a",
+		"target_node_id":     "c",
+		"relationship_types": []string{"LINKS"},
+		"limit":              2,
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
+	require.Contains(t, resp.Body.String(), "path search limit exceeded")
 }
 
 func TestGraphTemporalEndpoint(t *testing.T) {
@@ -116,6 +175,17 @@ func TestGraphTemporalEndpoint(t *testing.T) {
 	require.Equal(t, "Alice v1", payload.Nodes[0].Properties["name"])
 	require.Equal(t, "KNOWS", payload.Edges[0].Type)
 	require.Equal(t, asOf, payload.Meta.AsOf)
+}
+
+func TestGraphTemporalEndpoint_RejectsWhitespaceOnlyNodeIDs(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "temporal"), map[string]interface{}{
+		"node_ids": []string{" ", "\t", "\n"},
+		"as_of":    time.Now().UTC().Format(time.RFC3339Nano),
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
 }
 
 func TestGraphDiffEndpoint(t *testing.T) {
@@ -154,10 +224,11 @@ func TestGraphDiffEndpoint(t *testing.T) {
 		edgesByID[edge.ID] = edge
 	}
 	require.Equal(t, "changed", nodesByID["a"].Status)
-	require.Equal(t, "removed", nodesByID["b"].Status)
-	require.Equal(t, "added", nodesByID["c"].Status)
-	require.Equal(t, "removed", edgesByID["ab"].Status)
-	require.Equal(t, "added", edgesByID["ac"].Status)
+	require.Equal(t, "added", nodesByID["b"].Status)
+	require.Equal(t, "removed", nodesByID["c"].Status)
+	require.Equal(t, "added", edgesByID["ab"].Status)
+	require.Equal(t, "removed", edgesByID["ac"].Status)
+	require.Equal(t, asOf, payload.Meta.AsOf)
 	require.Equal(t, "current", payload.Meta.CompareTo)
 }
 
@@ -190,4 +261,16 @@ func TestGraphNeighborhoodEndpoint_RespectsResolvedDatabaseReadAccess(t *testing
 	require.NotEmpty(t, payload.Errors)
 	require.Equal(t, "Neo.ClientError.Security.Forbidden", payload.Errors[0].Code)
 	require.Contains(t, payload.Errors[0].Message, "not allowed")
+}
+
+func TestGraphEdgesForNode_RespectsContextCancellation(t *testing.T) {
+	server, _ := setupTestServer(t)
+	engine := getDefaultStorage(t, server)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := graphEdgesForNode(ctx, engine, storage.NodeID("any"))
+	require.Error(t, err)
+	require.Equal(t, context.Canceled, err)
 }

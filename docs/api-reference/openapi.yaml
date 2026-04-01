@@ -560,6 +560,8 @@ paths:
                   $ref: "#/components/schemas/SearchResult"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /nornicdb/graph/{database}/neighborhood:
     post:
@@ -632,7 +634,7 @@ paths:
       tags:
         - Graph
       summary: Build a graph payload for a path
-      description: Resolve a path between two node IDs and return it as a normalized graph payload.
+      description: Resolve a path between two node IDs and return it as a normalized graph payload. Returns 400 when the traversal limit is exhausted before the target is found.
       operationId: graphPath
       security:
         - bearerAuth: []
@@ -710,7 +712,7 @@ paths:
       tags:
         - Graph
       summary: Diff graph state across time
-      description: Compare current graph state against a historical snapshot, or compare two historical snapshots, and return deterministic added/removed/changed markers.
+      description: Compare a target graph state identified by `as_of` against a baseline identified by `compare_to`, or against `current` when `compare_to` is omitted, and return deterministic added/removed/changed markers.
       operationId: graphDiff
       security:
         - bearerAuth: []
@@ -1295,12 +1297,20 @@ components:
           type: array
           items:
             type: string
-          description: Existing graph node IDs already present in the client graph state.
+          description: >
+            Existing graph node IDs already present in the client graph state. This field is
+            currently advisory only and may be ignored by the server; responses include all
+            collected nodes regardless of this value. Reserved for future server-side diff/delta
+            behavior.
         existing_edge_ids:
           type: array
           items:
             type: string
-          description: Existing graph edge IDs already present in the client graph state.
+          description: >
+            Existing graph edge IDs already present in the client graph state. This field is
+            currently advisory only and may be ignored by the server; responses include all
+            collected edges regardless of this value. Reserved for future server-side diff/delta
+            behavior.
         source_node_id:
           type: string
           description: Source node ID for path requests.
@@ -1328,11 +1338,11 @@ components:
         as_of:
           type: string
           format: date-time
-          description: Snapshot timestamp for temporal reconstruction or diff.
+          description: Snapshot timestamp for temporal reconstruction or the target side of a diff.
         compare_to:
           type: string
           format: date-time
-          description: Optional baseline timestamp for temporal diff requests.
+          description: Optional baseline timestamp for temporal diff requests. When omitted, diff baselines against the current graph state.
 
     GraphNode:
       type: object
@@ -1384,8 +1394,10 @@ components:
           type: integer
         as_of:
           type: string
+          description: Target graph state timestamp for temporal payloads and diff responses.
         compare_to:
           type: string
+          description: Baseline graph state label or timestamp for diff responses.
         node_count:
           type: integer
         edge_count:
