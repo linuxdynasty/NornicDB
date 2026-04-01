@@ -753,20 +753,29 @@ func (s *Server) collectSnapshotInducedSubgraph(engine storage.Engine, nodeIDs [
 	}
 
 	resolvedIDs := sortedNodeIDs(collection.nodes)
-	for _, startID := range resolvedIDs {
-		for _, endID := range resolvedIDs {
-			if startID == endID {
-				continue
-			}
-			edges, err := indexed.GetEdgesBetweenVisibleAt(storage.NodeID(startID), storage.NodeID(endID), version)
-			if err != nil {
-				return collection, err
-			}
-			for _, edge := range edges {
-				if filters.allowEdge(edge) {
-					collection.addEdge(edge, "")
-				}
-			}
+	if len(resolvedIDs) == 0 {
+		return collection, nil
+	}
+	resolvedSet := make(map[storage.NodeID]struct{}, len(resolvedIDs))
+	for _, id := range resolvedIDs {
+		resolvedSet[storage.NodeID(id)] = struct{}{}
+	}
+	edges, err := indexed.GetEdgesByTypeVisibleAt("", version)
+	if err != nil {
+		return collection, err
+	}
+	for _, edge := range edges {
+		if edge == nil || edge.StartNode == edge.EndNode {
+			continue
+		}
+		if _, ok := resolvedSet[edge.StartNode]; !ok {
+			continue
+		}
+		if _, ok := resolvedSet[edge.EndNode]; !ok {
+			continue
+		}
+		if filters.allowEdge(edge) {
+			collection.addEdge(edge, "")
 		}
 	}
 

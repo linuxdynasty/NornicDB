@@ -25,6 +25,118 @@ type graphNoMVCCEngine struct {
 	storage.Engine
 }
 
+func waitUntilAfterRFC3339Nano(t *testing.T, asOf string) {
+	t.Helper()
+	asOfTime, err := time.Parse(time.RFC3339Nano, asOf)
+	require.NoError(t, err)
+	waitDeadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(waitDeadline) {
+		if time.Now().UTC().After(asOfTime) {
+			return
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	require.True(t, time.Now().UTC().After(asOfTime), "current time did not advance beyond asOf")
+}
+
+func asOfFromNodeHeadOrNow(t *testing.T, engine storage.Engine, nodeID storage.NodeID) string {
+	t.Helper()
+	if headEngine, ok := engine.(storage.MVCCHeadEngine); ok {
+		head, err := headEngine.GetNodeCurrentHead(nodeID)
+		require.NoError(t, err)
+		return head.Version.CommitTimestamp.UTC().Format(time.RFC3339Nano)
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func asOfFromEdgeHeadOrNow(t *testing.T, engine storage.Engine, edgeID storage.EdgeID) string {
+	t.Helper()
+	if headEngine, ok := engine.(storage.MVCCHeadEngine); ok {
+		head, err := headEngine.GetEdgeCurrentHead(edgeID)
+		require.NoError(t, err)
+		return head.Version.CommitTimestamp.UTC().Format(time.RFC3339Nano)
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+type graphSnapshotIndexEngine struct {
+	storage.Engine
+	nodes                map[storage.NodeID]*storage.Node
+	edges                []*storage.Edge
+	getEdgesByTypeCalls  int
+	getEdgesBetweenCalls int
+}
+
+func (e *graphSnapshotIndexEngine) GetNodeLatestVisible(id storage.NodeID) (*storage.Node, error) {
+	return e.GetNodeVisibleAt(id, storage.MVCCVersion{})
+}
+
+func (e *graphSnapshotIndexEngine) GetNodeVisibleAt(id storage.NodeID, _ storage.MVCCVersion) (*storage.Node, error) {
+	node, ok := e.nodes[id]
+	if !ok {
+		return nil, nil
+	}
+	return node, nil
+}
+
+func (e *graphSnapshotIndexEngine) GetEdgeLatestVisible(id storage.EdgeID) (*storage.Edge, error) {
+	return e.GetEdgeVisibleAt(id, storage.MVCCVersion{})
+}
+
+func (e *graphSnapshotIndexEngine) GetEdgeVisibleAt(id storage.EdgeID, _ storage.MVCCVersion) (*storage.Edge, error) {
+	for _, edge := range e.edges {
+		if edge != nil && edge.ID == id {
+			return edge, nil
+		}
+	}
+	return nil, nil
+}
+
+func (e *graphSnapshotIndexEngine) GetNodesByLabelVisibleAt(label string, _ storage.MVCCVersion) ([]*storage.Node, error) {
+	out := make([]*storage.Node, 0, len(e.nodes))
+	for _, node := range e.nodes {
+		if node == nil {
+			continue
+		}
+		if label == "" {
+			out = append(out, node)
+			continue
+		}
+		for _, l := range node.Labels {
+			if l == label {
+				out = append(out, node)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (e *graphSnapshotIndexEngine) GetEdgesByTypeVisibleAt(edgeType string, _ storage.MVCCVersion) ([]*storage.Edge, error) {
+	e.getEdgesByTypeCalls++
+	out := make([]*storage.Edge, 0, len(e.edges))
+	for _, edge := range e.edges {
+		if edge == nil {
+			continue
+		}
+		if edgeType == "" || edge.Type == edgeType {
+			out = append(out, edge)
+		}
+	}
+	return out, nil
+}
+
+func (e *graphSnapshotIndexEngine) GetEdgesBetweenVisibleAt(startID, endID storage.NodeID, _ storage.MVCCVersion) ([]*storage.Edge, error) {
+	e.getEdgesBetweenCalls++
+	out := make([]*storage.Edge, 0)
+	for _, edge := range e.edges {
+		if edge != nil && edge.StartNode == startID && edge.EndNode == endID {
+			out = append(out, edge)
+		}
+	}
+	return out, nil
+}
+
 func decodeGraphPayload(t *testing.T, recorderBody interface{ Bytes() []byte }) graphPayload {
 	t.Helper()
 	var payload graphPayload
@@ -194,9 +306,9 @@ func TestGraphTemporalEndpoint(t *testing.T) {
 	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
 	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS", Properties: map[string]interface{}{"weight": 1}}))
-	asOf := time.Now().UTC().Format(time.RFC3339Nano)
+	asOf := asOfFromEdgeHeadOrNow(t, engine, "ab")
 
-	time.Sleep(2 * time.Millisecond)
+	waitUntilAfterRFC3339Nano(t, asOf)
 	require.NoError(t, engine.UpdateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice v2"}}))
 	require.NoError(t, engine.UpdateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "LIKES", Properties: map[string]interface{}{"weight": 2}}))
 
@@ -235,9 +347,9 @@ func TestGraphDiffEndpoint(t *testing.T) {
 	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
 	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS"}))
-	asOf := time.Now().UTC().Format(time.RFC3339Nano)
+	asOf := asOfFromEdgeHeadOrNow(t, engine, "ab")
 
-	time.Sleep(2 * time.Millisecond)
+	waitUntilAfterRFC3339Nano(t, asOf)
 	require.NoError(t, engine.UpdateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice v2"}}))
 	require.NoError(t, engine.DeleteEdge("ab"))
 	require.NoError(t, engine.DeleteNode("b"))
@@ -389,15 +501,15 @@ func TestGraphDiffEndpoint_WithCompareToUsesBaselineTimestamp(t *testing.T) {
 		Properties: map[string]interface{}{"name": "Alice v1"},
 	})
 	require.NoError(t, err)
-	baseline := time.Now().UTC().Format(time.RFC3339Nano)
+	baseline := asOfFromNodeHeadOrNow(t, engine, "a")
 
-	time.Sleep(2 * time.Millisecond)
+	waitUntilAfterRFC3339Nano(t, baseline)
 	require.NoError(t, engine.UpdateNode(&storage.Node{
 		ID:         "a",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice v2"},
 	}))
-	target := time.Now().UTC().Format(time.RFC3339Nano)
+	target := asOfFromNodeHeadOrNow(t, engine, "a")
 
 	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
 		"node_ids":   []string{"a"},
@@ -601,6 +713,42 @@ func TestCollectSnapshotInducedSubgraph_RequiresMVCCInterfaces(t *testing.T) {
 	engine := &graphNoMVCCEngine{Engine: base}
 	_, err := server.collectSnapshotInducedSubgraph(engine, []string{"a"}, storage.MVCCVersion{}, newGraphFilterSet(nil, nil))
 	require.ErrorIs(t, err, storage.ErrNotImplemented)
+}
+
+func TestCollectSnapshotInducedSubgraph_UsesSingleVisibleEdgeScan(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	engine := &graphSnapshotIndexEngine{
+		Engine: base,
+		nodes: map[storage.NodeID]*storage.Node{
+			"a": {ID: "a", Labels: []string{"Node"}},
+			"b": {ID: "b", Labels: []string{"Node"}},
+			"c": {ID: "c", Labels: []string{"Node"}},
+		},
+		edges: []*storage.Edge{
+			{ID: "ab", StartNode: "a", EndNode: "b", Type: "LINKS"},
+			{ID: "bc", StartNode: "b", EndNode: "c", Type: "LINKS"},
+			{ID: "ca", StartNode: "c", EndNode: "a", Type: "OTHER"},
+			{ID: "aa", StartNode: "a", EndNode: "a", Type: "LINKS"}, // self-loop excluded to mirror previous induced-subgraph behavior
+		},
+	}
+	version := storage.MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: ^uint64(0)}
+
+	collection, err := server.collectSnapshotInducedSubgraph(engine, []string{"a", "b", "c"}, version, newGraphFilterSet(nil, []string{"LINKS"}))
+	require.NoError(t, err)
+	require.Equal(t, 1, engine.getEdgesByTypeCalls)
+	require.Equal(t, 0, engine.getEdgesBetweenCalls)
+	require.Len(t, collection.edges, 2)
+	_, hasAB := collection.edges["ab"]
+	_, hasBC := collection.edges["bc"]
+	_, hasCA := collection.edges["ca"]
+	_, hasAA := collection.edges["aa"]
+	require.True(t, hasAB)
+	require.True(t, hasBC)
+	require.False(t, hasCA)
+	require.False(t, hasAA)
 }
 
 func TestGraphFilterSetAndCollectionHelpers(t *testing.T) {
