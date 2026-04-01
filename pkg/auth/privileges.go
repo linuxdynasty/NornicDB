@@ -74,17 +74,19 @@ func (p *PrivilegesStore) Resolve(principalRoles []string, dbName string) Resolv
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var read, write bool
+	matchedMatrixEntry := false
 	for _, role := range principalRoles {
 		role = strings.ToLower(strings.TrimSpace(role))
 		role = strings.TrimPrefix(role, "role_")
 		if perDb, ok := p.matrix[role]; ok {
 			if priv, ok := perDb[dbName]; ok {
+				matchedMatrixEntry = true
 				read = read || priv.Read
 				write = write || priv.Write
 			}
 		}
 	}
-	if read || write {
+	if matchedMatrixEntry {
 		return ResolvedAccess{Read: read, Write: write}
 	}
 	// Fall back to global role permissions

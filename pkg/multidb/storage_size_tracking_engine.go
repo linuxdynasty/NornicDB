@@ -23,6 +23,9 @@ var _ storage.Engine = (*sizeTrackingEngine)(nil)
 // can keep LIMIT short-circuit behavior on hot paths.
 var _ storage.StreamingEngine = (*sizeTrackingEngine)(nil)
 var _ storage.LabelNodeIDLookupEngine = (*sizeTrackingEngine)(nil)
+var _ storage.MVCCVisibilityEngine = (*sizeTrackingEngine)(nil)
+var _ storage.MVCCIndexedVisibilityEngine = (*sizeTrackingEngine)(nil)
+var _ storage.MVCCHeadEngine = (*sizeTrackingEngine)(nil)
 var _ storage.MVCCLifecycleEngine = (*sizeTrackingEngine)(nil)
 
 func newSizeTrackingEngine(engine storage.Engine, manager *DatabaseManager, dbName string) storage.Engine {
@@ -184,6 +187,69 @@ func (t *sizeTrackingEngine) ForEachNodeIDByLabel(label string, visit func(stora
 		}
 	}
 	return nil
+}
+
+func (t *sizeTrackingEngine) GetNodeLatestVisible(id storage.NodeID) (*storage.Node, error) {
+	if provider, ok := t.Engine.(storage.MVCCVisibilityEngine); ok {
+		return provider.GetNodeLatestVisible(id)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetNodeVisibleAt(id storage.NodeID, version storage.MVCCVersion) (*storage.Node, error) {
+	if provider, ok := t.Engine.(storage.MVCCVisibilityEngine); ok {
+		return provider.GetNodeVisibleAt(id, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetEdgeLatestVisible(id storage.EdgeID) (*storage.Edge, error) {
+	if provider, ok := t.Engine.(storage.MVCCVisibilityEngine); ok {
+		return provider.GetEdgeLatestVisible(id)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetEdgeVisibleAt(id storage.EdgeID, version storage.MVCCVersion) (*storage.Edge, error) {
+	if provider, ok := t.Engine.(storage.MVCCVisibilityEngine); ok {
+		return provider.GetEdgeVisibleAt(id, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetNodesByLabelVisibleAt(label string, version storage.MVCCVersion) ([]*storage.Node, error) {
+	if provider, ok := t.Engine.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetNodesByLabelVisibleAt(label, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetEdgesByTypeVisibleAt(edgeType string, version storage.MVCCVersion) ([]*storage.Edge, error) {
+	if provider, ok := t.Engine.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesByTypeVisibleAt(edgeType, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetEdgesBetweenVisibleAt(startID, endID storage.NodeID, version storage.MVCCVersion) ([]*storage.Edge, error) {
+	if provider, ok := t.Engine.(storage.MVCCIndexedVisibilityEngine); ok {
+		return provider.GetEdgesBetweenVisibleAt(startID, endID, version)
+	}
+	return nil, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetNodeCurrentHead(id storage.NodeID) (storage.MVCCHead, error) {
+	if provider, ok := t.Engine.(storage.MVCCHeadEngine); ok {
+		return provider.GetNodeCurrentHead(id)
+	}
+	return storage.MVCCHead{}, storage.ErrNotImplemented
+}
+
+func (t *sizeTrackingEngine) GetEdgeCurrentHead(id storage.EdgeID) (storage.MVCCHead, error) {
+	if provider, ok := t.Engine.(storage.MVCCHeadEngine); ok {
+		return provider.GetEdgeCurrentHead(id)
+	}
+	return storage.MVCCHead{}, storage.ErrNotImplemented
 }
 
 func (t *sizeTrackingEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {

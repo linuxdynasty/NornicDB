@@ -159,6 +159,11 @@ func (s *Server) registerNornicDBRoutes(mux *http.ServeMux) {
 	// Vector search (NornicDB-specific)
 	mux.HandleFunc("/nornicdb/search", s.withAuth(s.handleSearch, auth.PermRead))
 	mux.HandleFunc("/nornicdb/similar", s.withAuth(s.handleSimilar, auth.PermRead))
+	mux.HandleFunc("/nornicdb/graph/{database}/neighborhood", s.withAuth(s.handleGraphNeighborhood, auth.PermRead))
+	mux.HandleFunc("/nornicdb/graph/{database}/expand", s.withAuth(s.handleGraphExpand, auth.PermRead))
+	mux.HandleFunc("/nornicdb/graph/{database}/path", s.withAuth(s.handleGraphPath, auth.PermRead))
+	mux.HandleFunc("/nornicdb/graph/{database}/temporal", s.withAuth(s.handleGraphTemporal, auth.PermRead))
+	mux.HandleFunc("/nornicdb/graph/{database}/diff", s.withAuth(s.handleGraphDiff, auth.PermRead))
 
 	// Memory decay (NornicDB-specific)
 	mux.HandleFunc("/nornicdb/decay", s.withAuth(s.handleDecay, auth.PermRead))
