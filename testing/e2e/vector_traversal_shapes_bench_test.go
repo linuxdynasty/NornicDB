@@ -20,6 +20,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type traversalTableRow struct {
+	shape     string
+	fanout    string
+	depth     int
+	protocol  string
+	samples   int
+	opsPerSec float64
+	minMS     float64
+	meanMS    float64
+	p50MS     float64
+	p95MS     float64
+	p99MS     float64
+	maxMS     float64
+}
+
 func TestVectorTraversalShapeMatrix_BoltVsHTTP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping traversal matrix e2e benchmark in -short")
@@ -27,7 +42,6 @@ func TestVectorTraversalShapeMatrix_BoltVsHTTP(t *testing.T) {
 	reportf := func(format string, args ...any) {
 		t.Helper()
 		msg := fmt.Sprintf(format, args...)
-		t.Log(msg)
 		fmt.Fprintln(os.Stdout, msg)
 	}
 
@@ -57,19 +71,27 @@ func TestVectorTraversalShapeMatrix_BoltVsHTTP(t *testing.T) {
 	rootIDs := fetchTraversalRootIDsE2E(t, driver)
 
 	fanouts := parseFanoutsEnv("NORNICDB_TRAVERSAL_FANOUTS", []int{1, 2, 3})
-	iterations := envInt("NORNICDB_TRAVERSAL_MATRIX_ITERS", 3)
+	requestedIterations := envInt("NORNICDB_TRAVERSAL_MATRIX_ITERS", 0)
+	minMeasuredIterations := envInt("NORNICDB_TRAVERSAL_MATRIX_MIN_SAMPLES", 101)
+	if minMeasuredIterations < 3 {
+		minMeasuredIterations = 3
+	}
+	warmupIterations := envInt("NORNICDB_TRAVERSAL_MATRIX_WARMUP", 2)
+	if warmupIterations < 0 {
+		warmupIterations = 0
+	}
+	iterations := requestedIterations
+	if iterations <= 0 {
+		iterations = minMeasuredIterations
+	}
+	if iterations < minMeasuredIterations {
+		reportf("benchmark config: requested measured_iters=%d is too low for stable percentiles; using measured_iters=%d instead", requestedIterations, minMeasuredIterations)
+		iterations = minMeasuredIterations
+	}
+	reportf("benchmark config: warmup_iters=%d measured_iters=%d", warmupIterations, iterations)
 	pathCap := envInt("NORNICDB_TRAVERSAL_PATH_CAP", 5)
 
-	type tableRow struct {
-		shape    string
-		fanout   string
-		depth    int
-		protocol string
-		meanMS   float64
-		p50MS    float64
-		p95MS    float64
-	}
-	rows := make([]tableRow, 0, 128)
+	rows := make([]traversalTableRow, 0, 128)
 
 	shapeSpecs := []struct {
 		name      string
@@ -165,7 +187,7 @@ LIMIT $topK
 		for _, fanout := range spec.fanoutSet {
 			for depth := 1; depth <= 6; depth++ {
 				query, params, expectedNodeID := spec.queryFor(depth, fanout, pathCap)
-				boltSummary := runSerialBench(iterations, func(ctx context.Context) error {
+				boltSummary, err := runSerialBench(warmupIterations, iterations, func(ctx context.Context) error {
 					row, err := runBoltSingleRow(ctx, driver, query, params)
 					if err != nil {
 						return err
@@ -173,9 +195,10 @@ LIMIT $topK
 					spec.assertRow(t, row, depth, fanout, pathCap, expectedNodeID)
 					return nil
 				})
-				rows = append(rows, tableRow{shape: spec.name, fanout: fanoutLabel(spec.name, fanout), depth: depth, protocol: "bolt", meanMS: durationToMS(meanDuration(boltSummary.lat)), p50MS: durationToMS(percentile(boltSummary.lat, 0.50)), p95MS: durationToMS(percentile(boltSummary.lat, 0.95))})
+				require.NoError(t, err, "shape=%s fanout=%d depth=%d protocol=bolt", spec.name, fanout, depth)
+				rows = append(rows, summarizeTableRow(spec.name, fanoutLabel(spec.name, fanout), depth, "bolt", boltSummary))
 
-				httpSummary := runSerialBench(iterations, func(ctx context.Context) error {
+				httpSummary, err := runSerialBench(warmupIterations, iterations, func(ctx context.Context) error {
 					row, err := neo4jHTTPCommitSingleRow(ctx, httpClient, httpAddr, dbName, query, params)
 					if err != nil {
 						return err
@@ -183,15 +206,24 @@ LIMIT $topK
 					spec.assertRow(t, row, depth, fanout, pathCap, expectedNodeID)
 					return nil
 				})
-				rows = append(rows, tableRow{shape: spec.name, fanout: fanoutLabel(spec.name, fanout), depth: depth, protocol: "http", meanMS: durationToMS(meanDuration(httpSummary.lat)), p50MS: durationToMS(percentile(httpSummary.lat, 0.50)), p95MS: durationToMS(percentile(httpSummary.lat, 0.95))})
+				require.NoError(t, err, "shape=%s fanout=%d depth=%d protocol=http", spec.name, fanout, depth)
+				rows = append(rows, summarizeTableRow(spec.name, fanoutLabel(spec.name, fanout), depth, "http", httpSummary))
 			}
 		}
 	}
 
-	reportf("| shape | fanout | depth | protocol | mean_ms | p50_ms | p95_ms |")
-	reportf("| --- | ---: | ---: | --- | ---: | ---: | ---: |")
+	reportf("| shape | fanout | depth | protocol | samples | throughput_ops_s | min_ms | mean_ms | p50_ms | p95_ms | p99_ms | max_ms |")
+	reportf("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for _, row := range rows {
-		reportf("| %s | %s | %d | %s | %.3f | %.3f | %.3f |", row.shape, row.fanout, row.depth, row.protocol, row.meanMS, row.p50MS, row.p95MS)
+		reportf("| %s | %s | %d | %s | %d | %.3f | %.3f | %.3f | %.3f | %.3f | %.3f | %.3f |", row.shape, row.fanout, row.depth, row.protocol, row.samples, row.opsPerSec, row.minMS, row.meanMS, row.p50MS, row.p95MS, row.p99MS, row.maxMS)
+	}
+
+	reportf("")
+	reportf("| Transport | Throughput | Mean | P50 | P95 | P99 | Max |")
+	reportf("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+	for _, protocol := range []string{"http", "bolt"} {
+		agg := summarizeTransport(rows, protocol)
+		reportf("| %s | %s ops/s | %s ms | %s ms | %s ms | %s ms | %s ms |", strings.ToUpper(protocol), formatFloatRange(agg.opsPerSec), formatFloatRange(agg.meanMS), formatFloatRange(agg.p50MS), formatFloatRange(agg.p95MS), formatFloatRange(agg.p99MS), formatFloatRange(agg.maxMS))
 	}
 }
 
@@ -297,24 +329,40 @@ func neo4jHTTPCommitSingleRow(ctx context.Context, c *http.Client, httpAddr, db,
 	return parsed.Results[0].Data[0].Row, nil
 }
 
-func runSerialBench(iterations int, fn func(context.Context) error) benchSummary {
+func runSerialBench(warmupIterations, iterations int, fn func(context.Context) error) (benchSummary, error) {
 	if iterations <= 0 {
 		iterations = 1
 	}
-	lat := make([]time.Duration, 0, iterations)
-	start := time.Now()
-	for i := 0; i < iterations; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		begin := time.Now()
-		err := fn(ctx)
-		lat = append(lat, time.Since(begin))
-		cancel()
-		if err != nil {
-			break
+	if warmupIterations < 0 {
+		warmupIterations = 0
+	}
+	runPhase := func(total int, record bool) ([]time.Duration, error) {
+		lat := make([]time.Duration, 0, total)
+		for i := 0; i < total; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			begin := time.Now()
+			err := fn(ctx)
+			elapsed := time.Since(begin)
+			cancel()
+			if err != nil {
+				return lat, fmt.Errorf("iteration %d/%d failed: %w", i+1, total, err)
+			}
+			if record {
+				lat = append(lat, elapsed)
+			}
 		}
+		return lat, nil
+	}
+	if _, err := runPhase(warmupIterations, false); err != nil {
+		return benchSummary{}, err
+	}
+	start := time.Now()
+	lat, err := runPhase(iterations, true)
+	if err != nil {
+		return benchSummary{ops: len(lat), dur: time.Since(start), lat: lat}, err
 	}
 	sortDurations(lat)
-	return benchSummary{ops: len(lat), dur: time.Since(start), lat: lat}
+	return benchSummary{ops: len(lat), dur: time.Since(start), lat: lat}, nil
 }
 
 func meanDuration(lat []time.Duration) time.Duration {
@@ -330,6 +378,77 @@ func meanDuration(lat []time.Duration) time.Duration {
 
 func durationToMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
+}
+
+func summarizeTableRow(shape, fanout string, depth int, protocol string, summary benchSummary) traversalTableRow {
+	row := traversalTableRow{
+		shape:     shape,
+		fanout:    fanout,
+		depth:     depth,
+		protocol:  protocol,
+		samples:   len(summary.lat),
+		opsPerSec: benchOpsPerSecond(summary),
+		meanMS:    durationToMS(meanDuration(summary.lat)),
+		p50MS:     durationToMS(percentile(summary.lat, 0.50)),
+		p95MS:     durationToMS(percentile(summary.lat, 0.95)),
+		p99MS:     durationToMS(percentile(summary.lat, 0.99)),
+	}
+	if len(summary.lat) > 0 {
+		row.minMS = durationToMS(summary.lat[0])
+		row.maxMS = durationToMS(summary.lat[len(summary.lat)-1])
+	}
+	return row
+}
+
+type transportSummary struct {
+	opsPerSec []float64
+	meanMS    []float64
+	p50MS     []float64
+	p95MS     []float64
+	p99MS     []float64
+	maxMS     []float64
+}
+
+func summarizeTransport(rows []traversalTableRow, protocol string) transportSummary {
+	out := transportSummary{}
+	for _, row := range rows {
+		if row.protocol != protocol {
+			continue
+		}
+		out.opsPerSec = append(out.opsPerSec, row.opsPerSec)
+		out.meanMS = append(out.meanMS, row.meanMS)
+		out.p50MS = append(out.p50MS, row.p50MS)
+		out.p95MS = append(out.p95MS, row.p95MS)
+		out.p99MS = append(out.p99MS, row.p99MS)
+		out.maxMS = append(out.maxMS, row.maxMS)
+	}
+	return out
+}
+
+func benchOpsPerSecond(summary benchSummary) float64 {
+	if summary.dur <= 0 {
+		return 0
+	}
+	return float64(summary.ops) / summary.dur.Seconds()
+}
+
+func formatFloatRange(values []float64) string {
+	if len(values) == 0 {
+		return "N/A"
+	}
+	minVal, maxVal := values[0], values[0]
+	for _, value := range values[1:] {
+		if value < minVal {
+			minVal = value
+		}
+		if value > maxVal {
+			maxVal = value
+		}
+	}
+	if math.Abs(maxVal-minVal) < 0.0005 {
+		return fmt.Sprintf("%.3f", minVal)
+	}
+	return fmt.Sprintf("%.3f-%.3f", minVal, maxVal)
 }
 
 func rowAsInt64(t *testing.T, value any) int64 {
