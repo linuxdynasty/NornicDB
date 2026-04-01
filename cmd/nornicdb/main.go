@@ -21,6 +21,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/bolt"
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/cache"
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -32,12 +33,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/txsession"
 	"github.com/orneryd/nornicdb/ui"
-)
-
-var (
-	version   = "0.1.0"
-	commit    = "dev"
-	buildTime = "unknown" // Set via ldflags: -X main.buildTime=$(date +%Y%m%d-%H%M%S)
 )
 
 func main() {
@@ -69,7 +64,7 @@ Features:
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("NornicDB v%s (%s) built %s\n", version, commit, buildTime)
+			fmt.Printf("NornicDB %s\n", buildinfo.DisplayVersion())
 		},
 	})
 
@@ -348,15 +343,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cache.ConfigureGlobalCache(cfg.Memory.QueryCacheSize, cfg.Memory.QueryCacheTTL)
 	}
 
-	// Display version with commit hash and build timestamp
-	versionInfo := fmt.Sprintf("v%s", version)
-	if commit != "dev" && commit != "" {
-		versionInfo = fmt.Sprintf("v%s-%s", version, commit[:7]) // Short hash
-	}
-	if buildTime != "unknown" && buildTime != "" {
-		versionInfo = fmt.Sprintf("%s (built: %s)", versionInfo, buildTime)
-	}
-	fmt.Printf("🚀 Starting NornicDB %s\n", versionInfo)
+	fmt.Printf("🚀 Starting NornicDB %s\n", buildinfo.DisplayVersion())
 	fmt.Printf("   Data directory:  %s\n", dataDir)
 	fmt.Printf("   Bolt protocol:   bolt://localhost:%d\n", boltPort)
 	fmt.Printf("   HTTP API:        http://localhost:%d\n", httpPort)
@@ -613,6 +600,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	boltConfig := bolt.DefaultConfig()
 	boltConfig.Port = boltPort
 	boltConfig.LogQueries = logQueries
+	boltConfig.ServerAnnouncement = cfg.Server.BoltServerAnnouncement
 	if !noAuth && authenticator != nil {
 		boltAuth := bolt.NewAuthenticatorAdapter(authenticator)
 		boltAuth.SetGetEffectivePermissions(httpServer.GetEffectivePermissions)

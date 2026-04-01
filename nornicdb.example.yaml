@@ -54,7 +54,13 @@ server:
   # Env: NORNICDB_BOLT_ENABLED
   bolt_enabled: true
 
-  # Enable HTTP API server  
+  # Override the Bolt HELLO server announcement for strict Neo4j-only clients
+  # such as cypher-shell. Leave empty to keep the native NornicDB announcement.
+  # Example: "Neo4j/5.26.0"
+  # Env: NORNICDB_BOLT_SERVER_ANNOUNCEMENT
+  bolt_server_announcement: ""
+
+  # Enable HTTP API server
   # Env: NORNICDB_HTTP_ENABLED
   http_enabled: true
 
@@ -63,8 +69,8 @@ server:
   # Env: NORNICDB_BOLT_TLS_ENABLED, NORNICDB_TLS_DIR
   tls:
     enabled: false
-    cert_file: ""  # Path to PEM certificate
-    key_file: ""   # Path to PEM private key
+    cert_file: "" # Path to PEM certificate
+    key_file: "" # Path to PEM private key
     # base_directory: ""  # If set, looks for public.crt and private.key here
 
   # HTTPS Configuration (secure HTTP API)
@@ -385,7 +391,7 @@ auto_tlp:
   # Env: NORNICDB_TOPOLOGY_AUTO_INTEGRATION_ENABLED
   enabled: false
 
-  # Algorithm: adamic_adar, jaccard, common_neighbors, 
+  # Algorithm: adamic_adar, jaccard, common_neighbors,
   #            resource_allocation, preferential_attachment, ensemble
   # Env: NORNICDB_TOPOLOGY_ALGORITHM
   algorithm: "adamic_adar"

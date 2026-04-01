@@ -159,6 +159,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"requests":       stats.RequestCount,
 			"errors":         stats.ErrorCount,
 			"active":         stats.ActiveRequests,
+			"version":        stats.Version,
+			"commit":         stats.Commit,
+			"build_time":     stats.BuildTime,
 		},
 		"database": map[string]interface{}{
 			"nodes":     totalNodeCount, // Sum of all user databases (excluding system)

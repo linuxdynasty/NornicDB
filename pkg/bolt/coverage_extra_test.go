@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -827,7 +828,7 @@ func TestBoltCoverage_ServerMessageAndRunHelpers(t *testing.T) {
 			require.NoError(t, <-done)
 			assert.Equal(t, "anonymous", session.authResult.Username)
 			assert.Equal(t, "graph", session.database)
-			assert.Equal(t, "NornicDB/0.1.0", meta["server"])
+			assert.Equal(t, buildinfo.ServerAnnouncement(), meta["server"])
 
 			serverConn2, clientConn2 := net.Pipe()
 			defer serverConn2.Close()
@@ -885,6 +886,20 @@ func TestBoltCoverage_ServerMessageAndRunHelpers(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, <-done)
 			assert.Equal(t, "Neo.ClientError.Security.Unauthorized", code)
+		})
+
+		t.Run("custom server announcement override", func(t *testing.T) {
+			session, serverConn, clientConn := makeHelloSession()
+			defer serverConn.Close()
+			defer clientConn.Close()
+			session.server.config.ServerAnnouncement = "Neo4j/5.26.0"
+
+			done := make(chan error, 1)
+			go func() { done <- session.handleHello(encodePackStreamMap(map[string]any{"scheme": "none"})) }()
+			meta, err := AssertSuccess(t, clientConn)
+			require.NoError(t, err)
+			require.NoError(t, <-done)
+			assert.Equal(t, "Neo4j/5.26.0", meta["server"])
 		})
 
 		t.Run("database not found and no-auth fallback", func(t *testing.T) {

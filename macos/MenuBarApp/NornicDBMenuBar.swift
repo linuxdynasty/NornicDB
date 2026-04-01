@@ -7,6 +7,28 @@ import Yams
 private let defaultQwenHeimdallFileName = "qwen3-0.6b-instruct.gguf"
 private let defaultQwenHeimdallDownloadURL = "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
 
+private func appDisplayVersion() -> String {
+    if let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+       !short.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return short
+    }
+    if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+       !build.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return build
+    }
+    return "unknown"
+}
+
+private func appBuildArchitecture() -> String {
+#if arch(arm64)
+    return "arm64"
+#elseif arch(x86_64)
+    return "x86_64"
+#else
+    return "unknown"
+#endif
+}
+
 // MARK: - Keychain Helper for Secure Secret Storage
 
 /// Keychain access result - distinguishes between "no value" and "access denied"
@@ -815,7 +837,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @objc func showAbout() {
         let alert = NSAlert()
         alert.messageText = "NornicDB"
-        alert.informativeText = "High-Performance Graph Database\n\nVersion: 1.0.0\nBuild: arm64"
+        alert.informativeText = "High-Performance Graph Database\n\nVersion: \(appDisplayVersion())\nBuild: \(appBuildArchitecture())"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Visit Website")
@@ -2536,6 +2558,10 @@ struct FirstRunWizard: View {
                 Text("Welcome to NornicDB!")
                     .font(.title)
                     .fontWeight(.bold)
+
+                Text("Version \(appDisplayVersion())")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 
                 Text("Let's set up your graph database")
                     .font(.subheadline)

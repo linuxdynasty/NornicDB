@@ -21,6 +21,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/gpu"
@@ -452,6 +453,14 @@ func TestHandleStatus(t *testing.T) {
 	}
 	if status["database"] == nil {
 		t.Error("missing 'database' field")
+	}
+
+	serverStats, ok := status["server"].(map[string]interface{})
+	if !ok {
+		t.Fatal("'server' field is not a map")
+	}
+	if serverStats["version"] != buildinfo.Version() {
+		t.Fatalf("expected server.version %q, got %v", buildinfo.Version(), serverStats["version"])
 	}
 
 	// Verify database stats structure

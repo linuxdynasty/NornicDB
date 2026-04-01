@@ -28,27 +28,27 @@ Neo4j-compatible Bolt protocol server for NornicDB. Enables any Neo4j driver to 
 
 ### Message Types
 
-| Message | Type | Status | Description |
-|---------|------|--------|-------------|
-| HELLO | 0x01 | ✅ | Authentication handshake |
-| GOODBYE | 0x02 | ✅ | Clean disconnect |
-| RESET | 0x0F | ✅ | Reset session state |
-| RUN | 0x10 | ✅ | Execute Cypher query |
-| DISCARD | 0x2F | ✅ | Discard remaining results |
-| PULL | 0x3F | ✅ | Stream result records |
-| BEGIN | 0x11 | ✅ | Start transaction |
-| COMMIT | 0x12 | ✅ | Commit transaction |
-| ROLLBACK | 0x13 | ✅ | Rollback transaction |
-| ROUTE | 0x66 | ✅ | Cluster routing (no-op) |
+| Message  | Type | Status | Description               |
+| -------- | ---- | ------ | ------------------------- |
+| HELLO    | 0x01 | ✅     | Authentication handshake  |
+| GOODBYE  | 0x02 | ✅     | Clean disconnect          |
+| RESET    | 0x0F | ✅     | Reset session state       |
+| RUN      | 0x10 | ✅     | Execute Cypher query      |
+| DISCARD  | 0x2F | ✅     | Discard remaining results |
+| PULL     | 0x3F | ✅     | Stream result records     |
+| BEGIN    | 0x11 | ✅     | Start transaction         |
+| COMMIT   | 0x12 | ✅     | Commit transaction        |
+| ROLLBACK | 0x13 | ✅     | Rollback transaction      |
+| ROUTE    | 0x66 | ✅     | Cluster routing (no-op)   |
 
 ### Response Messages
 
-| Message | Type | Status | Description |
-|---------|------|--------|-------------|
-| SUCCESS | 0x70 | ✅ | Operation succeeded |
-| RECORD | 0x71 | ✅ | Result row |
-| IGNORED | 0x7E | ✅ | Request ignored |
-| FAILURE | 0x7F | ✅ | Operation failed |
+| Message | Type | Status | Description         |
+| ------- | ---- | ------ | ------------------- |
+| SUCCESS | 0x70 | ✅     | Operation succeeded |
+| RECORD  | 0x71 | ✅     | Result row          |
+| IGNORED | 0x7E | ✅     | Request ignored     |
+| FAILURE | 0x7F | ✅     | Operation failed    |
 
 ## Usage
 
@@ -86,13 +86,13 @@ import (
 func main() {
     // Create storage
     store := storage.NewMemoryEngine()
-    
+
     // Create Cypher executor
     cypherExec := cypher.NewStorageExecutor(store)
-    
+
     // Wrap for Bolt
     executor := &MyBoltExecutor{cypher: cypherExec}
-    
+
     // Configure server
     config := &bolt.Config{
         Port:            7687,
@@ -100,7 +100,7 @@ func main() {
         ReadBufferSize:  8192,
         WriteBufferSize: 8192,
     }
-    
+
     // Start server
     server := bolt.New(config, executor)
     if err := server.ListenAndServe(); err != nil {
@@ -143,7 +143,7 @@ with driver.session() as session:
         age=30
     )
     print(result.single()[0])
-    
+
     # Query nodes
     result = session.run("MATCH (n:Person) RETURN n.name, n.age")
     for record in result:
@@ -155,31 +155,31 @@ driver.close()
 #### JavaScript/TypeScript
 
 ```javascript
-const neo4j = require('neo4j-driver');
+const neo4j = require("neo4j-driver");
 
 // Connect to NornicDB
 const driver = neo4j.driver(
-    'bolt://localhost:7687',
-    neo4j.auth.basic('', '') // Auth not required yet
+  "bolt://localhost:7687",
+  neo4j.auth.basic("", ""), // Auth not required yet
 );
 
 const session = driver.session();
 
 try {
-    // Create a node
-    const result = await session.run(
-        'CREATE (n:Person {name: $name, age: $age}) RETURN n',
-        { name: 'Bob', age: 25 }
-    );
-    console.log(result.records[0].get('n'));
-    
-    // Query nodes
-    const queryResult = await session.run('MATCH (n:Person) RETURN n');
-    queryResult.records.forEach(record => {
-        console.log(record.get('n'));
-    });
+  // Create a node
+  const result = await session.run(
+    "CREATE (n:Person {name: $name, age: $age}) RETURN n",
+    { name: "Bob", age: 25 },
+  );
+  console.log(result.records[0].get("n"));
+
+  // Query nodes
+  const queryResult = await session.run("MATCH (n:Person) RETURN n");
+  queryResult.records.forEach((record) => {
+    console.log(record.get("n"));
+  });
 } finally {
-    await session.close();
+  await session.close();
 }
 
 await driver.close();
@@ -206,11 +206,11 @@ func main() {
         panic(err)
     }
     defer driver.Close(context.Background())
-    
+
     ctx := context.Background()
     session := driver.NewSession(ctx, neo4j.SessionConfig{})
     defer session.Close(ctx)
-    
+
     // Create a node
     result, err := session.Run(ctx,
         "CREATE (n:Person {name: $name, age: $age}) RETURN n",
@@ -219,12 +219,12 @@ func main() {
     if err != nil {
         panic(err)
     }
-    
+
     if result.Next(ctx) {
         node := result.Record().Values[0]
         fmt.Printf("Created: %v\n", node)
     }
-    
+
     // Query nodes
     result, _ = session.Run(ctx, "MATCH (n:Person) RETURN n", nil)
     for result.Next(ctx) {
@@ -245,7 +245,7 @@ public class NornicDBExample {
             "bolt://localhost:7687",
             AuthTokens.none()
         );
-        
+
         try (Session session = driver.session()) {
             // Create a node
             Result result = session.run(
@@ -253,14 +253,14 @@ public class NornicDBExample {
                 Values.parameters("name", "David", "age", 35)
             );
             System.out.println(result.single().get("n"));
-            
+
             // Query nodes
             result = session.run("MATCH (n:Person) RETURN n");
             while (result.hasNext()) {
                 System.out.println(result.next().get("n"));
             }
         }
-        
+
         driver.close();
     }
 }
@@ -276,7 +276,7 @@ driver = GraphDatabase.driver("bolt://localhost:7687")
 with driver.session() as session:
     # Explicit transaction
     tx = session.begin_transaction()
-    
+
     try:
         tx.run("CREATE (n:Person {name: 'Eve'})")
         tx.run("CREATE (n:Person {name: 'Frank'})")
@@ -366,16 +366,17 @@ EOF
 
 ### Benchmarks
 
-| Operation | Neo4j | NornicDB | Speedup |
-|-----------|-------|----------|---------|
-| Connection | ~2ms | ~1ms | 2x |
-| Simple Query | ~1ms | ~0.5ms | 2x |
-| Create Node | ~2ms | ~0.8ms | 2.5x |
-| Match Query | ~1.5ms | ~0.6ms | 2.5x |
-| Vector Search | ~10ms | ~3ms | 3.3x |
-| Bulk Insert (1K) | ~100ms | ~40ms | 2.5x |
+| Operation        | Neo4j  | NornicDB | Speedup |
+| ---------------- | ------ | -------- | ------- |
+| Connection       | ~2ms   | ~1ms     | 2x      |
+| Simple Query     | ~1ms   | ~0.5ms   | 2x      |
+| Create Node      | ~2ms   | ~0.8ms   | 2.5x    |
+| Match Query      | ~1.5ms | ~0.6ms   | 2.5x    |
+| Vector Search    | ~10ms  | ~3ms     | 3.3x    |
+| Bulk Insert (1K) | ~100ms | ~40ms    | 2.5x    |
 
 **Why faster?**
+
 - In-memory storage (no disk I/O)
 - Native Go implementation (no JVM overhead)
 - Optimized PackStream encoding
@@ -444,15 +445,15 @@ Client                              Server
 
 ### Supported Drivers
 
-| Driver | Language | Version | Status |
-|--------|----------|---------|--------|
-| neo4j-python-driver | Python | 5.x | ✅ Tested |
-| neo4j-javascript-driver | JavaScript/TS | 5.x | ✅ Tested |
-| neo4j-go-driver | Go | 5.x | ✅ Tested |
-| Neo4j.Driver | .NET/C# | 5.x | ⏳ Should work |
-| neo4j-java-driver | Java | 5.x | ⏳ Should work |
-| neo4j-ruby-driver | Ruby | 5.x | ⏳ Should work |
-| rustheus | Rust | Latest | ⏳ Should work |
+| Driver                  | Language      | Version | Status         |
+| ----------------------- | ------------- | ------- | -------------- |
+| neo4j-python-driver     | Python        | 5.x     | ✅ Tested      |
+| neo4j-javascript-driver | JavaScript/TS | 5.x     | ✅ Tested      |
+| neo4j-go-driver         | Go            | 5.x     | ✅ Tested      |
+| Neo4j.Driver            | .NET/C#       | 5.x     | ⏳ Should work |
+| neo4j-java-driver       | Java          | 5.x     | ⏳ Should work |
+| neo4j-ruby-driver       | Ruby          | 5.x     | ⏳ Should work |
+| rustheus                | Rust          | Latest  | ⏳ Should work |
 
 ### Known Limitations
 
@@ -464,6 +465,7 @@ Client                              Server
 ## Roadmap
 
 ### Completed ✅
+
 - [x] Bolt 4.x protocol implementation
 - [x] PackStream serialization
 - [x] Message handling (all types)
@@ -475,11 +477,13 @@ Client                              Server
 - [x] Command-line server
 
 ### In Progress 🔄
+
 - [ ] Schema management (constraints, indexes) - See Phase 2
 - [ ] Built-in procedures (vector, fulltext, apoc) - See Phase 3
 - [ ] Real transaction support - See Phase 4
 
 ### Planned 📋
+
 - [ ] User authentication and RBAC
 - [ ] TLS/SSL support
 - [ ] Connection pooling optimizations
@@ -512,6 +516,18 @@ from neo4j import GraphDatabase
 driver = GraphDatabase.driver("bolt://localhost:7687")
 driver.verify_connectivity()
 ```
+
+### cypher-shell compatibility override
+
+`cypher-shell` may reject a Bolt connection if the Bolt `HELLO` success metadata does not advertise a Neo4j server string. If that is the only blocker, opt into the announcement override:
+
+```bash
+export NORNICDB_BOLT_SERVER_ANNOUNCEMENT="Neo4j/5.26.0"
+./nornicdb serve
+cypher-shell -a bolt://localhost:7687 -u neo4j -p password
+```
+
+This changes only the announced Bolt server string. Leave it unset unless you need strict-client compatibility.
 
 ### Performance Issues
 

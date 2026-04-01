@@ -180,6 +180,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/config/dbconfig"
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -1764,6 +1765,9 @@ func (s *Server) Stats() ServerStats {
 		RequestCount:   s.requestCount.Load(),
 		ErrorCount:     s.errorCount.Load(),
 		ActiveRequests: s.activeRequests.Load(),
+		Version:        buildinfo.Version(),
+		Commit:         buildinfo.ShortCommit(),
+		BuildTime:      buildinfo.BuildTime,
 	}
 }
 
@@ -1773,4 +1777,7 @@ type ServerStats struct {
 	RequestCount   int64         `json:"request_count"`
 	ErrorCount     int64         `json:"error_count"`
 	ActiveRequests int64         `json:"active_requests"`
+	Version        string        `json:"version"`
+	Commit         string        `json:"commit"`
+	BuildTime      string        `json:"build_time"`
 }

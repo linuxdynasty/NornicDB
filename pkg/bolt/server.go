@@ -132,6 +132,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -476,6 +477,9 @@ type Config struct {
 	ReadBufferSize  int
 	WriteBufferSize int
 	LogQueries      bool // Log all queries to stdout (for debugging)
+	// ServerAnnouncement overrides the Bolt HELLO SUCCESS "server" metadata.
+	// Leave empty to advertise NornicDB natively.
+	ServerAnnouncement string
 
 	// Authentication
 	Authenticator  BoltAuthenticator // Authentication handler (nil = no auth)
@@ -501,6 +505,16 @@ func DefaultConfig() *Config {
 		ReadBufferSize:  8192,
 		WriteBufferSize: 64 * 1024,
 	}
+}
+
+func (c *Config) serverAnnouncement() string {
+	if c == nil {
+		return buildinfo.ServerAnnouncement()
+	}
+	if v := strings.TrimSpace(c.ServerAnnouncement); v != "" {
+		return v
+	}
+	return buildinfo.ServerAnnouncement()
 }
 
 // New creates a new Bolt protocol server with the given configuration and executor.
@@ -1253,7 +1267,7 @@ func (s *Session) handleHello(data []byte) error {
 	}
 
 	return s.sendSuccess(map[string]any{
-		"server":        "NornicDB/0.1.0",
+		"server":        s.server.config.serverAnnouncement(),
 		"connection_id": "nornic-1",
 		"hints":         map[string]any{},
 	})

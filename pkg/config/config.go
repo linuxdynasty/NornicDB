@@ -285,6 +285,10 @@ type ServerConfig struct {
 	BoltPort int
 	// BoltAddress to bind to
 	BoltAddress string
+	// BoltServerAnnouncement overrides the Bolt HELLO SUCCESS "server" metadata.
+	// Use this only as a client compatibility workaround for strict Neo4j-only tools.
+	// Env: NORNICDB_BOLT_SERVER_ANNOUNCEMENT
+	BoltServerAnnouncement string
 	// BoltTLSEnabled for encrypted connections
 	BoltTLSEnabled bool
 	// BoltTLSCert path to certificate
@@ -1001,16 +1005,17 @@ func (c *Config) String() string {
 type YAMLConfig struct {
 	// Server configuration
 	Server struct {
-		BoltPort    int    `yaml:"bolt_port"`
-		HTTPPort    int    `yaml:"http_port"`
-		Port        int    `yaml:"port"`         // Alias for bolt_port
-		Host        string `yaml:"host"`         // Bind address
-		Address     string `yaml:"address"`      // Alias for host
-		DataDir     string `yaml:"data_dir"`     // Data directory
-		Auth        string `yaml:"auth"`         // Format: "username:password" or "none"
-		BoltEnabled bool   `yaml:"bolt_enabled"` // Enable Bolt protocol
-		HTTPEnabled bool   `yaml:"http_enabled"` // Enable HTTP API
-		TLS         struct {
+		BoltPort               int    `yaml:"bolt_port"`
+		HTTPPort               int    `yaml:"http_port"`
+		Port                   int    `yaml:"port"`                     // Alias for bolt_port
+		Host                   string `yaml:"host"`                     // Bind address
+		Address                string `yaml:"address"`                  // Alias for host
+		DataDir                string `yaml:"data_dir"`                 // Data directory
+		Auth                   string `yaml:"auth"`                     // Format: "username:password" or "none"
+		BoltEnabled            bool   `yaml:"bolt_enabled"`             // Enable Bolt protocol
+		HTTPEnabled            bool   `yaml:"http_enabled"`             // Enable HTTP API
+		BoltServerAnnouncement string `yaml:"bolt_server_announcement"` // Override Bolt HELLO server metadata
+		TLS                    struct {
 			Enabled  bool   `yaml:"enabled"`
 			CertFile string `yaml:"cert_file"`
 			KeyFile  string `yaml:"key_file"`
@@ -1284,6 +1289,7 @@ func LoadDefaults() *Config {
 	config.Server.BoltEnabled = true
 	config.Server.BoltPort = 7687
 	config.Server.BoltAddress = "0.0.0.0"
+	config.Server.BoltServerAnnouncement = ""
 	config.Server.BoltTLSEnabled = false
 
 	// Server defaults - HTTP
@@ -1584,6 +1590,9 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnv("NORNICDB_BOLT_ADDRESS", ""); v != "" {
 		config.Server.BoltAddress = v
+	}
+	if v := strings.TrimSpace(getEnv("NORNICDB_BOLT_SERVER_ANNOUNCEMENT", "")); v != "" {
+		config.Server.BoltServerAnnouncement = v
 	}
 	if getEnv("NORNICDB_BOLT_TLS_ENABLED", "") == "true" {
 		config.Server.BoltTLSEnabled = true
@@ -2069,6 +2078,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	if yamlCfg.Server.Address != "" {
 		config.Server.BoltAddress = yamlCfg.Server.Address
 		config.Server.HTTPAddress = yamlCfg.Server.Address
+	}
+	if yamlCfg.Server.BoltServerAnnouncement != "" {
+		config.Server.BoltServerAnnouncement = yamlCfg.Server.BoltServerAnnouncement
 	}
 	if yamlCfg.Server.DataDir != "" {
 		config.Database.DataDir = yamlCfg.Server.DataDir

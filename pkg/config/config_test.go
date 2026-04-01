@@ -61,6 +61,9 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 	if cfg.Server.BoltAddress != "0.0.0.0" {
 		t.Errorf("expected bolt address '0.0.0.0', got %q", cfg.Server.BoltAddress)
 	}
+	if cfg.Server.BoltServerAnnouncement != "" {
+		t.Errorf("expected empty bolt server announcement override, got %q", cfg.Server.BoltServerAnnouncement)
+	}
 
 	// Server defaults - HTTP
 	if !cfg.Server.HTTPEnabled {
@@ -376,6 +379,7 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	t.Setenv("NORNICDB_PERSIST_SEARCH_INDEXES", "true")
 	t.Setenv("NORNICDB_BOLT_ENABLED", "false")
 	t.Setenv("NORNICDB_BOLT_ADDRESS", "127.0.0.1")
+	t.Setenv("NORNICDB_BOLT_SERVER_ANNOUNCEMENT", "Neo4j/5.26.0")
 	t.Setenv("NORNICDB_BOLT_TLS_ENABLED", "true")
 	t.Setenv("NORNICDB_TLS_DIR", "/tlsdir")
 	t.Setenv("NORNICDB_HTTP_ENABLED", "false")
@@ -506,6 +510,9 @@ func TestLoadFromEnv_ComprehensiveAdditionalEnvCoverage(t *testing.T) {
 	}
 	if cfg.Server.BoltEnabled || cfg.Server.BoltAddress != "127.0.0.1" || !cfg.Server.BoltTLSEnabled {
 		t.Fatalf("unexpected bolt server config: %+v", cfg.Server)
+	}
+	if cfg.Server.BoltServerAnnouncement != "Neo4j/5.26.0" {
+		t.Fatalf("unexpected bolt server announcement: %+v", cfg.Server)
 	}
 	if cfg.Server.BoltTLSCert != "/tlsdir/public.crt" || cfg.Server.BoltTLSKey != "/tlsdir/private.key" {
 		t.Fatalf("unexpected TLS paths: %+v", cfg.Server)

@@ -48,7 +48,10 @@ export function Header({
   const pendingNodes = Math.max(0, embedData.pendingNodes ?? 0);
   const queueCompletePct =
     totalNodes > 0
-      ? Math.max(0, Math.min(100, ((totalNodes - pendingNodes) / totalNodes) * 100))
+      ? Math.max(
+          0,
+          Math.min(100, ((totalNodes - pendingNodes) / totalNodes) * 100),
+        )
       : 100;
 
   const formatUptime = (seconds: number) => {
@@ -132,7 +135,14 @@ export function Header({
             />
           </svg>
           <div>
-            <h1 className="text-lg font-semibold text-white">NornicDB</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-semibold text-white">NornicDB</h1>
+              {stats?.server?.version ? (
+                <span className="rounded-full border border-valhalla-gold/30 bg-valhalla-gold/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-valhalla-gold">
+                  v{stats.server.version}
+                </span>
+              ) : null}
+            </div>
             <p className="text-xs text-norse-silver">
               The Graph Database That Learns
             </p>

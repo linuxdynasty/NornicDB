@@ -19,6 +19,9 @@ export interface DatabaseStats {
     requests: number;
     errors: number;
     active: number;
+    version: string;
+    commit?: string;
+    build_time?: string;
   };
   database: {
     nodes: number;
@@ -718,9 +721,7 @@ class NornicDBClient {
   }
 
   /** Per-database config: overrides and effective (admin only). */
-  async getDatabaseConfig(
-    dbName: string,
-  ): Promise<{
+  async getDatabaseConfig(dbName: string): Promise<{
     overrides: Record<string, string>;
     effective: Record<string, string>;
   }> {

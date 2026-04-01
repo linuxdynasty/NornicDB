@@ -21,6 +21,10 @@
 # Configuration
 REGISTRY ?= timothyswt
 VERSION ?= latest
+BUILD_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo unknown)
+BUILD_LDFLAGS := -X github.com/orneryd/nornicdb/pkg/buildinfo.Commit=$(BUILD_COMMIT) -X github.com/orneryd/nornicdb/pkg/buildinfo.BuildTime=$(BUILD_TIME)
+MACOS_APP_VERSION := $(shell if [ -n "$(VERSION)" ] && [ "$(VERSION)" != "latest" ]; then printf "%s" "$(VERSION)" | sed 's/^v//'; elif [ -f pkg/buildinfo/VERSION ]; then tr -d '[:space:]' < pkg/buildinfo/VERSION; else echo "0.0.0"; fi)
 
 # Docker build flags (use NO_CACHE=1 to force rebuild without cache)
 # Usage: make build-arm64-metal NO_CACHE=1
@@ -104,7 +108,7 @@ BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/reso
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cpu push-llama-cpu deploy-llama-cpu ensure-llama-cpu
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda ensure-llama-cuda
-.PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test install-hooks clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
+.PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless sync-version test install-hooks clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen download-bge-reranker check-models
 .PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
 
@@ -595,6 +599,9 @@ deploy-llama-cuda: build-llama-cuda push-llama-cuda
 # Local Development (native binary, not Docker)
 # ==============================================================================
 
+sync-version:
+	@VERSION="$(VERSION)" sh ./scripts/sync-version.sh
+
 # Build UI assets first
 build-ui:
 	@echo "Building UI assets..."
@@ -678,7 +685,7 @@ build-swagger-ui:
 	go build -o bin/swagger-ui$(BIN_EXT) ./cmd/swagger-ui
 	@echo "✓ Built: bin/swagger-ui$(BIN_EXT)"
 
-build-binary: check-llama-lib
+build-binary: sync-version check-llama-lib
 ifeq ($(HOST_OS),windows)
 	@echo "Detecting GPU support..."
 	@powershell -Command " \
@@ -733,7 +740,7 @@ ifeq ($(HOST_OS),windows)
 			Write-Host 'GPU_BACKEND=cpu' | Out-File -FilePath .gpu-backend -Encoding ascii; \
 		} \
 	"
-	@go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	@go build -ldflags "$(BUILD_LDFLAGS)" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 	@powershell -Command " \
 		$$backend = (Get-Content .gpu-backend -ErrorAction SilentlyContinue) -replace 'GPU_BACKEND=',''; \
 		Remove-Item .gpu-backend -ErrorAction SilentlyContinue; \
@@ -750,9 +757,9 @@ ifeq ($(HOST_OS),windows)
 	"
 else
 ifeq ($(HOST_OS),linux)
-	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -ldflags "$(BUILD_LDFLAGS)" -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
-	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 go build -ldflags "$(BUILD_LDFLAGS)" -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 endif
 endif
 
@@ -764,33 +771,33 @@ else
 	@$(MAKE) plugins
 endif
 
-build-localllm: check-llama-lib build-plugins-if-supported
+build-localllm: sync-version check-llama-lib build-plugins-if-supported
 ifeq ($(HOST_OS),windows)
 	@echo "Note: On Windows, build-localllm requires manual llama.cpp setup"
 	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
-	@set CGO_ENABLED=1 && go build -tags "localllm" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	@set CGO_ENABLED=1 && go build -ldflags "$(BUILD_LDFLAGS)" -tags "localllm" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
 ifeq ($(HOST_OS),linux)
-	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl,-no-pie" go build -ldflags "$(BUILD_LDFLAGS)" -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
-	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 go build -ldflags "$(BUILD_LDFLAGS)" -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 endif
 endif
 
 # Build without UI (headless mode)
-build-headless: build-plugins-if-supported
-	go build -tags noui -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+build-headless: sync-version build-plugins-if-supported
+	go build -ldflags "$(BUILD_LDFLAGS)" -tags noui -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 
-build-localllm-headless: check-llama-lib build-plugins-if-supported
+build-localllm-headless: sync-version check-llama-lib build-plugins-if-supported
 ifeq ($(HOST_OS),windows)
 	@echo "Note: On Windows, build-localllm-headless requires manual llama.cpp setup"
 	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
-	@set CGO_ENABLED=1 && go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+	@set CGO_ENABLED=1 && go build -ldflags "$(BUILD_LDFLAGS)" -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
 ifeq ($(HOST_OS),linux)
-	CGO_ENABLED=1 CGO_LDFLAGS="-Wl" go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 CGO_LDFLAGS="-Wl" go build -ldflags "$(BUILD_LDFLAGS)" -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
-	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 go build -ldflags "$(BUILD_LDFLAGS)" -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 endif
 endif
 
@@ -1166,6 +1173,7 @@ macos-menubar:
 	@echo "Building macOS Menu Bar App..."
 ifeq ($(HOST_OS),darwin)
 	@echo "Architecture: $(HOST_ARCH)"
+	@echo "Version: $(MACOS_APP_VERSION)"
 	@rm -rf macos/build 2>/dev/null || sudo rm -rf macos/build 2>/dev/null || true
 	@mkdir -p macos/build
 	@cd macos/MenuBarApp && swift build -c release --arch $(HOST_ARCH)
@@ -1197,7 +1205,8 @@ ifeq ($(HOST_OS),darwin)
 	@echo '<key>CFBundleExecutable</key><string>NornicDB</string>' >> macos/build/NornicDB.app/Contents/Info.plist
 	@echo '<key>CFBundleIdentifier</key><string>com.nornicdb.menubar</string>' >> macos/build/NornicDB.app/Contents/Info.plist
 	@echo '<key>CFBundleName</key><string>NornicDB</string>' >> macos/build/NornicDB.app/Contents/Info.plist
-	@echo '<key>CFBundleVersion</key><string>1.0.0</string>' >> macos/build/NornicDB.app/Contents/Info.plist
+	@echo '<key>CFBundleShortVersionString</key><string>$(MACOS_APP_VERSION)</string>' >> macos/build/NornicDB.app/Contents/Info.plist
+	@echo '<key>CFBundleVersion</key><string>$(MACOS_APP_VERSION)</string>' >> macos/build/NornicDB.app/Contents/Info.plist
 	@if [ -f "macos/build/NornicDB.app/Contents/Resources/NornicDB.icns" ]; then \
 		echo '<key>CFBundleIconFile</key><string>NornicDB</string>' >> macos/build/NornicDB.app/Contents/Info.plist; \
 	fi
@@ -1253,7 +1262,7 @@ macos-clean:
 macos-package: build macos-menubar plugins
 	@echo "Creating macOS package installers (Lite + Full)..."
 ifeq ($(HOST_OS),darwin)
-	@./macos/scripts/build-installer.sh --both
+	@VERSION="$(MACOS_APP_VERSION)" ./macos/scripts/build-installer.sh --both
 else
 	@echo "❌ Package creation is only available on macOS"
 	@exit 1
@@ -1263,7 +1272,7 @@ endif
 macos-package-lite: build macos-menubar
 	@echo "Creating macOS package installer (Lite Edition)..."
 ifeq ($(HOST_OS),darwin)
-	@./macos/scripts/build-installer.sh --lite
+	@VERSION="$(MACOS_APP_VERSION)" ./macos/scripts/build-installer.sh --lite
 else
 	@echo "❌ Package creation is only available on macOS"
 	@exit 1
@@ -1273,7 +1282,7 @@ endif
 macos-package-full: build macos-menubar plugins
 	@echo "Creating macOS package installer (Full Edition with plugins)..."
 ifeq ($(HOST_OS),darwin)
-	@./macos/scripts/build-installer.sh --full
+	@VERSION="$(MACOS_APP_VERSION)" ./macos/scripts/build-installer.sh --full
 else
 	@echo "❌ Package creation is only available on macOS"
 	@exit 1
