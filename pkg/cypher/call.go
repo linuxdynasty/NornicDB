@@ -1274,13 +1274,24 @@ func (e *StorageExecutor) evaluateYieldWhere(whereExpr string, ctx map[string]in
 		return true, nil
 	}
 
-	// Convert context to pseudo-nodes for the expression evaluator
-	// Each yielded variable becomes a pseudo-node with properties from the context
+	// Convert context for the expression evaluator.
+	// Preserve real yielded node/relationship values so functions like elementId(node),
+	// id(node), labels(node), and type(relationship) evaluate correctly.
 	nodes := make(map[string]*storage.Node)
 	rels := make(map[string]*storage.Edge)
 
 	for name, val := range ctx {
-		// If the value is a map (like a node result), wrap it
+		// Preserve real graph entities.
+		if nodeVal, ok := val.(*storage.Node); ok && nodeVal != nil {
+			nodes[name] = nodeVal
+			continue
+		}
+		if relVal, ok := val.(*storage.Edge); ok && relVal != nil {
+			rels[name] = relVal
+			continue
+		}
+
+		// If the value is a map (legacy node-like result), wrap it as pseudo-node.
 		if mapVal, ok := val.(map[string]interface{}); ok {
 			props := make(map[string]interface{})
 			for k, v := range mapVal {
