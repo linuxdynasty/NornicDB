@@ -95,6 +95,13 @@ To authenticate in Swagger UI:
 - `GET /nornicdb/decay` - Memory decay statistics
 - Embedding management endpoints
 
+### Graph (Nornic Extensions)
+- `POST /nornicdb/graph/{database}/neighborhood` - Build a neighborhood subgraph from `node_ids`
+- `POST /nornicdb/graph/{database}/expand` - Expand an existing graph selection (same request shape as neighborhood)
+- `POST /nornicdb/graph/{database}/path` - Resolve path between `source_node_id` and `target_node_id`
+- `POST /nornicdb/graph/{database}/temporal` - Reconstruct snapshot graph at `as_of`
+- `POST /nornicdb/graph/{database}/diff` - Diff target graph `as_of` against `compare_to` or `current`
+
 ### Admin & System
 - `GET /admin/stats` - System statistics
 - `GET /admin/config` - Server configuration
@@ -150,6 +157,16 @@ swagger-codegen generate \
 ```
 
 ## 📝 Example Usage
+
+### Graph Endpoint Quick Notes
+
+- `node_ids` are normalized (trimmed and de-duplicated); whitespace-only values are rejected with `400`.
+- `path` returns `404` when no path exists, and `400` when traversal limits are exhausted before target discovery.
+- `temporal` and `diff` require `as_of`.
+- In `diff` responses:
+  - `meta.as_of` = target graph timestamp
+  - `meta.compare_to` = baseline timestamp or `"current"`
+- `existing_node_ids` and `existing_edge_ids` in `GraphRequest` are currently advisory-only and may be ignored by the server.
 
 ### Testing with curl
 
@@ -228,4 +245,3 @@ If you find any issues with the OpenAPI specification:
 
 **Ready to test?** → **[OpenAPI Spec](openapi.yaml)**  
 **Need help?** → **[User Guides](../user-guides/)**
-

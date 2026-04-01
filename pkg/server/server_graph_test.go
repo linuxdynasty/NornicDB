@@ -3,12 +3,27 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type graphOutgoingErrorEngine struct {
+	storage.Engine
+}
+
+func (e *graphOutgoingErrorEngine) GetOutgoingEdges(storage.NodeID) ([]*storage.Edge, error) {
+	return nil, fmt.Errorf("boom")
+}
+
+type graphNoMVCCEngine struct {
+	storage.Engine
+}
 
 func decodeGraphPayload(t *testing.T, recorderBody interface{ Bytes() []byte }) graphPayload {
 	t.Helper()
@@ -273,4 +288,298 @@ func TestGraphEdgesForNode_RespectsContextCancellation(t *testing.T) {
 	_, err := graphEdgesForNode(ctx, engine, storage.NodeID("any"))
 	require.Error(t, err)
 	require.Equal(t, context.Canceled, err)
+}
+
+func TestGraphEdgesForNode_DedupesOutgoingAndIncoming(t *testing.T) {
+	server, _ := setupTestServer(t)
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "self", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "self-loop", StartNode: "self", EndNode: "self", Type: "LOOPS"}))
+
+	edges, err := graphEdgesForNode(context.Background(), engine, "self")
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, storage.EdgeID("self-loop"), edges[0].ID)
+}
+
+func TestGraphExpandEndpoint_DelegatesToNeighborhood(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}})
+	require.NoError(t, err)
+	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS"}))
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "expand"), map[string]interface{}{
+		"node_ids": []string{"a"},
+		"depth":    1,
+	}, "Bearer "+token)
+	require.Equal(t, 200, resp.Code)
+	payload := decodeGraphPayload(t, resp.Body)
+	require.Equal(t, "node", payload.Meta.GeneratedFrom)
+	require.Equal(t, 2, payload.Meta.NodeCount)
+}
+
+func TestGraphPathEndpoint_NotFoundReturns404(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "path"), map[string]interface{}{
+		"source_node_id": "a",
+		"target_node_id": "b",
+	}, "Bearer "+token)
+	require.Equal(t, 404, resp.Code)
+}
+
+func TestGraphPathEndpoint_RejectsAsOfWithDatabaseRouteHint(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "path"), map[string]interface{}{
+		"source_node_id": "a",
+		"target_node_id": "b",
+		"as_of":          time.Now().UTC().Format(time.RFC3339Nano),
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
+	require.Contains(t, resp.Body.String(), "/nornicdb/graph/{database}/path")
+	require.Contains(t, resp.Body.String(), "/nornicdb/graph/{database}/temporal")
+}
+
+func TestGraphDiffEndpoint_WithCompareToUsesBaselineTimestamp(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	_, err := engine.CreateNode(&storage.Node{
+		ID:         "a",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice v1"},
+	})
+	require.NoError(t, err)
+	baseline := time.Now().UTC().Format(time.RFC3339Nano)
+
+	time.Sleep(2 * time.Millisecond)
+	require.NoError(t, engine.UpdateNode(&storage.Node{
+		ID:         "a",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice v2"},
+	}))
+	target := time.Now().UTC().Format(time.RFC3339Nano)
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids":   []string{"a"},
+		"as_of":      target,
+		"compare_to": baseline,
+	}, "Bearer "+token)
+	require.Equal(t, 200, resp.Code)
+	payload := decodeGraphPayload(t, resp.Body)
+	require.Equal(t, target, payload.Meta.AsOf)
+	require.Equal(t, baseline, payload.Meta.CompareTo)
+}
+
+func TestWriteGraphResolveError_MapsSentinels(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	recNotFound := httptest.NewRecorder()
+	server.writeGraphResolveError(recNotFound, multidb.ErrDatabaseNotFound)
+	require.Equal(t, 404, recNotFound.Code)
+
+	recOffline := httptest.NewRecorder()
+	server.writeGraphResolveError(recOffline, multidb.ErrDatabaseOffline)
+	require.Equal(t, 503, recOffline.Code)
+
+	recBadRequest := httptest.NewRecorder()
+	server.writeGraphResolveError(recBadRequest, ErrBadRequest)
+	require.Equal(t, 400, recBadRequest.Code)
+}
+
+func TestGraphHelperParsersAndNormalizers(t *testing.T) {
+	ids := normalizeGraphNodeIDs([]string{" a ", "", "a", "\t", "b", "b"})
+	require.Equal(t, []string{"a", "b"}, ids)
+
+	normalized := normalizeNodeIDs([]string{"b", " a ", "b", "", "a"})
+	require.Equal(t, []string{"a", "b"}, normalized)
+
+	unixVer, err := parseGraphVersion("1710000000")
+	require.NoError(t, err)
+	require.Equal(t, int64(1710000000), unixVer.CommitTimestamp.Unix())
+
+	rfcVer, err := parseGraphVersion("2026-03-31T13:29:57Z")
+	require.NoError(t, err)
+	require.Equal(t, "2026-03-31T13:29:57Z", rfcVer.CommitTimestamp.Format(time.RFC3339))
+
+	_, err = parseGraphVersion("not-a-date")
+	require.Error(t, err)
+}
+
+func TestGraphHelperComparators(t *testing.T) {
+	left := graphEdgePayload{
+		ID:         "ab",
+		Source:     "a",
+		Target:     "b",
+		Type:       "KNOWS",
+		Semantic:   true,
+		Properties: map[string]interface{}{"weight": 1},
+	}
+	right := graphEdgePayload{
+		ID:         "ab",
+		Source:     "a",
+		Target:     "b",
+		Type:       "KNOWS",
+		Semantic:   true,
+		Properties: map[string]interface{}{"weight": 1},
+	}
+	require.True(t, sameEdgePayload(left, right))
+
+	right.Properties["weight"] = 2
+	require.False(t, sameEdgePayload(left, right))
+}
+
+func TestGraphHandlers_MethodNotAllowed(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	for _, op := range []string{"neighborhood", "expand", "path", "temporal", "diff"} {
+		resp := makeRequest(t, server, "GET", defaultGraphPath(server, op), nil, "Bearer "+token)
+		require.Equal(t, 405, resp.Code)
+	}
+}
+
+func TestGraphNeighborhoodEndpoint_RejectsAsOf(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "neighborhood"), map[string]interface{}{
+		"node_ids": []string{"a"},
+		"as_of":    time.Now().UTC().Format(time.RFC3339Nano),
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
+	require.Contains(t, resp.Body.String(), "/nornicdb/graph/{database}/temporal")
+	require.Contains(t, resp.Body.String(), "/nornicdb/graph/{database}/diff")
+}
+
+func TestGraphPathEndpoint_RequiresSourceAndTarget(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "path"), map[string]interface{}{
+		"source_node_id": "a",
+	}, "Bearer "+token)
+	require.Equal(t, 400, resp.Code)
+	require.Contains(t, resp.Body.String(), "source_node_id and target_node_id are required")
+}
+
+func TestGraphTemporalAndDiff_RequireAsOf(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	temporal := makeRequest(t, server, "POST", defaultGraphPath(server, "temporal"), map[string]interface{}{
+		"node_ids": []string{"a"},
+		"as_of":    "invalid",
+	}, "Bearer "+token)
+	require.Equal(t, 400, temporal.Code)
+	require.Contains(t, temporal.Body.String(), "as_of must be a valid datetime")
+
+	diff := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids": []string{"a"},
+	}, "Bearer "+token)
+	require.Equal(t, 400, diff.Code)
+	require.Contains(t, diff.Body.String(), "as_of is required")
+}
+
+func TestCollectLatestNeighborhood_CanceledContext(t *testing.T) {
+	server, _ := setupTestServer(t)
+	engine := getDefaultStorage(t, server)
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = server.collectLatestNeighborhood(ctx, engine, []string{"a"}, 1, 10, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCollectLatestPath_SourceEqualsTargetBranches(t *testing.T) {
+	server, _ := setupTestServer(t)
+	engine := getDefaultStorage(t, server)
+
+	_, err := server.collectLatestPath(context.Background(), engine, "missing", "missing", 0, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, storage.ErrNotFound)
+
+	_, err = engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	collection, err := server.collectLatestPath(context.Background(), engine, "a", "a", 0, newGraphFilterSet(nil, nil))
+	require.NoError(t, err)
+	require.Len(t, collection.nodes, 1)
+}
+
+func TestCollectLatestInducedSubgraph_PropagatesOutgoingError(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+	_, err := base.CreateNode(&storage.Node{ID: "nornic:a", Labels: []string{"Node"}})
+	require.NoError(t, err)
+
+	engine := &graphOutgoingErrorEngine{Engine: base}
+	_, err = server.collectLatestInducedSubgraph(engine, []string{"nornic:a"}, newGraphFilterSet(nil, nil))
+	require.EqualError(t, err, "boom")
+}
+
+func TestCollectSnapshotInducedSubgraph_RequiresMVCCInterfaces(t *testing.T) {
+	server, _ := setupTestServer(t)
+	base := storage.NewMemoryEngine()
+	defer func() { _ = base.Close() }()
+
+	engine := &graphNoMVCCEngine{Engine: base}
+	_, err := server.collectSnapshotInducedSubgraph(engine, []string{"a"}, storage.MVCCVersion{}, newGraphFilterSet(nil, nil))
+	require.ErrorIs(t, err, storage.ErrNotImplemented)
+}
+
+func TestGraphFilterSetAndCollectionHelpers(t *testing.T) {
+	filtered := newGraphFilterSet([]string{" Person ", ""}, []string{" KNOWS ", ""})
+	require.False(t, filtered.allowNode(nil))
+	require.False(t, filtered.allowNode(&storage.Node{ID: "x", Labels: []string{"Topic"}}))
+	require.True(t, filtered.allowNode(&storage.Node{ID: "p", Labels: []string{"Person"}}))
+
+	require.False(t, filtered.allowEdge(nil))
+	require.False(t, filtered.allowEdge(&storage.Edge{ID: "e1", Type: "LIKES"}))
+	require.True(t, filtered.allowEdge(&storage.Edge{ID: "e2", Type: "KNOWS"}))
+
+	unfiltered := newGraphFilterSet(nil, nil)
+	require.True(t, unfiltered.allowNode(&storage.Node{ID: "any"}))
+	require.True(t, unfiltered.allowEdge(&storage.Edge{ID: "any"}))
+
+	collection := newGraphCollection()
+	collection.addNode(nil, "added")
+	collection.addEdge(nil, "added")
+
+	collection.addNode(&storage.Node{ID: "n1", Labels: []string{"L"}, Properties: map[string]interface{}{"k": "v1"}}, "")
+	collection.addNode(&storage.Node{ID: "n1", Labels: []string{"L2"}, Properties: map[string]interface{}{"k": "v2"}}, "added")
+	collection.addNode(&storage.Node{ID: "n1", Labels: []string{"L3"}, Properties: map[string]interface{}{"k": "v3"}}, "removed")
+	require.Equal(t, "added", collection.nodes["n1"].Status)
+	require.Equal(t, "v3", collection.nodes["n1"].Properties["k"])
+
+	collection.addEdge(&storage.Edge{ID: "e1", StartNode: "a", EndNode: "b", Type: "R", Properties: map[string]interface{}{"k": "v1"}}, "")
+	collection.addEdge(&storage.Edge{ID: "e1", StartNode: "a", EndNode: "b", Type: "R", Properties: map[string]interface{}{"k": "v2"}}, "added")
+	collection.addEdge(&storage.Edge{ID: "e1", StartNode: "a", EndNode: "b", Type: "R", Properties: map[string]interface{}{"k": "v3"}}, "removed")
+	require.Equal(t, "added", collection.edges["e1"].Status)
+	require.Equal(t, "v3", collection.edges["e1"].Properties["k"])
+
+	collection.truncated = true
+	payload := collection.payload(graphMetaPayload{Database: "nornic", GeneratedFrom: "node"})
+	require.Equal(t, 1, payload.Meta.NodeCount)
+	require.Equal(t, 1, payload.Meta.EdgeCount)
+	require.True(t, payload.Meta.Truncated)
 }
