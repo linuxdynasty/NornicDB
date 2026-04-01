@@ -14,6 +14,7 @@ import (
 	"time"
 
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -598,7 +599,7 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 	// so any change to a non-metadata property should invalidate.
 	invalidateManagedEmbeddings := false
 	for k := range properties {
-		if !isEmbeddingMetadataPropertyKey(k) {
+		if !embeddingutil.IsMetadataPropertyKey(k) {
 			invalidateManagedEmbeddings = true
 			break
 		}
@@ -613,7 +614,7 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 	}
 
 	if invalidateManagedEmbeddings {
-		invalidateNodeManagedEmbeddings(n)
+		embeddingutil.InvalidateManagedEmbeddings(n)
 	}
 
 	if err := storageEngine.UpdateNode(n); err != nil {
@@ -642,39 +643,6 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 		Properties: decryptedProps,
 		CreatedAt:  n.CreatedAt,
 	}, nil
-}
-
-func isEmbeddingMetadataPropertyKey(key string) bool {
-	switch key {
-	// Internal embedding fields / markers
-	case "embedding",
-		"has_embedding",
-		"embedding_skipped",
-		"embedding_model",
-		"embedding_dimensions",
-		"embedded_at",
-		"has_chunks",
-		"chunk_count",
-		// Common identity/timestamps that should not affect embedding text
-		"createdAt",
-		"updatedAt",
-		"id":
-		return true
-	default:
-		return false
-	}
-}
-
-func invalidateNodeManagedEmbeddings(node *storage.Node) {
-	if node == nil {
-		return
-	}
-
-	// Managed embeddings live in ChunkEmbeddings (embed worker output).
-	node.ChunkEmbeddings = nil
-
-	// Clear embedding metadata from EmbedMeta
-	node.EmbedMeta = nil
 }
 
 // DeleteNode deletes a node.

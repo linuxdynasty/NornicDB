@@ -121,6 +121,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/fabric"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -292,7 +293,10 @@ type StorageExecutor struct {
 
 	// onNodeMutated is called when a node is created or mutated (CREATE, MERGE, SET, REMOVE).
 	// This allows the embed queue to be notified so embeddings are (re)generated.
-	onNodeMutated NodeMutatedCallback
+	onNodeMutated               NodeMutatedCallback
+	inlineEmbeddingTextOptions  *embeddingutil.EmbedTextOptions
+	inlineEmbeddingChunkSize    int
+	inlineEmbeddingChunkOverlap int
 
 	// defaultEmbeddingDimensions is the configured embedding dimensions for vector indexes
 	// Used as default when CREATE VECTOR INDEX doesn't specify dimensions
@@ -413,21 +417,24 @@ type InferenceManager interface {
 //	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
 func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 	exec := &StorageExecutor{
-		parser:                     NewParser(),
-		storage:                    store,
-		cache:                      NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
-		planCache:                  NewQueryPlanCache(500),   // Cache 500 parsed query plans
-		fabricPlanCache:            fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
-		analyzer:                   NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
-		nodeLookupCache:            make(map[string]*storage.Node, 1000),
-		shellParams:                make(map[string]interface{}),
-		searchService:              nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
-		vectorRegistry:             vectorspace.NewIndexRegistry(),
-		vectorIndexSpaces:          make(map[string]vectorspace.VectorSpaceKey),
-		hotPathTraceState:          &hotPathTraceState{},
-		vectorQueryEmbedCache:      make(map[string][]float32, 512),
-		vectorQueryEmbedInflight:   make(map[string]*vectorEmbedInflight, 64),
-		unwindSimpleMergePlanCache: make(map[string]unwindSimpleMergePlan, 128),
+		parser:                      NewParser(),
+		storage:                     store,
+		cache:                       NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
+		planCache:                   NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		fabricPlanCache:             fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
+		analyzer:                    NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
+		nodeLookupCache:             make(map[string]*storage.Node, 1000),
+		shellParams:                 make(map[string]interface{}),
+		searchService:               nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
+		vectorRegistry:              vectorspace.NewIndexRegistry(),
+		vectorIndexSpaces:           make(map[string]vectorspace.VectorSpaceKey),
+		hotPathTraceState:           &hotPathTraceState{},
+		vectorQueryEmbedCache:       make(map[string][]float32, 512),
+		vectorQueryEmbedInflight:    make(map[string]*vectorEmbedInflight, 64),
+		unwindSimpleMergePlanCache:  make(map[string]unwindSimpleMergePlan, 128),
+		inlineEmbeddingTextOptions:  embeddingutil.EmbedTextOptionsFromConfig(config.LoadFromEnv()),
+		inlineEmbeddingChunkSize:    maxInt(config.LoadFromEnv().EmbeddingWorker.ChunkSize, 1),
+		inlineEmbeddingChunkOverlap: maxInt(config.LoadFromEnv().EmbeddingWorker.ChunkOverlap, 0),
 	}
 	ensureBuiltInProceduresRegistered()
 	_ = exec.loadPersistedProcedures()
@@ -1428,6 +1435,12 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 // If any part of the query fails, all changes are rolled back atomically.
 // This prevents data corruption from partially executed queries.
 func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
+	parsedCypher, inlineEmbeddingEnabled := stripWithEmbeddingSuffix(cypher)
+	if inlineEmbeddingEnabled {
+		cypher = parsedCypher
+		upperQuery = strings.ToUpper(cypher)
+	}
+
 	// Try to get a transaction-capable engine and async wrapper (if present)
 	engines := e.resolveImplicitTxEngines()
 	txEngine := engines.txEngine
@@ -1436,6 +1449,9 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	// If no transaction support, fall back to direct execution (legacy mode)
 	// This is less safe but maintains backward compatibility
 	if txEngine == nil {
+		if inlineEmbeddingEnabled {
+			return nil, fmt.Errorf("WITH EMBEDDING requires transaction-capable storage")
+		}
 		result, err := e.executeWithoutTransaction(ctx, cypher, upperQuery)
 		if err != nil {
 			return nil, err
@@ -1499,10 +1515,11 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 		separator = ""
 	}
 	txWrapper := &transactionStorageWrapper{
-		tx:         tx,
-		underlying: e.storage,
-		namespace:  engines.namespace,
-		separator:  separator,
+		tx:             tx,
+		underlying:     e.storage,
+		namespace:      engines.namespace,
+		separator:      separator,
+		mutatedNodeIDs: make(map[string]struct{}),
 	}
 
 	// Execute with transaction wrapper via context
@@ -1519,6 +1536,16 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 			_, _ = wal.AppendTxAbort(dbName, txID, execErr.Error())
 		}
 		return nil, execErr
+	}
+
+	if inlineEmbeddingEnabled {
+		if err := e.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
+			tx.Rollback()
+			if wal != nil && walSeqStart > 0 {
+				_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
+			}
+			return nil, err
+		}
 	}
 
 	// Commit successful transaction
@@ -1554,6 +1581,87 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 type ctxKeyTxStorageType struct{}
 
 var ctxKeyTxStorage = ctxKeyTxStorageType{}
+
+func (e *StorageExecutor) applyInlineEmbeddingMutations(ctx context.Context, ids map[string]struct{}) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if e.embedder == nil {
+		return fmt.Errorf("WITH EMBEDDING requires configured embedder")
+	}
+	store := e.getStorage(ctx)
+	for id := range ids {
+		node, err := store.GetNode(storage.NodeID(id))
+		if err != nil {
+			if err == storage.ErrNotFound {
+				continue
+			}
+			return err
+		}
+		if node == nil {
+			continue
+		}
+		text := embeddingutil.BuildText(node.Properties, node.Labels, e.inlineEmbeddingTextOptions)
+		chunks, err := e.embedder.ChunkText(text, e.inlineEmbeddingChunkSize, e.inlineEmbeddingChunkOverlap)
+		if err != nil {
+			return fmt.Errorf("WITH EMBEDDING chunking failed for node %s: %w", id, err)
+		}
+		if len(chunks) == 0 {
+			chunks = []string{text}
+		}
+		embeddings := make([][]float32, 0, len(chunks))
+		for _, chunk := range chunks {
+			emb, err := e.embedder.Embed(ctx, chunk)
+			if err != nil {
+				return fmt.Errorf("WITH EMBEDDING embed failed for node %s: %w", id, err)
+			}
+			if len(emb) == 0 {
+				return fmt.Errorf("WITH EMBEDDING embed returned empty vector for node %s", id)
+			}
+			embeddings = append(embeddings, emb)
+		}
+		model := "inline-cypher"
+		dimensions := len(embeddings[0])
+		if named, ok := e.embedder.(interface{ Model() string }); ok {
+			if v := strings.TrimSpace(named.Model()); v != "" {
+				model = v
+			}
+		}
+		if d, ok := e.embedder.(interface{ Dimensions() int }); ok {
+			if v := d.Dimensions(); v > 0 {
+				dimensions = v
+			}
+		}
+		embeddingutil.ApplyManagedEmbedding(node, embeddings, model, dimensions, time.Now())
+		if err := store.UpdateNode(node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stripWithEmbeddingSuffix(cypher string) (string, bool) {
+	idx := findKeywordIndex(cypher, "WITH EMBEDDING")
+	if idx < 0 {
+		return cypher, false
+	}
+	before := strings.TrimSpace(cypher[:idx])
+	after := strings.TrimSpace(cypher[idx+len("WITH EMBEDDING"):])
+	if before == "" {
+		return cypher, false
+	}
+	if after == "" {
+		return before, true
+	}
+	return strings.TrimSpace(before + " " + after), true
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 // ctxKeyUseDatabase is the context key for :USE database switching.
 // When :USE database_name is detected, the database name is stored in context
@@ -1634,16 +1742,44 @@ func (e *StorageExecutor) resolveWALAndDatabase() (*storage.WAL, string) {
 // for use in implicit transaction execution. It routes writes through the transaction
 // (for atomicity/rollback) and reads through the underlying engine (for performance).
 type transactionStorageWrapper struct {
-	tx         *storage.BadgerTransaction
-	underlying storage.Engine // For read operations not supported by transaction
-	namespace  string
-	separator  string
+	tx               *storage.BadgerTransaction
+	underlying       storage.Engine // For read operations not supported by transaction
+	namespace        string
+	separator        string
+	mutatedNodeIDs   map[string]struct{}
+	mutatedNodeIDsMu sync.Mutex
+}
+
+func (w *transactionStorageWrapper) markMutatedNodeID(id storage.NodeID) {
+	if id == "" || w.mutatedNodeIDs == nil {
+		return
+	}
+	w.mutatedNodeIDsMu.Lock()
+	w.mutatedNodeIDs[string(id)] = struct{}{}
+	w.mutatedNodeIDsMu.Unlock()
+}
+
+func (w *transactionStorageWrapper) snapshotMutatedNodeIDs() map[string]struct{} {
+	if len(w.mutatedNodeIDs) == 0 {
+		return nil
+	}
+	w.mutatedNodeIDsMu.Lock()
+	defer w.mutatedNodeIDsMu.Unlock()
+	out := make(map[string]struct{}, len(w.mutatedNodeIDs))
+	for id := range w.mutatedNodeIDs {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 // Write operations - go through transaction for atomicity
 func (w *transactionStorageWrapper) CreateNode(node *storage.Node) (storage.NodeID, error) {
 	if w.namespace == "" {
-		return w.tx.CreateNode(node)
+		id, err := w.tx.CreateNode(node)
+		if err == nil {
+			w.markMutatedNodeID(id)
+		}
+		return id, err
 	}
 	namespaced := storage.CopyNode(node)
 	namespaced.ID = w.prefixNodeID(node.ID)
@@ -1651,16 +1787,26 @@ func (w *transactionStorageWrapper) CreateNode(node *storage.Node) (storage.Node
 	if err != nil {
 		return "", err
 	}
-	return w.unprefixNodeID(actualID), nil
+	userID := w.unprefixNodeID(actualID)
+	w.markMutatedNodeID(userID)
+	return userID, nil
 }
 
 func (w *transactionStorageWrapper) UpdateNode(node *storage.Node) error {
 	if w.namespace == "" {
-		return w.tx.UpdateNode(node)
+		err := w.tx.UpdateNode(node)
+		if err == nil {
+			w.markMutatedNodeID(node.ID)
+		}
+		return err
 	}
 	namespaced := storage.CopyNode(node)
 	namespaced.ID = w.prefixNodeID(node.ID)
-	return w.tx.UpdateNode(namespaced)
+	err := w.tx.UpdateNode(namespaced)
+	if err == nil {
+		w.markMutatedNodeID(node.ID)
+	}
+	return err
 }
 
 func (w *transactionStorageWrapper) DeleteNode(id storage.NodeID) error {

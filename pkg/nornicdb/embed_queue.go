@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/embed"
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -665,12 +665,8 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	node = copyNodeForEmbedding(node)
 
 	// Build text for embedding (labels and properties per config include/exclude)
-	opts := &EmbedTextOptions{
-		Include:       ew.config.PropertiesInclude,
-		Exclude:       ew.config.PropertiesExclude,
-		IncludeLabels: ew.config.IncludeLabels,
-	}
-	text := buildEmbeddingText(node.Properties, node.Labels, opts)
+	opts := embeddingutil.EmbedTextOptionsFromFields(ew.config.PropertiesInclude, ew.config.PropertiesExclude, ew.config.IncludeLabels)
+	text := embeddingutil.BuildText(node.Properties, node.Labels, opts)
 
 	chunker, ok := ew.embedder.(deterministicTextChunker)
 	if !ok {
@@ -706,20 +702,8 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		return true // Failed but we tried - continue to next node
 	}
 
-	// Always store ALL embeddings in ChunkEmbeddings (even single chunk = array of 1)
-	// This simplifies logic - always iterate over ChunkEmbeddings, always count the same way
-	// Store as struct field, not in properties (so it's filtered out from user queries - opaque)
-	node.ChunkEmbeddings = embeddings
-
-	// Update node with embedding metadata (in EmbedMeta, not Properties - avoids namespace pollution)
-	if node.EmbedMeta == nil {
-		node.EmbedMeta = make(map[string]any)
-	}
-	node.EmbedMeta["chunk_count"] = len(embeddings)
-	node.EmbedMeta["embedding_model"] = ew.embedder.Model()
-	node.EmbedMeta["embedding_dimensions"] = ew.embedder.Dimensions()
-	node.EmbedMeta["has_embedding"] = true
-	node.EmbedMeta["embedded_at"] = time.Now().Format(time.RFC3339)
+	// Persist worker-managed embedding fields in a shared canonical shape.
+	embeddingutil.ApplyManagedEmbedding(node, embeddings, ew.embedder.Model(), ew.embedder.Dimensions(), time.Now())
 
 	// CRITICAL: Double-check node still exists before updating
 	// This prevents creating orphaned nodes if the node was deleted between
@@ -977,110 +961,6 @@ func averageEmbeddings(embeddings [][]float32) []float32 {
 	}
 
 	return avg
-}
-
-// EmbedTextOptions controls which properties and labels are used when building embedding text.
-type EmbedTextOptions struct {
-	// Include: if non-empty, only these property keys are used (plus built-in skips and Exclude applied).
-	Include []string
-	// Exclude: these property keys are never used (in addition to built-in metadata skips).
-	Exclude []string
-	// IncludeLabels: if true, node labels are prepended to the embedding text.
-	IncludeLabels bool
-}
-
-// buildEmbeddingText creates text for embedding from node properties and labels.
-// Always returns a non-empty string - at minimum includes labels when opts.IncludeLabels is true, else a fallback.
-//
-// The function:
-//   - Optionally includes labels first (when opts.IncludeLabels is true)
-//   - Includes properties according to opts: if Include is set, only those keys; Exclude is always applied; built-in skips always apply
-//   - Converts all property values to string representation
-//   - Handles arrays, booleans, numbers, and complex types (via JSON)
-func buildEmbeddingText(properties map[string]interface{}, labels []string, opts *EmbedTextOptions) string {
-	if opts == nil {
-		opts = &EmbedTextOptions{IncludeLabels: true}
-	}
-	var parts []string
-
-	if opts.IncludeLabels && len(labels) > 0 {
-		parts = append(parts, fmt.Sprintf("labels: %s", strings.Join(labels, ", ")))
-	}
-
-	// Built-in metadata/internal fields always skipped
-	skipFields := map[string]bool{
-		"embedding":            true,
-		"has_embedding":        true,
-		"embedding_skipped":    true,
-		"embedding_model":      true,
-		"embedding_dimensions": true,
-		"embedded_at":          true,
-		"createdAt":            true,
-		"updatedAt":            true,
-		"id":                   true,
-	}
-
-	// Build exclude set: built-in + user exclude
-	excludeSet := make(map[string]bool, len(skipFields)+16)
-	for k := range skipFields {
-		excludeSet[k] = true
-	}
-	for _, k := range opts.Exclude {
-		excludeSet[k] = true
-	}
-
-	// Include set: if opts.Include is non-empty, only those keys (still subject to excludeSet)
-	var includeSet map[string]bool
-	if len(opts.Include) > 0 {
-		includeSet = make(map[string]bool, len(opts.Include))
-		for _, k := range opts.Include {
-			includeSet[k] = true
-		}
-	}
-
-	for key, val := range properties {
-		if excludeSet[key] {
-			continue
-		}
-		if includeSet != nil && !includeSet[key] {
-			continue
-		}
-
-		var strVal string
-		switch v := val.(type) {
-		case string:
-			strVal = v
-		case []interface{}:
-			strs := make([]string, 0, len(v))
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					strs = append(strs, s)
-				} else {
-					strs = append(strs, fmt.Sprintf("%v", item))
-				}
-			}
-			strVal = strings.Join(strs, ", ")
-		case bool:
-			strVal = fmt.Sprintf("%v", v)
-		case int, int64, float64:
-			strVal = fmt.Sprintf("%v", v)
-		case nil:
-			strVal = "null"
-		default:
-			if b, err := json.Marshal(v); err == nil {
-				strVal = string(b)
-			} else {
-				strVal = fmt.Sprintf("%v", v)
-			}
-		}
-		parts = append(parts, fmt.Sprintf("%s: %s", key, strVal))
-	}
-
-	result := strings.Join(parts, "\n")
-	if result == "" {
-		return "node"
-	}
-	return result
 }
 
 // MarshalJSON for worker stats.

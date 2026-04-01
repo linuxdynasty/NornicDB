@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/google/uuid"
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
@@ -993,7 +994,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							if !hasLabel {
 								node.Labels = append(node.Labels, labelName)
 								// Labels are part of the embedding text; invalidate managed embeddings so they regenerate.
-								invalidateManagedEmbeddings(node)
+								embeddingutil.InvalidateManagedEmbeddings(node)
 								if err := store.UpdateNode(node); err == nil {
 									result.Stats.LabelsAdded++
 									e.notifyNodeMutated(string(node.ID))
@@ -2012,13 +2013,13 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 				if _, exists := node.Properties[prop]; exists {
 					delete(node.Properties, prop)
 					result.Stats.PropertiesSet++ // Neo4j counts removals as properties set
-					if !isEmbeddingMetadataPropertyKey(prop) {
+					if !embeddingutil.IsMetadataPropertyKey(prop) {
 						invalidated = true
 					}
 				}
 			}
 			if invalidated {
-				invalidateManagedEmbeddings(node)
+				embeddingutil.InvalidateManagedEmbeddings(node)
 			}
 			if len(labelsToRemove) > 0 {
 				next, removed := removeNodeLabels(node.Labels, labelsToRemove)
@@ -2140,7 +2141,7 @@ func (e *StorageExecutor) applyRemoveToMatchedRows(
 				if _, exists := node.Properties[prop]; exists {
 					delete(node.Properties, prop)
 					result.Stats.PropertiesSet++
-					if !isEmbeddingMetadataPropertyKey(prop) {
+					if !embeddingutil.IsMetadataPropertyKey(prop) {
 						invalidated = true
 					}
 				}
@@ -2150,7 +2151,7 @@ func (e *StorageExecutor) applyRemoveToMatchedRows(
 				node.Labels = next
 			}
 			if invalidated {
-				invalidateManagedEmbeddings(node)
+				embeddingutil.InvalidateManagedEmbeddings(node)
 			}
 			if err := store.UpdateNode(node); err != nil {
 				return err

@@ -201,6 +201,9 @@ func (e *StorageExecutor) cloneForStorage(store storage.Engine) *StorageExecutor
 	}
 	cloned.inferenceManager = e.inferenceManager
 	cloned.onNodeMutated = e.onNodeMutated
+	cloned.inlineEmbeddingTextOptions = e.inlineEmbeddingTextOptions
+	cloned.inlineEmbeddingChunkSize = e.inlineEmbeddingChunkSize
+	cloned.inlineEmbeddingChunkOverlap = e.inlineEmbeddingChunkOverlap
 	cloned.defaultEmbeddingDimensions = e.defaultEmbeddingDimensions
 	cloned.dbManager = e.dbManager
 	cloned.vectorRegistry = e.vectorRegistry

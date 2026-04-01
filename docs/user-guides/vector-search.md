@@ -30,6 +30,7 @@ NornicDB maintains **two complementary vector index systems**:
 #### 1. Internal Automatic Index (Zero Configuration)
 
 NornicDB automatically maintains an internal vector index that:
+
 - **Indexes nodes** with managed embeddings in `node.ChunkEmbeddings` (main embedding is `ChunkEmbeddings[0]`)
 - **Updates automatically** when nodes are created, updated, or deleted
 - **Requires no setup** - works out of the box
@@ -41,7 +42,7 @@ db.searchService = search.NewServiceWithDimensions(storage, 1024)
 
 // Nodes are indexed automatically via storage callbacks:
 // OnNodeCreated → searchService.IndexNode(node)
-// OnNodeUpdated → searchService.IndexNode(node)  
+// OnNodeUpdated → searchService.IndexNode(node)
 // OnNodeDeleted → searchService.RemoveNode(nodeID)
 ```
 
@@ -62,6 +63,7 @@ CALL db.index.vector.createNodeIndex(
 ```
 
 **Key insight:** User-defined indexes are **metadata only** - they specify which nodes to search and where to find embeddings. The actual embeddings come from either:
+
 1. `node.NamedEmbeddings[index.property]` (or `"default"` when no property is configured)
 2. The specified property (e.g., `node.Properties["embedding"]` when it contains a vector array)
 3. `node.ChunkEmbeddings[0..N]` (best score across chunks)
@@ -112,11 +114,11 @@ for _, result := range results {
 
 ### `db.index.vector.queryNodes`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `indexName` | String | Name of the vector index |
-| `k` | Integer | Number of results to return |
-| `queryInput` | Array/String/Parameter | Query vector or text |
+| Parameter    | Type                   | Description                 |
+| ------------ | ---------------------- | --------------------------- |
+| `indexName`  | String                 | Name of the vector index    |
+| `k`          | Integer                | Number of results to return |
+| `queryInput` | Array/String/Parameter | Query vector or text        |
 
 **Query Input Types:**
 
@@ -164,12 +166,26 @@ SET n.embedding = [0.7, 0.2, 0.05, 0.05],
     n.has_embedding = true
 ```
 
+### Inline Embedding During Mutations (`WITH EMBEDDING`)
+
+For mutations where vectors must be available immediately after the write, use `WITH EMBEDDING` on the same Cypher statement:
+
+```cypher
+CREATE (d:Doc {id: 'v1', content: 'vector ready now'})
+WITH EMBEDDING
+RETURN d.id
+```
+
+This performs embedding generation in the mutation transaction, so the node is queryable by vector search right away.
+
+For additional patterns (`UNWIND`, `MERGE`, `SET`), see the Cypher guide section: `Inline Embedding on Mutations (WITH EMBEDDING)`.
+
 ### Creating Vector Indexes
 
 ```cypher
 CALL db.index.vector.createNodeIndex(
   'embeddings',      -- index name
-  'Document',        -- node label  
+  'Document',        -- node label
   'embedding',       -- property name (also used as a NamedEmbeddings key if present)
   1024,              -- dimensions
   'cosine'           -- similarity function: 'cosine', 'euclidean', or 'dot'
@@ -197,6 +213,7 @@ curl -X POST http://localhost:7474/nornicdb/search \
 ```
 
 **Response:**
+
 ```json
 {
   "status": "ok",
@@ -223,14 +240,14 @@ curl -X POST http://localhost:7474/nornicdb/search \
 
 ## When to Use Each Approach
 
-| Use Case | Recommended Approach |
-|----------|---------------------|
-| General semantic search | REST API `/nornicdb/search` |
-| Neo4j driver compatibility | `db.index.vector.queryNodes` with user index |
-| Filter by specific label | User-defined index with label filter |
-| Custom embedding property | User-defined index with property name |
-| Use managed embeddings | Either (Cypher uses `ChunkEmbeddings`; HTTP uses `search.Service`) |
-| Hybrid vector + keyword search | REST API (built-in RRF fusion) |
+| Use Case                       | Recommended Approach                                               |
+| ------------------------------ | ------------------------------------------------------------------ |
+| General semantic search        | REST API `/nornicdb/search`                                        |
+| Neo4j driver compatibility     | `db.index.vector.queryNodes` with user index                       |
+| Filter by specific label       | User-defined index with label filter                               |
+| Custom embedding property      | User-defined index with property name                              |
+| Use managed embeddings         | Either (Cypher uses `ChunkEmbeddings`; HTTP uses `search.Service`) |
+| Hybrid vector + keyword search | REST API (built-in RRF fusion)                                     |
 
 ---
 
@@ -291,6 +308,7 @@ fmt.Printf("Cache: %.1f%% hit rate\n", stats.HitRate)
 ```
 
 **Server defaults:**
+
 ```bash
 nornicdb serve                        # 10K cache (~40MB)
 nornicdb serve --embedding-cache 50000  # Larger cache
@@ -334,12 +352,12 @@ results, _ := index.Search(queryEmbedding, 10)
 
 ### GPU Backends
 
-| Backend | Platform | Performance | Notes |
-|---------|----------|-------------|-------|
-| **Metal** | Apple Silicon | Excellent | Native M1/M2/M3 |
-| **CUDA** | NVIDIA | Highest | Requires toolkit |
-| **OpenCL** | Cross-platform | Good | Best compatibility |
-| **Vulkan** | Cross-platform | Good | Future-proof |
+| Backend    | Platform       | Performance | Notes              |
+| ---------- | -------------- | ----------- | ------------------ |
+| **Metal**  | Apple Silicon  | Excellent   | Native M1/M2/M3    |
+| **CUDA**   | NVIDIA         | Highest     | Requires toolkit   |
+| **OpenCL** | Cross-platform | Good        | Best compatibility |
+| **Vulkan** | Cross-platform | Good        | Future-proof       |
 
 ---
 
@@ -414,12 +432,12 @@ Use this profile when memory-scaled ANN operation is more important than lowest-
 
 ### Dimensions
 
-| Dimensions | Speed | Quality | Model Examples |
-|------------|-------|---------|----------------|
-| 384 | Fast | Good | all-MiniLM-L6-v2 |
-| 768 | Balanced | Better | e5-base |
-| 1024 | Slower | Best | mxbai-embed-large |
-| 3072 | Slowest | Highest | OpenAI ada-002 |
+| Dimensions | Speed    | Quality | Model Examples    |
+| ---------- | -------- | ------- | ----------------- |
+| 384        | Fast     | Good    | all-MiniLM-L6-v2  |
+| 768        | Balanced | Better  | e5-base           |
+| 1024       | Slower   | Best    | mxbai-embed-large |
+| 3072       | Slowest  | Highest | OpenAI ada-002    |
 
 ### Similarity Thresholds
 
@@ -479,17 +497,19 @@ NORNICDB_KMEANS_MIN_EMBEDDINGS=1000  # Minimum embeddings before K-means cluster
 ```
 
 **K-Means cluster count (auto by default):**
+
 - The number of clusters is chosen from the dataset size when clustering runs: **K ≈ √(n/2)** (min 10, max 8192). For ~900k embeddings this yields ~670 clusters (~1350 vectors per cluster) instead of a fixed 100.
 - Override with `NORNICDB_KMEANS_NUM_CLUSTERS=500` (or any positive value) to use a fixed K.
 
 **K-Means Clustering Threshold:**
+
 - `NORNICDB_KMEANS_MIN_EMBEDDINGS` (default: 1000): Minimum number of embeddings required before K-means clustering is triggered. Below this threshold, brute-force search is used as it's faster for small datasets.
-  
+
   **Performance Scaling (Benchmarked):**
   - 2,000 embeddings: 14% faster (61ms → 65ms avg)
   - 4,500 embeddings: 26% faster (35ms → 47ms avg)
   - 10,000+ embeddings: 10-50x faster
-  
+
   **Tuning:**
   - 1000 (default): Safe for most workloads, proven benefit
   - 500-1000: Latency-sensitive applications (14-26% speedup)
@@ -507,27 +527,27 @@ curl http://localhost:8080/health
 
 ## NornicDB vs Neo4j
 
-| Feature | Neo4j GDS | NornicDB |
-|---------|-----------|----------|
-| Vector array queries | ✅ | ✅ |
-| String auto-embedding | ❌ | ✅ |
-| Multi-line SET with arrays | ❌ | ✅ |
-| Native embedding field | ❌ | ✅ |
-| Server-side embedding | ❌ | ✅ |
-| GPU acceleration | ❌ | ✅ |
-| Embedding cache | ❌ | ✅ |
+| Feature                    | Neo4j GDS | NornicDB |
+| -------------------------- | --------- | -------- |
+| Vector array queries       | ✅        | ✅       |
+| String auto-embedding      | ❌        | ✅       |
+| Multi-line SET with arrays | ❌        | ✅       |
+| Native embedding field     | ❌        | ✅       |
+| Server-side embedding      | ❌        | ✅       |
+| GPU acceleration           | ❌        | ✅       |
+| Embedding cache            | ❌        | ✅       |
 
 ---
 
 ## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| Slow search | Enable GPU, use caching, reduce dimensions |
-| Poor results | Increase dimensions, lower threshold, use hybrid |
-| Out of memory | Reduce batch size, enable GPU (uses VRAM) |
-| No embedder error | Configure embedding service or use vector arrays |
-| Dimension mismatch | Ensure all embeddings use same model |
+| Issue              | Solution                                         |
+| ------------------ | ------------------------------------------------ |
+| Slow search        | Enable GPU, use caching, reduce dimensions       |
+| Poor results       | Increase dimensions, lower threshold, use hybrid |
+| Out of memory      | Reduce batch size, enable GPU (uses VRAM)        |
+| No embedder error  | Configure embedding service or use vector arrays |
+| Dimension mismatch | Ensure all embeddings use same model             |
 
 ---
 

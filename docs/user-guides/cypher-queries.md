@@ -9,6 +9,7 @@
 - [Creating Data](#creating-data)
 - [Reading Data](#reading-data)
 - [Updating Data](#updating-data)
+- [Inline Embedding on Mutations](#inline-embedding-on-mutations-with-embedding)
 - [Deleting Data](#deleting-data)
 - [Pattern Matching](#pattern-matching)
 - [Functions](#functions)
@@ -63,7 +64,7 @@ CREATE (alice:Person {name: "Alice", age: 30})
 RETURN alice
 
 // Multiple nodes
-CREATE 
+CREATE
   (bob:Person {name: "Bob"}),
   (carol:Person {name: "Carol"}),
   (company:Company {name: "TechCorp"})
@@ -78,7 +79,7 @@ CREATE (alice:Person {name: "Alice"})-[r:KNOWS {since: 2020}]->(bob:Person {name
 RETURN alice, r, bob
 
 // Connect existing nodes
-MATCH 
+MATCH
   (alice:Person {name: "Alice"}),
   (bob:Person {name: "Bob"})
 CREATE (alice)-[r:KNOWS]->(bob)
@@ -95,7 +96,7 @@ ON MATCH SET alice.accessed = timestamp()
 RETURN alice
 
 // Create relationship if it doesn't exist
-MATCH 
+MATCH
   (alice:Person {name: "Alice"}),
   (bob:Person {name: "Bob"})
 MERGE (alice)-[r:KNOWS]->(bob)
@@ -287,6 +288,81 @@ REMOVE alice:Employee
 RETURN labels(alice)
 ```
 
+## Inline Embedding on Mutations (`WITH EMBEDDING`)
+
+`WITH EMBEDDING` is a NornicDB Cypher extension that runs embedding generation inline for node mutations and commits both the mutation and embedding state in the same statement transaction.
+
+Use this when you need embedded content to be immediately available right after the write.
+
+### Requirements
+
+- Embeddings must be configured (`SetEmbedder(...)` in embedded usage, or server embedding enabled).
+- Query must be a write mutation that touches nodes (`CREATE`, `MERGE`, `SET`, `UNWIND ... MERGE/SET`, etc.).
+
+### Supported Pattern
+
+Place `WITH EMBEDDING` immediately before `RETURN` (or at statement end if no return projection):
+
+```cypher
+... <mutation clauses> WITH EMBEDDING RETURN ...
+```
+
+### Examples
+
+Single create:
+
+```cypher
+CREATE (d:Doc {id: 'd1', content: 'hello world'})
+WITH EMBEDDING
+RETURN count(d) AS created
+```
+
+Multi-create:
+
+```cypher
+CREATE
+  (a:Doc {id: 'a1', content: 'alpha text'}),
+  (b:Doc {id: 'b1', content: 'beta text'})
+WITH EMBEDDING
+RETURN count(*) AS created
+```
+
+Unwind pipeline:
+
+```cypher
+UNWIND $hops AS hop
+MERGE (h:BenchmarkHop {hopId: hop.hopId})
+SET h.benchmarkRun = hop.runID
+WITH EMBEDDING
+RETURN count(h) AS prepared
+```
+
+Set existing node properties and re-embed:
+
+```cypher
+MATCH (d:Doc {id: 'd1'})
+SET d.content = 'updated text', d.version = 2
+WITH EMBEDDING
+RETURN d.id, d.version
+```
+
+### What gets written
+
+The statement writes managed embedding fields in the same canonical format used by the async worker:
+
+- `ChunkEmbeddings` populated with chunk vectors
+- `EmbedMeta.chunk_count`
+- `EmbedMeta.embedding_model`
+- `EmbedMeta.embedding_dimensions`
+- `EmbedMeta.has_embedding`
+- `EmbedMeta.embedded_at`
+
+### Behavior notes
+
+- `WITH EMBEDDING` is node-focused; relationship-only writes do not produce node embeddings.
+- If embedding generation fails, the statement fails and the transaction rolls back.
+- This extension is useful for low-latency consistency; async queue embedding remains suitable for high-throughput ingestion.
+
 ## Deleting Data
 
 ### DELETE - Remove Nodes/Relationships
@@ -374,7 +450,7 @@ RETURN p.name, c.name
 
 ```cypher
 MATCH (p:Person)
-RETURN 
+RETURN
   toLower(p.name) AS lowercase,
   toUpper(p.name) AS uppercase,
   substring(p.name, 0, 3) AS first3,
@@ -386,7 +462,7 @@ RETURN
 ### Math Functions
 
 ```cypher
-RETURN 
+RETURN
   abs(-5) AS absolute,
   ceil(3.2) AS ceiling,
   floor(3.8) AS floor,
@@ -398,7 +474,7 @@ RETURN
 ### List Functions
 
 ```cypher
-RETURN 
+RETURN
   size([1,2,3,4,5]) AS listSize,
   head([1,2,3]) AS first,
   tail([1,2,3]) AS rest,
@@ -409,7 +485,7 @@ RETURN
 ### Temporal Functions
 
 ```cypher
-RETURN 
+RETURN
   timestamp() AS currentTimestamp,
   date() AS currentDate,
   datetime() AS currentDateTime,
@@ -440,7 +516,7 @@ RETURN count(DISTINCT p.city) AS uniqueCities
 
 ```cypher
 MATCH (p:Person)
-RETURN 
+RETURN
   sum(p.age) AS totalAge,
   avg(p.age) AS averageAge,
   min(p.age) AS youngest,
@@ -510,7 +586,7 @@ RETURN p
 ```cypher
 MATCH (p:Person)
 RETURN p.name,
-  CASE 
+  CASE
     WHEN p.age < 18 THEN "Minor"
     WHEN p.age < 65 THEN "Adult"
     ELSE "Senior"

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -667,14 +668,14 @@ func TestSetNodeProperty_ManagedEmbeddingInvalidation(t *testing.T) {
 }
 
 func TestInvalidateManagedEmbeddings_NilSafe(t *testing.T) {
-	invalidateManagedEmbeddings(nil)
+	embeddingutil.InvalidateManagedEmbeddings(nil)
 
 	node := &storage.Node{
 		ID:              "n2",
 		ChunkEmbeddings: [][]float32{{9}},
 		EmbedMeta:       map[string]interface{}{"x": 1},
 	}
-	invalidateManagedEmbeddings(node)
+	embeddingutil.InvalidateManagedEmbeddings(node)
 	assert.Nil(t, node.ChunkEmbeddings)
 	assert.Nil(t, node.EmbedMeta)
 }

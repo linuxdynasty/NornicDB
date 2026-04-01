@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -131,13 +132,13 @@ func TestEmbeddingInvalidationHelpers(t *testing.T) {
 			"updatedAt",
 			"id",
 		} {
-			require.True(t, isEmbeddingMetadataPropertyKey(key), "expected metadata key: %s", key)
+			require.True(t, embeddingutil.IsMetadataPropertyKey(key), "expected metadata key: %s", key)
 		}
-		require.False(t, isEmbeddingMetadataPropertyKey("name"))
+		require.False(t, embeddingutil.IsMetadataPropertyKey("name"))
 	})
 
 	t.Run("invalidate helper nil and clear branches", func(t *testing.T) {
-		invalidateNodeManagedEmbeddings(nil)
+		embeddingutil.InvalidateManagedEmbeddings(nil)
 
 		node := &storage.Node{
 			ID:              "n-1",
@@ -146,7 +147,7 @@ func TestEmbeddingInvalidationHelpers(t *testing.T) {
 				"has_embedding": true,
 			},
 		}
-		invalidateNodeManagedEmbeddings(node)
+		embeddingutil.InvalidateManagedEmbeddings(node)
 		require.Nil(t, node.ChunkEmbeddings)
 		require.Nil(t, node.EmbedMeta)
 	})

@@ -20,6 +20,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type traversalBenchConfig struct {
+	httpAddr  string
+	boltAddr  string
+	httpUser  string
+	httpPass  string
+	boltUser  string
+	boltPass  string
+	indexName string
+}
+
 type traversalTableRow struct {
 	shape     string
 	fanout    string
@@ -45,29 +55,39 @@ func TestVectorTraversalShapeMatrix_BoltVsHTTP(t *testing.T) {
 		fmt.Fprintln(os.Stdout, msg)
 	}
 
-	repoRoot := mustRepoRoot(t)
-	dataDir := t.TempDir()
-	binPath := buildNornicBinary(t, repoRoot)
-	httpPort := pickPort(t)
-	boltPort := pickPort(t)
-	grpcPort := pickPort(t)
+	benchCfg := traversalBenchConfigFromEnv()
+	var stopServer func()
+	if benchCfg.httpAddr == "" {
+		repoRoot := mustRepoRoot(t)
+		dataDir := t.TempDir()
+		binPath := buildNornicBinary(t, repoRoot)
+		httpPort := pickPort(t)
+		boltPort := pickPort(t)
+		grpcPort := pickPort(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	proc := startNornicDB(t, ctx, binPath, dataDir, httpPort, boltPort, grpcPort)
-	defer proc.stop(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		proc := startNornicDB(t, ctx, binPath, dataDir, httpPort, boltPort, grpcPort)
+		stopServer = func() {
+			cancel()
+			proc.stop(t)
+		}
+		benchCfg.httpAddr = fmt.Sprintf("127.0.0.1:%d", httpPort)
+		benchCfg.boltAddr = fmt.Sprintf("127.0.0.1:%d", boltPort)
+	}
+	if stopServer != nil {
+		defer stopServer()
+	}
 
-	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
-	boltAddr := fmt.Sprintf("127.0.0.1:%d", boltPort)
-	waitTCP(t, httpAddr, 30*time.Second)
-	waitTCP(t, boltAddr, 30*time.Second)
+	waitTCP(t, benchCfg.httpAddr, 30*time.Second)
+	waitTCP(t, benchCfg.boltAddr, 30*time.Second)
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
-	dbName := discoverDefaultDatabase(t, httpClient, httpAddr)
-	driver := newBoltDriver(t, boltAddr)
+	httpClient := newTraversalHTTPClient(benchCfg.httpUser, benchCfg.httpPass)
+	dbName := discoverDefaultDatabaseWithAuth(t, httpClient, benchCfg.httpAddr, benchCfg.httpUser, benchCfg.httpPass)
+	driver := newBoltDriverWithAuth(t, benchCfg.boltAddr, benchCfg.boltUser, benchCfg.boltPass)
 	defer func() { _ = driver.Close(context.Background()) }()
 
-	seedVectorTraversalFixtureE2E(t, driver)
+	seedVectorTraversalFixtureE2E(t, driver, benchCfg.indexName, httpClient, benchCfg.httpAddr)
+	waitForEmbeddingQueueDrainE2E(t, httpClient, benchCfg.httpAddr, "before benchmark")
 	rootIDs := fetchTraversalRootIDsE2E(t, driver)
 
 	fanouts := parseFanoutsEnv("NORNICDB_TRAVERSAL_FANOUTS", []int{1, 2, 3})
@@ -104,13 +124,13 @@ func TestVectorTraversalShapeMatrix_BoltVsHTTP(t *testing.T) {
 			fanoutSet: []int{1},
 			queryFor: func(depth, _fanout, _pathCap int) (string, map[string]any, string) {
 				return fmt.Sprintf(`
-CALL db.index.vector.queryNodes('idx_original_text', $vectorTopK, $query)
+CALL db.index.vector.queryNodes('%s', $vectorTopK, $query)
 YIELD node, score
 MATCH p = (node)-[:BENCH_HOP*1..%d]->(:BenchmarkHop)
 WITH node, score, max(length(p)) AS maxDepth
 RETURN elementId(node) AS nodeID, score, maxDepth
 LIMIT $topK
-`, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "query": []any{0.95, 0.05, 0.0}}, rootIDs["chain-root"]
+`, benchCfg.indexName, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "query": []any{0.95, 0.05, 0.0}}, rootIDs["chain-root"]
 			},
 			assertRow: func(t *testing.T, row []any, depth, _fanout, _pathCap int, expectedNodeID string) {
 				require.Len(t, row, 3)
@@ -123,7 +143,7 @@ LIMIT $topK
 			fanoutSet: fanouts,
 			queryFor: func(depth, fanout, pathCap int) (string, map[string]any, string) {
 				return fmt.Sprintf(`
-CALL db.index.vector.queryNodes('idx_original_text', $vectorTopK, $query)
+CALL db.index.vector.queryNodes('%s', $vectorTopK, $query)
 YIELD node, score
 MATCH p = (node)-[:BENCH_HOP|REL_A|REL_B*1..%d]->(x)
 WHERE ALL(n IN nodes(p) WHERE size(labels(n)) > 0)
@@ -132,7 +152,7 @@ ORDER BY d ASC
 WITH node, score, collect(p)[0..$pathCap] AS paths
 RETURN elementId(node) AS nodeID, score, size(paths) AS pathCount
 LIMIT $topK
-`, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "pathCap": int64(pathCap), "query": branchingVectorForFanoutE2E(fanout)}, rootIDs[fmt.Sprintf("branch-f%d", fanout)]
+`, benchCfg.indexName, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "pathCap": int64(pathCap), "query": branchingVectorForFanoutE2E(fanout)}, rootIDs[fmt.Sprintf("branch-f%d", fanout)]
 			},
 			assertRow: func(t *testing.T, row []any, depth, fanout, pathCap int, expectedNodeID string) {
 				require.Len(t, row, 3)
@@ -145,14 +165,14 @@ LIMIT $topK
 			fanoutSet: fanouts,
 			queryFor: func(depth, fanout, _pathCap int) (string, map[string]any, string) {
 				return fmt.Sprintf(`
-CALL db.index.vector.queryNodes('idx_original_text', $vectorTopK, $query)
+CALL db.index.vector.queryNodes('%s', $vectorTopK, $query)
 YIELD node, score
 MATCH (node)-[:REL*1..%d]->(x)
 WITH node, score, length(shortestPath((node)-[:REL*1..%d]->(x))) AS d
 WITH node, score, min(d) AS nearest, count(*) AS reachable
 RETURN elementId(node) AS nodeID, score, nearest, reachable
 LIMIT $topK
-`, depth, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "query": frontierVectorForFanoutE2E(fanout)}, rootIDs[fmt.Sprintf("frontier-f%d", fanout)]
+`, benchCfg.indexName, depth, depth), map[string]any{"vectorTopK": int64(1), "topK": int64(1), "query": frontierVectorForFanoutE2E(fanout)}, rootIDs[fmt.Sprintf("frontier-f%d", fanout)]
 			},
 			assertRow: func(t *testing.T, row []any, depth, fanout, _pathCap int, expectedNodeID string) {
 				require.Len(t, row, 4)
@@ -166,14 +186,14 @@ LIMIT $topK
 			fanoutSet: []int{2},
 			queryFor: func(depth, _fanout, _pathCap int) (string, map[string]any, string) {
 				return fmt.Sprintf(`
-CALL db.index.vector.queryNodes('idx_original_text', $vectorTopK, $query)
+CALL db.index.vector.queryNodes('%s', $vectorTopK, $query)
 YIELD node, score
 MATCH p = (node)-[:REL*1..%d]->(x)
 WHERE any(r IN relationships(p) WHERE r.weight >= $minWeight)
   AND any(n IN nodes(p) WHERE n.category IN $cats)
 RETURN elementId(node) AS nodeID, score, max(length(p)) AS maxDepth
 LIMIT $topK
-`, depth), map[string]any{"vectorTopK": int64(2), "topK": int64(2), "query": []any{0.12, 0.84, 0.04}, "minWeight": 2.5, "cats": []string{"allowed"}}, rootIDs["constrained-strong"]
+`, benchCfg.indexName, depth), map[string]any{"vectorTopK": int64(2), "topK": int64(2), "query": []any{0.12, 0.84, 0.04}, "minWeight": 2.5, "cats": []string{"allowed"}}, rootIDs["constrained-strong"]
 			},
 			assertRow: func(t *testing.T, row []any, depth, _fanout, _pathCap int, expectedNodeID string) {
 				require.Len(t, row, 3)
@@ -199,7 +219,7 @@ LIMIT $topK
 				rows = append(rows, summarizeTableRow(spec.name, fanoutLabel(spec.name, fanout), depth, "bolt", boltSummary))
 
 				httpSummary, err := runSerialBench(warmupIterations, iterations, func(ctx context.Context) error {
-					row, err := neo4jHTTPCommitSingleRow(ctx, httpClient, httpAddr, dbName, query, params)
+					row, err := neo4jHTTPCommitSingleRow(ctx, httpClient, benchCfg.httpAddr, dbName, query, params)
 					if err != nil {
 						return err
 					}
@@ -227,27 +247,62 @@ LIMIT $topK
 	}
 }
 
-func seedVectorTraversalFixtureE2E(t *testing.T, driver neo4j.DriverWithContext) {
+func seedVectorTraversalFixtureE2E(t *testing.T, driver neo4j.DriverWithContext, indexName string, httpClient *http.Client, httpAddr string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	sess := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer func() { _ = sess.Close(ctx) }()
+	sess := driver.NewSession(context.Background(), neo4j.SessionConfig{})
+	defer func() { _ = sess.Close(context.Background()) }()
+	waitForEmbeddingQueueDrainE2E(t, httpClient, httpAddr, "before fixture cleanup")
 
 	runWrite := func(query string, params map[string]any) {
 		t.Helper()
-		_, err := sess.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx, query, params)
-			return nil, err
-		})
-		require.NoError(t, err)
+		maxAttempts := envInt("NORNICDB_TRAVERSAL_WRITE_RETRY_ATTEMPTS", 8)
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		backoffMillis := envInt("NORNICDB_TRAVERSAL_WRITE_RETRY_BACKOFF_MS", 250)
+		if backoffMillis < 0 {
+			backoffMillis = 0
+		}
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			writeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, err := sess.ExecuteWrite(writeCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+				_, err := tx.Run(writeCtx, query, params)
+				return nil, err
+			})
+			cancel()
+			if err == nil {
+				return
+			}
+			lastErr = err
+			if !isTraversalWriteConflictE2E(err) || attempt == maxAttempts {
+				break
+			}
+			t.Logf("retrying traversal fixture write after conflict: attempt=%d/%d err=%v", attempt, maxAttempts, err)
+			waitForEmbeddingQueueDrainE2E(t, httpClient, httpAddr, fmt.Sprintf("after write conflict retry %d", attempt))
+			if backoffMillis > 0 {
+				time.Sleep(time.Duration(backoffMillis) * time.Millisecond)
+			}
+		}
+		require.NoError(t, lastErr)
 	}
 
-	runWrite("CALL db.index.vector.createNodeIndex('idx_original_text', 'OriginalText', 'embedding', 3, 'cosine')", nil)
+	runWrite(`
+MATCH (n)
+WHERE (n:OriginalText AND n.textKey IN $textKeys)
+   OR ((n:BenchmarkHop OR n:BranchHop OR n:FrontierHop OR n:ConstrainedHop) AND n.rootKey IN $rootKeys)
+DETACH DELETE n
+`, map[string]any{"textKeys": traversalRootTextKeysE2E(), "rootKeys": traversalRootTextKeysE2E()})
+	runWrite(fmt.Sprintf("CALL db.index.vector.createNodeIndex('%s', 'OriginalText', 'embedding', 3, 'cosine')", indexName), nil)
 	runWrite(`
 UNWIND $rows AS row
 CREATE (o:OriginalText {textKey: row.textKey, originalText: row.originalText, embedding: row.embedding, nodeKey: row.textKey})
 `, map[string]any{"rows": traversalRootRowsE2E()})
+	embedStartupDelayMillis := envInt("NORNICDB_TRAVERSAL_EMBED_STARTUP_DELAY_MS", 2000)
+	if embedStartupDelayMillis > 0 {
+		time.Sleep(time.Duration(embedStartupDelayMillis) * time.Millisecond)
+	}
+	waitForEmbeddingQueueDrainE2E(t, httpClient, httpAddr, "after original text creation")
 	runWrite(`
 UNWIND $rows AS row
 CREATE (h:BenchmarkHop {nodeKey: row.nodeKey, hopDepth: row.hopDepth, rootKey: row.rootKey})
@@ -272,6 +327,15 @@ CREATE (a)-[:%s {weight: row.weight, depth: row.depth}]->(b)
 `, edgeType)
 		runWrite(query, map[string]any{"rows": rows})
 	}
+}
+
+func isTraversalWriteConflictE2E(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "changed after transaction start") ||
+		strings.Contains(message, "failed to commit implicit transaction: conflict:")
 }
 
 func runBoltSingleRow(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) ([]any, error) {
@@ -327,6 +391,272 @@ func neo4jHTTPCommitSingleRow(ctx context.Context, c *http.Client, httpAddr, db,
 		return nil, fmt.Errorf("unexpected neo4j http response: %s", string(body))
 	}
 	return parsed.Results[0].Data[0].Row, nil
+}
+
+func traversalBenchConfigFromEnv() traversalBenchConfig {
+	httpAddr := strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_HTTP_ADDR"))
+	boltAddr := strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_BOLT_ADDR"))
+	if httpAddr != "" && boltAddr == "" {
+		boltAddr = deriveBoltAddr(httpAddr)
+	}
+	user := strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_USER"))
+	pass := os.Getenv("NORNICDB_TRAVERSAL_PASS")
+	indexName := strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_INDEX_NAME"))
+	if indexName == "" {
+		indexName = fmt.Sprintf("idx_original_text_%d", time.Now().UnixNano())
+	}
+	return traversalBenchConfig{
+		httpAddr:  httpAddr,
+		boltAddr:  boltAddr,
+		httpUser:  firstNonEmpty(strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_HTTP_USER")), user),
+		httpPass:  firstNonEmpty(os.Getenv("NORNICDB_TRAVERSAL_HTTP_PASS"), pass),
+		boltUser:  firstNonEmpty(strings.TrimSpace(os.Getenv("NORNICDB_TRAVERSAL_BOLT_USER")), user),
+		boltPass:  firstNonEmpty(os.Getenv("NORNICDB_TRAVERSAL_BOLT_PASS"), pass),
+		indexName: indexName,
+	}
+}
+
+func newTraversalHTTPClient(user, pass string) *http.Client {
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: &traversalAuthTransport{base: http.DefaultTransport, user: user, pass: pass},
+	}
+}
+
+type traversalAuthTransport struct {
+	base http.RoundTripper
+	user string
+	pass string
+}
+
+func (t *traversalAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	if t.user != "" {
+		clone.SetBasicAuth(t.user, t.pass)
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
+func deriveBoltAddr(httpAddr string) string {
+	host, port, ok := strings.Cut(httpAddr, ":")
+	if !ok {
+		return httpAddr
+	}
+	if port == "7474" {
+		return host + ":7687"
+	}
+	return httpAddr
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func traversalRootTextKeysE2E() []string {
+	return []string{"chain-root", "branch-f1", "branch-f2", "branch-f3", "frontier-f1", "frontier-f2", "frontier-f3", "constrained-strong", "constrained-weak"}
+}
+
+type embedStatsResponseE2E struct {
+	Enabled      bool                 `json:"enabled"`
+	PendingNodes int                  `json:"pending_nodes"`
+	Stats        *embedWorkerStatsE2E `json:"stats"`
+}
+
+type embedWorkerStatsE2E struct {
+	Running bool `json:"running"`
+}
+
+func (e embedStatsResponseE2E) workerRunning() bool {
+	return e.Stats != nil && e.Stats.Running
+}
+
+func waitForEmbeddingQueueDrainE2E(t *testing.T, httpClient *http.Client, httpAddr, phase string) {
+	t.Helper()
+	if httpClient == nil || strings.TrimSpace(httpAddr) == "" {
+		return
+	}
+	pollMillis := envInt("NORNICDB_TRAVERSAL_EMBED_WAIT_POLL_MS", 500)
+	if pollMillis < 50 {
+		pollMillis = 50
+	}
+	idlePollsBeforeRetrigger := envInt("NORNICDB_TRAVERSAL_EMBED_IDLE_POLLS_BEFORE_RETRIGGER", 2)
+	if idlePollsBeforeRetrigger < 1 {
+		idlePollsBeforeRetrigger = 1
+	}
+	progressSeconds := envInt("NORNICDB_TRAVERSAL_EMBED_PROGRESS_SECONDS", 5)
+	if progressSeconds < 1 {
+		progressSeconds = 1
+	}
+	maxFetchFailures := envInt("NORNICDB_TRAVERSAL_EMBED_MAX_FETCH_FAILURES", 10)
+	if maxFetchFailures < 1 {
+		maxFetchFailures = 1
+	}
+	pollInterval := time.Duration(pollMillis) * time.Millisecond
+	progressInterval := time.Duration(progressSeconds) * time.Second
+
+	var lastErr error
+	announcedWait := false
+	lastProgressLog := time.Time{}
+	triggerAttempts := 0
+	lastPending := -1
+	idlePolls := 0
+	fetchFailures := 0
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		stats, err := fetchEmbedStatsE2E(ctx, httpClient, httpAddr)
+		cancel()
+		if err == nil {
+			lastErr = nil
+			fetchFailures = 0
+			if !stats.Enabled {
+				return
+			}
+			if stats.PendingNodes == 0 && !stats.workerRunning() {
+				if announcedWait {
+					t.Logf("embedding queue drained %s: pending=%d running=%t", phase, stats.PendingNodes, stats.workerRunning())
+				}
+				return
+			}
+			if stats.PendingNodes < 0 && !stats.workerRunning() {
+				if announcedWait {
+					t.Logf("embedding worker idle %s with unavailable pending count", phase)
+				}
+				return
+			}
+			if !announcedWait && (stats.PendingNodes > 0 || stats.workerRunning()) {
+				t.Logf("waiting for embedding queue %s: pending=%d running=%t", phase, stats.PendingNodes, stats.workerRunning())
+				announcedWait = true
+			}
+			if lastPending >= 0 {
+				switch {
+				case stats.PendingNodes < lastPending:
+					idlePolls = 0
+				case stats.PendingNodes > lastPending:
+					idlePolls = 0
+				default:
+					idlePolls++
+				}
+			}
+			lastPending = stats.PendingNodes
+			if announcedWait && (lastProgressLog.IsZero() || time.Since(lastProgressLog) >= progressInterval) {
+				t.Logf("embedding queue progress %s: pending=%d running=%t idle_polls=%d trigger_attempts=%d", phase, stats.PendingNodes, stats.workerRunning(), idlePolls, triggerAttempts)
+				lastProgressLog = time.Now()
+			}
+			if stats.PendingNodes > 0 && !stats.workerRunning() && idlePolls >= idlePollsBeforeRetrigger {
+				triggerAttempts++
+				triggerCtx, triggerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				triggerErr := triggerEmbeddingWorkerE2E(triggerCtx, httpClient, httpAddr)
+				triggerCancel()
+				if triggerErr != nil {
+					t.Logf("embedding queue retrigger failed %s: pending=%d err=%v", phase, stats.PendingNodes, triggerErr)
+					lastErr = triggerErr
+				} else {
+					t.Logf("embedding queue retriggered %s: pending=%d attempt=%d", phase, stats.PendingNodes, triggerAttempts)
+					lastErr = nil
+				}
+				idlePolls = 0
+			}
+		} else {
+			fetchFailures++
+			lastErr = err
+			if fetchFailures >= maxFetchFailures {
+				t.Fatalf("failed waiting for embedding queue %s after %d fetch errors: last_error=%v", phase, fetchFailures, lastErr)
+			}
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func triggerEmbeddingWorkerE2E(ctx context.Context, httpClient *http.Client, httpAddr string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+httpAddr+"/nornicdb/embed/trigger", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := ioReadAll(resp.Body, 1<<20)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("embed trigger status=%d body=%s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func fetchEmbedStatsE2E(ctx context.Context, httpClient *http.Client, httpAddr string) (embedStatsResponseE2E, error) {
+	var out embedStatsResponseE2E
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+httpAddr+"/nornicdb/embed/stats", nil)
+	if err != nil {
+		return out, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	body, err := ioReadAll(resp.Body, 1<<20)
+	if err != nil {
+		return out, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return out, fmt.Errorf("embed stats status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func newBoltDriverWithAuth(t *testing.T, addr, user, pass string) neo4j.DriverWithContext {
+	t.Helper()
+	uri := "bolt://" + addr
+	auth := neo4j.NoAuth()
+	if user != "" {
+		auth = neo4j.BasicAuth(user, pass, "")
+	}
+	driver, err := neo4j.NewDriverWithContext(uri, auth)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, driver.VerifyConnectivity(ctx))
+	return driver
+}
+
+func discoverDefaultDatabaseWithAuth(t *testing.T, c *http.Client, httpAddr, _user, _pass string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+httpAddr+"/", nil)
+	require.NoError(t, err)
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := ioReadAll(resp.Body, 1<<20)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "discovery status=%d body=%s", resp.StatusCode, string(body))
+
+	var disc struct {
+		DefaultDatabase string `json:"default_database"`
+	}
+	require.NoError(t, json.Unmarshal(body, &disc))
+	if disc.DefaultDatabase == "" {
+		return "nornic"
+	}
+	return disc.DefaultDatabase
 }
 
 func runSerialBench(warmupIterations, iterations int, fn func(context.Context) error) (benchSummary, error) {
@@ -657,24 +987,49 @@ func minIntE2E(a, b int) int {
 
 func fetchTraversalRootIDsE2E(t *testing.T, driver neo4j.DriverWithContext) map[string]string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	sess := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer func() { _ = sess.Close(ctx) }()
-	out, err := sess.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		res, err := tx.Run(ctx, "MATCH (o:OriginalText) RETURN o.textKey AS textKey, elementId(o) AS nodeID", nil)
-		if err != nil {
-			return nil, err
+	maxAttempts := envInt("NORNICDB_TRAVERSAL_ROOT_FETCH_ATTEMPTS", 6)
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	perAttemptTimeoutSeconds := envInt("NORNICDB_TRAVERSAL_ROOT_FETCH_TIMEOUT_SECONDS", 30)
+	if perAttemptTimeoutSeconds < 1 {
+		perAttemptTimeoutSeconds = 1
+	}
+	backoffMillis := envInt("NORNICDB_TRAVERSAL_ROOT_FETCH_BACKOFF_MS", 1000)
+	if backoffMillis < 0 {
+		backoffMillis = 0
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(perAttemptTimeoutSeconds)*time.Second)
+		sess := driver.NewSession(ctx, neo4j.SessionConfig{})
+		out, err := sess.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			res, err := tx.Run(ctx, "MATCH (o:OriginalText) RETURN o.textKey AS textKey, elementId(o) AS nodeID", nil)
+			if err != nil {
+				return nil, err
+			}
+			ids := map[string]string{}
+			for res.Next(ctx) {
+				textKey, _ := res.Record().Get("textKey")
+				nodeID, _ := res.Record().Get("nodeID")
+				ids[fmt.Sprintf("%v", textKey)] = fmt.Sprintf("%v", nodeID)
+			}
+			return ids, res.Err()
+		})
+		_ = sess.Close(ctx)
+		cancel()
+		if err == nil {
+			ids, _ := out.(map[string]string)
+			return ids
 		}
-		ids := map[string]string{}
-		for res.Next(ctx) {
-			textKey, _ := res.Record().Get("textKey")
-			nodeID, _ := res.Record().Get("nodeID")
-			ids[fmt.Sprintf("%v", textKey)] = fmt.Sprintf("%v", nodeID)
+		lastErr = err
+		if attempt < maxAttempts {
+			t.Logf("retrying traversal root id fetch: attempt=%d/%d err=%v", attempt, maxAttempts, err)
+			if backoffMillis > 0 {
+				time.Sleep(time.Duration(backoffMillis) * time.Millisecond)
+			}
 		}
-		return ids, res.Err()
-	})
-	require.NoError(t, err)
-	ids, _ := out.(map[string]string)
-	return ids
+	}
+	require.NoError(t, lastErr)
+	return nil
 }

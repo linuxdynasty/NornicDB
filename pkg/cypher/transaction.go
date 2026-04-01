@@ -244,6 +244,12 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 // Uses the same transactionStorageWrapper pattern as implicit transactions,
 // routing writes through the transaction for atomicity and rollback support.
 func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
+	parsedCypher, inlineEmbeddingEnabled := stripWithEmbeddingSuffix(cypher)
+	if inlineEmbeddingEnabled {
+		cypher = parsedCypher
+		upperQuery = strings.ToUpper(cypher)
+	}
+
 	if ftx, ok := e.txContext.tx.(*fabric.FabricTransaction); ok {
 		if looksLikeWriteQuery(cypher) {
 			if graph := extractFirstUseGraph(cypher); graph != "" {
@@ -277,10 +283,11 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 		separator = ""
 	}
 	txWrapper := &transactionStorageWrapper{
-		tx:         tx,
-		underlying: e.storage,
-		namespace:  engines.namespace,
-		separator:  separator,
+		tx:             tx,
+		underlying:     e.storage,
+		namespace:      engines.namespace,
+		separator:      separator,
+		mutatedNodeIDs: make(map[string]struct{}),
 	}
 
 	// Pass the wrapper through context (same pattern as implicit transactions)
@@ -288,7 +295,16 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 	txCtx := context.WithValue(ctx, ctxKeyTxStorage, txWrapper)
 
 	// Execute the query - getStorage() will automatically use the transaction wrapper
-	return e.executeQueryAgainstStorage(txCtx, cypher, upperQuery)
+	result, err := e.executeQueryAgainstStorage(txCtx, cypher, upperQuery)
+	if err != nil {
+		return nil, err
+	}
+	if inlineEmbeddingEnabled {
+		if err := e.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 func looksLikeWriteQuery(cypher string) bool {

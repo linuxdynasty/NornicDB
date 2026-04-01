@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -534,7 +535,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"score":       85,
 		}
 
-		text := buildEmbeddingText(props, []string{"Document"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Document"}, nil)
 
 		assert.Contains(t, text, "Test Title")
 		assert.Contains(t, text, "Test Content")
@@ -554,7 +555,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"createdAt":       "2024-01-01",
 		}
 
-		text := buildEmbeddingText(props, []string{"Article"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Article"}, nil)
 
 		assert.Contains(t, text, "Real content")
 		assert.Contains(t, text, "labels: Article")
@@ -574,7 +575,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"createdAt":     "2024-01-01",
 		}
 
-		text := buildEmbeddingText(props, []string{"Node"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Node"}, nil)
 
 		// Should return labels even if no embeddable properties
 		assert.Contains(t, text, "labels: Node")
@@ -587,7 +588,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"tags":    []interface{}{"tag1", "tag2"},
 		}
 
-		text := buildEmbeddingText(props, []string{"Post"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Post"}, nil)
 
 		assert.Contains(t, text, "tag1")
 		assert.Contains(t, text, "tag2")
@@ -604,7 +605,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"issuesFound":        "Uses informal 'tu'",
 		}
 
-		text := buildEmbeddingText(props, []string{"TranslationEntry"}, nil)
+		text := embeddingutil.BuildText(props, []string{"TranslationEntry"}, nil)
 
 		assert.Contains(t, text, "Your prescription was delivered")
 		assert.Contains(t, text, "Tu receta fue entregada")
@@ -616,7 +617,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 
 	t.Run("includes_labels_even_with_no_properties", func(t *testing.T) {
 		props := map[string]interface{}{}
-		text := buildEmbeddingText(props, []string{"Person", "Employee"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Person", "Employee"}, nil)
 
 		assert.Contains(t, text, "labels: Person, Employee")
 		assert.NotEmpty(t, text)
@@ -624,7 +625,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 
 	t.Run("handles_empty_labels_and_properties", func(t *testing.T) {
 		props := map[string]interface{}{}
-		text := buildEmbeddingText(props, []string{}, nil)
+		text := embeddingutil.BuildText(props, []string{}, nil)
 
 		// Should return fallback "node" if no labels and no properties
 		assert.NotEmpty(t, text)
@@ -641,7 +642,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 			"empty":    "",
 			"nil":      nil,
 		}
-		text := buildEmbeddingText(props, []string{"Person"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Person"}, nil)
 
 		assert.Contains(t, text, "labels: Person")
 		assert.Contains(t, text, "name: Alice")
@@ -663,8 +664,8 @@ func TestBuildEmbeddingText_IncludeExclude(t *testing.T) {
 	}
 
 	t.Run("include_only", func(t *testing.T) {
-		opts := &EmbedTextOptions{Include: []string{"content"}, IncludeLabels: true}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		opts := &embeddingutil.EmbedTextOptions{Include: []string{"content"}, IncludeLabels: true}
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		assert.Contains(t, text, "labels: Doc")
 		assert.Contains(t, text, "content: Main content")
 		assert.NotContains(t, text, "title:")
@@ -673,8 +674,8 @@ func TestBuildEmbeddingText_IncludeExclude(t *testing.T) {
 	})
 
 	t.Run("include_multiple", func(t *testing.T) {
-		opts := &EmbedTextOptions{Include: []string{"content", "title"}, IncludeLabels: true}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		opts := &embeddingutil.EmbedTextOptions{Include: []string{"content", "title"}, IncludeLabels: true}
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		assert.Contains(t, text, "content: Main content")
 		assert.Contains(t, text, "title: Title here")
 		assert.NotContains(t, text, "internal_id:")
@@ -682,8 +683,8 @@ func TestBuildEmbeddingText_IncludeExclude(t *testing.T) {
 	})
 
 	t.Run("exclude_only", func(t *testing.T) {
-		opts := &EmbedTextOptions{Exclude: []string{"internal_id"}, IncludeLabels: true}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		opts := &embeddingutil.EmbedTextOptions{Exclude: []string{"internal_id"}, IncludeLabels: true}
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		assert.Contains(t, text, "content: Main content")
 		assert.Contains(t, text, "title: Title here")
 		assert.Contains(t, text, "description: Desc")
@@ -692,33 +693,33 @@ func TestBuildEmbeddingText_IncludeExclude(t *testing.T) {
 
 	t.Run("include_and_exclude", func(t *testing.T) {
 		// Include content and title; exclude title (exclude wins) so only content
-		opts := &EmbedTextOptions{
+		opts := &embeddingutil.EmbedTextOptions{
 			Include:       []string{"content", "title"},
 			Exclude:       []string{"title"},
 			IncludeLabels: true,
 		}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		assert.Contains(t, text, "content: Main content")
 		assert.NotContains(t, text, "title:")
 		assert.NotContains(t, text, "internal_id:")
 	})
 
 	t.Run("include_labels_false", func(t *testing.T) {
-		opts := &EmbedTextOptions{Include: []string{"content"}, IncludeLabels: false}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		opts := &embeddingutil.EmbedTextOptions{Include: []string{"content"}, IncludeLabels: false}
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		assert.NotContains(t, text, "labels:")
 		assert.Contains(t, text, "content: Main content")
 	})
 
 	t.Run("include_labels_false_no_properties_included", func(t *testing.T) {
-		opts := &EmbedTextOptions{Include: []string{"nonexistent"}, IncludeLabels: false}
-		text := buildEmbeddingText(props, []string{"Doc"}, opts)
+		opts := &embeddingutil.EmbedTextOptions{Include: []string{"nonexistent"}, IncludeLabels: false}
+		text := embeddingutil.BuildText(props, []string{"Doc"}, opts)
 		// Should return fallback when nothing to embed
 		assert.Equal(t, "node", text)
 	})
 
 	t.Run("nil_opts_includes_all_non_metadata", func(t *testing.T) {
-		text := buildEmbeddingText(props, []string{"Doc"}, nil)
+		text := embeddingutil.BuildText(props, []string{"Doc"}, nil)
 		assert.Contains(t, text, "labels: Doc")
 		assert.Contains(t, text, "content: Main content")
 		assert.Contains(t, text, "title: Title here")

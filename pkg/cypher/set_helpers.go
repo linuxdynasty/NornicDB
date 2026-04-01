@@ -48,6 +48,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/embeddingutil"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -157,47 +158,14 @@ func setNodeProperty(node *storage.Node, propName string, value interface{}) {
 	// For managed embeddings (ChunkEmbeddings), any mutation to non-metadata properties
 	// should invalidate the embedding so it can be regenerated. This prevents stale
 	// embeddings after SET/REMOVE operations.
-	if !isEmbeddingMetadataPropertyKey(propName) {
-		invalidateManagedEmbeddings(node)
+	if !embeddingutil.IsMetadataPropertyKey(propName) {
+		embeddingutil.InvalidateManagedEmbeddings(node)
 	}
 
 	if node.Properties == nil {
 		node.Properties = make(map[string]interface{})
 	}
 	node.Properties[propName] = value
-}
-
-func isEmbeddingMetadataPropertyKey(key string) bool {
-	switch key {
-	// Internal embedding fields / markers
-	case "embedding",
-		"has_embedding",
-		"embedding_skipped",
-		"embedding_model",
-		"embedding_dimensions",
-		"embedded_at",
-		"has_chunks",
-		"chunk_count",
-		// Common identity/timestamps that should not affect embedding text
-		"createdAt",
-		"updatedAt",
-		"id":
-		return true
-	default:
-		return false
-	}
-}
-
-func invalidateManagedEmbeddings(node *storage.Node) {
-	if node == nil {
-		return
-	}
-
-	// Managed embeddings live in ChunkEmbeddings (embed worker output).
-	node.ChunkEmbeddings = nil
-
-	// Clear embedding metadata from EmbedMeta
-	node.EmbedMeta = nil
 }
 
 // splitSetAssignments splits a SET clause into individual assignments,
