@@ -35,6 +35,7 @@ RETURN count(h) AS prepared
 	require.Equal(t, []string{"prepared"}, res.Columns)
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, int64(72), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch, "expected unwind simple merge batch hot path")
 
 	nodes, err := store.GetNodesByLabel("BenchmarkHop")
 	require.NoError(t, err)
@@ -75,6 +76,7 @@ RETURN count(h) AS prepared
 	require.NoError(t, err)
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, int64(2), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch, "expected unwind simple merge batch hot path")
 
 	nodes, err := store.GetNodesByLabel("BenchmarkHop")
 	require.NoError(t, err)
@@ -109,6 +111,7 @@ RETURN count(h) AS prepared
 	require.Len(t, res.Rows, 1)
 	// Cypher semantics: count(h) in this shape counts input rows, including duplicates.
 	require.Equal(t, int64(3), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch, "expected unwind simple merge batch hot path")
 
 	nodes, err := store.GetNodesByLabel("BenchmarkHop")
 	require.NoError(t, err)

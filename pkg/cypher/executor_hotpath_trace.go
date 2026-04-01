@@ -6,6 +6,8 @@ type HotPathTrace struct {
 	OuterScanFallbackUsed    bool
 	FabricBatchedApplyRows   bool
 	SimpleMatchLimitFastPath bool
+	UnwindSimpleMergeBatch   bool
+	UnwindBenchHopLinkBatch  bool
 }
 
 func (e *StorageExecutor) resetHotPathTrace() {
@@ -53,6 +55,24 @@ func (e *StorageExecutor) markSimpleMatchLimitFastPathUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.SimpleMatchLimitFastPath = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markUnwindSimpleMergeBatchUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.UnwindSimpleMergeBatch = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markUnwindBenchHopLinkBatchUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.UnwindBenchHopLinkBatch = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

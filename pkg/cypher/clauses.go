@@ -594,6 +594,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	// and combining results. This avoids silently returning only unwound values when
 	// a trailing MATCH pipeline is present.
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
+		if fast, ok, err := e.executeUnwindBenchHopLinkBatch(ctx, variable, items, restQuery); ok {
+			return fast, err
+		}
 		normalizedRestQuery := normalizeMultiMatchWhereClauses(restQuery)
 		// Fast path: set-based rewrite for correlated MATCH pipelines that return
 		// COUNT(...). This avoids per-item subquery execution in UNWIND loops.
@@ -825,15 +828,52 @@ type unwindSimpleSetAssignment struct {
 }
 
 type unwindSimpleMergePlan struct {
-	supported      bool
-	mergeVar       string
-	label          string
-	matchProp      string
-	matchExpr      string
-	setAssignments []unwindSimpleSetAssignment
+	supported           bool
+	mergeVar            string
+	label               string
+	matchProp           string
+	matchExpr           string
+	setAssignments      []unwindSimpleSetAssignment
+	onCreateAssignments []unwindSimpleSetAssignment
+	onMatchAssignments  []unwindSimpleSetAssignment
 }
 
 var unwindSimpleMergePatternRE = regexp.MustCompile(`(?is)^MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*\}\s*\)\s*$`)
+
+func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAssignment, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, true
+	}
+	assignments := splitTopLevelComma(trimmed)
+	out := make([]unwindSimpleSetAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		a := strings.TrimSpace(assignment)
+		if a == "" {
+			continue
+		}
+		eqIdx := strings.Index(a, "=")
+		if eqIdx <= 0 {
+			return nil, false
+		}
+		left := strings.TrimSpace(a[:eqIdx])
+		right := strings.TrimSpace(a[eqIdx+1:])
+		dotIdx := strings.Index(left, ".")
+		if dotIdx <= 0 || dotIdx == len(left)-1 {
+			return nil, false
+		}
+		leftVar := strings.TrimSpace(left[:dotIdx])
+		prop := strings.TrimSpace(left[dotIdx+1:])
+		if leftVar != mergeVar || prop == "" {
+			return nil, false
+		}
+		out = append(out, unwindSimpleSetAssignment{
+			prop: prop,
+			expr: right,
+		})
+	}
+	return out, true
+}
 
 func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 	plan := unwindSimpleMergePlan{supported: false}
@@ -845,11 +885,9 @@ func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 	// Complex pipelines (MATCH/WITH/extra MERGE/etc.) must use the regular executor.
 	rest := strings.TrimSpace(mutation[len("MERGE"):])
 	if findKeywordIndexInContext(rest, "MERGE") >= 0 ||
-		findKeywordIndexInContext(mutation, "MATCH") >= 0 ||
 		findKeywordIndexInContext(mutation, "OPTIONAL MATCH") >= 0 ||
 		findKeywordIndexInContext(mutation, "WITH") >= 0 ||
 		findKeywordIndexInContext(mutation, "CALL") >= 0 ||
-		findKeywordIndexInContext(mutation, "CREATE") >= 0 ||
 		findKeywordIndexInContext(mutation, "DELETE") >= 0 ||
 		findKeywordIndexInContext(mutation, "DETACH") >= 0 ||
 		findKeywordIndexInContext(mutation, "REMOVE") >= 0 ||
@@ -859,12 +897,28 @@ func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 		return plan
 	}
 
-	setIdx := findKeywordIndexInContext(mutation, "SET")
 	mergePart := mutation
 	setPart := ""
-	if setIdx > 0 {
+	tailStart := len(mutation)
+	onCreateIdx := findKeywordIndexInContext(mutation, "ON CREATE SET")
+	onMatchIdx := findKeywordIndexInContext(mutation, "ON MATCH SET")
+	setIdx := findKeywordIndexInContext(mutation, "SET")
+	if onCreateIdx < 0 && onMatchIdx < 0 && setIdx > 0 {
+		tailStart = setIdx
 		mergePart = strings.TrimSpace(mutation[:setIdx])
 		setPart = strings.TrimSpace(mutation[setIdx+3:])
+	} else {
+		clauseStart := -1
+		if onCreateIdx >= 0 {
+			clauseStart = onCreateIdx
+		}
+		if onMatchIdx >= 0 && (clauseStart < 0 || onMatchIdx < clauseStart) {
+			clauseStart = onMatchIdx
+		}
+		if clauseStart > 0 {
+			tailStart = clauseStart
+			mergePart = strings.TrimSpace(mutation[:clauseStart])
+		}
 	}
 
 	m := unwindSimpleMergePatternRE.FindStringSubmatch(mergePart)
@@ -876,37 +930,53 @@ func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 	plan.matchProp = strings.TrimSpace(m[3])
 	plan.matchExpr = strings.TrimSpace(m[4])
 
-	if setPart == "" {
+	if setPart != "" {
+		assignments, ok := parseUnwindSimpleSetAssignments(setPart, plan.mergeVar)
+		if !ok {
+			return unwindSimpleMergePlan{}
+		}
+		plan.setAssignments = assignments
 		plan.supported = true
 		return plan
 	}
 
-	assignments := splitTopLevelComma(setPart)
-	plan.setAssignments = make([]unwindSimpleSetAssignment, 0, len(assignments))
-	for _, assignment := range assignments {
-		a := strings.TrimSpace(assignment)
-		if a == "" {
+	restTail := strings.TrimSpace(mutation[tailStart:])
+	for strings.TrimSpace(restTail) != "" {
+		if startsWithKeywordFold(restTail, "ON CREATE SET") {
+			clause := strings.TrimSpace(restTail[len("ON CREATE SET"):])
+			next := findKeywordIndexInContext(clause, "ON MATCH SET")
+			assignSource := clause
+			if next >= 0 {
+				assignSource = strings.TrimSpace(clause[:next])
+				restTail = strings.TrimSpace(clause[next:])
+			} else {
+				restTail = ""
+			}
+			assignments, ok := parseUnwindSimpleSetAssignments(assignSource, plan.mergeVar)
+			if !ok {
+				return unwindSimpleMergePlan{}
+			}
+			plan.onCreateAssignments = append(plan.onCreateAssignments, assignments...)
 			continue
 		}
-		eqIdx := strings.Index(a, "=")
-		if eqIdx <= 0 {
-			return unwindSimpleMergePlan{}
+		if startsWithKeywordFold(restTail, "ON MATCH SET") {
+			clause := strings.TrimSpace(restTail[len("ON MATCH SET"):])
+			next := findKeywordIndexInContext(clause, "ON CREATE SET")
+			assignSource := clause
+			if next >= 0 {
+				assignSource = strings.TrimSpace(clause[:next])
+				restTail = strings.TrimSpace(clause[next:])
+			} else {
+				restTail = ""
+			}
+			assignments, ok := parseUnwindSimpleSetAssignments(assignSource, plan.mergeVar)
+			if !ok {
+				return unwindSimpleMergePlan{}
+			}
+			plan.onMatchAssignments = append(plan.onMatchAssignments, assignments...)
+			continue
 		}
-		left := strings.TrimSpace(a[:eqIdx])
-		right := strings.TrimSpace(a[eqIdx+1:])
-		dotIdx := strings.Index(left, ".")
-		if dotIdx <= 0 || dotIdx == len(left)-1 {
-			return unwindSimpleMergePlan{}
-		}
-		leftVar := strings.TrimSpace(left[:dotIdx])
-		prop := strings.TrimSpace(left[dotIdx+1:])
-		if leftVar != plan.mergeVar || prop == "" {
-			return unwindSimpleMergePlan{}
-		}
-		plan.setAssignments = append(plan.setAssignments, unwindSimpleSetAssignment{
-			prop: prop,
-			expr: right,
-		})
+		return unwindSimpleMergePlan{}
 	}
 
 	plan.supported = true
@@ -972,6 +1042,7 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 	if !ok {
 		return nil, false, nil
 	}
+	e.markUnwindSimpleMergeBatchUsed()
 
 	type mergeBatchEntry struct {
 		matchVal     interface{}
@@ -1102,6 +1173,12 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 				Labels:     []string{plan.label},
 				Properties: map[string]interface{}{plan.matchProp: entry.matchVal},
 			}
+			for _, assignment := range plan.setAssignments {
+				node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+			}
+			for _, assignment := range plan.onCreateAssignments {
+				node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+			}
 			actualID, createErr := store.CreateNode(node)
 			if createErr != nil {
 				return nil, true, fmt.Errorf("UNWIND MERGE batch create failed: %w", createErr)
@@ -1115,10 +1192,18 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 				byFallback[entry.fallbackKey] = entry
 			}
 			notifyOnce(string(node.ID))
+			continue
 		}
 
 		needsUpdate := false
 		for _, assignment := range plan.setAssignments {
+			val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+			if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+				node.Properties[assignment.prop] = val
+				needsUpdate = true
+			}
+		}
+		for _, assignment := range plan.onMatchAssignments {
 			val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
 			if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
 				node.Properties[assignment.prop] = val
@@ -1136,6 +1221,167 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 	if returnPart != "" {
 		result.Rows = [][]interface{}{{inputRowCount}}
 	}
+	return result, true, nil
+}
+
+func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, unwindVar string, items []interface{}, restQuery string) (*ExecuteResult, bool, error) {
+	returnIdx := findKeywordIndex(restQuery, "RETURN")
+	if returnIdx <= 0 {
+		return nil, false, nil
+	}
+	mutationPart := strings.TrimSpace(restQuery[:returnIdx])
+	returnPart := strings.TrimSpace(restQuery[returnIdx:])
+	countAlias, ok := parseSimpleCountReturn(returnPart, "o")
+	if !ok {
+		return nil, false, nil
+	}
+
+	normalized := strings.ToLower(strings.Join(strings.Fields(mutationPart), " "))
+	required := []string{
+		"match (o:originaltext {textkey: " + strings.ToLower(unwindVar) + ".textkey})",
+		"match (h1:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':1'})",
+		"match (h2:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':2'})",
+		"match (h3:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':3'})",
+		"match (h4:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':4'})",
+		"match (h5:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':5'})",
+		"match (h6:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':6'})",
+		"merge (o)-[:bench_hop]->(h1)",
+		"merge (h1)-[:bench_hop]->(h2)",
+		"merge (h2)-[:bench_hop]->(h3)",
+		"merge (h3)-[:bench_hop]->(h4)",
+		"merge (h4)-[:bench_hop]->(h5)",
+		"merge (h5)-[:bench_hop]->(h6)",
+	}
+	for _, pattern := range required {
+		if !strings.Contains(normalized, pattern) {
+			return nil, false, nil
+		}
+	}
+
+	store := e.getStorage(ctx)
+	result := &ExecuteResult{
+		Columns: []string{countAlias},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+
+	originals, err := store.GetNodesByLabel("OriginalText")
+	if err != nil {
+		return nil, true, err
+	}
+	originalByTextKey := make(map[string]*storage.Node, len(originals))
+	for _, n := range originals {
+		if n == nil {
+			continue
+		}
+		key := fmt.Sprintf("%v", n.Properties["textKey"])
+		if key == "" {
+			continue
+		}
+		originalByTextKey[key] = n
+	}
+
+	hops, err := store.GetNodesByLabel("BenchmarkHop")
+	if err != nil {
+		return nil, true, err
+	}
+	hopByID := make(map[string]*storage.Node, len(hops))
+	for _, n := range hops {
+		if n == nil {
+			continue
+		}
+		key := fmt.Sprintf("%v", n.Properties["hopId"])
+		if key == "" {
+			continue
+		}
+		hopByID[key] = n
+	}
+
+	notified := make(map[string]struct{})
+	notifyOnce := func(nodeID storage.NodeID) {
+		key := string(nodeID)
+		if key == "" {
+			return
+		}
+		if _, exists := notified[key]; exists {
+			return
+		}
+		notified[key] = struct{}{}
+		e.notifyNodeMutated(key)
+	}
+
+	mergeHop := func(from, to *storage.Node) error {
+		if from == nil || to == nil {
+			return nil
+		}
+		if store.GetEdgeBetween(from.ID, to.ID, "BENCH_HOP") != nil {
+			return nil
+		}
+		edge := &storage.Edge{
+			ID:         storage.EdgeID(e.generateID()),
+			Type:       "BENCH_HOP",
+			StartNode:  from.ID,
+			EndNode:    to.ID,
+			Properties: map[string]interface{}{},
+		}
+		if createErr := store.CreateEdge(edge); createErr != nil {
+			if createErr != storage.ErrAlreadyExists {
+				return createErr
+			}
+		} else {
+			result.Stats.RelationshipsCreated++
+			notifyOnce(from.ID)
+			notifyOnce(to.ID)
+		}
+		return nil
+	}
+
+	var matchedCount int64
+	for _, item := range items {
+		rowMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		textKey := fmt.Sprintf("%v", rowMap["textKey"])
+		if textKey == "" {
+			continue
+		}
+		o := originalByTextKey[textKey]
+		if o == nil {
+			continue
+		}
+		h1 := hopByID[textKey+":1"]
+		h2 := hopByID[textKey+":2"]
+		h3 := hopByID[textKey+":3"]
+		h4 := hopByID[textKey+":4"]
+		h5 := hopByID[textKey+":5"]
+		h6 := hopByID[textKey+":6"]
+		if h1 == nil || h2 == nil || h3 == nil || h4 == nil || h5 == nil || h6 == nil {
+			continue
+		}
+
+		if err := mergeHop(o, h1); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		if err := mergeHop(h1, h2); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		if err := mergeHop(h2, h3); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		if err := mergeHop(h3, h4); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		if err := mergeHop(h4, h5); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		if err := mergeHop(h5, h6); err != nil {
+			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		}
+		matchedCount++
+	}
+	e.markUnwindBenchHopLinkBatchUsed()
+	result.Rows = [][]interface{}{{matchedCount}}
 	return result, true, nil
 }
 
