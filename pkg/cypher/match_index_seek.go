@@ -228,6 +228,97 @@ func (e *StorageExecutor) tryCollectNodesFromIDEqualityParam(
 	return []*storage.Node{node}, true, nil
 }
 
+// tryCollectNodesFromIDEqualityCompound attempts ID/elementId direct seeks from
+// simple and compound predicates over a single MATCH variable.
+//
+// Supported safe forms:
+//   - id(n) = '...'
+//   - elementId(n) = '...'
+//   - id(n) = $param
+//   - (... AND id(n) = ...)
+//   - (id(n) = ... OR n.id = ... ) where every OR branch is an ID-equality form
+//
+// For OR predicates, this helper only engages when all disjuncts are recognized
+// ID-equality predicates; otherwise it returns (nil, false, nil) to avoid unsafe
+// pruning.
+func (e *StorageExecutor) tryCollectNodesFromIDEqualityCompound(
+	nodePattern nodePatternInfo,
+	whereClause string,
+	params map[string]interface{},
+) ([]*storage.Node, bool, error) {
+	clause := unwrapOuterParens(strings.TrimSpace(whereClause))
+	if clause == "" {
+		return nil, false, nil
+	}
+
+	// 1) Simple clause (literal or param).
+	if nodes, used, err := e.tryCollectNodesFromIDEquality(nodePattern, clause); used || err != nil {
+		return nodes, used, err
+	}
+	if nodes, used, err := e.tryCollectNodesFromIDEqualityParam(nodePattern, clause, params); used || err != nil {
+		return nodes, used, err
+	}
+
+	// 2) Conjunction: any recognized id-conjunct is safe to use as a pruning seek.
+	if findTopLevelKeyword(clause, " AND ") > 0 {
+		for _, raw := range splitTopLevelAndConjuncts(clause) {
+			term := unwrapOuterParens(strings.TrimSpace(raw))
+			if term == "" {
+				continue
+			}
+			if nodes, used, err := e.tryCollectNodesFromIDEquality(nodePattern, term); used || err != nil {
+				return nodes, used, err
+			}
+			if nodes, used, err := e.tryCollectNodesFromIDEqualityParam(nodePattern, term, params); used || err != nil {
+				return nodes, used, err
+			}
+		}
+	}
+
+	// 3) Disjunction: only safe when every branch is recognized as an ID seek.
+	orTerms := splitTopLevelOrTerms(clause)
+	if len(orTerms) > 1 {
+		merged := make([]*storage.Node, 0, len(orTerms))
+		seen := make(map[storage.NodeID]struct{}, len(orTerms))
+		for _, raw := range orTerms {
+			term := unwrapOuterParens(strings.TrimSpace(raw))
+			if term == "" {
+				return nil, false, nil
+			}
+
+			nodes, used, err := e.tryCollectNodesFromIDEquality(nodePattern, term)
+			if err != nil {
+				return nil, true, err
+			}
+			if !used {
+				nodes, used, err = e.tryCollectNodesFromIDEqualityParam(nodePattern, term, params)
+				if err != nil {
+					return nil, true, err
+				}
+			}
+			if !used {
+				// At least one OR branch is not a recognized ID-equality predicate.
+				// Bail out to preserve semantics.
+				return nil, false, nil
+			}
+
+			for _, node := range nodes {
+				if node == nil {
+					continue
+				}
+				if _, ok := seen[node.ID]; ok {
+					continue
+				}
+				seen[node.ID] = struct{}{}
+				merged = append(merged, node)
+			}
+		}
+		return merged, true, nil
+	}
+
+	return nil, false, nil
+}
+
 // tryCollectNodesFromPropertyIndex attempts to satisfy MATCH node candidates from a schema property index.
 // It only applies to simple equality predicates:
 //   - <var>.<prop> = <value>

@@ -222,7 +222,7 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 		// MATCH (o)-[:R]->(t) WHERE elementId(o) = '...'
 		// This avoids traversing from all start nodes for single-node lookups.
 		if matches.StartNode.variable != "" {
-			if nodes, used, idxErr := e.tryCollectNodesFromIDEquality(matches.StartNode, whereClause); idxErr == nil && used {
+			if nodes, used, idxErr := e.tryCollectNodesFromIDEqualityCompound(matches.StartNode, whereClause, nil); idxErr == nil && used {
 				optimizedStartNodes = nodes
 				usedPropertyIndex = true
 			}
@@ -252,36 +252,6 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 			}
 		}
 
-		// Check if WHERE clause has id(startVar) = $param pattern
-		startVar := matches.StartNode.variable
-		if startVar != "" {
-			// Try to extract id(startVar) = value from WHERE clause
-			idPattern := fmt.Sprintf("id(%s) = ", startVar)
-			if strings.Contains(whereClause, idPattern) {
-				// Extract the value after the = sign
-				idx := strings.Index(whereClause, idPattern)
-				if idx >= 0 {
-					afterEq := strings.TrimSpace(whereClause[idx+len(idPattern):])
-					// Handle OR conditions: id(n) = $nodeId OR n.id = $nodeId
-					if strings.Contains(afterEq, " OR ") {
-						parts := strings.Split(afterEq, " OR ")
-						afterEq = strings.TrimSpace(parts[0])
-					}
-					// Handle AND conditions: id(n) = $nodeId AND ...
-					if strings.Contains(afterEq, " AND ") {
-						parts := strings.Split(afterEq, " AND ")
-						afterEq = strings.TrimSpace(parts[0])
-					}
-					// Remove quotes if present
-					afterEq = strings.Trim(afterEq, "'\"")
-					// Try to get the specific node
-					if node, err := e.storage.GetNode(storage.NodeID(afterEq)); err == nil && node != nil {
-						optimizedStartNodes = []*storage.Node{node}
-						usedPropertyIndex = false
-					}
-				}
-			}
-		}
 	}
 
 	// Execute traversal with optimized start nodes if available
