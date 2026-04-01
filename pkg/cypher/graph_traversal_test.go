@@ -566,3 +566,63 @@ func TestCollectWithMapLiteral(t *testing.T) {
 		}
 	})
 }
+
+func TestVariableLengthPath_LengthFunction(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (a:PathNode {id: 1}),
+		       (b:PathNode {id: 2}),
+		       (c:PathNode {id: 3}),
+		       (d:PathNode {id: 4}),
+		       (a)-[:NEXT]->(b),
+		       (b)-[:NEXT]->(c),
+		       (c)-[:NEXT]->(d)
+	`, nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		MATCH p = (a:PathNode {id: 1})-[:NEXT*1..3]->(b:PathNode)
+		RETURN b.id AS bid, length(p) AS pathLen
+		ORDER BY bid
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 3)
+
+	assert.EqualValues(t, 2, result.Rows[0][0])
+	assert.EqualValues(t, 1, result.Rows[0][1])
+	assert.EqualValues(t, 3, result.Rows[1][0])
+	assert.EqualValues(t, 2, result.Rows[1][1])
+	assert.EqualValues(t, 4, result.Rows[2][0])
+	assert.EqualValues(t, 3, result.Rows[2][1])
+}
+
+func TestVariableLengthPath_MaxLengthAggregation(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+		CREATE (a:PathNode {id: 1}),
+		       (b:PathNode {id: 2}),
+		       (c:PathNode {id: 3}),
+		       (d:PathNode {id: 4}),
+		       (a)-[:NEXT]->(b),
+		       (b)-[:NEXT]->(c),
+		       (c)-[:NEXT]->(d)
+	`, nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		MATCH p = (a:PathNode {id: 1})-[:NEXT*1..3]->(b:PathNode)
+		RETURN max(length(p)) AS maxLen
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.Len(t, result.Rows[0], 1)
+	assert.EqualValues(t, 3, result.Rows[0][0])
+}

@@ -352,48 +352,23 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 				case isAggregateFuncName(item.expr, "count"):
 					row[i] = int64(len(paths))
 
+				case isAggregateFuncName(item.expr, "sum"):
+					row[i] = e.aggregatePathSum(paths, matches, extractFuncInner(item.expr))
+
+				case isAggregateFuncName(item.expr, "avg"):
+					row[i] = e.aggregatePathAvg(paths, matches, extractFuncInner(item.expr))
+
+				case isAggregateFuncName(item.expr, "min"):
+					row[i] = e.aggregatePathMinMax(paths, matches, extractFuncInner(item.expr), false)
+
+				case isAggregateFuncName(item.expr, "max"):
+					row[i] = e.aggregatePathMinMax(paths, matches, extractFuncInner(item.expr), true)
+
 				case isAggregateFuncName(item.expr, "collect") && strings.Contains(upperExpr, "DISTINCT"):
-					// COLLECT(DISTINCT expression) - may have suffix like [..10]
-					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
-					// Skip "DISTINCT " prefix
-					if strings.HasPrefix(strings.ToUpper(inner), "DISTINCT ") {
-						inner = strings.TrimSpace(inner[9:])
-					}
-					seen := make(map[string]bool)
-					collected := make([]interface{}, 0, len(paths))
-					for _, path := range paths {
-						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithPathContext(inner, context)
-						if val != nil {
-							key := fmt.Sprintf("%v", val)
-							if !seen[key] {
-								seen[key] = true
-								collected = append(collected, val)
-							}
-						}
-					}
-					// Apply suffix (e.g., [..10] for slicing) if present
-					if suffix != "" {
-						row[i] = e.applyArraySuffix(collected, suffix)
-					} else {
-						row[i] = collected
-					}
+					row[i] = e.aggregatePathCollect(paths, matches, item.expr, true)
 
 				case isAggregateFuncName(item.expr, "collect"):
-					// COLLECT(expression) - may have suffix like [..10]
-					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
-					collected := make([]interface{}, 0, len(paths))
-					for _, path := range paths {
-						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithPathContext(inner, context)
-						collected = append(collected, val)
-					}
-					// Apply suffix (e.g., [..10] for slicing) if present
-					if suffix != "" {
-						row[i] = e.applyArraySuffix(collected, suffix)
-					} else {
-						row[i] = collected
-					}
+					row[i] = e.aggregatePathCollect(paths, matches, item.expr, false)
 
 				default:
 					if len(paths) > 0 {
@@ -451,47 +426,23 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 				case isAggregateFuncName(item.expr, "count"):
 					row[i] = int64(len(groupPaths))
 
+				case isAggregateFuncName(item.expr, "sum"):
+					row[i] = e.aggregatePathSum(groupPaths, matches, extractFuncInner(item.expr))
+
+				case isAggregateFuncName(item.expr, "avg"):
+					row[i] = e.aggregatePathAvg(groupPaths, matches, extractFuncInner(item.expr))
+
+				case isAggregateFuncName(item.expr, "min"):
+					row[i] = e.aggregatePathMinMax(groupPaths, matches, extractFuncInner(item.expr), false)
+
+				case isAggregateFuncName(item.expr, "max"):
+					row[i] = e.aggregatePathMinMax(groupPaths, matches, extractFuncInner(item.expr), true)
+
 				case isAggregateFuncName(item.expr, "collect") && strings.Contains(upperExpr, "DISTINCT"):
-					// COLLECT(DISTINCT expression) - may have suffix like [..10]
-					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
-					if strings.HasPrefix(strings.ToUpper(inner), "DISTINCT ") {
-						inner = strings.TrimSpace(inner[9:])
-					}
-					seen := make(map[string]bool)
-					collected := make([]interface{}, 0, len(groupPaths))
-					for _, path := range groupPaths {
-						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithPathContext(inner, context)
-						if val != nil {
-							key := fmt.Sprintf("%v", val)
-							if !seen[key] {
-								seen[key] = true
-								collected = append(collected, val)
-							}
-						}
-					}
-					// Apply suffix (e.g., [..10] for slicing) if present
-					if suffix != "" {
-						row[i] = e.applyArraySuffix(collected, suffix)
-					} else {
-						row[i] = collected
-					}
+					row[i] = e.aggregatePathCollect(groupPaths, matches, item.expr, true)
 
 				case isAggregateFuncName(item.expr, "collect"):
-					// COLLECT(expression) - may have suffix like [..10]
-					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
-					collected := make([]interface{}, 0, len(groupPaths))
-					for _, path := range groupPaths {
-						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithPathContext(inner, context)
-						collected = append(collected, val)
-					}
-					// Apply suffix (e.g., [..10] for slicing) if present
-					if suffix != "" {
-						row[i] = e.applyArraySuffix(collected, suffix)
-					} else {
-						row[i] = collected
-					}
+					row[i] = e.aggregatePathCollect(groupPaths, matches, item.expr, false)
 
 				default:
 					if len(groupPaths) > 0 {
@@ -654,6 +605,135 @@ func (e *StorageExecutor) tryFastRelationshipCount(matches *TraversalMatch, item
 // isLengthPathExpr checks if an expression is length(path) for some path variable
 func isLengthPathExpr(expr string) bool {
 	return matchFuncStartAndSuffix(expr, "length") && strings.Contains(strings.ToLower(expr), "path")
+}
+
+func (e *StorageExecutor) aggregatePathSum(paths []PathResult, matches *TraversalMatch, inner string) interface{} {
+	var sumInt int64
+	sumFloat := 0.0
+	hasFloat := false
+	hasValue := false
+
+	for _, path := range paths {
+		context := e.buildPathContext(path, matches)
+		val := e.evaluateExpressionWithPathContext(inner, context)
+		if val == nil {
+			continue
+		}
+		hasValue = true
+		switch v := val.(type) {
+		case int64:
+			sumInt += v
+			sumFloat += float64(v)
+		case int:
+			sumInt += int64(v)
+			sumFloat += float64(v)
+		default:
+			if f, ok := toFloat64(v); ok {
+				hasFloat = true
+				sumFloat += f
+			}
+		}
+	}
+
+	if !hasValue {
+		return int64(0)
+	}
+	if hasFloat {
+		return sumFloat
+	}
+	return sumInt
+}
+
+func (e *StorageExecutor) aggregatePathAvg(paths []PathResult, matches *TraversalMatch, inner string) interface{} {
+	sum := 0.0
+	count := 0
+	for _, path := range paths {
+		context := e.buildPathContext(path, matches)
+		val := e.evaluateExpressionWithPathContext(inner, context)
+		if f, ok := toFloat64(val); ok {
+			sum += f
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	return sum / float64(count)
+}
+
+func (e *StorageExecutor) aggregatePathMinMax(paths []PathResult, matches *TraversalMatch, inner string, wantMax bool) interface{} {
+	var best interface{}
+	hasBest := false
+	for _, path := range paths {
+		context := e.buildPathContext(path, matches)
+		val := e.evaluateExpressionWithPathContext(inner, context)
+		if val == nil {
+			continue
+		}
+		if !hasBest {
+			best = val
+			hasBest = true
+			continue
+		}
+		if wantMax {
+			if compareForSort(best, val) {
+				best = val
+			}
+			continue
+		}
+		if compareForSort(val, best) {
+			best = val
+		}
+	}
+	if !hasBest {
+		return nil
+	}
+	return best
+}
+
+func (e *StorageExecutor) aggregatePathCollect(paths []PathResult, matches *TraversalMatch, expr string, distinct bool) interface{} {
+	inner, suffix, _ := extractFuncArgsWithSuffix(expr, "collect")
+	if distinct {
+		inner = trimDistinctPrefix(inner)
+	}
+
+	collected := make([]interface{}, 0, len(paths))
+	if distinct {
+		seen := make(map[string]struct{}, len(paths))
+		for _, path := range paths {
+			context := e.buildPathContext(path, matches)
+			val := e.evaluateExpressionWithPathContext(inner, context)
+			if val == nil {
+				continue
+			}
+			key := fmt.Sprintf("%v", val)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			collected = append(collected, val)
+		}
+	} else {
+		for _, path := range paths {
+			context := e.buildPathContext(path, matches)
+			collected = append(collected, e.evaluateExpressionWithPathContext(inner, context))
+		}
+	}
+	if suffix == "" {
+		return collected
+	}
+	return e.applyArraySuffix(collected, suffix)
+}
+
+func trimDistinctPrefix(expr string) string {
+	trimmed := strings.TrimSpace(expr)
+	if len(trimmed) < len("distinct ")+1 {
+		return trimmed
+	}
+	if strings.EqualFold(trimmed[:8], "distinct") {
+		return strings.TrimSpace(trimmed[8:])
+	}
+	return trimmed
 }
 
 // TraversalMatch represents a parsed traversal pattern
