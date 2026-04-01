@@ -1445,7 +1445,7 @@ components:
           type: string
         generated_from:
           type: string
-          enum: [query, search, node, diff]
+          enum: [query, node, diff]
         depth:
           type: integer
         as_of:
