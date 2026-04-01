@@ -200,6 +200,60 @@ func TestCypherHelpers_ProcedureRegistryAndArgParsing_Errors(t *testing.T) {
 	assert.Equal(t, 3.25, v)
 }
 
+func TestCypherHelpers_ExtractCallArguments_IgnoresTailFunctionParens(t *testing.T) {
+	args, err := extractCallArguments(
+		"CALL db.index.vector.queryNodes('idx_original_text', $topK, $text) " +
+			"YIELD node, score " +
+			"RETURN elementId(node) AS id, labels(node) AS labels, left(node.originalText,40) AS txt, score LIMIT 5",
+	)
+	require.NoError(t, err)
+	require.Len(t, args, 3)
+	assert.Equal(t, "idx_original_text", args[0])
+	assert.Equal(t, "$topK", args[1])
+	assert.Equal(t, "$text", args[2])
+}
+
+func TestCypherHelpers_ExecuteCall_DoesNotMiscountArgsWithTailFunctions(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	eng := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(eng)
+	ctx := context.Background()
+
+	origRegistry := globalProcedureRegistry
+	origOnce := builtinProcedureRegistryOnce
+	doneOnce := sync.Once{}
+	doneOnce.Do(func() {})
+	globalProcedureRegistry = NewProcedureRegistry()
+	builtinProcedureRegistryOnce = doneOnce
+	defer func() {
+		globalProcedureRegistry = origRegistry
+		builtinProcedureRegistryOnce = origOnce
+	}()
+
+	err := globalProcedureRegistry.RegisterUser(
+		ProcedureSpec{Name: "custom.echo", MinArgs: 3, MaxArgs: 3},
+		func(_ context.Context, _ *StorageExecutor, _ string, args []interface{}) (*ExecuteResult, error) {
+			if len(args) != 3 {
+				return nil, fmt.Errorf("unexpected arg count: %d", len(args))
+			}
+			return &ExecuteResult{
+				Columns: []string{"value"},
+				Rows:    [][]interface{}{{"ok"}},
+			}, nil
+		},
+	)
+	require.NoError(t, err)
+
+	res, err := exec.executeCall(ctx,
+		"CALL custom.echo('idx_original_text', 10, 'needle') "+
+			"YIELD value "+
+			"RETURN left('abcdef', 2) AS prefix, value",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.Rows)
+}
+
 func TestCypherHelpers_LooksNumericAndSkipString(t *testing.T) {
 	assert.True(t, looksNumeric("42"))
 	assert.True(t, looksNumeric("3.1415"))

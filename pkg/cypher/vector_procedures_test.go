@@ -1441,6 +1441,30 @@ func TestCallDbIndexFulltextQueryRelationships(t *testing.T) {
 	})
 }
 
+func TestVectorQueryNodes_ReturnTailFunctions_DoNotAffectArgCount(t *testing.T) {
+	baseEngine := newTestMemoryEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	exec := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CALL db.index.vector.createNodeIndex('idx_tail_fn', 'OriginalText', 'embedding', 4, 'cosine')", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "CREATE (o:OriginalText {id:'o1', originalText:'get it shipped', embedding:[1.0,0.0,0.0,0.0]})", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+CALL db.index.vector.queryNodes('idx_tail_fn', 10, [1.0, 0.0, 0.0, 0.0])
+YIELD node, score
+RETURN elementId(node) AS id, labels(node) AS labels, left(node.originalText,40) AS txt, score
+LIMIT 5
+`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{"id", "labels", "txt", "score"}, result.Columns)
+	require.NotEmpty(t, result.Rows)
+}
+
 // =============================================================================
 // Tests for New Index Creation Procedures (Neo4j 100% Compatibility)
 // =============================================================================
