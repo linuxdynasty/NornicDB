@@ -21,6 +21,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -673,15 +674,19 @@ func (e *StorageExecutor) executeCallTailSetBased(
 	if !tailStartsWithMatchClause(tail) {
 		return nil, false
 	}
+	if res, ok, err := e.tryExecuteCallTailVariableLengthMaxLengthFastPath(seed, tail, expectedCols); ok {
+		if err != nil {
+			return nil, false
+		}
+		return res, true
+	}
 	relationshipTail := strings.Contains(tail, "-[") || strings.Contains(tail, "]-")
 	upperTail := strings.ToUpper(tail)
-	// Some traversal+aggregation tails rely on per-seed row context across
-	// MATCH ... WITH ... aggregate stages (for example max(length(p)) shapes).
-	// The set-based rewrite can drop non-path bindings in these cases.
-	// Fall back to per-row execution for correctness.
-	if relationshipTail && strings.Contains(upperTail, "MAX(LENGTH(") {
-		return nil, false
-	}
+	// Relationship tails that aggregate over path length still benefit from a
+	// single batched query, but the MATCH ... WITH aggregate executor preserves
+	// scalar seed bindings more reliably when they stay in normal query scope via
+	// the UNWIND-based route below rather than being rewritten as CASE id(node)
+	// expressions inside the tail.
 
 	params := map[string]interface{}{}
 	rowsParam := make([]map[string]interface{}, 0, len(seed.Rows))
@@ -731,7 +736,7 @@ func (e *StorageExecutor) executeCallTailSetBased(
 	}
 	params["__seed_rows"] = rowsParam
 
-	if relationshipTail {
+	if relationshipTail && !strings.Contains(upperTail, "MAX(LENGTH(") {
 		// Relationship-safe batched path:
 		// Inject id(nodeVar) IN $__seed_ids into the existing tail MATCH's WHERE clause
 		// instead of prepending a separate bare MATCH (node). This preserves label
@@ -818,6 +823,358 @@ func (e *StorageExecutor) executeCallTailSetBased(
 		res.Columns = append([]string{}, expectedCols...)
 	}
 	return res, true
+}
+
+var maxLengthWithItemPattern = regexp.MustCompile(`(?i)^max\s*\(\s*length\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$`)
+
+func (e *StorageExecutor) tryExecuteCallTailVariableLengthMaxLengthFastPath(
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailVariableLengthMaxLengthPlan(tail)
+	if !ok {
+		return nil, false, nil
+	}
+
+	result := &ExecuteResult{
+		Columns: make([]string, len(plan.returnItems)),
+		Rows:    make([][]interface{}, 0, len(seed.Rows)),
+	}
+	for i, item := range plan.returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	for _, row := range seed.Rows {
+		values := make(map[string]interface{}, len(seed.Columns)+1)
+		for i, col := range seed.Columns {
+			if i < len(row) {
+				values[col] = row[i]
+			}
+		}
+
+		startRaw, ok := values[plan.nodeVar]
+		if !ok {
+			return nil, false, nil
+		}
+		startNode, ok := startRaw.(*storage.Node)
+		if !ok || startNode == nil {
+			continue
+		}
+
+		maxDepth, err := e.maxDepthForTraversalMatch(startNode, plan.match)
+		if err != nil {
+			return nil, true, err
+		}
+		if maxDepth < plan.match.Relationship.MinHops {
+			continue
+		}
+		values[plan.aggregateAlias] = int64(maxDepth)
+
+		projected := make([]interface{}, len(plan.returnItems))
+		for i, item := range plan.returnItems {
+			projected[i] = e.evaluateExpressionFromValues(item.expr, values)
+		}
+		result.Rows = append(result.Rows, projected)
+	}
+
+	if plan.orderBy != "" {
+		result = e.applyOrderByToResult(result, plan.orderBy)
+	}
+	if plan.skip > 0 && plan.skip < len(result.Rows) {
+		result.Rows = result.Rows[plan.skip:]
+	} else if plan.skip >= len(result.Rows) {
+		result.Rows = [][]interface{}{}
+	}
+	if plan.limit >= 0 {
+		if plan.limit == 0 {
+			result.Rows = [][]interface{}{}
+		} else if plan.limit < len(result.Rows) {
+			result.Rows = result.Rows[:plan.limit]
+		}
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
+		result.Columns = append([]string{}, expectedCols...)
+	}
+	return result, true, nil
+}
+
+type callTailVariableLengthMaxLengthPlan struct {
+	match          *TraversalMatch
+	nodeVar        string
+	aggregateAlias string
+	returnItems    []returnItem
+	orderBy        string
+	limit          int
+	skip           int
+}
+
+func (e *StorageExecutor) parseCallTailVariableLengthMaxLengthPlan(tail string) (*callTailVariableLengthMaxLengthPlan, bool) {
+	trimmed := strings.TrimSpace(tail)
+	upper := strings.ToUpper(trimmed)
+	if !strings.HasPrefix(upper, "MATCH ") {
+		return nil, false
+	}
+
+	withIdx := findKeywordIndexInContext(trimmed, "WITH")
+	returnIdx := findKeywordIndexInContext(trimmed, "RETURN")
+	if withIdx == -1 || returnIdx == -1 || returnIdx <= withIdx {
+		return nil, false
+	}
+
+	matchClause := strings.TrimSpace(trimmed[len("MATCH"):withIdx])
+	if matchClause == "" || findKeywordIndexInContext(matchClause, "WHERE") != -1 {
+		return nil, false
+	}
+	withClause := strings.TrimSpace(trimmed[withIdx+len("WITH") : returnIdx])
+	if withClause == "" {
+		return nil, false
+	}
+	returnClause, orderBy, limit, skip := splitCallTailReturnOptions(strings.TrimSpace(trimmed[returnIdx+len("RETURN"):]))
+	if returnClause == "" {
+		return nil, false
+	}
+
+	pattern := matchClause
+	pathVar := ""
+	if eqIdx := strings.Index(matchClause, "="); eqIdx != -1 {
+		pathVar = strings.TrimSpace(matchClause[:eqIdx])
+		pattern = strings.TrimSpace(matchClause[eqIdx+1:])
+	}
+	if pathVar == "" || pattern == "" {
+		return nil, false
+	}
+
+	match := e.parseTraversalPattern(pattern)
+	if match == nil || match.IsChained {
+		return nil, false
+	}
+	if match.Relationship.Direction != "outgoing" && match.Relationship.Direction != "incoming" && match.Relationship.Direction != "both" {
+		return nil, false
+	}
+
+	withItems := splitReturnExpressions(withClause)
+	if len(withItems) < 2 {
+		return nil, false
+	}
+	nodeVar := match.StartNode.variable
+	if nodeVar == "" {
+		return nil, false
+	}
+	aggAlias := ""
+	seenNodeVar := false
+	for _, item := range withItems {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if matches := maxLengthWithItemPattern.FindStringSubmatch(item); matches != nil {
+			if matches[1] != pathVar || aggAlias != "" {
+				return nil, false
+			}
+			aggAlias = matches[2]
+			continue
+		}
+		if !isSimpleIdentifier(item) {
+			return nil, false
+		}
+		if item == nodeVar {
+			seenNodeVar = true
+		}
+	}
+	if aggAlias == "" || !seenNodeVar {
+		return nil, false
+	}
+
+	returnItems := e.parseReturnItems(returnClause)
+	if len(returnItems) == 0 {
+		return nil, false
+	}
+
+	return &callTailVariableLengthMaxLengthPlan{
+		match:          match,
+		nodeVar:        nodeVar,
+		aggregateAlias: aggAlias,
+		returnItems:    returnItems,
+		orderBy:        orderBy,
+		limit:          limit,
+		skip:           skip,
+	}, true
+}
+
+func splitCallTailReturnOptions(returnAndTail string) (string, string, int, int) {
+	trimmed := strings.TrimSpace(returnAndTail)
+	if trimmed == "" {
+		return "", "", -1, -1
+	}
+	orderIdx := findKeywordIndexInContext(trimmed, "ORDER")
+	limitIdx := findKeywordIndexInContext(trimmed, "LIMIT")
+	skipIdx := findKeywordIndexInContext(trimmed, "SKIP")
+
+	end := len(trimmed)
+	for _, idx := range []int{orderIdx, limitIdx, skipIdx} {
+		if idx != -1 && idx < end {
+			end = idx
+		}
+	}
+	returnClause := strings.TrimSpace(trimmed[:end])
+
+	orderBy := ""
+	if orderIdx != -1 {
+		orderEnd := len(trimmed)
+		for _, idx := range []int{limitIdx, skipIdx} {
+			if idx != -1 && idx > orderIdx && idx < orderEnd {
+				orderEnd = idx
+			}
+		}
+		orderPart := strings.TrimSpace(trimmed[orderIdx:orderEnd])
+		if strings.HasPrefix(strings.ToUpper(orderPart), "ORDER BY") {
+			orderBy = strings.TrimSpace(orderPart[len("ORDER BY"):])
+		} else if strings.HasPrefix(strings.ToUpper(orderPart), "ORDER") {
+			orderBy = strings.TrimSpace(orderPart[len("ORDER"):])
+		}
+	}
+
+	limit := -1
+	if limitIdx != -1 {
+		limitEnd := len(trimmed)
+		if skipIdx != -1 && skipIdx > limitIdx {
+			limitEnd = skipIdx
+		}
+		limitPart := strings.TrimSpace(trimmed[limitIdx+len("LIMIT") : limitEnd])
+		limitValue := strings.TrimSpace(strings.Split(limitPart, " ")[0])
+		if n, err := strconv.Atoi(limitValue); err == nil {
+			limit = n
+		}
+	}
+
+	skip := -1
+	if skipIdx != -1 {
+		skipEnd := len(trimmed)
+		if limitIdx != -1 && limitIdx > skipIdx {
+			skipEnd = limitIdx
+		}
+		skipPart := strings.TrimSpace(trimmed[skipIdx+len("SKIP") : skipEnd])
+		skipValue := strings.TrimSpace(strings.Split(skipPart, " ")[0])
+		if n, err := strconv.Atoi(skipValue); err == nil {
+			skip = n
+		}
+	}
+
+	return returnClause, orderBy, limit, skip
+}
+
+func (e *StorageExecutor) maxDepthForTraversalMatch(startNode *storage.Node, match *TraversalMatch) (int, error) {
+	if startNode == nil || match == nil {
+		return 0, nil
+	}
+	ctx := &callTailMaxDepthContext{
+		nodeCache:  map[storage.NodeID]*storage.Node{startNode.ID: startNode},
+		visited:    make(map[storage.EdgeID]bool),
+		relTypeSet: buildRelTypeSet(match.Relationship.Types),
+	}
+	if err := e.maxDepthForTraversalMatchFromNode(startNode, 0, match, ctx); err != nil {
+		return 0, err
+	}
+	return ctx.best, nil
+}
+
+type callTailMaxDepthContext struct {
+	nodeCache  map[storage.NodeID]*storage.Node
+	visited    map[storage.EdgeID]bool
+	relTypeSet map[string]struct{}
+	best       int
+}
+
+func (e *StorageExecutor) maxDepthForTraversalMatchFromNode(
+	current *storage.Node,
+	depth int,
+	match *TraversalMatch,
+	ctx *callTailMaxDepthContext,
+) error {
+	if current == nil || match == nil || ctx == nil {
+		return nil
+	}
+	if depth >= match.Relationship.MinHops && e.matchesEndPattern(current, &match.EndNode) && depth > ctx.best {
+		ctx.best = depth
+	}
+	if depth >= match.Relationship.MaxHops {
+		return nil
+	}
+
+	var edges []*storage.Edge
+	switch match.Relationship.Direction {
+	case "outgoing":
+		outgoing, err := e.storage.GetOutgoingEdges(current.ID)
+		if err != nil {
+			return err
+		}
+		edges = outgoing
+	case "incoming":
+		incoming, err := e.storage.GetIncomingEdges(current.ID)
+		if err != nil {
+			return err
+		}
+		edges = incoming
+	default:
+		outgoing, err := e.storage.GetOutgoingEdges(current.ID)
+		if err != nil {
+			return err
+		}
+		incoming, err := e.storage.GetIncomingEdges(current.ID)
+		if err != nil {
+			return err
+		}
+		edges = append(outgoing, incoming...)
+	}
+
+	for _, edge := range edges {
+		if edge == nil || ctx.visited[edge.ID] {
+			continue
+		}
+		if len(match.Relationship.Types) > 0 {
+			if len(match.Relationship.Types) == 1 {
+				if edge.Type != match.Relationship.Types[0] {
+					continue
+				}
+			} else {
+				if _, ok := ctx.relTypeSet[edge.Type]; !ok {
+					continue
+				}
+			}
+		}
+
+		var nextNodeID storage.NodeID
+		if match.Relationship.Direction == "outgoing" || (match.Relationship.Direction == "both" && edge.StartNode == current.ID) {
+			nextNodeID = edge.EndNode
+		} else {
+			nextNodeID = edge.StartNode
+		}
+
+		nextNode := ctx.nodeCache[nextNodeID]
+		if nextNode == nil {
+			loaded, err := e.storage.GetNode(nextNodeID)
+			if err != nil {
+				return err
+			}
+			if loaded == nil {
+				continue
+			}
+			nextNode = loaded
+			ctx.nodeCache[nextNodeID] = nextNode
+		}
+
+		ctx.visited[edge.ID] = true
+		if err := e.maxDepthForTraversalMatchFromNode(nextNode, depth+1, match, ctx); err != nil {
+			return err
+		}
+		delete(ctx.visited, edge.ID)
+	}
+	return nil
 }
 
 func buildIDCaseExpression(nodeVar string, valueByID map[string]interface{}) string {
