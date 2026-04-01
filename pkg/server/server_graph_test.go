@@ -25,38 +25,64 @@ type graphNoMVCCEngine struct {
 	storage.Engine
 }
 
-func waitUntilAfterRFC3339Nano(t *testing.T, asOf string) {
-	t.Helper()
-	asOfTime, err := time.Parse(time.RFC3339Nano, asOf)
-	require.NoError(t, err)
-	waitDeadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(waitDeadline) {
-		if time.Now().UTC().After(asOfTime) {
-			return
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-	require.True(t, time.Now().UTC().After(asOfTime), "current time did not advance beyond asOf")
-}
-
-func asOfFromNodeHeadOrNow(t *testing.T, engine storage.Engine, nodeID storage.NodeID) string {
+func nodeHeadVersionOrNow(t *testing.T, engine storage.Engine, nodeID storage.NodeID) storage.MVCCVersion {
 	t.Helper()
 	if headEngine, ok := engine.(storage.MVCCHeadEngine); ok {
 		head, err := headEngine.GetNodeCurrentHead(nodeID)
 		require.NoError(t, err)
-		return head.Version.CommitTimestamp.UTC().Format(time.RFC3339Nano)
+		return head.Version
 	}
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	return storage.MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: ^uint64(0)}
 }
 
-func asOfFromEdgeHeadOrNow(t *testing.T, engine storage.Engine, edgeID storage.EdgeID) string {
+func edgeHeadVersionOrNow(t *testing.T, engine storage.Engine, edgeID storage.EdgeID) storage.MVCCVersion {
 	t.Helper()
 	if headEngine, ok := engine.(storage.MVCCHeadEngine); ok {
 		head, err := headEngine.GetEdgeCurrentHead(edgeID)
 		require.NoError(t, err)
-		return head.Version.CommitTimestamp.UTC().Format(time.RFC3339Nano)
+		return head.Version
 	}
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	return storage.MVCCVersion{CommitTimestamp: time.Now().UTC(), CommitSequence: ^uint64(0)}
+}
+
+func advanceMVCCClockPast(t *testing.T, engine storage.Engine, minTimestamp time.Time) {
+	t.Helper()
+	headEngine, ok := engine.(storage.MVCCHeadEngine)
+	if !ok {
+		waitDeadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(waitDeadline) {
+			if time.Now().UTC().After(minTimestamp) {
+				return
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		require.True(t, time.Now().UTC().After(minTimestamp), "current time did not advance beyond baseline timestamp")
+		return
+	}
+
+	clockID := storage.NodeID(fmt.Sprintf("__mvcc-clock-%d", time.Now().UnixNano()))
+	_, err := engine.CreateNode(&storage.Node{
+		ID:         clockID,
+		Labels:     []string{"Clock"},
+		Properties: map[string]interface{}{"tick": 0},
+	})
+	require.NoError(t, err)
+
+	waitDeadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(waitDeadline) {
+		head, err := headEngine.GetNodeCurrentHead(clockID)
+		require.NoError(t, err)
+		if head.Version.CommitTimestamp.After(minTimestamp) {
+			return
+		}
+		node, err := engine.GetNode(clockID)
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		require.NoError(t, engine.UpdateNode(node))
+	}
+	head, err := headEngine.GetNodeCurrentHead(clockID)
+	require.NoError(t, err)
+	require.True(t, head.Version.CommitTimestamp.After(minTimestamp), "mvcc clock did not advance beyond baseline timestamp")
 }
 
 type graphSnapshotIndexEngine struct {
@@ -306,9 +332,10 @@ func TestGraphTemporalEndpoint(t *testing.T) {
 	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
 	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS", Properties: map[string]interface{}{"weight": 1}}))
-	asOf := asOfFromEdgeHeadOrNow(t, engine, "ab")
+	asOfVersion := edgeHeadVersionOrNow(t, engine, "ab")
+	asOf := asOfVersion.CommitTimestamp.UTC().Format(time.RFC3339Nano)
 
-	waitUntilAfterRFC3339Nano(t, asOf)
+	advanceMVCCClockPast(t, engine, asOfVersion.CommitTimestamp)
 	require.NoError(t, engine.UpdateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice v2"}}))
 	require.NoError(t, engine.UpdateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "LIKES", Properties: map[string]interface{}{"weight": 2}}))
 
@@ -347,9 +374,10 @@ func TestGraphDiffEndpoint(t *testing.T) {
 	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
 	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "ab", StartNode: "a", EndNode: "b", Type: "KNOWS"}))
-	asOf := asOfFromEdgeHeadOrNow(t, engine, "ab")
+	asOfVersion := edgeHeadVersionOrNow(t, engine, "ab")
+	asOf := asOfVersion.CommitTimestamp.UTC().Format(time.RFC3339Nano)
 
-	waitUntilAfterRFC3339Nano(t, asOf)
+	advanceMVCCClockPast(t, engine, asOfVersion.CommitTimestamp)
 	require.NoError(t, engine.UpdateNode(&storage.Node{ID: "a", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice v2"}}))
 	require.NoError(t, engine.DeleteEdge("ab"))
 	require.NoError(t, engine.DeleteNode("b"))
@@ -501,15 +529,16 @@ func TestGraphDiffEndpoint_WithCompareToUsesBaselineTimestamp(t *testing.T) {
 		Properties: map[string]interface{}{"name": "Alice v1"},
 	})
 	require.NoError(t, err)
-	baseline := asOfFromNodeHeadOrNow(t, engine, "a")
+	baselineVersion := nodeHeadVersionOrNow(t, engine, "a")
+	baseline := baselineVersion.CommitTimestamp.UTC().Format(time.RFC3339Nano)
 
-	waitUntilAfterRFC3339Nano(t, baseline)
+	advanceMVCCClockPast(t, engine, baselineVersion.CommitTimestamp)
 	require.NoError(t, engine.UpdateNode(&storage.Node{
 		ID:         "a",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice v2"},
 	}))
-	target := asOfFromNodeHeadOrNow(t, engine, "a")
+	target := nodeHeadVersionOrNow(t, engine, "a").CommitTimestamp.UTC().Format(time.RFC3339Nano)
 
 	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
 		"node_ids":   []string{"a"},
