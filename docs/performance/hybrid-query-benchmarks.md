@@ -42,6 +42,23 @@ Remote environment:
 | Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |   123,352 |
 | Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |   181,790 |
 
+## Traversal queries
+
+| Depth | Transport |   Throughput |   Mean |    P50 |     P95 |     P99 |     Max |
+| ----: | --------- | -----------: | -----: | -----: | ------: | ------: | ------: |
+|     1 | HTTP      | 23,492 req/s | 419 us | 365 us |  773 us | 1.00 ms | 1.50 ms |
+|     1 | Bolt      | 24,668 req/s | 402 us | 386 us |  575 us |  784 us | 2.59 ms |
+|     2 | HTTP      | 19,257 req/s | 514 us | 415 us | 1.00 ms | 2.29 ms | 5.81 ms |
+|     2 | Bolt      | 25,188 req/s | 393 us | 390 us |  508 us |  617 us |  747 us |
+|     3 | HTTP      | 18,105 req/s | 548 us | 541 us |  816 us | 1.22 ms | 2.47 ms |
+|     3 | Bolt      | 22,212 req/s | 446 us | 427 us |  572 us |  754 us | 2.42 ms |
+|     4 | HTTP      | 21,793 req/s | 453 us | 368 us |  789 us | 1.35 ms | 4.23 ms |
+|     4 | Bolt      | 25,035 req/s | 396 us | 387 us |  517 us |  612 us |  764 us |
+|     5 | HTTP      | 21,884 req/s | 450 us | 369 us |  786 us | 1.10 ms | 4.09 ms |
+|     5 | Bolt      | 25,230 req/s | 393 us | 389 us |  499 us |  627 us |  985 us |
+|     6 | HTTP      | 18,715 req/s | 528 us | 412 us | 1.15 ms | 3.19 ms | 3.53 ms |
+|     6 | Bolt      | 24,487 req/s | 403 us | 399 us |  509 us |  607 us |  720 us |
+
 ## Remote Results
 
 Client-to-server latency was about **110 ms**.
