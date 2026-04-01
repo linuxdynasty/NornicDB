@@ -674,7 +674,25 @@ func (e *StorageExecutor) executeCallTailSetBased(
 	if !tailStartsWithMatchClause(tail) {
 		return nil, false
 	}
-	if res, ok, err := e.tryExecuteCallTailVariableLengthMaxLengthFastPath(seed, tail, expectedCols); ok {
+	if res, ok, err := e.tryExecuteCallTailVariableLengthMaxLengthFastPath(ctx, seed, tail, expectedCols); ok {
+		if err != nil {
+			return nil, false
+		}
+		return res, true
+	}
+	if res, ok, err := e.tryExecuteCallTailBranchingPathCountFastPath(ctx, seed, tail, expectedCols); ok {
+		if err != nil {
+			return nil, false
+		}
+		return res, true
+	}
+	if res, ok, err := e.tryExecuteCallTailFrontierReachableFastPath(ctx, seed, tail, expectedCols); ok {
+		if err != nil {
+			return nil, false
+		}
+		return res, true
+	}
+	if res, ok, err := e.tryExecuteCallTailConstrainedMaxDepthFastPath(ctx, seed, tail, expectedCols); ok {
 		if err != nil {
 			return nil, false
 		}
@@ -828,6 +846,7 @@ func (e *StorageExecutor) executeCallTailSetBased(
 var maxLengthWithItemPattern = regexp.MustCompile(`(?i)^max\s*\(\s*length\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$`)
 
 func (e *StorageExecutor) tryExecuteCallTailVariableLengthMaxLengthFastPath(
+	ctx context.Context,
 	seed *ExecuteResult,
 	tail string,
 	expectedCols []string,
@@ -900,6 +919,151 @@ func (e *StorageExecutor) tryExecuteCallTailVariableLengthMaxLengthFastPath(
 	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
 		result.Columns = append([]string{}, expectedCols...)
 	}
+	e.markCallTailTraversalFastPathUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) tryExecuteCallTailBranchingPathCountFastPath(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailBranchingPathCountPlan(tail)
+	if !ok {
+		return nil, false, nil
+	}
+	pathCap, ok := resolveIntLiteralOrParam(ctx, plan.pathCapToken)
+	if !ok || pathCap < 0 {
+		return nil, false, nil
+	}
+	limit, ok := resolveOptionalIntLiteralOrParam(ctx, plan.limitToken)
+	if !ok {
+		return nil, false, nil
+	}
+
+	result := &ExecuteResult{Columns: plan.resultColumns(), Rows: make([][]interface{}, 0, len(seed.Rows))}
+	for _, row := range seed.Rows {
+		values := seedValuesForRow(seed, row)
+		startNode, ok := values[plan.nodeVar].(*storage.Node)
+		if !ok || startNode == nil {
+			continue
+		}
+		pathCount, err := e.countTraversalPathsWithCap(startNode, plan.match, pathCap, callTailPathPredicate{requireAllNodesLabeled: true})
+		if err != nil {
+			return nil, true, err
+		}
+		values[plan.pathsAlias] = make([]interface{}, pathCount)
+		result.Rows = append(result.Rows, projectReturnItemsFromValues(e, plan.returnItems, values))
+	}
+	if limit >= 0 && limit < len(result.Rows) {
+		result.Rows = result.Rows[:limit]
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
+		result.Columns = append([]string{}, expectedCols...)
+	}
+	e.markCallTailTraversalFastPathUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) tryExecuteCallTailFrontierReachableFastPath(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailFrontierReachablePlan(tail)
+	if !ok {
+		return nil, false, nil
+	}
+	limit, ok := resolveOptionalIntLiteralOrParam(ctx, plan.limitToken)
+	if !ok {
+		return nil, false, nil
+	}
+	result := &ExecuteResult{Columns: plan.resultColumns(), Rows: make([][]interface{}, 0, len(seed.Rows))}
+	for _, row := range seed.Rows {
+		values := seedValuesForRow(seed, row)
+		startNode, ok := values[plan.nodeVar].(*storage.Node)
+		if !ok || startNode == nil {
+			continue
+		}
+		nearest, reachable, err := e.shortestReachableStats(startNode, plan.match)
+		if err != nil {
+			return nil, true, err
+		}
+		if reachable == 0 {
+			continue
+		}
+		values[plan.nearestAlias] = int64(nearest)
+		values[plan.reachableAlias] = int64(reachable)
+		result.Rows = append(result.Rows, projectReturnItemsFromValues(e, plan.returnItems, values))
+	}
+	if limit >= 0 && limit < len(result.Rows) {
+		result.Rows = result.Rows[:limit]
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
+		result.Columns = append([]string{}, expectedCols...)
+	}
+	e.markCallTailTraversalFastPathUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) tryExecuteCallTailConstrainedMaxDepthFastPath(
+	ctx context.Context,
+	seed *ExecuteResult,
+	tail string,
+	expectedCols []string,
+) (*ExecuteResult, bool, error) {
+	plan, ok := e.parseCallTailConstrainedMaxDepthPlan(tail)
+	if !ok {
+		return nil, false, nil
+	}
+	minWeight, ok := resolveFloatLiteralOrParam(ctx, plan.minWeightToken)
+	if !ok {
+		return nil, false, nil
+	}
+	categories, ok := resolveStringSliceLiteralOrParam(ctx, plan.categoriesToken)
+	if !ok {
+		return nil, false, nil
+	}
+	limit, ok := resolveOptionalIntLiteralOrParam(ctx, plan.limitToken)
+	if !ok {
+		return nil, false, nil
+	}
+	allowedCategories := make(map[string]struct{}, len(categories))
+	for _, category := range categories {
+		allowedCategories[category] = struct{}{}
+	}
+	result := &ExecuteResult{Columns: plan.resultColumns(), Rows: make([][]interface{}, 0, len(seed.Rows))}
+	for _, row := range seed.Rows {
+		values := seedValuesForRow(seed, row)
+		startNode, ok := values[plan.nodeVar].(*storage.Node)
+		if !ok || startNode == nil {
+			continue
+		}
+		maxDepth, found, err := e.maxDepthForPredicateTraversal(startNode, plan.match, callTailPathPredicate{
+			minWeight:       &minWeight,
+			allowedCategory: allowedCategories,
+		})
+		if err != nil {
+			return nil, true, err
+		}
+		if !found {
+			continue
+		}
+		values[plan.aggregateExpr] = int64(maxDepth)
+		if plan.aggregateAlias != "" {
+			values[plan.aggregateAlias] = int64(maxDepth)
+		}
+		result.Rows = append(result.Rows, projectReturnItemsFromValues(e, plan.returnItems, values))
+	}
+	if limit >= 0 && limit < len(result.Rows) {
+		result.Rows = result.Rows[:limit]
+	}
+	if len(expectedCols) > 0 && len(expectedCols) == len(result.Columns) {
+		result.Columns = append([]string{}, expectedCols...)
+	}
+	e.markCallTailTraversalFastPathUsed()
 	return result, true, nil
 }
 
@@ -1006,24 +1170,273 @@ func (e *StorageExecutor) parseCallTailVariableLengthMaxLengthPlan(tail string) 
 	}, true
 }
 
-func splitCallTailReturnOptions(returnAndTail string) (string, string, int, int) {
+type callTailBranchingPathCountPlan struct {
+	match        *TraversalMatch
+	nodeVar      string
+	pathsAlias   string
+	pathCapToken string
+	returnItems  []returnItem
+	limitToken   string
+}
+
+func (p *callTailBranchingPathCountPlan) resultColumns() []string {
+	cols := make([]string, len(p.returnItems))
+	for i, item := range p.returnItems {
+		if item.alias != "" {
+			cols[i] = item.alias
+		} else {
+			cols[i] = item.expr
+		}
+	}
+	return cols
+}
+
+type callTailFrontierReachablePlan struct {
+	match          *TraversalMatch
+	nodeVar        string
+	nearestAlias   string
+	reachableAlias string
+	returnItems    []returnItem
+	limitToken     string
+}
+
+func (p *callTailFrontierReachablePlan) resultColumns() []string {
+	cols := make([]string, len(p.returnItems))
+	for i, item := range p.returnItems {
+		if item.alias != "" {
+			cols[i] = item.alias
+		} else {
+			cols[i] = item.expr
+		}
+	}
+	return cols
+}
+
+type callTailConstrainedMaxDepthPlan struct {
+	match           *TraversalMatch
+	nodeVar         string
+	aggregateExpr   string
+	aggregateAlias  string
+	minWeightToken  string
+	categoriesToken string
+	returnItems     []returnItem
+	limitToken      string
+}
+
+func (p *callTailConstrainedMaxDepthPlan) resultColumns() []string {
+	cols := make([]string, len(p.returnItems))
+	for i, item := range p.returnItems {
+		if item.alias != "" {
+			cols[i] = item.alias
+		} else {
+			cols[i] = item.expr
+		}
+	}
+	return cols
+}
+
+func (e *StorageExecutor) parseCallTailBranchingPathCountPlan(tail string) (*callTailBranchingPathCountPlan, bool) {
+	normalized := normalizeCallTailShape(tail)
+	firstWithIdx := findKeywordIndexInContext(normalized, "WITH")
+	if firstWithIdx == -1 {
+		return nil, false
+	}
+	matchSection := strings.TrimSpace(normalized[:firstWithIdx])
+	afterFirstWith := strings.TrimSpace(normalized[firstWithIdx+len("WITH"):])
+	secondWithIdx := findKeywordIndexInContext(afterFirstWith, "WITH")
+	if secondWithIdx == -1 {
+		return nil, false
+	}
+	firstWith := strings.TrimSpace(afterFirstWith[:secondWithIdx])
+	afterSecondWith := strings.TrimSpace(afterFirstWith[secondWithIdx+len("WITH"):])
+	returnIdx := findKeywordIndexInContext(afterSecondWith, "RETURN")
+	if returnIdx == -1 {
+		return nil, false
+	}
+	secondWith := strings.TrimSpace(afterSecondWith[:returnIdx])
+	returnOptions := splitCallTailReturnOptionsRaw(strings.TrimSpace(afterSecondWith[returnIdx+len("RETURN"):]))
+	if !strings.HasPrefix(strings.ToUpper(matchSection), "MATCH ") {
+		return nil, false
+	}
+	matchBody := strings.TrimSpace(matchSection[len("MATCH"):])
+	whereIdx := findKeywordIndexInContext(matchBody, "WHERE")
+	if whereIdx == -1 {
+		return nil, false
+	}
+	patternPart := strings.TrimSpace(matchBody[:whereIdx])
+	whereClause := strings.TrimSpace(matchBody[whereIdx+len("WHERE"):])
+	pathVar, pattern, ok := splitPathAssignment(patternPart)
+	if !ok {
+		return nil, false
+	}
+	match := e.parseTraversalPattern(pattern)
+	if match == nil || match.StartNode.variable == "" {
+		return nil, false
+	}
+	compactWhere := compactCypherFragment(whereClause)
+	expectedWhere := compactCypherFragment("ALL(n IN nodes(" + pathVar + ") WHERE size(labels(n)) > 0)")
+	if compactWhere != expectedWhere {
+		return nil, false
+	}
+	firstWithItems := splitReturnExpressions(strings.TrimSpace(stripOrderByFromClause(firstWith)))
+	if len(firstWithItems) != 4 || strings.TrimSpace(firstWithItems[0]) != match.StartNode.variable || strings.TrimSpace(firstWithItems[1]) != "score" || strings.TrimSpace(firstWithItems[2]) != pathVar {
+		return nil, false
+	}
+	lengthCompact := compactCypherFragment(firstWithItems[3])
+	if !strings.HasPrefix(lengthCompact, compactCypherFragment("length("+pathVar+") as ")) {
+		return nil, false
+	}
+	dAlias := strings.TrimSpace(firstWithItems[3][strings.LastIndex(strings.ToUpper(firstWithItems[3]), " AS ")+4:])
+	if !strings.EqualFold(strings.TrimSpace(extractOrderByClause(firstWith)), dAlias+" ASC") {
+		return nil, false
+	}
+	secondItems := splitReturnExpressions(secondWith)
+	if len(secondItems) != 3 || strings.TrimSpace(secondItems[0]) != match.StartNode.variable || strings.TrimSpace(secondItems[1]) != "score" {
+		return nil, false
+	}
+	collectCompact := compactCypherFragment(secondItems[2])
+	prefix := compactCypherFragment("collect(" + pathVar + ")[0..")
+	if !strings.HasPrefix(collectCompact, prefix) || !strings.Contains(strings.ToUpper(secondItems[2]), " AS ") {
+		return nil, false
+	}
+	asIdx := strings.LastIndex(strings.ToUpper(secondItems[2]), " AS ")
+	pathsAlias := strings.TrimSpace(secondItems[2][asIdx+4:])
+	sliceStart := strings.Index(collectCompact, "[0..")
+	sliceEnd := strings.Index(collectCompact[sliceStart:], "]AS")
+	if sliceStart == -1 || sliceEnd == -1 {
+		return nil, false
+	}
+	pathCapToken := strings.TrimSpace(secondItems[2][strings.Index(secondItems[2], "[0..")+4 : strings.LastIndex(secondItems[2], "]")])
+	returnItems := e.parseReturnItems(returnOptions.returnClause)
+	if len(returnItems) != 3 || compactCypherFragment(returnItems[0].expr) != compactCypherFragment("elementId("+match.StartNode.variable+")") || returnItems[1].expr != "score" || compactCypherFragment(returnItems[2].expr) != compactCypherFragment("size("+pathsAlias+")") {
+		return nil, false
+	}
+	return &callTailBranchingPathCountPlan{
+		match:        match,
+		nodeVar:      match.StartNode.variable,
+		pathsAlias:   pathsAlias,
+		pathCapToken: pathCapToken,
+		returnItems:  returnItems,
+		limitToken:   returnOptions.limitRaw,
+	}, true
+}
+
+func (e *StorageExecutor) parseCallTailFrontierReachablePlan(tail string) (*callTailFrontierReachablePlan, bool) {
+	normalized := normalizeCallTailShape(tail)
+	firstWithIdx := findKeywordIndexInContext(normalized, "WITH")
+	if firstWithIdx == -1 || !strings.HasPrefix(strings.ToUpper(normalized), "MATCH ") {
+		return nil, false
+	}
+	matchPart := strings.TrimSpace(normalized[len("MATCH"):firstWithIdx])
+	afterFirstWith := strings.TrimSpace(normalized[firstWithIdx+len("WITH"):])
+	secondWithIdx := findKeywordIndexInContext(afterFirstWith, "WITH")
+	if secondWithIdx == -1 {
+		return nil, false
+	}
+	firstWith := strings.TrimSpace(afterFirstWith[:secondWithIdx])
+	afterSecondWith := strings.TrimSpace(afterFirstWith[secondWithIdx+len("WITH"):])
+	returnIdx := findKeywordIndexInContext(afterSecondWith, "RETURN")
+	if returnIdx == -1 {
+		return nil, false
+	}
+	secondWith := strings.TrimSpace(afterSecondWith[:returnIdx])
+	returnOptions := splitCallTailReturnOptionsRaw(strings.TrimSpace(afterSecondWith[returnIdx+len("RETURN"):]))
+	match := e.parseTraversalPattern(matchPart)
+	if match == nil || match.StartNode.variable == "" {
+		return nil, false
+	}
+	firstItems := splitReturnExpressions(firstWith)
+	if len(firstItems) != 3 || strings.TrimSpace(firstItems[0]) != match.StartNode.variable || strings.TrimSpace(firstItems[1]) != "score" || !strings.Contains(strings.ToUpper(firstItems[2]), " AS ") {
+		return nil, false
+	}
+	asIdx := strings.LastIndex(strings.ToUpper(firstItems[2]), " AS ")
+	dAlias := strings.TrimSpace(firstItems[2][asIdx+4:])
+	expectedShortest := compactCypherFragment("length(shortestPath((" + match.StartNode.variable + ")-[:" + strings.Join(match.Relationship.Types, "|") + "*1.." + strconv.Itoa(match.Relationship.MaxHops) + "]->(" + match.EndNode.variable + ")))")
+	if compactCypherFragment(strings.TrimSpace(firstItems[2][:asIdx])) != expectedShortest {
+		return nil, false
+	}
+	secondItems := splitReturnExpressions(secondWith)
+	if len(secondItems) != 4 || strings.TrimSpace(secondItems[0]) != match.StartNode.variable || strings.TrimSpace(secondItems[1]) != "score" {
+		return nil, false
+	}
+	nearestAlias, ok1 := parseAggregateAlias(secondItems[2], "min", dAlias)
+	reachableAlias, ok2 := parseCountStarAlias(secondItems[3])
+	if !ok1 || !ok2 {
+		return nil, false
+	}
+	returnItems := e.parseReturnItems(returnOptions.returnClause)
+	if len(returnItems) != 4 || compactCypherFragment(returnItems[0].expr) != compactCypherFragment("elementId("+match.StartNode.variable+")") || returnItems[1].expr != "score" || returnItems[2].expr != nearestAlias || returnItems[3].expr != reachableAlias {
+		return nil, false
+	}
+	return &callTailFrontierReachablePlan{match: match, nodeVar: match.StartNode.variable, nearestAlias: nearestAlias, reachableAlias: reachableAlias, returnItems: returnItems, limitToken: returnOptions.limitRaw}, true
+}
+
+func (e *StorageExecutor) parseCallTailConstrainedMaxDepthPlan(tail string) (*callTailConstrainedMaxDepthPlan, bool) {
+	normalized := normalizeCallTailShape(tail)
+	if !strings.HasPrefix(strings.ToUpper(normalized), "MATCH ") {
+		return nil, false
+	}
+	returnIdx := findKeywordIndexInContext(normalized, "RETURN")
+	if returnIdx == -1 {
+		return nil, false
+	}
+	matchWhere := strings.TrimSpace(normalized[len("MATCH"):returnIdx])
+	returnOptions := splitCallTailReturnOptionsRaw(strings.TrimSpace(normalized[returnIdx+len("RETURN"):]))
+	whereIdx := findKeywordIndexInContext(matchWhere, "WHERE")
+	if whereIdx == -1 {
+		return nil, false
+	}
+	patternPart := strings.TrimSpace(matchWhere[:whereIdx])
+	whereClause := strings.TrimSpace(matchWhere[whereIdx+len("WHERE"):])
+	pathVar, pattern, ok := splitPathAssignment(patternPart)
+	if !ok {
+		return nil, false
+	}
+	match := e.parseTraversalPattern(pattern)
+	if match == nil || match.StartNode.variable == "" {
+		return nil, false
+	}
+	parts := splitConjunction(whereClause)
+	if len(parts) != 2 {
+		return nil, false
+	}
+	minWeightToken, categoriesToken, ok := parseConstrainedTraversalPredicates(parts, pathVar)
+	if !ok {
+		return nil, false
+	}
+	returnItems := e.parseReturnItems(returnOptions.returnClause)
+	if len(returnItems) != 3 || compactCypherFragment(returnItems[0].expr) != compactCypherFragment("elementId("+match.StartNode.variable+")") || returnItems[1].expr != "score" {
+		return nil, false
+	}
+	matches := maxLengthWithItemPattern.FindStringSubmatch(strings.TrimSpace(returnItems[2].expr + " AS " + returnItems[2].alias))
+	if matches == nil || matches[1] != pathVar {
+		return nil, false
+	}
+	return &callTailConstrainedMaxDepthPlan{match: match, nodeVar: match.StartNode.variable, aggregateExpr: returnItems[2].expr, aggregateAlias: returnItems[2].alias, minWeightToken: minWeightToken, categoriesToken: categoriesToken, returnItems: returnItems, limitToken: returnOptions.limitRaw}, true
+}
+
+type callTailReturnOptionsRaw struct {
+	returnClause string
+	orderBy      string
+	limitRaw     string
+	skipRaw      string
+}
+
+func splitCallTailReturnOptionsRaw(returnAndTail string) callTailReturnOptionsRaw {
 	trimmed := strings.TrimSpace(returnAndTail)
 	if trimmed == "" {
-		return "", "", -1, -1
+		return callTailReturnOptionsRaw{}
 	}
 	orderIdx := findKeywordIndexInContext(trimmed, "ORDER")
 	limitIdx := findKeywordIndexInContext(trimmed, "LIMIT")
 	skipIdx := findKeywordIndexInContext(trimmed, "SKIP")
-
 	end := len(trimmed)
 	for _, idx := range []int{orderIdx, limitIdx, skipIdx} {
 		if idx != -1 && idx < end {
 			end = idx
 		}
 	}
-	returnClause := strings.TrimSpace(trimmed[:end])
-
-	orderBy := ""
+	out := callTailReturnOptionsRaw{returnClause: strings.TrimSpace(trimmed[:end])}
 	if orderIdx != -1 {
 		orderEnd := len(trimmed)
 		for _, idx := range []int{limitIdx, skipIdx} {
@@ -1033,39 +1446,43 @@ func splitCallTailReturnOptions(returnAndTail string) (string, string, int, int)
 		}
 		orderPart := strings.TrimSpace(trimmed[orderIdx:orderEnd])
 		if strings.HasPrefix(strings.ToUpper(orderPart), "ORDER BY") {
-			orderBy = strings.TrimSpace(orderPart[len("ORDER BY"):])
-		} else if strings.HasPrefix(strings.ToUpper(orderPart), "ORDER") {
-			orderBy = strings.TrimSpace(orderPart[len("ORDER"):])
+			out.orderBy = strings.TrimSpace(orderPart[len("ORDER BY"):])
 		}
 	}
-
-	limit := -1
 	if limitIdx != -1 {
 		limitEnd := len(trimmed)
 		if skipIdx != -1 && skipIdx > limitIdx {
 			limitEnd = skipIdx
 		}
-		limitPart := strings.TrimSpace(trimmed[limitIdx+len("LIMIT") : limitEnd])
-		limitValue := strings.TrimSpace(strings.Split(limitPart, " ")[0])
-		if n, err := strconv.Atoi(limitValue); err == nil {
-			limit = n
-		}
+		out.limitRaw = strings.TrimSpace(strings.Split(strings.TrimSpace(trimmed[limitIdx+len("LIMIT"):limitEnd]), " ")[0])
 	}
-
-	skip := -1
 	if skipIdx != -1 {
 		skipEnd := len(trimmed)
 		if limitIdx != -1 && limitIdx > skipIdx {
 			skipEnd = limitIdx
 		}
-		skipPart := strings.TrimSpace(trimmed[skipIdx+len("SKIP") : skipEnd])
-		skipValue := strings.TrimSpace(strings.Split(skipPart, " ")[0])
-		if n, err := strconv.Atoi(skipValue); err == nil {
+		out.skipRaw = strings.TrimSpace(strings.Split(strings.TrimSpace(trimmed[skipIdx+len("SKIP"):skipEnd]), " ")[0])
+	}
+	return out
+}
+
+func splitCallTailReturnOptions(returnAndTail string) (string, string, int, int) {
+	raw := splitCallTailReturnOptionsRaw(returnAndTail)
+	limit := -1
+	if raw.limitRaw != "" {
+		if n, err := strconv.Atoi(raw.limitRaw); err == nil {
+			limit = n
+		}
+	}
+
+	skip := -1
+	if raw.skipRaw != "" {
+		if n, err := strconv.Atoi(raw.skipRaw); err == nil {
 			skip = n
 		}
 	}
 
-	return returnClause, orderBy, limit, skip
+	return raw.returnClause, raw.orderBy, limit, skip
 }
 
 func (e *StorageExecutor) maxDepthForTraversalMatch(startNode *storage.Node, match *TraversalMatch) (int, error) {
@@ -1081,6 +1498,447 @@ func (e *StorageExecutor) maxDepthForTraversalMatch(startNode *storage.Node, mat
 		return 0, err
 	}
 	return ctx.best, nil
+}
+
+type callTailPathPredicate struct {
+	requireAllNodesLabeled bool
+	minWeight              *float64
+	allowedCategory        map[string]struct{}
+}
+
+func seedValuesForRow(seed *ExecuteResult, row []interface{}) map[string]interface{} {
+	values := make(map[string]interface{}, len(seed.Columns))
+	for i, col := range seed.Columns {
+		if i < len(row) {
+			values[col] = row[i]
+		}
+	}
+	return values
+}
+
+func projectReturnItemsFromValues(e *StorageExecutor, items []returnItem, values map[string]interface{}) []interface{} {
+	row := make([]interface{}, len(items))
+	for i, item := range items {
+		row[i] = e.evaluateExpressionFromValues(item.expr, values)
+	}
+	return row
+}
+
+func normalizeCallTailShape(tail string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(tail)), " ")
+}
+
+func compactCypherFragment(value string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(value), " ", ""))
+}
+
+func stripOrderByFromClause(clause string) string {
+	idx := findKeywordIndexInContext(clause, "ORDER")
+	if idx == -1 {
+		return clause
+	}
+	return strings.TrimSpace(clause[:idx])
+}
+
+func extractOrderByClause(clause string) string {
+	idx := findKeywordIndexInContext(clause, "ORDER")
+	if idx == -1 {
+		return ""
+	}
+	part := strings.TrimSpace(clause[idx:])
+	if strings.HasPrefix(strings.ToUpper(part), "ORDER BY") {
+		return strings.TrimSpace(part[len("ORDER BY"):])
+	}
+	return ""
+}
+
+func splitPathAssignment(patternPart string) (string, string, bool) {
+	eqIdx := strings.Index(patternPart, "=")
+	if eqIdx == -1 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(patternPart[:eqIdx])
+	right := strings.TrimSpace(patternPart[eqIdx+1:])
+	if left == "" || right == "" {
+		return "", "", false
+	}
+	return left, right, true
+}
+
+func parseAggregateAlias(item, funcName, inner string) (string, bool) {
+	upper := strings.ToUpper(item)
+	asIdx := strings.LastIndex(upper, " AS ")
+	if asIdx == -1 {
+		return "", false
+	}
+	expr := compactCypherFragment(item[:asIdx])
+	expected := compactCypherFragment(funcName + "(" + inner + ")")
+	if expr != expected {
+		return "", false
+	}
+	return strings.TrimSpace(item[asIdx+4:]), true
+}
+
+func parseCountStarAlias(item string) (string, bool) {
+	upper := strings.ToUpper(item)
+	asIdx := strings.LastIndex(upper, " AS ")
+	if asIdx == -1 || compactCypherFragment(item[:asIdx]) != "COUNT(*)" {
+		return "", false
+	}
+	return strings.TrimSpace(item[asIdx+4:]), true
+}
+
+func splitConjunction(whereClause string) []string {
+	parts := strings.Split(whereClause, " AND ")
+	if len(parts) != 2 {
+		parts = strings.Split(strings.ToUpper(whereClause), " AND ")
+	}
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		result = append(result, strings.TrimSpace(part))
+	}
+	return result
+}
+
+func parseConstrainedTraversalPredicates(parts []string, pathVar string) (string, string, bool) {
+	var minWeightToken string
+	var categoriesToken string
+	for _, part := range parts {
+		compact := compactCypherFragment(part)
+		prefixRel := compactCypherFragment("any(r IN relationships(" + pathVar + ") WHERE r.weight >=")
+		prefixNode := compactCypherFragment("any(n IN nodes(" + pathVar + ") WHERE n.category IN")
+		switch {
+		case strings.HasPrefix(compact, prefixRel) && strings.HasSuffix(compact, ")"):
+			start := strings.Index(strings.ToUpper(part), ">=")
+			if start == -1 {
+				return "", "", false
+			}
+			minWeightToken = strings.TrimSpace(strings.TrimSuffix(part[start+2:], ")"))
+		case strings.HasPrefix(compact, prefixNode) && strings.HasSuffix(compact, ")"):
+			needle := "CATEGORY IN "
+			upperPart := strings.ToUpper(part)
+			inIdx := strings.Index(upperPart, needle)
+			if inIdx == -1 {
+				return "", "", false
+			}
+			categoriesToken = strings.TrimSpace(strings.TrimSuffix(part[inIdx+len(needle):], ")"))
+		}
+	}
+	return minWeightToken, categoriesToken, minWeightToken != "" && categoriesToken != ""
+}
+
+func resolveOptionalIntLiteralOrParam(ctx context.Context, raw string) (int, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return -1, true
+	}
+	return resolveIntLiteralOrParam(ctx, raw)
+}
+
+func resolveIntLiteralOrParam(ctx context.Context, raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	if strings.HasPrefix(raw, "$") {
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return 0, false
+		}
+		value, ok := params[strings.TrimPrefix(raw, "$")]
+		if !ok {
+			return 0, false
+		}
+		switch typed := value.(type) {
+		case int:
+			return typed, true
+		case int64:
+			return int(typed), true
+		case float64:
+			return int(typed), true
+		}
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func resolveFloatLiteralOrParam(ctx context.Context, raw string) (float64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	if strings.HasPrefix(raw, "$") {
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return 0, false
+		}
+		value, ok := params[strings.TrimPrefix(raw, "$")]
+		if !ok {
+			return 0, false
+		}
+		return toFloat64(value)
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func resolveStringSliceLiteralOrParam(ctx context.Context, raw string) ([]string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(raw, "$") {
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return nil, false
+		}
+		value, ok := params[strings.TrimPrefix(raw, "$")]
+		if !ok {
+			return nil, false
+		}
+		switch typed := value.(type) {
+		case []string:
+			return append([]string{}, typed...), true
+		case []interface{}:
+			out := make([]string, 0, len(typed))
+			for _, item := range typed {
+				text, ok := item.(string)
+				if !ok {
+					return nil, false
+				}
+				out = append(out, text)
+			}
+			return out, true
+		}
+		return nil, false
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		inner := strings.TrimSpace(raw[1 : len(raw)-1])
+		if inner == "" {
+			return []string{}, true
+		}
+		parts := strings.Split(inner, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			trimmed := strings.Trim(strings.TrimSpace(part), "'\"")
+			out = append(out, trimmed)
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+func (e *StorageExecutor) countTraversalPathsWithCap(startNode *storage.Node, match *TraversalMatch, cap int, predicate callTailPathPredicate) (int, error) {
+	if startNode == nil || match == nil || cap == 0 {
+		return 0, nil
+	}
+	ctx := &callTailTraversalContext{nodeCache: map[storage.NodeID]*storage.Node{startNode.ID: startNode}, visitedEdges: make(map[storage.EdgeID]bool), relTypeSet: buildRelTypeSet(match.Relationship.Types)}
+	count, _, err := e.walkCallTailTraversal(startNode, 0, match, ctx, predicate, false, cap, predicateMatchesCategory(startNode, predicate.allowedCategory), false)
+	return count, err
+}
+
+func (e *StorageExecutor) maxDepthForPredicateTraversal(startNode *storage.Node, match *TraversalMatch, predicate callTailPathPredicate) (int, bool, error) {
+	if startNode == nil || match == nil {
+		return 0, false, nil
+	}
+	ctx := &callTailTraversalContext{nodeCache: map[storage.NodeID]*storage.Node{startNode.ID: startNode}, visitedEdges: make(map[storage.EdgeID]bool), relTypeSet: buildRelTypeSet(match.Relationship.Types)}
+	_, maxDepth, err := e.walkCallTailTraversal(startNode, 0, match, ctx, predicate, false, -1, predicateMatchesCategory(startNode, predicate.allowedCategory), true)
+	if err != nil {
+		return 0, false, err
+	}
+	return maxDepth, maxDepth > 0, nil
+}
+
+type callTailTraversalContext struct {
+	nodeCache    map[storage.NodeID]*storage.Node
+	visitedEdges map[storage.EdgeID]bool
+	relTypeSet   map[string]struct{}
+}
+
+func (e *StorageExecutor) walkCallTailTraversal(current *storage.Node, depth int, match *TraversalMatch, ctx *callTailTraversalContext, predicate callTailPathPredicate, hasWeight bool, cap int, hasCategory bool, trackMax bool) (int, int, error) {
+	count := 0
+	maxDepth := 0
+	if depth >= match.Relationship.MinHops && e.matchesEndPattern(current, &match.EndNode) {
+		qualifies := true
+		if predicate.requireAllNodesLabeled && len(current.Labels) == 0 {
+			qualifies = false
+		}
+		if predicate.minWeight != nil && !hasWeight {
+			qualifies = false
+		}
+		if len(predicate.allowedCategory) > 0 && !hasCategory {
+			qualifies = false
+		}
+		if qualifies {
+			count = 1
+			maxDepth = depth
+			if cap > 0 && count >= cap && !trackMax {
+				return count, maxDepth, nil
+			}
+		}
+	}
+	if depth >= match.Relationship.MaxHops {
+		return count, maxDepth, nil
+	}
+	edges, err := e.callTailTraversalEdges(current, match)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, edge := range edges {
+		if edge == nil || ctx.visitedEdges[edge.ID] || !callTailEdgeMatchesTypes(edge, match.Relationship.Types, ctx.relTypeSet) {
+			continue
+		}
+		nextNodeID := callTailNextNodeID(current.ID, edge, match.Relationship.Direction)
+		nextNode, err := e.callTailLoadNode(nextNodeID, ctx)
+		if err != nil || nextNode == nil {
+			if err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		if predicate.requireAllNodesLabeled && len(nextNode.Labels) == 0 {
+			continue
+		}
+		nextHasWeight := hasWeight
+		if predicate.minWeight != nil {
+			if weight, ok := toFloat64(edge.Properties["weight"]); ok && weight >= *predicate.minWeight {
+				nextHasWeight = true
+			}
+		}
+		nextHasCategory := hasCategory || predicateMatchesCategory(nextNode, predicate.allowedCategory)
+		ctx.visitedEdges[edge.ID] = true
+		subCount, subMaxDepth, err := e.walkCallTailTraversal(nextNode, depth+1, match, ctx, predicate, nextHasWeight, cap-count, nextHasCategory, trackMax)
+		delete(ctx.visitedEdges, edge.ID)
+		if err != nil {
+			return 0, 0, err
+		}
+		count += subCount
+		if subMaxDepth > maxDepth {
+			maxDepth = subMaxDepth
+		}
+		if cap > 0 && count >= cap && !trackMax {
+			break
+		}
+	}
+	return count, maxDepth, nil
+}
+
+func predicateMatchesCategory(node *storage.Node, allowed map[string]struct{}) bool {
+	if node == nil || len(allowed) == 0 || node.Properties == nil {
+		return false
+	}
+	category, ok := node.Properties["category"].(string)
+	if !ok {
+		return false
+	}
+	_, found := allowed[category]
+	return found
+}
+
+func (e *StorageExecutor) shortestReachableStats(startNode *storage.Node, match *TraversalMatch) (int, int, error) {
+	if startNode == nil || match == nil {
+		return 0, 0, nil
+	}
+	type queueItem struct {
+		node  *storage.Node
+		depth int
+	}
+	ctx := &callTailTraversalContext{nodeCache: map[storage.NodeID]*storage.Node{startNode.ID: startNode}, relTypeSet: buildRelTypeSet(match.Relationship.Types)}
+	visitedNodes := map[storage.NodeID]bool{startNode.ID: true}
+	queue := []queueItem{{node: startNode, depth: 0}}
+	nearest := 0
+	reachable := 0
+	for head := 0; head < len(queue); head++ {
+		current := queue[head]
+		if current.depth >= match.Relationship.MaxHops {
+			continue
+		}
+		edges, err := e.callTailTraversalEdges(current.node, match)
+		if err != nil {
+			return 0, 0, err
+		}
+		for _, edge := range edges {
+			if edge == nil || !callTailEdgeMatchesTypes(edge, match.Relationship.Types, ctx.relTypeSet) {
+				continue
+			}
+			nextNodeID := callTailNextNodeID(current.node.ID, edge, match.Relationship.Direction)
+			if visitedNodes[nextNodeID] {
+				continue
+			}
+			nextNode, err := e.callTailLoadNode(nextNodeID, ctx)
+			if err != nil {
+				return 0, 0, err
+			}
+			if nextNode == nil {
+				continue
+			}
+			visitedNodes[nextNodeID] = true
+			nextDepth := current.depth + 1
+			if nextDepth >= match.Relationship.MinHops && e.matchesEndPattern(nextNode, &match.EndNode) {
+				reachable++
+				if nearest == 0 || nextDepth < nearest {
+					nearest = nextDepth
+				}
+			}
+			queue = append(queue, queueItem{node: nextNode, depth: nextDepth})
+		}
+	}
+	return nearest, reachable, nil
+}
+
+func (e *StorageExecutor) callTailTraversalEdges(current *storage.Node, match *TraversalMatch) ([]*storage.Edge, error) {
+	switch match.Relationship.Direction {
+	case "outgoing":
+		return e.storage.GetOutgoingEdges(current.ID)
+	case "incoming":
+		return e.storage.GetIncomingEdges(current.ID)
+	default:
+		outgoing, err := e.storage.GetOutgoingEdges(current.ID)
+		if err != nil {
+			return nil, err
+		}
+		incoming, err := e.storage.GetIncomingEdges(current.ID)
+		if err != nil {
+			return nil, err
+		}
+		return append(outgoing, incoming...), nil
+	}
+}
+
+func callTailEdgeMatchesTypes(edge *storage.Edge, relTypes []string, relTypeSet map[string]struct{}) bool {
+	if len(relTypes) == 0 {
+		return true
+	}
+	if len(relTypes) == 1 {
+		return edge.Type == relTypes[0]
+	}
+	_, ok := relTypeSet[edge.Type]
+	return ok
+}
+
+func callTailNextNodeID(currentID storage.NodeID, edge *storage.Edge, direction string) storage.NodeID {
+	if direction == "outgoing" || (direction == "both" && edge.StartNode == currentID) {
+		return edge.EndNode
+	}
+	return edge.StartNode
+}
+
+func (e *StorageExecutor) callTailLoadNode(nodeID storage.NodeID, ctx *callTailTraversalContext) (*storage.Node, error) {
+	if node, ok := ctx.nodeCache[nodeID]; ok {
+		return node, nil
+	}
+	node, err := e.storage.GetNode(nodeID)
+	if err != nil || node == nil {
+		return node, err
+	}
+	ctx.nodeCache[nodeID] = node
+	return node, nil
 }
 
 type callTailMaxDepthContext struct {

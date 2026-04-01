@@ -8,6 +8,7 @@ type HotPathTrace struct {
 	SimpleMatchLimitFastPath  bool
 	UnwindSimpleMergeBatch    bool
 	UnwindFixedChainLinkBatch bool
+	CallTailTraversalFastPath bool
 }
 
 func (e *StorageExecutor) resetHotPathTrace() {
@@ -73,6 +74,15 @@ func (e *StorageExecutor) markUnwindFixedChainLinkBatchUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.UnwindFixedChainLinkBatch = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markCallTailTraversalFastPathUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.CallTailTraversalFastPath = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

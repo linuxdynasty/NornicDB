@@ -118,6 +118,7 @@ LIMIT $topK
 			"text": "get it delivered",
 		})
 		require.NoError(t, qErr, "depth=%d query failed", depth)
+		require.True(t, exec.LastHotPathTrace().CallTailTraversalFastPath, "depth=%d should use call-tail traversal hot path", depth)
 		require.NotNil(t, res, "depth=%d result nil", depth)
 		require.NotEmpty(t, res.Rows, "depth=%d should return traversal rows", depth)
 
