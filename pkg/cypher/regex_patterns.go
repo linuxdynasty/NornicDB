@@ -133,6 +133,17 @@ var (
 			`\s*,\s*\((\w+):(\w+)\s*\{\s*(\w+)\s*:\s*(\d+)\s*\}\s*\)` +
 			`\s+CREATE\s*\(\w+\)-\[(\w+):(\w+)\]->\(\w+\)` +
 			`\s+WITH\s+(\w+)\s+DELETE\s+(\w+)\s+RETURN\s+COUNT\s*\(\s*(\w+)\s*\)\s*$`)
+
+	// UNWIND fixed-chain link batch fast-path patterns.
+	// These are intentionally structural; runtime checks bind to the actual UNWIND variable.
+	fixedChainRootByPropPattern = regexp.MustCompile(
+		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\{\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*\}\s*\)`)
+	fixedChainRootByElementIDPattern = regexp.MustCompile(
+		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\)\s*where\s*elementid\(\s*([a-z_][a-z0-9_]*)\s*\)\s*=\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)`)
+	fixedChainHopMatchPattern = regexp.MustCompile(
+		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\{\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*\+\s*':(\d+)'\s*\}\s*\)`)
+	fixedChainMergePattern = regexp.MustCompile(
+		`(?i)merge\s*\(\s*([a-z_][a-z0-9_]*)\s*\)\s*-\s*\[:\s*([a-z_][a-z0-9_]*)\s*\]\s*->\s*\(\s*([a-z_][a-z0-9_]*)\s*\)`)
 )
 
 // =============================================================================

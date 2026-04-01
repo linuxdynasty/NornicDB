@@ -594,7 +594,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	// and combining results. This avoids silently returning only unwound values when
 	// a trailing MATCH pipeline is present.
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
-		if fast, ok, err := e.executeUnwindBenchHopLinkBatch(ctx, variable, items, restQuery); ok {
+		if fast, ok, err := e.executeUnwindFixedChainLinkBatch(ctx, variable, items, restQuery); ok {
 			return fast, err
 		}
 		normalizedRestQuery := normalizeMultiMatchWhereClauses(restQuery)
@@ -1224,7 +1224,7 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 	return result, true, nil
 }
 
-func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, unwindVar string, items []interface{}, restQuery string) (*ExecuteResult, bool, error) {
+func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, unwindVar string, items []interface{}, restQuery string) (*ExecuteResult, bool, error) {
 	returnIdx := findKeywordIndex(restQuery, "RETURN")
 	if returnIdx <= 0 {
 		return nil, false, nil
@@ -1236,24 +1236,135 @@ func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, un
 		return nil, false, nil
 	}
 
-	normalized := strings.ToLower(strings.Join(strings.Fields(mutationPart), " "))
-	required := []string{
-		"match (o:originaltext {textkey: " + strings.ToLower(unwindVar) + ".textkey})",
-		"match (h1:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':1'})",
-		"match (h2:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':2'})",
-		"match (h3:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':3'})",
-		"match (h4:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':4'})",
-		"match (h5:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':5'})",
-		"match (h6:benchmarkhop {hopid: " + strings.ToLower(unwindVar) + ".textkey + ':6'})",
-		"merge (o)-[:bench_hop]->(h1)",
-		"merge (h1)-[:bench_hop]->(h2)",
-		"merge (h2)-[:bench_hop]->(h3)",
-		"merge (h3)-[:bench_hop]->(h4)",
-		"merge (h4)-[:bench_hop]->(h5)",
-		"merge (h5)-[:bench_hop]->(h6)",
+	normalized := strings.Join(strings.Fields(mutationPart), " ")
+	normalizedLower := strings.ToLower(normalized)
+
+	type rootSpec struct {
+		varName  string
+		label    string
+		byID     bool
+		propName string
+		rowField string
 	}
-	for _, pattern := range required {
-		if !strings.Contains(normalized, pattern) {
+	parseRootSpec := func() (rootSpec, bool) {
+		var out rootSpec
+		if m := fixedChainRootByPropPattern.FindStringSubmatch(normalized); len(m) == 6 && strings.EqualFold(m[4], unwindVar) {
+			out.varName = strings.ToLower(m[1])
+			out.label = m[2]
+			out.propName = m[3]
+			out.rowField = m[5]
+			return out, true
+		}
+		if m := fixedChainRootByElementIDPattern.FindStringSubmatch(normalized); len(m) == 6 && strings.EqualFold(m[4], unwindVar) && strings.EqualFold(m[1], m[3]) {
+			out.varName = strings.ToLower(m[1])
+			out.label = m[2]
+			out.byID = true
+			out.rowField = m[5]
+			return out, true
+		}
+		return rootSpec{}, false
+	}
+	root, ok := parseRootSpec()
+	if !ok {
+		return nil, false, nil
+	}
+
+	type hopSpec struct {
+		label      string
+		propName   string
+		rowField   string
+		depthByVar map[string]int
+	}
+	parseHopSpec := func() (hopSpec, bool) {
+		var out hopSpec
+		out.depthByVar = make(map[string]int)
+		matches := fixedChainHopMatchPattern.FindAllStringSubmatch(normalized, -1)
+		if len(matches) == 0 {
+			return hopSpec{}, false
+		}
+		seenDepth := make(map[int]bool)
+		for _, m := range matches {
+			// 1=var, 2=label, 3=prop, 4=unwindVar, 5=rowField, 6=depth
+			if len(m) != 7 || !strings.EqualFold(m[4], unwindVar) {
+				continue
+			}
+			depth, err := strconv.Atoi(m[6])
+			if err != nil || depth <= 0 {
+				return hopSpec{}, false
+			}
+			v := strings.ToLower(m[1])
+			if out.label == "" {
+				out.label = m[2]
+				out.propName = m[3]
+				out.rowField = m[5]
+			}
+			if !strings.EqualFold(out.label, m[2]) || !strings.EqualFold(out.propName, m[3]) || !strings.EqualFold(out.rowField, m[5]) {
+				return hopSpec{}, false
+			}
+			if prev, exists := out.depthByVar[v]; exists && prev != depth {
+				return hopSpec{}, false
+			}
+			out.depthByVar[v] = depth
+			seenDepth[depth] = true
+		}
+		if len(out.depthByVar) == 0 {
+			return hopSpec{}, false
+		}
+		for i := 1; i <= len(seenDepth); i++ {
+			if !seenDepth[i] {
+				return hopSpec{}, false
+			}
+		}
+		return out, true
+	}
+	hop, ok := parseHopSpec()
+	if !ok {
+		return nil, false, nil
+	}
+
+	mergeMatches := fixedChainMergePattern.FindAllStringSubmatch(normalizedLower, -1)
+	if len(mergeMatches) == 0 {
+		return nil, false, nil
+	}
+	relType := ""
+	nextByFrom := make(map[string]string)
+	for _, m := range mergeMatches {
+		from, rel, to := m[1], m[2], m[3]
+		if relType == "" {
+			relType = rel
+		}
+		if rel != relType {
+			return nil, false, nil
+		}
+		if prev, exists := nextByFrom[from]; exists && prev != to {
+			return nil, false, nil
+		}
+		nextByFrom[from] = to
+	}
+	firstHopVar, ok := nextByFrom[root.varName]
+	if !ok {
+		return nil, false, nil
+	}
+	chainVars := make([]string, 0, len(hop.depthByVar))
+	seenVar := make(map[string]bool)
+	cur := firstHopVar
+	for {
+		if seenVar[cur] {
+			return nil, false, nil
+		}
+		seenVar[cur] = true
+		chainVars = append(chainVars, cur)
+		next, ok := nextByFrom[cur]
+		if !ok {
+			break
+		}
+		cur = next
+	}
+	if len(chainVars) == 0 || len(chainVars) != len(hop.depthByVar) {
+		return nil, false, nil
+	}
+	for _, v := range chainVars {
+		if _, ok := hop.depthByVar[v]; !ok {
 			return nil, false, nil
 		}
 	}
@@ -1265,23 +1376,27 @@ func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, un
 		Stats:   &QueryStats{},
 	}
 
-	originals, err := store.GetNodesByLabel("OriginalText")
+	originals, err := store.GetNodesByLabel(root.label)
 	if err != nil {
 		return nil, true, err
 	}
-	originalByTextKey := make(map[string]*storage.Node, len(originals))
+	originalByProp := make(map[string]*storage.Node, len(originals))
+	originalByID := make(map[string]*storage.Node, len(originals))
 	for _, n := range originals {
 		if n == nil {
 			continue
 		}
-		key := fmt.Sprintf("%v", n.Properties["textKey"])
-		if key == "" {
-			continue
+		originalByID[string(n.ID)] = n
+		if !root.byID {
+			key := fmt.Sprintf("%v", n.Properties[root.propName])
+			if key == "" {
+				continue
+			}
+			originalByProp[key] = n
 		}
-		originalByTextKey[key] = n
 	}
 
-	hops, err := store.GetNodesByLabel("BenchmarkHop")
+	hops, err := store.GetNodesByLabel(hop.label)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1290,7 +1405,7 @@ func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, un
 		if n == nil {
 			continue
 		}
-		key := fmt.Sprintf("%v", n.Properties["hopId"])
+		key := fmt.Sprintf("%v", n.Properties[hop.propName])
 		if key == "" {
 			continue
 		}
@@ -1314,12 +1429,12 @@ func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, un
 		if from == nil || to == nil {
 			return nil
 		}
-		if store.GetEdgeBetween(from.ID, to.ID, "BENCH_HOP") != nil {
+		if store.GetEdgeBetween(from.ID, to.ID, relType) != nil {
 			return nil
 		}
 		edge := &storage.Edge{
 			ID:         storage.EdgeID(e.generateID()),
-			Type:       "BENCH_HOP",
+			Type:       relType,
 			StartNode:  from.ID,
 			EndNode:    to.ID,
 			Properties: map[string]interface{}{},
@@ -1342,45 +1457,54 @@ func (e *StorageExecutor) executeUnwindBenchHopLinkBatch(ctx context.Context, un
 		if !ok {
 			continue
 		}
-		textKey := fmt.Sprintf("%v", rowMap["textKey"])
-		if textKey == "" {
-			continue
+		var o *storage.Node
+		var hopPrefix string
+		if root.byID {
+			rootID := fmt.Sprintf("%v", rowMap[root.rowField])
+			if rootID == "" {
+				continue
+			}
+			o = originalByID[rootID]
+		} else {
+			rootKey := fmt.Sprintf("%v", rowMap[root.rowField])
+			if rootKey == "" {
+				continue
+			}
+			o = originalByProp[rootKey]
 		}
-		o := originalByTextKey[textKey]
 		if o == nil {
 			continue
 		}
-		h1 := hopByID[textKey+":1"]
-		h2 := hopByID[textKey+":2"]
-		h3 := hopByID[textKey+":3"]
-		h4 := hopByID[textKey+":4"]
-		h5 := hopByID[textKey+":5"]
-		h6 := hopByID[textKey+":6"]
-		if h1 == nil || h2 == nil || h3 == nil || h4 == nil || h5 == nil || h6 == nil {
+		hopPrefix = fmt.Sprintf("%v", rowMap[hop.rowField])
+		if hopPrefix == "" {
+			continue
+		}
+		chainNodes := make([]*storage.Node, 0, len(chainVars))
+		missing := false
+		for _, v := range chainVars {
+			depth := hop.depthByVar[v]
+			n := hopByID[fmt.Sprintf("%s:%d", hopPrefix, depth)]
+			if n == nil {
+				missing = true
+				break
+			}
+			chainNodes = append(chainNodes, n)
+		}
+		if missing || len(chainNodes) == 0 {
 			continue
 		}
 
-		if err := mergeHop(o, h1); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		if err := mergeHop(o, chainNodes[0]); err != nil {
+			return nil, true, fmt.Errorf("UNWIND fixed-chain merge failed: %w", err)
 		}
-		if err := mergeHop(h1, h2); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
-		}
-		if err := mergeHop(h2, h3); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
-		}
-		if err := mergeHop(h3, h4); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
-		}
-		if err := mergeHop(h4, h5); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
-		}
-		if err := mergeHop(h5, h6); err != nil {
-			return nil, true, fmt.Errorf("UNWIND BENCH_HOP merge failed: %w", err)
+		for i := 0; i < len(chainNodes)-1; i++ {
+			if err := mergeHop(chainNodes[i], chainNodes[i+1]); err != nil {
+				return nil, true, fmt.Errorf("UNWIND fixed-chain merge failed: %w", err)
+			}
 		}
 		matchedCount++
 	}
-	e.markUnwindBenchHopLinkBatchUsed()
+	e.markUnwindFixedChainLinkBatchUsed()
 	result.Rows = [][]interface{}{{matchedCount}}
 	return result, true, nil
 }

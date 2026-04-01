@@ -2,12 +2,12 @@ package cypher
 
 // HotPathTrace records which key query hot paths were used for the most recent Execute call.
 type HotPathTrace struct {
-	OuterIndexTopK           bool
-	OuterScanFallbackUsed    bool
-	FabricBatchedApplyRows   bool
-	SimpleMatchLimitFastPath bool
-	UnwindSimpleMergeBatch   bool
-	UnwindBenchHopLinkBatch  bool
+	OuterIndexTopK            bool
+	OuterScanFallbackUsed     bool
+	FabricBatchedApplyRows    bool
+	SimpleMatchLimitFastPath  bool
+	UnwindSimpleMergeBatch    bool
+	UnwindFixedChainLinkBatch bool
 }
 
 func (e *StorageExecutor) resetHotPathTrace() {
@@ -67,12 +67,12 @@ func (e *StorageExecutor) markUnwindSimpleMergeBatchUsed() {
 	e.hotPathTraceState.mu.Unlock()
 }
 
-func (e *StorageExecutor) markUnwindBenchHopLinkBatchUsed() {
+func (e *StorageExecutor) markUnwindFixedChainLinkBatchUsed() {
 	if e.hotPathTraceState == nil {
 		e.hotPathTraceState = &hotPathTraceState{}
 	}
 	e.hotPathTraceState.mu.Lock()
-	e.hotPathTraceState.trace.UnwindBenchHopLinkBatch = true
+	e.hotPathTraceState.trace.UnwindFixedChainLinkBatch = true
 	e.hotPathTraceState.mu.Unlock()
 }
 
