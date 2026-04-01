@@ -1177,7 +1177,7 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Per-database write: for mutations, require ResolvedAccess.Write for this (principal, db).
-		if isMutationQuery(stmt.Statement) {
+		if isMutationQuery(stmt.Statement) && s.isRBACEnforced() {
 			if claims == nil {
 				response.Errors = append(response.Errors, QueryError{
 					Code:    "Neo.ClientError.Security.Forbidden",
@@ -1386,7 +1386,7 @@ func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Re
 	}
 
 	// Write permission check for mutations.
-	if isMutationQuery(stmt.Statement) {
+	if isMutationQuery(stmt.Statement) && s.isRBACEnforced() {
 		if claims == nil || !s.getResolvedAccess(claims, dbName).Write {
 			resp := TransactionResponse{
 				Results: []QueryResult{},
@@ -1839,7 +1839,7 @@ func (s *Server) executeTxStatements(
 			continue
 		}
 
-		if isMutationQuery(queryStatement) {
+		if isMutationQuery(queryStatement) && s.isRBACEnforced() {
 			if claims == nil {
 				response.Errors = append(response.Errors, QueryError{
 					Code:    "Neo.ClientError.Security.Forbidden",

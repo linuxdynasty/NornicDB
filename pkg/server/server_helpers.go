@@ -55,11 +55,17 @@ func getClientIP(r *http.Request) string {
 	return host
 }
 
+// isRBACEnforced reports whether RBAC checks should be enforced for requests.
+// When auth is disabled (e.g. --no-auth), request-level RBAC checks are skipped.
+func (s *Server) isRBACEnforced() bool {
+	return s.auth != nil && s.auth.IsSecurityEnabled()
+}
+
 // getDatabaseAccessMode returns the per-database access mode for the given principal (claims).
 // When auth is disabled returns Full; when unauthenticated returns DenyAll;
 // when allowlist is loaded returns allowlist-based mode for claims.Roles.
 func (s *Server) getDatabaseAccessMode(claims *auth.JWTClaims) auth.DatabaseAccessMode {
-	if s.auth == nil || !s.auth.IsSecurityEnabled() {
+	if !s.isRBACEnforced() {
 		return auth.FullDatabaseAccessMode
 	}
 	if claims == nil {
@@ -74,7 +80,7 @@ func (s *Server) getDatabaseAccessMode(claims *auth.JWTClaims) auth.DatabaseAcce
 // GetDatabaseAccessModeForRoles returns the per-database access mode for the given principal roles.
 // Used by Bolt when the principal is known (e.g. from HELLO auth). When auth disabled, Bolt should use Full.
 func (s *Server) GetDatabaseAccessModeForRoles(roles []string) auth.DatabaseAccessMode {
-	if s.auth == nil || !s.auth.IsSecurityEnabled() {
+	if !s.isRBACEnforced() {
 		return auth.FullDatabaseAccessMode
 	}
 	if roles == nil {

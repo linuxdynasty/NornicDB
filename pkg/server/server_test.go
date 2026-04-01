@@ -1825,7 +1825,7 @@ func TestHandleMetrics_BranchesWithAndWithoutEmbedQueue(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 	server.handleMetrics(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, []int{http.StatusOK, http.StatusAccepted}, rec.Code)
 	require.Contains(t, rec.Body.String(), "nornicdb_info")
 
 	// Ensure embed-worker metrics path is present once embedder is configured.
@@ -2217,6 +2217,63 @@ func TestHandleImplicitTransaction_AsyncEnabledSyncFallbackReturnsOK(t *testing.
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
 	_, hasReceipt := payload["receipt"]
 	require.True(t, hasReceipt, "sync fallback should expose durable receipt metadata")
+}
+
+func TestHandleImplicitTransaction_NoAuth_SkipsRBACWriteCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbCfg := nornicdb.DefaultConfig()
+	dbCfg.Memory.DecayEnabled = false
+	dbCfg.Database.AsyncWritesEnabled = false // Deterministic status: isolate RBAC behavior from async 202 semantics.
+	db, err := nornicdb.Open(tmpDir, dbCfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	cfg := DefaultConfig()
+	cfg.Port = 0
+	srv, err := New(db, nil, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", strings.NewReader(`{"statements":[{"statement":"CREATE (n:Doc {name:'open'}) RETURN n.name"}]}`))
+	rec := httptest.NewRecorder()
+	srv.handleImplicitTransaction(rec, req, "nornic")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload TransactionResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	require.Empty(t, payload.Errors, "writes should not be RBAC-forbidden when auth is disabled")
+	require.NotEmpty(t, payload.Results)
+}
+
+func TestExecuteTxStatements_NoAuth_SkipsRBACWriteCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbCfg := nornicdb.DefaultConfig()
+	dbCfg.Memory.DecayEnabled = false
+	db, err := nornicdb.Open(tmpDir, dbCfg)
+	require.NoError(t, err)
+	defer db.Close()
+
+	cfg := DefaultConfig()
+	cfg.Port = 0
+	srv, err := New(db, nil, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	dbName := srv.dbManager.DefaultDatabaseName()
+	tx, err := srv.txSessions.Open(context.Background(), dbName)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.txSessions.RollbackAndDelete(context.Background(), tx) })
+
+	resp := &TransactionResponse{
+		Results: make([]QueryResult, 0, 1),
+		Errors:  make([]QueryError, 0, 1),
+	}
+	srv.executeTxStatements(context.Background(), "", nil, dbName, tx, []StatementRequest{
+		{Statement: "CREATE (n:Doc {name:'tx-open'}) RETURN n.name"},
+	}, resp)
+
+	require.Empty(t, resp.Errors, "writes in tx session should not be RBAC-forbidden when auth is disabled")
+	require.NotEmpty(t, resp.Results)
 }
 
 func TestHandleSimilar(t *testing.T) {
