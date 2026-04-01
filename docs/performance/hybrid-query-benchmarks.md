@@ -59,6 +59,8 @@ Remote environment:
 |     6 | HTTP      | 18,715 req/s | 528 us | 412 us | 1.15 ms | 3.19 ms | 3.53 ms |
 |     6 | Bolt      | 24,487 req/s | 403 us | 399 us |  509 us |  607 us |  720 us |
 
+> Bolt is nearly zero allocation. this was under concurrent load with mixed http and bolt queries. The tail latency spikes are from GC calls from hitting the http path at the same time. Bolt is far more efficient than HTTP for tail latency.
+
 ## Remote Results
 
 Client-to-server latency was about **110 ms**.
