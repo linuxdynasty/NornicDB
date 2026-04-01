@@ -112,6 +112,28 @@ func TestGraphNeighborhoodEndpoint_LimitPreservesEdgesBetweenIncludedNodes(t *te
 	require.Equal(t, "ab", payload.Edges[0].ID)
 }
 
+func TestGraphNeighborhoodEndpoint_LimitTruncatesSeedNodes(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+	engine := getDefaultStorage(t, server)
+
+	for _, id := range []string{"a", "b", "c"} {
+		_, err := engine.CreateNode(&storage.Node{ID: storage.NodeID(id), Labels: []string{"Person"}})
+		require.NoError(t, err)
+	}
+
+	resp := makeRequest(t, server, "POST", defaultGraphPath(server, "neighborhood"), map[string]interface{}{
+		"node_ids": []string{"a", "b", "c"},
+		"depth":    1,
+		"limit":    2,
+	}, "Bearer "+token)
+	require.Equal(t, 200, resp.Code)
+
+	payload := decodeGraphPayload(t, resp.Body)
+	require.Equal(t, 2, payload.Meta.NodeCount)
+	require.True(t, payload.Meta.Truncated)
+}
+
 func TestGraphPathEndpoint(t *testing.T) {
 	server, authenticator := setupTestServer(t)
 	token := getAuthToken(t, authenticator, "admin")
@@ -496,6 +518,40 @@ func TestGraphTemporalAndDiff_RequireAsOf(t *testing.T) {
 	}, "Bearer "+token)
 	require.Equal(t, 400, diff.Code)
 	require.Contains(t, diff.Body.String(), "as_of is required")
+
+	diffInvalidCompareTo := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids":   []string{"a"},
+		"as_of":      time.Now().UTC().Format(time.RFC3339Nano),
+		"compare_to": "not-a-date",
+	}, "Bearer "+token)
+	require.Equal(t, 400, diffInvalidCompareTo.Code)
+	require.Contains(t, diffInvalidCompareTo.Body.String(), "compare_to must be a valid datetime")
+}
+
+func TestGraphTemporalAndDiff_RejectExcessiveNodeIDs(t *testing.T) {
+	server, authenticator := setupTestServer(t)
+	token := getAuthToken(t, authenticator, "admin")
+
+	nodeIDs := make([]string, 0, maxGraphTemporalDiffNodeIDs+1)
+	for i := 0; i < maxGraphTemporalDiffNodeIDs+1; i++ {
+		nodeIDs = append(nodeIDs, fmt.Sprintf("n-%d", i))
+	}
+
+	temporal := makeRequest(t, server, "POST", defaultGraphPath(server, "temporal"), map[string]interface{}{
+		"node_ids": nodeIDs,
+		"as_of":    time.Now().UTC().Format(time.RFC3339Nano),
+	}, "Bearer "+token)
+	require.Equal(t, 400, temporal.Code)
+	require.Contains(t, temporal.Body.String(), "node_ids exceeds maximum")
+	require.Contains(t, temporal.Body.String(), "temporal graph requests")
+
+	diff := makeRequest(t, server, "POST", defaultGraphPath(server, "diff"), map[string]interface{}{
+		"node_ids": nodeIDs,
+		"as_of":    time.Now().UTC().Format(time.RFC3339Nano),
+	}, "Bearer "+token)
+	require.Equal(t, 400, diff.Code)
+	require.Contains(t, diff.Body.String(), "node_ids exceeds maximum")
+	require.Contains(t, diff.Body.String(), "diff graph requests")
 }
 
 func TestCollectLatestNeighborhood_CanceledContext(t *testing.T) {
@@ -582,4 +638,69 @@ func TestGraphFilterSetAndCollectionHelpers(t *testing.T) {
 	require.Equal(t, 1, payload.Meta.NodeCount)
 	require.Equal(t, 1, payload.Meta.EdgeCount)
 	require.True(t, payload.Meta.Truncated)
+}
+
+func TestDiffGraphCollections_OmitsUnchangedEntries(t *testing.T) {
+	baseline := newGraphCollection()
+	target := newGraphCollection()
+
+	baseline.nodes["same-node"] = graphNodePayload{
+		ID:         "same-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	target.nodes["same-node"] = graphNodePayload{
+		ID:         "same-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	baseline.nodes["changed-node"] = graphNodePayload{
+		ID:         "changed-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Before"},
+	}
+	target.nodes["changed-node"] = graphNodePayload{
+		ID:         "changed-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "After"},
+	}
+
+	baseline.edges["same-edge"] = graphEdgePayload{
+		ID:         "same-edge",
+		Source:     "a",
+		Target:     "b",
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{"w": 1},
+	}
+	target.edges["same-edge"] = graphEdgePayload{
+		ID:         "same-edge",
+		Source:     "a",
+		Target:     "b",
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{"w": 1},
+	}
+	baseline.edges["changed-edge"] = graphEdgePayload{
+		ID:         "changed-edge",
+		Source:     "a",
+		Target:     "c",
+		Type:       "KNOWS",
+		Properties: map[string]interface{}{"w": 1},
+	}
+	target.edges["changed-edge"] = graphEdgePayload{
+		ID:         "changed-edge",
+		Source:     "a",
+		Target:     "c",
+		Type:       "LIKES",
+		Properties: map[string]interface{}{"w": 2},
+	}
+
+	diff := diffGraphCollections(baseline, target)
+
+	_, hasSameNode := diff.nodes["same-node"]
+	_, hasSameEdge := diff.edges["same-edge"]
+	require.False(t, hasSameNode)
+	require.False(t, hasSameEdge)
+
+	require.Equal(t, "changed", diff.nodes["changed-node"].Status)
+	require.Equal(t, "changed", diff.edges["changed-edge"].Status)
 }

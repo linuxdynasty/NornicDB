@@ -18,6 +18,8 @@ import (
 var errGraphForbidden = fmt.Errorf("graph access forbidden")
 var errGraphPathLimitExceeded = fmt.Errorf("path search limit exceeded before target was found")
 
+const maxGraphTemporalDiffNodeIDs = 200
+
 type graphRequest struct {
 	NodeIDs           []string `json:"node_ids,omitempty"`
 	ExistingNodeIDs   []string `json:"existing_node_ids,omitempty"`
@@ -58,7 +60,7 @@ type graphMetaPayload struct {
 	CompareTo     string `json:"compare_to,omitempty"`
 	NodeCount     int    `json:"node_count"`
 	EdgeCount     int    `json:"edge_count"`
-	Truncated     bool   `json:"truncated,omitempty"`
+	Truncated     bool   `json:"truncated"`
 }
 
 type graphPayload struct {
@@ -207,6 +209,10 @@ func (s *Server) handleGraphTemporal(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "node_ids is required", ErrBadRequest)
 		return
 	}
+	if len(req.NodeIDs) > maxGraphTemporalDiffNodeIDs {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("node_ids exceeds maximum of %d for temporal graph requests", maxGraphTemporalDiffNodeIDs), ErrBadRequest)
+		return
+	}
 	version, err := parseGraphVersion(req.AsOf)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error(), ErrBadRequest)
@@ -253,6 +259,10 @@ func (s *Server) handleGraphDiff(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "node_ids is required", ErrBadRequest)
 		return
 	}
+	if len(req.NodeIDs) > maxGraphTemporalDiffNodeIDs {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("node_ids exceeds maximum of %d for diff graph requests", maxGraphTemporalDiffNodeIDs), ErrBadRequest)
+		return
+	}
 	if strings.TrimSpace(req.AsOf) == "" {
 		s.writeError(w, http.StatusBadRequest, "as_of is required", ErrBadRequest)
 		return
@@ -275,7 +285,7 @@ func (s *Server) handleGraphDiff(w http.ResponseWriter, r *http.Request) {
 	var target graphCollection
 	compareLabel := "current"
 	if strings.TrimSpace(req.CompareTo) != "" {
-		baselineVersion, versionErr := parseGraphVersion(req.CompareTo)
+		baselineVersion, versionErr := parseGraphVersionForField(req.CompareTo, "compare_to")
 		if versionErr != nil {
 			s.writeError(w, http.StatusBadRequest, versionErr.Error(), ErrBadRequest)
 			return
@@ -495,10 +505,21 @@ func (s *Server) collectLatestNeighborhood(ctx context.Context, engine storage.E
 	}
 	queue := make([]queueEntry, 0, len(seedIDs))
 	visited := make(map[string]int, len(seedIDs))
+	maxNodes := limit
+	if maxNodes <= 0 {
+		maxNodes = 500
+	}
 
 	for _, seedID := range seedIDs {
 		seedID = strings.TrimSpace(seedID)
 		if seedID == "" {
+			continue
+		}
+		if _, seen := visited[seedID]; seen {
+			continue
+		}
+		if len(collection.nodes) >= maxNodes {
+			collection.truncated = true
 			continue
 		}
 		node, err := engine.GetNode(storage.NodeID(seedID))
@@ -508,11 +529,6 @@ func (s *Server) collectLatestNeighborhood(ctx context.Context, engine storage.E
 		collection.addNode(node, "")
 		queue = append(queue, queueEntry{nodeID: seedID, depth: 0})
 		visited[seedID] = 0
-	}
-
-	maxNodes := limit
-	if maxNodes <= 0 {
-		maxNodes = 500
 	}
 
 	for len(queue) > 0 {
@@ -772,12 +788,10 @@ func diffGraphCollections(baseline, target graphCollection) graphCollection {
 		after, hadAfter := target.nodes[id]
 		switch {
 		case hadBefore && hadAfter:
-			status := "live"
 			if !sameNodePayload(before, after) {
-				status = "changed"
+				after.Status = "changed"
+				out.nodes[id] = after
 			}
-			after.Status = status
-			out.nodes[id] = after
 		case hadAfter:
 			after.Status = "added"
 			out.nodes[id] = after
@@ -799,12 +813,10 @@ func diffGraphCollections(baseline, target graphCollection) graphCollection {
 		after, hadAfter := target.edges[id]
 		switch {
 		case hadBefore && hadAfter:
-			status := "live"
 			if !sameEdgePayload(before, after) {
-				status = "changed"
+				after.Status = "changed"
+				out.edges[id] = after
 			}
-			after.Status = status
-			out.edges[id] = after
 		case hadAfter:
 			after.Status = "added"
 			out.edges[id] = after
@@ -830,9 +842,13 @@ func sameEdgePayload(left, right graphEdgePayload) bool {
 }
 
 func parseGraphVersion(raw string) (storage.MVCCVersion, error) {
+	return parseGraphVersionForField(raw, "as_of")
+}
+
+func parseGraphVersionForField(raw, fieldName string) (storage.MVCCVersion, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return storage.MVCCVersion{}, fmt.Errorf("as_of must be a valid datetime")
+		return storage.MVCCVersion{}, fmt.Errorf("%s must be a valid datetime", fieldName)
 	}
 	if unixSeconds, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		return storage.MVCCVersion{CommitTimestamp: time.Unix(unixSeconds, 0).UTC(), CommitSequence: ^uint64(0)}, nil
@@ -842,7 +858,7 @@ func parseGraphVersion(raw string) (storage.MVCCVersion, error) {
 			return storage.MVCCVersion{CommitTimestamp: parsed.UTC(), CommitSequence: ^uint64(0)}, nil
 		}
 	}
-	return storage.MVCCVersion{}, fmt.Errorf("as_of must be a valid datetime")
+	return storage.MVCCVersion{}, fmt.Errorf("%s must be a valid datetime", fieldName)
 }
 
 func normalizeNodeIDs(nodeIDs []string) []string {

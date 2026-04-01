@@ -585,7 +585,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/GraphRequest"
+              $ref: "#/components/schemas/GraphNeighborhoodRequest"
       responses:
         "200":
           description: Neighborhood graph payload
@@ -618,7 +618,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/GraphRequest"
+              $ref: "#/components/schemas/GraphNeighborhoodRequest"
       responses:
         "200":
           description: Expanded graph payload
@@ -651,12 +651,7 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - $ref: "#/components/schemas/GraphRequest"
-                - type: object
-                  required:
-                    - source_node_id
-                    - target_node_id
+              $ref: "#/components/schemas/GraphPathRequest"
       responses:
         "200":
           description: Path graph payload
@@ -691,12 +686,7 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - $ref: "#/components/schemas/GraphRequest"
-                - type: object
-                  required:
-                    - node_ids
-                    - as_of
+              $ref: "#/components/schemas/GraphTemporalRequest"
       responses:
         "200":
           description: Temporal graph payload
@@ -729,12 +719,7 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - $ref: "#/components/schemas/GraphRequest"
-                - type: object
-                  required:
-                    - node_ids
-                    - as_of
+              $ref: "#/components/schemas/GraphDiffRequest"
       responses:
         "200":
           description: Diff graph payload
@@ -1285,8 +1270,10 @@ components:
                     meta:
                       type: array
 
-    GraphRequest:
+    GraphNeighborhoodRequest:
       type: object
+      required:
+        - node_ids
       properties:
         node_ids:
           type: array
@@ -1311,12 +1298,6 @@ components:
             currently advisory only and may be ignored by the server; responses include all
             collected edges regardless of this value. Reserved for future server-side diff/delta
             behavior.
-        source_node_id:
-          type: string
-          description: Source node ID for path requests.
-        target_node_id:
-          type: string
-          description: Target node ID for path requests.
         depth:
           type: integer
           description: Traversal depth for neighborhood and expand requests.
@@ -1335,10 +1316,85 @@ components:
           items:
             type: string
           description: Optional relationship-type filter.
+
+    GraphPathRequest:
+      type: object
+      required:
+        - source_node_id
+        - target_node_id
+      properties:
+        source_node_id:
+          type: string
+          description: Source node ID for path requests.
+        target_node_id:
+          type: string
+          description: Target node ID for path requests.
+        limit:
+          type: integer
+          description: Soft traversal cap for path search responses.
+          example: 500
+        labels:
+          type: array
+          items:
+            type: string
+          description: Optional node-label filter.
+        relationship_types:
+          type: array
+          items:
+            type: string
+          description: Optional relationship-type filter.
+
+    GraphTemporalRequest:
+      type: object
+      required:
+        - node_ids
+        - as_of
+      properties:
+        node_ids:
+          type: array
+          items:
+            type: string
+          description: Seed or selected node IDs to include in the graph response.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Optional node-label filter.
+        relationship_types:
+          type: array
+          items:
+            type: string
+          description: Optional relationship-type filter.
         as_of:
           type: string
           format: date-time
-          description: Snapshot timestamp for temporal reconstruction or the target side of a diff.
+          description: Snapshot timestamp for temporal reconstruction.
+
+    GraphDiffRequest:
+      type: object
+      required:
+        - node_ids
+        - as_of
+      properties:
+        node_ids:
+          type: array
+          items:
+            type: string
+          description: Seed or selected node IDs to include in the graph response.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Optional node-label filter.
+        relationship_types:
+          type: array
+          items:
+            type: string
+          description: Optional relationship-type filter.
+        as_of:
+          type: string
+          format: date-time
+          description: Target graph state timestamp for the diff response.
         compare_to:
           type: string
           format: date-time
@@ -1360,7 +1416,7 @@ components:
           type: number
         status:
           type: string
-          enum: [live, added, removed, changed]
+          enum: [added, removed, changed]
 
     GraphEdge:
       type: object
@@ -1380,7 +1436,7 @@ components:
           type: boolean
         status:
           type: string
-          enum: [live, added, removed, changed]
+          enum: [added, removed, changed]
 
     GraphMeta:
       type: object
