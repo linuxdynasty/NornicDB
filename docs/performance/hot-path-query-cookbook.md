@@ -4,6 +4,8 @@ A practical, domain-neutral guide for fast, predictable graph query latency in p
 
 Use this cookbook as a menu of proven query shapes. Pick the shape that matches your endpoint behavior, adapt labels/properties, and measure p50/p95/p99.
 
+Hot-path additions since `v1.0.36` include bounded `UNWIND ... MERGE` batch upserts, fixed-depth chain materialization, vector-result `elementId()` pinning, and vector-seeded traversal aggregations for chain, branching, frontier, and constrained traversal shapes.
+
 ## Generic Model Used In Examples
 
 - Node labels: `EntityA`, `EntityB`, `Tenant`, `Event`
@@ -236,6 +238,85 @@ ORDER BY score DESC
 LIMIT $topK;
 ```
 
+### 4.1b Vector Candidate Pinning By `elementId()`
+
+```cypher
+CALL db.index.vector.queryNodes('idx_entitya_embedding', $topK, $vector)
+YIELD node, score
+WHERE elementId(node) = $id
+RETURN node, score
+LIMIT 1;
+```
+
+Use when the caller already has a root ID and wants vector scoring plus exact candidate verification without scanning unrelated matches.
+
+### 4.1c Vector Search Plus Bounded Chain Depth Aggregation
+
+```cypher
+CALL db.index.vector.queryNodes('idx_entitya_embedding', $topK, $vector)
+YIELD node, score
+MATCH p = (node)-[:LINKS_TO*1..6]->(:EntityB)
+WITH node, score, max(length(p)) AS maxDepth
+RETURN elementId(node) AS nodeId, maxDepth, score
+ORDER BY score DESC
+LIMIT $topK;
+```
+
+Use when you need the deepest reachable bounded chain per vector candidate. Keep the upper bound literal in query text.
+
+### 4.1d Vector Search Plus Branching Path-Cap Aggregation
+
+```cypher
+CALL db.index.vector.queryNodes('idx_entitya_embedding', $topK, $vector)
+YIELD node, score
+MATCH p = (node)-[:LINKS_TO|BELONGS_TO*1..6]->(x)
+WHERE ALL(n IN nodes(p) WHERE size(labels(n)) > 0)
+WITH node, score, p, length(p) AS d
+ORDER BY d ASC
+WITH node, score, collect(p)[0..$pathCap] AS paths
+RETURN elementId(node) AS nodeId, score, size(paths) AS pathCount
+LIMIT $topK;
+```
+
+Use for Falkor-style branching expansions where you need bounded per-seed path counts. Cap collected paths explicitly.
+
+### 4.1e Vector Search Plus Frontier Reachability Summary
+
+```cypher
+CALL db.index.vector.queryNodes('idx_entitya_embedding', $topK, $vector)
+YIELD node, score
+MATCH (node)-[:LINKS_TO*1..6]->(x)
+WITH node, score, length(shortestPath((node)-[:LINKS_TO*1..6]->(x))) AS d
+WITH node, score, min(d) AS nearest, count(*) AS reachable
+RETURN elementId(node) AS nodeId, score, nearest, reachable
+LIMIT $topK;
+```
+
+Use for BFS-like frontier reads where you need nearest-distance plus bounded reachable counts from each seeded node.
+
+### 4.1f Vector Search Plus Constrained Traversal Depth
+
+```cypher
+CALL db.index.vector.queryNodes('idx_entitya_embedding', $topK, $vector)
+YIELD node, score
+MATCH p = (node)-[:LINKS_TO*1..6]->(x)
+WHERE any(r IN relationships(p) WHERE r.weight >= $minWeight)
+  AND any(n IN nodes(p) WHERE n.category IN $categories)
+RETURN elementId(node) AS nodeId, score, max(length(p)) AS maxDepth
+LIMIT $topK;
+```
+
+Use when traversal depth must respect relationship and node predicates. Keep predicate lists and thresholds parameterized; keep traversal bounds literal and tight.
+
+Traversal matrix coverage for the current hot path:
+
+- Chain depth aggregation: depth sweep `1..6`
+- Branching path-cap aggregation: fanout sweep `1..3`, depth sweep `1..6`, bounded by `$pathCap`
+- Frontier reachability summary: fanout sweep `1..3`, depth sweep `1..6`
+- Constrained traversal depth: validated at fanout `2`, depth sweep `1..6`, with weight/category predicates
+
+These dimensions mirror the deterministic e2e workload matrix used to verify Bolt and HTTP routing for Falkor-style traversal reads.
+
 ### 4.2 Full-Text Then Graph Expand
 
 ```cypher
@@ -379,6 +460,55 @@ SET n += row.props, n.updatedAt = $now;
 ```
 
 Use bounded batch sizes to avoid oversized transactions.
+
+### 7.3b Batched Upsert With Distinct `ON CREATE` And `ON MATCH` Sets
+
+```cypher
+UNWIND $rows AS row
+MERGE (n:EntityA {primaryKey: row.primaryKey})
+ON CREATE SET n.payload = row.payload,
+              n.createdAt = row.now,
+              n.updatedAt = row.now,
+              n.sessionId = row.sessionId
+ON MATCH SET  n.payload = row.payload,
+              n.updatedAt = row.now
+RETURN count(n) AS prepared;
+```
+
+Use for idempotent bounded upsert batches where immutable fields must only be written on create.
+
+### 7.3c Batched Fixed-Depth Chain Materialization By Key
+
+```cypher
+UNWIND $rows AS row
+MATCH (root:EntityA {primaryKey: row.primaryKey})
+MATCH (n1:EntityB {primaryKey: row.primaryKey + ':1'})
+MATCH (n2:EntityB {primaryKey: row.primaryKey + ':2'})
+MATCH (n3:EntityB {primaryKey: row.primaryKey + ':3'})
+MERGE (root)-[:LINKS_TO]->(n1)
+MERGE (n1)-[:LINKS_TO]->(n2)
+MERGE (n2)-[:LINKS_TO]->(n3)
+RETURN count(root) AS prepared;
+```
+
+Use when the application materializes bounded chains in one batch and the chain depth is fixed in query text. Re-running stays idempotent through `MERGE`.
+
+### 7.3d Batched Fixed-Depth Chain Materialization By Root ID
+
+```cypher
+UNWIND $rows AS row
+MATCH (root:EntityA)
+WHERE elementId(root) = row.rootId
+MATCH (n1:EntityB {primaryKey: row.rootKey + ':1'})
+MATCH (n2:EntityB {primaryKey: row.rootKey + ':2'})
+MATCH (n3:EntityB {primaryKey: row.rootKey + ':3'})
+MERGE (root)-[:LINKS_TO]->(n1)
+MERGE (n1)-[:LINKS_TO]->(n2)
+MERGE (n2)-[:LINKS_TO]->(n3)
+RETURN count(root) AS prepared;
+```
+
+Use this variant when the caller already has stable `elementId()` values for roots and only needs a lightweight key suffix to resolve chain members.
 
 ### 7.4 Single-Statement Autocommit Shape
 
@@ -561,6 +691,7 @@ SHOW CONSTRAINTS;
 ```
 
 If latency spikes:
+
 1. Verify required indexes are `ONLINE`.
 2. Re-run identical shape 3-5 times to compare first-hit vs steady state.
 3. Split optional-filter and optional-match paths into separate templates.
