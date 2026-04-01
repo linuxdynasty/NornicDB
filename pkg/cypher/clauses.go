@@ -1237,7 +1237,6 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 	}
 
 	normalized := strings.Join(strings.Fields(mutationPart), " ")
-	normalizedLower := strings.ToLower(normalized)
 
 	type rootSpec struct {
 		varName  string
@@ -1322,18 +1321,18 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 		return nil, false, nil
 	}
 
-	mergeMatches := fixedChainMergePattern.FindAllStringSubmatch(normalizedLower, -1)
+	mergeMatches := fixedChainMergePattern.FindAllStringSubmatch(normalized, -1)
 	if len(mergeMatches) == 0 {
 		return nil, false, nil
 	}
 	relType := ""
 	nextByFrom := make(map[string]string)
 	for _, m := range mergeMatches {
-		from, rel, to := m[1], m[2], m[3]
+		from, rel, to := strings.ToLower(m[1]), m[2], strings.ToLower(m[3])
 		if relType == "" {
 			relType = rel
 		}
-		if rel != relType {
+		if !strings.EqualFold(rel, relType) {
 			return nil, false, nil
 		}
 		if prev, exists := nextByFrom[from]; exists && prev != to {
@@ -1460,7 +1459,9 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 		var o *storage.Node
 		var hopPrefix string
 		if root.byID {
-			rootID := fmt.Sprintf("%v", rowMap[root.rowField])
+			rawRootID := rowMap[root.rowField]
+			rootID, _ := normalizeNodeIDValue(rawRootID).(string)
+			rootID = strings.TrimSpace(rootID)
 			if rootID == "" {
 				continue
 			}

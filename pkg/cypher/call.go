@@ -674,6 +674,14 @@ func (e *StorageExecutor) executeCallTailSetBased(
 		return nil, false
 	}
 	relationshipTail := strings.Contains(tail, "-[") || strings.Contains(tail, "]-")
+	upperTail := strings.ToUpper(tail)
+	// Some traversal+aggregation tails rely on per-seed row context across
+	// MATCH ... WITH ... aggregate stages (for example max(length(p)) shapes).
+	// The set-based rewrite can drop non-path bindings in these cases.
+	// Fall back to per-row execution for correctness.
+	if relationshipTail && strings.Contains(upperTail, "MAX(LENGTH(") {
+		return nil, false
+	}
 
 	params := map[string]interface{}{}
 	rowsParam := make([]map[string]interface{}, 0, len(seed.Rows))
