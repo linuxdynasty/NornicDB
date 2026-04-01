@@ -279,6 +279,13 @@ func TestPrivilegesStore_SaveLoadResolveAndPutMatrix(t *testing.T) {
 	if got := loaded.Resolve([]string{"viewer"}, "analytics"); !got.Read || got.Write {
 		t.Fatalf("expected explicit analytics privilege, got %#v", got)
 	}
+
+	if err := loaded.SavePrivilege(ctx, "viewer", "locked", false, false); err != nil {
+		t.Fatalf("save explicit deny privilege failed: %v", err)
+	}
+	if got := loaded.Resolve([]string{"viewer"}, "locked"); got.Read || got.Write {
+		t.Fatalf("expected explicit deny to override global viewer fallback, got %#v", got)
+	}
 }
 
 func TestPrivilegesParsingHelpers(t *testing.T) {
