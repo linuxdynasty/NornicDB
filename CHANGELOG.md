@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.37] - 2026-04-01
+
+### Added
+
+- **Inline mutation-time embedding in Cypher (`WITH EMBEDDING`)**:
+  - added support for `WITH EMBEDDING` on write statements so node mutations and managed embedding writes happen in the same transaction.
+  - supports common mutation shapes including `CREATE`, `MERGE ... SET`, `MATCH ... SET`, and `UNWIND` write pipelines.
+
+Example usage:
+
+```cypher
+CREATE (d:Doc {id: 'd1', content: 'hello world'})
+WITH EMBEDDING
+RETURN count(d) AS created
+```
+
+```cypher
+UNWIND $rows AS row
+MERGE (d:Doc {id: row.id})
+SET d.content = row.content
+WITH EMBEDDING
+RETURN count(d) AS upserted
+```
+
+- **Shared embedding utility package**:
+  - added `pkg/embeddingutil` to centralize canonical embedding text construction, metadata-key detection, invalidation, and managed embedding payload shaping.
+
+### Changed
+
+- **Cypher traversal and CALL-tail performance/coverage**:
+  - generalized and hardened hot paths for benchmark-shaped `CALL ... YIELD` + traversal queries, `UNWIND` merge pipelines, and variable-length traversal aggregation patterns.
+  - expanded E2E and benchmark coverage for real query shapes used in traversal/vector workloads.
+
+- **Async and eventual consistency behavior**:
+  - expanded async engine eventual-create eligibility and completed additional read-your-own-write (RYOW) coverage.
+  - aligned async HTTP behavior and transport/docs guidance for consistency.
+
+- **Documentation updates for user-facing query behavior**:
+  - added/updated user docs for mutation-time embedding and vector search usage, including practical `WITH EMBEDDING` examples and caveats.
+
+### Fixed
+
+- **Cypher correctness across complex pipelines**:
+  - fixed `WITH DISTINCT` projection behavior in pipeline routing.
+  - fixed `CALL` argument parsing for tail function expressions.
+  - fixed `YIELD ... WHERE elementId(...)` handling to preserve actual yielded entities.
+  - fixed path aggregate semantics for variable-length `MATCH` and related traversal aggregate edge cases.
+
+- **Storage/server stability under mixed write + background load**:
+  - fixed scenarios where deleted nodes could reappear during index builds.
+  - improved MVCC head rebuild batching and prioritized transaction hot paths over embedding worker pressure.
+  - fixed auth-disabled mode write-gating behavior to avoid incorrect RBAC blocking when authentication is off.
+
+### Tests
+
+- Added and expanded regression coverage for:
+  - `WITH EMBEDDING` mutation patterns (`CREATE`, multi-create, `MERGE/SET`, `MATCH/SET`, `UNWIND`, explicit transactions)
+  - CALL-tail traversal fast paths and benchmark shape handling
+  - async engine RYOW/eventual-create behavior and MVCC conflict-sensitive paths
+  - embedding invalidation and shared utility behavior across Cypher/DB/worker paths
+
+### Technical Details
+
+- **Range covered**: `v1.0.36..HEAD`
+- **Commits in range**: 26 (non-merge)
+- **Repository delta**: 59 files changed, +7,156 / -726 lines
+- **Primary focus areas**: inline mutation-time embeddings, Cypher traversal/call hot paths, async consistency hardening, and operational stability fixes.
+
 ## [v1.0.36] "Gold on the Cieling" - 2026-03-30
 
 ### Added
