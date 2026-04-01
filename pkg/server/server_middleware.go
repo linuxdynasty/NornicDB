@@ -304,7 +304,12 @@ func (s *Server) requestTimeoutMiddleware(next http.Handler) http.Handler {
 			http.TimeoutHandler(next, searchTimeout, "request timeout: search busy").ServeHTTP(w, r)
 			return
 		case strings.HasPrefix(path, "/db/") && strings.Contains(path, "/tx"):
-			http.TimeoutHandler(next, txTimeout, "request timeout: transaction busy").ServeHTTP(w, r)
+			txWrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				s.activeTxReqs.Add(1)
+				defer s.activeTxReqs.Add(-1)
+				next.ServeHTTP(w, r)
+			})
+			http.TimeoutHandler(txWrapped, txTimeout, "request timeout: transaction busy").ServeHTTP(w, r)
 			return
 		default:
 			next.ServeHTTP(w, r)

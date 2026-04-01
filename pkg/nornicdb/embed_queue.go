@@ -77,6 +77,10 @@ type EmbedWorker struct {
 	// potentially expensive on large datasets and can contend with write traffic.
 	refreshMu     sync.Mutex
 	lastRefreshAt time.Time
+
+	// shouldYield reports whether foreground request pressure is high enough that
+	// background embedding should pause. This keeps tx/commit hot path prioritized.
+	shouldYield func() bool
 }
 
 const minRefreshOnEmptyInterval = 30 * time.Second
@@ -225,6 +229,14 @@ func (ew *EmbedWorker) SetOnEmbedded(fn func(node *storage.Node)) {
 // The callback receives the total number of embeddings processed in this batch.
 func (ew *EmbedWorker) SetOnQueueEmpty(fn func(processedCount int)) {
 	ew.onQueueEmpty = fn
+}
+
+// SetShouldYield configures an optional pressure probe used to pause background
+// embedding while foreground request traffic is active.
+func (ew *EmbedWorker) SetShouldYield(fn func() bool) {
+	ew.mu.Lock()
+	ew.shouldYield = fn
+	ew.mu.Unlock()
 }
 
 // Trigger wakes up the worker to check for nodes without embeddings.
@@ -555,6 +567,16 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	case <-ew.ctx.Done():
 		return false
 	default:
+	}
+
+	// Foreground-first policy: if tx load is active, pause background embedding.
+	ew.mu.Lock()
+	shouldYield := ew.shouldYield
+	ew.mu.Unlock()
+	if shouldYield != nil && shouldYield() {
+		time.Sleep(25 * time.Millisecond)
+		ew.signalTrigger()
+		return false
 	}
 
 	ew.running.Store(true)

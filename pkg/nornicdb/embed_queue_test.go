@@ -2170,3 +2170,30 @@ func TestEmbedQueueDebounceAndHelpers(t *testing.T) {
 		require.Equal(t, 0, ew.refreshEmbeddingIndex())
 	})
 }
+
+func TestEmbedWorker_ProcessNextBatch_YieldsUnderForegroundPressure(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	engine := &queueBranchEngine{
+		Engine: storage.NewNamespacedEngine(base, "test"),
+		findNode: &storage.Node{
+			ID:         "test:n-1",
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"text": "hello"},
+		},
+	}
+	_, err := engine.Engine.CreateNode(storage.CopyNode(engine.findNode))
+	require.NoError(t, err)
+
+	worker := &EmbedWorker{
+		storage: engine,
+		config:  DefaultEmbedWorkerConfig(),
+		ctx:     context.Background(),
+	}
+	worker.SetShouldYield(func() bool { return true })
+
+	didWork := worker.processNextBatch()
+	require.False(t, didWork)
+	require.False(t, engine.findReturned, "worker should yield before claiming any node")
+	require.Equal(t, 0, engine.getNodeCalls, "worker should not hit storage while yielding")
+	require.Empty(t, engine.marked, "worker should not mutate pending index while yielding")
+}

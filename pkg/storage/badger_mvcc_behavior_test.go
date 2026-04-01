@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -185,6 +186,39 @@ func TestBadgerEngine_RebuildAndPruneMVCC(t *testing.T) {
 	oldVersion, err := engine.GetNodeVisibleAt(nodeID, MVCCVersion{CommitTimestamp: time.Now().UTC().Add(-24 * time.Hour), CommitSequence: ^uint64(0)})
 	if err == nil {
 		require.NotNil(t, oldVersion)
+	}
+}
+
+func TestBadgerEngine_RebuildMVCCHeads_BatchesLargeDataset(t *testing.T) {
+	engine := createMVCCBadgerEngine(t)
+	const total = 650 // Crosses mvccRebuildScanBatchSize (512) to exercise chunked rebuild.
+
+	for i := 0; i < total; i++ {
+		id := NodeID(prefixTestID(fmt.Sprintf("mvcc-batch-node-%d", i)))
+		_, err := engine.CreateNode(&Node{
+			ID:         id,
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"version": 1},
+		})
+		require.NoError(t, err)
+		require.NoError(t, engine.UpdateNode(&Node{
+			ID:         id,
+			Labels:     []string{"Doc"},
+			Properties: map[string]any{"version": 2},
+		}))
+	}
+
+	require.NoError(t, engine.clearBadgerPrefix(context.Background(), prefixMVCCNodeHead))
+	require.NoError(t, engine.RebuildMVCCHeads(context.Background()))
+
+	for _, idx := range []int{0, total / 2, total - 1} {
+		id := NodeID(prefixTestID(fmt.Sprintf("mvcc-batch-node-%d", idx)))
+		head, err := engine.GetNodeCurrentHead(id)
+		require.NoError(t, err)
+		require.False(t, head.Tombstoned)
+		node, err := engine.GetNodeLatestVisible(id)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, node.Properties["version"])
 	}
 }
 

@@ -627,6 +627,7 @@ type Server struct {
 	requestCount   atomic.Int64
 	errorCount     atomic.Int64
 	activeRequests atomic.Int64
+	activeTxReqs   atomic.Int64
 
 	// Slow query logging
 	slowQueryLogger *log.Logger
@@ -1000,6 +1001,10 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		searchServices: make(map[string]*search.Service),
 		executors:      make(map[string]*cypher.StorageExecutor),
 	}
+	// Foreground-first policy: while tx requests are active, background embed work yields.
+	s.db.SetEmbedQueueShouldYield(func() bool {
+		return s.activeTxReqs.Load() > 0
+	})
 	s.txSessions = txsession.NewManager(30*time.Second, s.newExecutorForDatabase)
 	s.txSessions.SetTerminalErrorObserver(func(session *txsession.Session, err error) {
 		s.logMVCCSnapshotExpiration(session, err)

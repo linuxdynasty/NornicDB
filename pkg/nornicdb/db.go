@@ -386,6 +386,7 @@ type DB struct {
 	// Async embedding queue for auto-generating embeddings
 	embedQueue        *EmbedQueue
 	embedWorkerConfig *EmbedWorkerConfig // Configurable via ENV vars
+	embedQueueYieldFn func() bool
 
 	// K-means clustering timer (runs on schedule instead of trigger)
 	clusterTicker           *time.Ticker
@@ -1087,6 +1088,9 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		workerCfg := *db.embedWorkerConfig
 		workerCfg.DeferWorkerStart = true
 		db.embedQueue = NewEmbedQueue(nil, db.baseStorage, &workerCfg)
+		if db.embedQueueYieldFn != nil {
+			db.embedQueue.SetShouldYield(db.embedQueueYieldFn)
+		}
 		db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
 			db.onNodeEmbedded(node)
 		})
@@ -1378,6 +1382,9 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 
 	if db.embedQueue != nil {
 		// Queue was created in Open(); activate with loaded embedder and start cluster timer
+		if db.embedQueueYieldFn != nil {
+			db.embedQueue.SetShouldYield(db.embedQueueYieldFn)
+		}
 		db.embedQueue.SetEmbedder(embedder)
 		log.Printf("🧠 Auto-embed queue started using %s (%d dims)",
 			embedder.Model(), embedder.Dimensions())
@@ -1394,6 +1401,9 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	// Create embed queue against the un-namespaced base storage so it can pull work
 	// from ALL databases (node IDs are fully-qualified, e.g. "nornic:<id>").
 	db.embedQueue = NewEmbedQueue(embedder, db.baseStorage, db.embedWorkerConfig)
+	if db.embedQueueYieldFn != nil {
+		db.embedQueue.SetShouldYield(db.embedQueueYieldFn)
+	}
 
 	// Set callback to update search index after embedding and run inference.
 	// Note: IndexNode is idempotent (uses map keyed by node ID), so if the storage
@@ -1430,6 +1440,18 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 
 	if startClusterTimer {
 		db.startClusteringTimer(clusterInterval)
+	}
+}
+
+// SetEmbedQueueShouldYield sets an optional foreground-pressure callback used to
+// pause background embedding while high-priority request traffic is active.
+func (db *DB) SetEmbedQueueShouldYield(fn func() bool) {
+	db.mu.Lock()
+	db.embedQueueYieldFn = fn
+	q := db.embedQueue
+	db.mu.Unlock()
+	if q != nil {
+		q.SetShouldYield(fn)
 	}
 }
 

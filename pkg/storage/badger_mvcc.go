@@ -830,6 +830,26 @@ func (b *BadgerEngine) materializeMVCCCommitInTxn(txn *badger.Txn, version MVCCV
 	return nil
 }
 
+const mvccRebuildScanBatchSize = 512
+
+type nodeHeadWrite struct {
+	id           NodeID
+	version      MVCCVersion
+	tombstoned   bool
+	floorVersion MVCCVersion
+}
+
+type edgeHeadWrite struct {
+	id           EdgeID
+	version      MVCCVersion
+	tombstoned   bool
+	floorVersion MVCCVersion
+}
+
+func nextScanStart(key []byte) []byte {
+	return append(append([]byte(nil), key...), 0x00)
+}
+
 func (b *BadgerEngine) RebuildMVCCHeads(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -840,137 +860,426 @@ func (b *BadgerEngine) RebuildMVCCHeads(ctx context.Context) error {
 	if err := b.clearBadgerPrefix(ctx, prefixMVCCEdgeHead); err != nil {
 		return err
 	}
-
-	if err := b.withUpdate(func(txn *badger.Txn) error {
-		if err := b.rebuildMVCCHeadsFromVersionRecordsInTxn(ctx, txn); err != nil {
-			return err
-		}
-		return b.bootstrapMVCCHeadsFromCurrentStateInTxn(txn)
-	}); err != nil {
+	if err := b.rebuildMVCCHeadsFromVersionRecords(ctx); err != nil {
 		return err
 	}
-	return nil
+	return b.bootstrapMVCCHeadsFromCurrentState(ctx)
 }
 
-func (b *BadgerEngine) rebuildMVCCHeadsFromVersionRecordsInTxn(ctx context.Context, txn *badger.Txn) error {
-	if err := b.rebuildNodeMVCCHeadsFromVersionsInTxn(ctx, txn); err != nil {
+func (b *BadgerEngine) rebuildMVCCHeadsFromVersionRecords(ctx context.Context) error {
+	if err := b.rebuildNodeMVCCHeadsFromVersions(ctx); err != nil {
 		return err
 	}
-	return b.rebuildEdgeMVCCHeadsFromVersionsInTxn(ctx, txn)
+	return b.rebuildEdgeMVCCHeadsFromVersions(ctx)
 }
 
-func (b *BadgerEngine) rebuildNodeMVCCHeadsFromVersionsInTxn(ctx context.Context, txn *badger.Txn) error {
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = []byte{prefixMVCCNode}
-	opts.PrefetchValues = true
-	it := txn.NewIterator(opts)
-	defer it.Close()
-
+func (b *BadgerEngine) rebuildNodeMVCCHeadsFromVersions(ctx context.Context) error {
+	start := []byte{prefixMVCCNode}
 	var lastID NodeID
 	var lastHead MVCCHead
 	var firstVersion MVCCVersion
 	var haveLast bool
-	flush := func() error {
+	batch := make([]nodeHeadWrite, 0, mvccRebuildScanBatchSize)
+	flush := func() {
 		if !haveLast {
-			return nil
+			return
 		}
-		return b.writeNodeMVCCHeadWithFloorInTxn(txn, lastID, lastHead.Version, lastHead.Tombstoned, firstVersion)
+		batch = append(batch, nodeHeadWrite{
+			id:           lastID,
+			version:      lastHead.Version,
+			tombstoned:   lastHead.Tombstoned,
+			floorVersion: firstVersion,
+		})
+		firstVersion = MVCCVersion{}
 	}
 
-	for it.Rewind(); it.Valid(); it.Next() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		key := append([]byte(nil), it.Item().Key()...)
-		nodeID, version, err := extractNodeIDAndMVCCVersionFromVersionKey(key)
+	for {
+		lastScanned, reachedEnd, err := b.withViewNodeMVCCVersionsFromKey(start, mvccRebuildScanBatchSize, func(nodeID NodeID, version MVCCVersion, tombstoned bool) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if haveLast && nodeID != lastID {
+				flush()
+			}
+			if firstVersion.IsZero() {
+				firstVersion = version
+			}
+			lastID = nodeID
+			lastHead = MVCCHead{Version: version, Tombstoned: tombstoned}
+			haveLast = true
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		var tombstoned bool
-		if err := it.Item().Value(func(val []byte) error {
-			record, decodeErr := decodeMVCCNodeRecord(val)
-			if decodeErr != nil {
-				return decodeErr
-			}
-			tombstoned = record.Tombstoned
-			return nil
-		}); err != nil {
-			return err
-		}
-		if haveLast && nodeID != lastID {
-			if err := flush(); err != nil {
+		if len(batch) > 0 {
+			if err := b.applyNodeHeadBatch(batch); err != nil {
 				return err
 			}
-			firstVersion = MVCCVersion{}
+			batch = batch[:0]
 		}
-		if firstVersion.IsZero() {
-			firstVersion = version
+		if reachedEnd {
+			flush()
+			if len(batch) > 0 {
+				if err := b.applyNodeHeadBatch(batch); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		lastID = nodeID
-		lastHead = MVCCHead{Version: version, Tombstoned: tombstoned}
-		haveLast = true
+		start = nextScanStart(lastScanned)
 	}
-	return flush()
 }
 
-func (b *BadgerEngine) rebuildEdgeMVCCHeadsFromVersionsInTxn(ctx context.Context, txn *badger.Txn) error {
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = []byte{prefixMVCCEdge}
-	opts.PrefetchValues = true
-	it := txn.NewIterator(opts)
-	defer it.Close()
-
+func (b *BadgerEngine) rebuildEdgeMVCCHeadsFromVersions(ctx context.Context) error {
+	start := []byte{prefixMVCCEdge}
 	var lastID EdgeID
 	var lastHead MVCCHead
 	var firstVersion MVCCVersion
 	var haveLast bool
-	flush := func() error {
+	batch := make([]edgeHeadWrite, 0, mvccRebuildScanBatchSize)
+	flush := func() {
 		if !haveLast {
-			return nil
+			return
 		}
-		return b.writeEdgeMVCCHeadWithFloorInTxn(txn, lastID, lastHead.Version, lastHead.Tombstoned, firstVersion)
+		batch = append(batch, edgeHeadWrite{
+			id:           lastID,
+			version:      lastHead.Version,
+			tombstoned:   lastHead.Tombstoned,
+			floorVersion: firstVersion,
+		})
+		firstVersion = MVCCVersion{}
 	}
 
-	for it.Rewind(); it.Valid(); it.Next() {
-		key := append([]byte(nil), it.Item().Key()...)
-		edgeID, version, err := extractEdgeIDAndMVCCVersionFromVersionKey(key)
+	for {
+		lastScanned, reachedEnd, err := b.withViewEdgeMVCCVersionsFromKey(start, mvccRebuildScanBatchSize, func(edgeID EdgeID, version MVCCVersion, tombstoned bool) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if haveLast && edgeID != lastID {
+				flush()
+			}
+			if firstVersion.IsZero() {
+				firstVersion = version
+			}
+			lastID = edgeID
+			lastHead = MVCCHead{Version: version, Tombstoned: tombstoned}
+			haveLast = true
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		var tombstoned bool
-		if err := it.Item().Value(func(val []byte) error {
-			record, decodeErr := decodeMVCCEdgeRecord(val)
-			if decodeErr != nil {
-				return decodeErr
-			}
-			tombstoned = record.Tombstoned
-			return nil
-		}); err != nil {
-			return err
-		}
-		if haveLast && edgeID != lastID {
-			if err := flush(); err != nil {
+		if len(batch) > 0 {
+			if err := b.applyEdgeHeadBatch(batch); err != nil {
 				return err
 			}
-			firstVersion = MVCCVersion{}
+			batch = batch[:0]
 		}
-		if firstVersion.IsZero() {
-			firstVersion = version
+		if reachedEnd {
+			flush()
+			if len(batch) > 0 {
+				if err := b.applyEdgeHeadBatch(batch); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		lastID = edgeID
-		lastHead = MVCCHead{Version: version, Tombstoned: tombstoned}
-		haveLast = true
+		start = nextScanStart(lastScanned)
 	}
-	return flush()
 }
 
-func (b *BadgerEngine) bootstrapMVCCHeadsFromCurrentStateInTxn(txn *badger.Txn) error {
-	if err := b.bootstrapNodeMVCCFromCurrentStateInTxn(txn); err != nil {
+func (b *BadgerEngine) applyNodeHeadBatch(batch []nodeHeadWrite) error {
+	return b.withUpdate(func(txn *badger.Txn) error {
+		for _, write := range batch {
+			if err := b.writeNodeMVCCHeadWithFloorInTxn(txn, write.id, write.version, write.tombstoned, write.floorVersion); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (b *BadgerEngine) applyEdgeHeadBatch(batch []edgeHeadWrite) error {
+	return b.withUpdate(func(txn *badger.Txn) error {
+		for _, write := range batch {
+			if err := b.writeEdgeMVCCHeadWithFloorInTxn(txn, write.id, write.version, write.tombstoned, write.floorVersion); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (b *BadgerEngine) withViewNodeMVCCVersionsFromKey(start []byte, limit int, yield func(NodeID, MVCCVersion, bool) error) ([]byte, bool, error) {
+	var lastScanned []byte
+	reachedEnd := true
+	err := b.withView(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{prefixMVCCNode}
+		opts.PrefetchValues = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		count := 0
+		for it.Seek(start); it.ValidForPrefix(opts.Prefix); it.Next() {
+			key := append([]byte(nil), it.Item().Key()...)
+			nodeID, version, err := extractNodeIDAndMVCCVersionFromVersionKey(key)
+			if err != nil {
+				return err
+			}
+			var tombstoned bool
+			if err := it.Item().Value(func(val []byte) error {
+				record, decodeErr := decodeMVCCNodeRecord(val)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				tombstoned = record.Tombstoned
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := yield(nodeID, version, tombstoned); err != nil {
+				return err
+			}
+			lastScanned = key
+			count++
+			if count >= limit {
+				reachedEnd = false
+				break
+			}
+		}
+		return nil
+	})
+	return lastScanned, reachedEnd, err
+}
+
+func (b *BadgerEngine) withViewEdgeMVCCVersionsFromKey(start []byte, limit int, yield func(EdgeID, MVCCVersion, bool) error) ([]byte, bool, error) {
+	var lastScanned []byte
+	reachedEnd := true
+	err := b.withView(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{prefixMVCCEdge}
+		opts.PrefetchValues = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		count := 0
+		for it.Seek(start); it.ValidForPrefix(opts.Prefix); it.Next() {
+			key := append([]byte(nil), it.Item().Key()...)
+			edgeID, version, err := extractEdgeIDAndMVCCVersionFromVersionKey(key)
+			if err != nil {
+				return err
+			}
+			var tombstoned bool
+			if err := it.Item().Value(func(val []byte) error {
+				record, decodeErr := decodeMVCCEdgeRecord(val)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				tombstoned = record.Tombstoned
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := yield(edgeID, version, tombstoned); err != nil {
+				return err
+			}
+			lastScanned = key
+			count++
+			if count >= limit {
+				reachedEnd = false
+				break
+			}
+		}
+		return nil
+	})
+	return lastScanned, reachedEnd, err
+}
+
+func (b *BadgerEngine) bootstrapMVCCHeadsFromCurrentState(ctx context.Context) error {
+	if err := b.bootstrapNodeMVCCFromCurrentState(ctx); err != nil {
 		return err
 	}
-	return b.bootstrapEdgeMVCCFromCurrentStateInTxn(txn)
+	return b.bootstrapEdgeMVCCFromCurrentState(ctx)
+}
+
+func (b *BadgerEngine) bootstrapNodeMVCCFromCurrentState(ctx context.Context) error {
+	start := []byte{prefixNode}
+	for {
+		batch, lastScanned, reachedEnd, err := b.collectNodeBootstrapBatch(ctx, start, mvccRebuildScanBatchSize)
+		if err != nil {
+			return err
+		}
+		if len(batch) > 0 {
+			if err := b.applyNodeBootstrapBatch(batch); err != nil {
+				return err
+			}
+		}
+		if reachedEnd {
+			return nil
+		}
+		start = nextScanStart(lastScanned)
+	}
+}
+
+func (b *BadgerEngine) collectNodeBootstrapBatch(ctx context.Context, start []byte, limit int) ([]*Node, []byte, bool, error) {
+	nodes := make([]*Node, 0, limit)
+	var lastScanned []byte
+	reachedEnd := true
+	err := b.withView(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{prefixNode}
+		opts.PrefetchValues = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(start); it.ValidForPrefix(opts.Prefix); it.Next() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			key := append([]byte(nil), it.Item().Key()...)
+			if len(key) <= 1 {
+				continue
+			}
+			id := NodeID(key[1:])
+			var node *Node
+			if err := it.Item().Value(func(val []byte) error {
+				var decodeErr error
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
+				return decodeErr
+			}); err != nil {
+				return err
+			}
+			nodes = append(nodes, node)
+			lastScanned = key
+			if len(nodes) >= limit {
+				reachedEnd = false
+				break
+			}
+		}
+		return nil
+	})
+	return nodes, lastScanned, reachedEnd, err
+}
+
+func (b *BadgerEngine) applyNodeBootstrapBatch(nodes []*Node) error {
+	return b.withUpdate(func(txn *badger.Txn) error {
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			if _, err := b.loadNodeMVCCHeadInTxn(txn, node.ID); err == nil {
+				continue
+			} else if err != ErrNotFound {
+				return err
+			}
+			version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(node.CreatedAt, node.UpdatedAt))
+			if err != nil {
+				return err
+			}
+			if err := b.writeNodeMVCCVersionInTxn(txn, node, version); err != nil {
+				return err
+			}
+			if err := b.writeNodeMVCCHeadInTxn(txn, node.ID, version, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (b *BadgerEngine) bootstrapEdgeMVCCFromCurrentState(ctx context.Context) error {
+	start := []byte{prefixEdge}
+	for {
+		batch, lastScanned, reachedEnd, err := b.collectEdgeBootstrapBatch(ctx, start, mvccRebuildScanBatchSize)
+		if err != nil {
+			return err
+		}
+		if len(batch) > 0 {
+			if err := b.applyEdgeBootstrapBatch(batch); err != nil {
+				return err
+			}
+		}
+		if reachedEnd {
+			return nil
+		}
+		start = nextScanStart(lastScanned)
+	}
+}
+
+func (b *BadgerEngine) collectEdgeBootstrapBatch(ctx context.Context, start []byte, limit int) ([]*Edge, []byte, bool, error) {
+	edges := make([]*Edge, 0, limit)
+	var lastScanned []byte
+	reachedEnd := true
+	err := b.withView(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{prefixEdge}
+		opts.PrefetchValues = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(start); it.ValidForPrefix(opts.Prefix); it.Next() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			key := append([]byte(nil), it.Item().Key()...)
+			if len(key) <= 1 {
+				continue
+			}
+			id := EdgeID(key[1:])
+			var edge *Edge
+			if err := it.Item().Value(func(val []byte) error {
+				var decodeErr error
+				edge, decodeErr = decodeEdge(val)
+				return decodeErr
+			}); err != nil {
+				return err
+			}
+			if edge == nil {
+				continue
+			}
+			edge.ID = id
+			edges = append(edges, edge)
+			lastScanned = key
+			if len(edges) >= limit {
+				reachedEnd = false
+				break
+			}
+		}
+		return nil
+	})
+	return edges, lastScanned, reachedEnd, err
+}
+
+func (b *BadgerEngine) applyEdgeBootstrapBatch(edges []*Edge) error {
+	return b.withUpdate(func(txn *badger.Txn) error {
+		for _, edge := range edges {
+			if edge == nil {
+				continue
+			}
+			if _, err := b.loadEdgeMVCCHeadInTxn(txn, edge.ID); err == nil {
+				continue
+			} else if err != ErrNotFound {
+				return err
+			}
+			version, err := b.allocateMVCCVersion(txn, mvccBootstrapTime(edge.CreatedAt, edge.UpdatedAt))
+			if err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
+				return err
+			}
+			if err := b.writeEdgeMVCCHeadInTxn(txn, edge.ID, version, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (b *BadgerEngine) bootstrapNodeMVCCFromCurrentStateInTxn(txn *badger.Txn) error {

@@ -3796,6 +3796,40 @@ func TestRequestTimeoutMiddleware_TxRoute_UsesConfigAndOverride(t *testing.T) {
 	}
 }
 
+func TestRequestTimeoutMiddleware_TxRoute_TracksActiveTxRequests(t *testing.T) {
+	s := &Server{config: &Config{WriteTimeout: 10 * time.Second}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mw := s.requestTimeoutMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/db/nornic/tx/commit", nil)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		mw.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("tx handler did not start")
+	}
+	require.Eventually(t, func() bool { return s.activeTxReqs.Load() == 1 }, time.Second, 10*time.Millisecond)
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tx handler did not complete")
+	}
+	require.Equal(t, int64(0), s.activeTxReqs.Load())
+}
+
 func TestTransactionHandlers_AdditionalErrorBranches(t *testing.T) {
 	server, _ := setupTestServer(t)
 	_ = server.dbManager.CreateDatabase("private")
