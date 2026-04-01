@@ -128,6 +128,9 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 			withClause = strings.TrimSpace(withClause[:idx])
 		}
 	}
+	trimmedWithClause := strings.TrimSpace(withClause)
+	withClause = trimDistinctPrefix(trimmedWithClause)
+	withDistinct := !strings.EqualFold(withClause, trimmedWithClause)
 	withItems := e.splitWithItems(withClause)
 
 	// Extract RETURN clause
@@ -410,6 +413,26 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 			}
 		}
 		computedRows = filteredRows
+	}
+	if withDistinct {
+		withAliases := make([]string, 0, len(parsedWithItems))
+		for _, wi := range parsedWithItems {
+			withAliases = append(withAliases, wi.alias)
+		}
+		seen := make(map[string]bool)
+		distinctRows := make([]computedRow, 0, len(computedRows))
+		for _, cr := range computedRows {
+			parts := make([]string, 0, len(withAliases))
+			for _, alias := range withAliases {
+				parts = append(parts, alias+"="+joinedValueKey(cr.values[alias]))
+			}
+			key := strings.Join(parts, "|")
+			if !seen[key] {
+				seen[key] = true
+				distinctRows = append(distinctRows, cr)
+			}
+		}
+		computedRows = distinctRows
 	}
 
 	// Apply ORDER BY to computedRows (before building result)

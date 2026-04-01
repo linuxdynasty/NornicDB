@@ -237,6 +237,9 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 	}
 
 	// Parse WITH items
+	trimmedWithClause := strings.TrimSpace(withClause)
+	withClause = trimDistinctPrefix(trimmedWithClause)
+	withDistinct := !strings.EqualFold(withClause, trimmedWithClause)
 	withItems := e.splitWithItems(withClause)
 	type withItem struct {
 		expr        string
@@ -482,6 +485,26 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 			}
 		}
 		computedRows = filtered
+	}
+	if withDistinct {
+		withAliases := make([]string, 0, len(parsedWithItems))
+		for _, wi := range parsedWithItems {
+			withAliases = append(withAliases, wi.alias)
+		}
+		seen := make(map[string]bool)
+		distinctRows := make([]computedRow, 0, len(computedRows))
+		for _, row := range computedRows {
+			parts := make([]string, 0, len(withAliases))
+			for _, alias := range withAliases {
+				parts = append(parts, alias+"="+joinedValueKey(row.values[alias]))
+			}
+			key := strings.Join(parts, "|")
+			if !seen[key] {
+				seen[key] = true
+				distinctRows = append(distinctRows, row)
+			}
+		}
+		computedRows = distinctRows
 	}
 
 	// Apply WITH SKIP
@@ -753,6 +776,28 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 
 	// Handle function calls
 	if strings.Contains(expr, "(") && strings.Contains(expr, ")") {
+		// elementId(n) / id(n)
+		if matchFuncStartAndSuffix(expr, "elementid") || matchFuncStartAndSuffix(expr, "id") {
+			inner := extractFuncArgs(expr, "elementid")
+			if inner == "" {
+				inner = extractFuncArgs(expr, "id")
+			}
+			inner = strings.TrimSpace(inner)
+			if val, ok := values[inner]; ok {
+				if node, ok := val.(*storage.Node); ok && node != nil {
+					return string(node.ID)
+				}
+				if nodeMap, ok := val.(map[string]interface{}); ok {
+					if id, ok := nodeMap["id"]; ok {
+						return id
+					}
+					if id, ok := nodeMap["_id"]; ok {
+						return id
+					}
+				}
+			}
+		}
+
 		// For labels(connected), we need to extract the node and get labels
 		if matchFuncStartAndSuffix(expr, "labels") {
 			inner := extractFuncArgs(expr, "labels")
