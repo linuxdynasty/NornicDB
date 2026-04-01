@@ -566,6 +566,20 @@ func (db *DB) EnsureSearchIndexesBuilt(ctx context.Context, dbName string, stora
 	return svc, nil
 }
 
+func (db *DB) removeNodeFromSearchIndexes(ctx context.Context, dbName string, storageEngine storage.Engine, id storage.NodeID) error {
+	if id == "" {
+		return nil
+	}
+	svc, err := db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine)
+	if err != nil {
+		return err
+	}
+	if svc == nil {
+		return nil
+	}
+	return svc.RemoveNode(id)
+}
+
 // EnsureSearchIndexesBuildStarted starts per-database search indexing if not already started
 // and returns immediately without waiting for completion.
 func (db *DB) EnsureSearchIndexesBuildStarted(dbName string, storageEngine storage.Engine) (*search.Service, error) {

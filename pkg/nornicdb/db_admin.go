@@ -688,9 +688,10 @@ func (db *DB) DeleteNode(ctx context.Context, id string) error {
 	defaultDB := db.defaultDatabaseName()
 	db.mu.RUnlock()
 
-	// Remove from search indexes first (before storage deletion)
-	if svc, _ := db.getOrCreateSearchService(defaultDB, storageEngine); svc != nil {
-		_ = svc.RemoveNode(storage.NodeID(id))
+	// Remove from search indexes first (before storage deletion), but wait for any
+	// in-flight build to finish so a stale scan cannot re-add the deleted node.
+	if err := db.removeNodeFromSearchIndexes(ctx, defaultDB, storageEngine, storage.NodeID(id)); err != nil && !db.shouldIgnoreSearchIndexingError(err) {
+		return err
 	}
 
 	return storageEngine.DeleteNode(storage.NodeID(id))
@@ -1692,13 +1693,12 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 		return err
 	}
 
-	svc, _ := db.getOrCreateSearchService(defaultDB, storageEngine)
-
 	// Now delete the collected nodes
 	for _, id := range toDelete {
-		// Remove from search indexes first (before storage deletion)
-		if svc != nil {
-			_ = svc.RemoveNode(id)
+		// Remove from search indexes first (before storage deletion), but wait for any
+		// in-flight build to finish so a stale scan cannot re-add the deleted node.
+		if err := db.removeNodeFromSearchIndexes(ctx, defaultDB, storageEngine, id); err != nil && !db.shouldIgnoreSearchIndexingError(err) {
+			return err
 		}
 		if err := storageEngine.DeleteNode(id); err != nil {
 			return err

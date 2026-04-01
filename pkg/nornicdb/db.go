@@ -2499,9 +2499,10 @@ func (db *DB) Forget(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 
-	// Remove from search indexes first (before storage deletion)
-	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
-		_ = svc.RemoveNode(storage.NodeID(id))
+	// Remove from search indexes first (before storage deletion), but wait for any
+	// in-flight build to finish so a stale scan cannot re-add the deleted memory.
+	if err := db.removeNodeFromSearchIndexes(ctx, db.defaultDatabaseName(), db.storage, storage.NodeID(id)); err != nil && !db.shouldIgnoreSearchIndexingError(err) {
+		return err
 	}
 
 	// Delete the node (storage should handle edge cleanup)

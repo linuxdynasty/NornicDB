@@ -75,7 +75,9 @@ jobs:
         run: make build
 
       - name: Test
-        run: make test-serial
+        run: |
+          set -o pipefail
+          make test-serial 2>&1 | grep -E 'FAIL|ok'
 
   coverage:
     name: Coverage

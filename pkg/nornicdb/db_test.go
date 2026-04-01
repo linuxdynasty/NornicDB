@@ -2358,6 +2358,50 @@ func TestSearchAndHybridSearch_RetryWhileIndexBuilding(t *testing.T) {
 	require.NotNil(t, hybrid)
 }
 
+func TestRemoveNodeFromSearchIndexes_WaitsForBuildCompletion(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	ns := storage.NewNamespacedEngine(base, "nornic")
+	svc := search.NewServiceWithDimensions(ns, 3)
+	require.NoError(t, svc.IndexNode(&storage.Node{
+		ID:              storage.NodeID("wait-delete"),
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"content": "wait for build removal"},
+		ChunkEmbeddings: [][]float32{{1, 2, 3}},
+	}))
+
+	entry := &dbSearchService{
+		dbName:    "nornic",
+		engine:    ns,
+		svc:       svc,
+		buildDone: make(chan struct{}),
+	}
+	entry.buildOnce.Do(func() {})
+
+	db := &DB{
+		config:            DefaultConfig(),
+		storage:           ns,
+		baseStorage:       base,
+		searchServices:    map[string]*dbSearchService{"nornic": entry},
+		inferenceServices: map[string]*inference.Engine{},
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.removeNodeFromSearchIndexes(context.Background(), "nornic", ns, storage.NodeID("wait-delete"))
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("removeNodeFromSearchIndexes returned before build completion: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(entry.buildDone)
+	require.NoError(t, <-errCh)
+	require.Equal(t, 0, svc.EmbeddingCount())
+}
+
 func TestHybridSearch_InvalidUnnamespacedStoragePanics(t *testing.T) {
 	db := &DB{
 		config:            DefaultConfig(),
