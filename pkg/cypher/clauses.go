@@ -501,6 +501,14 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				returnPart = ""
 			}
 
+			// Hot path: UNWIND row MERGE (n:Label {k: row.x}) [SET n.p = row.y] RETURN count(n)
+			// Execute as a single batched pass to avoid per-item MERGE query re-parsing/scans.
+			if startsWithKeywordFold(strings.TrimSpace(mutationPart), "MERGE") {
+				if fast, ok, err := e.executeUnwindSimpleMergeBatch(ctx, variable, items, mutationPart, returnPart); ok {
+					return fast, err
+				}
+			}
+
 			// Execute mutation for each unwound item
 			for _, item := range items {
 				// Reconstruct full query with RETURN.
@@ -811,6 +819,326 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	return result, nil
 }
 
+type unwindSimpleSetAssignment struct {
+	prop string
+	expr string
+}
+
+type unwindSimpleMergePlan struct {
+	supported      bool
+	mergeVar       string
+	label          string
+	matchProp      string
+	matchExpr      string
+	setAssignments []unwindSimpleSetAssignment
+}
+
+var unwindSimpleMergePatternRE = regexp.MustCompile(`(?is)^MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*\}\s*\)\s*$`)
+
+func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
+	plan := unwindSimpleMergePlan{supported: false}
+	mutation := strings.TrimSpace(mutationPart)
+	if !startsWithKeywordFold(mutation, "MERGE") {
+		return plan
+	}
+	// Strictly limit this optimization to a single-node MERGE with optional SET.
+	// Complex pipelines (MATCH/WITH/extra MERGE/etc.) must use the regular executor.
+	rest := strings.TrimSpace(mutation[len("MERGE"):])
+	if findKeywordIndexInContext(rest, "MERGE") >= 0 ||
+		findKeywordIndexInContext(mutation, "MATCH") >= 0 ||
+		findKeywordIndexInContext(mutation, "OPTIONAL MATCH") >= 0 ||
+		findKeywordIndexInContext(mutation, "WITH") >= 0 ||
+		findKeywordIndexInContext(mutation, "CALL") >= 0 ||
+		findKeywordIndexInContext(mutation, "CREATE") >= 0 ||
+		findKeywordIndexInContext(mutation, "DELETE") >= 0 ||
+		findKeywordIndexInContext(mutation, "DETACH") >= 0 ||
+		findKeywordIndexInContext(mutation, "REMOVE") >= 0 ||
+		findKeywordIndexInContext(mutation, "FOREACH") >= 0 ||
+		findKeywordIndexInContext(mutation, "UNWIND") >= 0 ||
+		findKeywordIndexInContext(mutation, "RETURN") >= 0 {
+		return plan
+	}
+
+	setIdx := findKeywordIndexInContext(mutation, "SET")
+	mergePart := mutation
+	setPart := ""
+	if setIdx > 0 {
+		mergePart = strings.TrimSpace(mutation[:setIdx])
+		setPart = strings.TrimSpace(mutation[setIdx+3:])
+	}
+
+	m := unwindSimpleMergePatternRE.FindStringSubmatch(mergePart)
+	if len(m) != 5 {
+		return plan
+	}
+	plan.mergeVar = strings.TrimSpace(m[1])
+	plan.label = strings.TrimSpace(m[2])
+	plan.matchProp = strings.TrimSpace(m[3])
+	plan.matchExpr = strings.TrimSpace(m[4])
+
+	if setPart == "" {
+		plan.supported = true
+		return plan
+	}
+
+	assignments := splitTopLevelComma(setPart)
+	plan.setAssignments = make([]unwindSimpleSetAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		a := strings.TrimSpace(assignment)
+		if a == "" {
+			continue
+		}
+		eqIdx := strings.Index(a, "=")
+		if eqIdx <= 0 {
+			return unwindSimpleMergePlan{}
+		}
+		left := strings.TrimSpace(a[:eqIdx])
+		right := strings.TrimSpace(a[eqIdx+1:])
+		dotIdx := strings.Index(left, ".")
+		if dotIdx <= 0 || dotIdx == len(left)-1 {
+			return unwindSimpleMergePlan{}
+		}
+		leftVar := strings.TrimSpace(left[:dotIdx])
+		prop := strings.TrimSpace(left[dotIdx+1:])
+		if leftVar != plan.mergeVar || prop == "" {
+			return unwindSimpleMergePlan{}
+		}
+		plan.setAssignments = append(plan.setAssignments, unwindSimpleSetAssignment{
+			prop: prop,
+			expr: right,
+		})
+	}
+
+	plan.supported = true
+	return plan
+}
+
+func (e *StorageExecutor) cachedUnwindSimpleMergePlan(mutationPart string) unwindSimpleMergePlan {
+	key := strings.TrimSpace(mutationPart)
+	e.unwindSimpleMergePlanMu.RLock()
+	if plan, ok := e.unwindSimpleMergePlanCache[key]; ok {
+		e.unwindSimpleMergePlanMu.RUnlock()
+		return plan
+	}
+	e.unwindSimpleMergePlanMu.RUnlock()
+
+	plan := parseSimpleUnwindMergePattern(key)
+	e.unwindSimpleMergePlanMu.Lock()
+	e.unwindSimpleMergePlanCache[key] = plan
+	e.unwindSimpleMergePlanMu.Unlock()
+	return plan
+}
+
+func isComparableInterfaceValue(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	t := reflect.TypeOf(v)
+	return t.Comparable()
+}
+
+func parseSimpleCountReturn(returnPart, mergeVar string) (alias string, ok bool) {
+	r := strings.TrimSpace(returnPart)
+	if r == "" {
+		return "", true
+	}
+	if !startsWithKeywordFold(r, "RETURN") {
+		return "", false
+	}
+	body := strings.TrimSpace(r[len("RETURN "):])
+	asIdx := findKeywordIndexInContext(body, "AS")
+	if asIdx <= 0 {
+		return "", false
+	}
+	expr := strings.TrimSpace(body[:asIdx])
+	alias = strings.TrimSpace(body[asIdx+2:])
+	expected := "count(" + mergeVar + ")"
+	if !strings.EqualFold(expr, expected) {
+		return "", false
+	}
+	if alias == "" {
+		alias = "count(" + mergeVar + ")"
+	}
+	return alias, true
+}
+
+func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
+	plan := e.cachedUnwindSimpleMergePlan(mutationPart)
+	if !plan.supported {
+		return nil, false, nil
+	}
+
+	countAlias, ok := parseSimpleCountReturn(returnPart, plan.mergeVar)
+	if !ok {
+		return nil, false, nil
+	}
+
+	type mergeBatchEntry struct {
+		matchVal     interface{}
+		item         interface{}
+		isComparable bool
+		compKey      interface{}
+		fallbackKey  string
+		node         *storage.Node
+	}
+
+	store := e.getStorage(ctx)
+	inputRowCount := int64(len(items))
+	rowValues := map[string]interface{}{unwindVar: nil}
+	ordered := make([]*mergeBatchEntry, 0, len(items))
+	byComparable := make(map[interface{}]*mergeBatchEntry, len(items))
+	byFallback := make(map[string]*mergeBatchEntry)
+	for _, item := range items {
+		rowValues[unwindVar] = item
+		matchVal := e.evaluateExpressionFromValues(plan.matchExpr, rowValues)
+		if isComparableInterfaceValue(matchVal) {
+			if existing, exists := byComparable[matchVal]; exists {
+				existing.item = item
+				continue
+			}
+			entry := &mergeBatchEntry{
+				matchVal:     matchVal,
+				item:         item,
+				isComparable: true,
+				compKey:      matchVal,
+			}
+			byComparable[matchVal] = entry
+			ordered = append(ordered, entry)
+			continue
+		}
+		fallbackKey := mergeLookupCacheKey(plan.label, plan.matchProp, matchVal)
+		if existing, exists := byFallback[fallbackKey]; exists {
+			existing.item = item
+			continue
+		}
+		entry := &mergeBatchEntry{
+			matchVal:     matchVal,
+			item:         item,
+			isComparable: false,
+			fallbackKey:  fallbackKey,
+		}
+		byFallback[fallbackKey] = entry
+		ordered = append(ordered, entry)
+	}
+
+	schema := store.GetSchema()
+	unresolved := len(ordered)
+	if schema != nil {
+		if _, indexed := schema.GetPropertyIndex(plan.label, plan.matchProp); indexed {
+			for _, entry := range ordered {
+				candidateIDs := schema.PropertyIndexLookup(plan.label, plan.matchProp, entry.matchVal)
+				for _, id := range candidateIDs {
+					n, getErr := store.GetNode(id)
+					if getErr != nil || n == nil {
+						continue
+					}
+					entry.node = n
+					unresolved--
+					break
+				}
+			}
+		}
+	}
+	if unresolved > 0 {
+		existing, err := store.GetNodesByLabel(plan.label)
+		if err != nil {
+			return nil, true, err
+		}
+		existingComparable := make(map[interface{}]*storage.Node, len(existing))
+		existingFallback := make(map[string]*storage.Node)
+		for _, n := range existing {
+			if n == nil {
+				continue
+			}
+			v, exists := n.Properties[plan.matchProp]
+			if !exists {
+				continue
+			}
+			if isComparableInterfaceValue(v) {
+				existingComparable[v] = n
+				continue
+			}
+			existingFallback[mergeLookupCacheKey(plan.label, plan.matchProp, v)] = n
+		}
+		for _, entry := range ordered {
+			if entry.node != nil {
+				continue
+			}
+			if entry.isComparable {
+				entry.node = existingComparable[entry.compKey]
+			} else {
+				entry.node = existingFallback[entry.fallbackKey]
+			}
+		}
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+	if returnPart != "" {
+		result.Columns = []string{countAlias}
+	}
+
+	notified := make(map[string]struct{}, len(ordered))
+	notifyOnce := func(nodeID string) {
+		if nodeID == "" {
+			return
+		}
+		if _, exists := notified[nodeID]; exists {
+			return
+		}
+		notified[nodeID] = struct{}{}
+		e.notifyNodeMutated(nodeID)
+	}
+
+	for _, entry := range ordered {
+		rowValues[unwindVar] = entry.item
+		node := entry.node
+		if node == nil {
+			node = &storage.Node{
+				ID:         storage.NodeID(e.generateID()),
+				Labels:     []string{plan.label},
+				Properties: map[string]interface{}{plan.matchProp: entry.matchVal},
+			}
+			actualID, createErr := store.CreateNode(node)
+			if createErr != nil {
+				return nil, true, fmt.Errorf("UNWIND MERGE batch create failed: %w", createErr)
+			}
+			node.ID = actualID
+			entry.node = node
+			result.Stats.NodesCreated++
+			if entry.isComparable {
+				byComparable[entry.compKey] = entry
+			} else {
+				byFallback[entry.fallbackKey] = entry
+			}
+			notifyOnce(string(node.ID))
+		}
+
+		needsUpdate := false
+		for _, assignment := range plan.setAssignments {
+			val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+			if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+				node.Properties[assignment.prop] = val
+				needsUpdate = true
+			}
+		}
+		if needsUpdate {
+			if updateErr := store.UpdateNode(node); updateErr != nil {
+				return nil, true, fmt.Errorf("UNWIND MERGE batch update failed: %w", updateErr)
+			}
+			notifyOnce(string(node.ID))
+		}
+	}
+
+	if returnPart != "" {
+		result.Rows = [][]interface{}{{inputRowCount}}
+	}
+	return result, true, nil
+}
+
 func rewriteUnwindCorrelationToIn(query string, variable string, paramName string) (string, bool) {
 	if strings.TrimSpace(query) == "" || strings.TrimSpace(variable) == "" || strings.TrimSpace(paramName) == "" {
 		return "", false
@@ -1048,26 +1376,6 @@ func (e *StorageExecutor) executeUnwindWithCollectProjection(unwindVar string, i
 // executeDoubleUnwind handles double UNWIND clauses like:
 // UNWIND [[1,2],[3,4]] AS pair UNWIND pair AS num RETURN num
 func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
-
-	// Check for dependent range expressions (range(1, i) where i is from first UNWIND)
-	if containsOutsideStrings(upper, "RANGE(") {
-		// Find if second UNWIND uses range with first variable
-		firstAsIdx := findKeywordIndex(cypher, "AS")
-		if firstAsIdx >= 0 {
-			afterAs := strings.TrimSpace(cypher[firstAsIdx+2:])
-			varEnd := strings.IndexAny(afterAs, " \t\n")
-			if varEnd > 0 {
-				firstVar := strings.ToUpper(afterAs[:varEnd])
-				restQuery := strings.ToUpper(afterAs[varEnd:])
-				// Check if range() contains the first variable
-				if containsOutsideStrings(restQuery, "RANGE(") && containsOutsideStrings(restQuery, firstVar) {
-					return nil, fmt.Errorf("dependent range in double UNWIND is not supported")
-				}
-			}
-		}
-	}
-
 	// Parse first UNWIND
 	firstUnwindIdx := findKeywordIndex(cypher, "UNWIND")
 	if firstUnwindIdx == -1 {
@@ -1143,15 +1451,24 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 	}
 	var allPairedItems []pairedItem
 
+	// Fast path: independent second UNWIND expression can be evaluated once and reused.
+	secondDependsOnFirst := replaceIdentifierOutsideQuotes(secondListExpr, firstVar, "__nornic_probe__") != secondListExpr
+	var independentInnerList interface{}
+	if !secondDependsOnFirst && secondListExpr != firstVar {
+		independentInnerList = e.evaluateExpressionWithContext(secondListExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+	}
+
 	for _, outerItem := range outerItems {
 		// The second UNWIND expression should reference the first variable
 		// If secondListExpr == firstVar, use outerItem directly (nested case)
 		var innerList interface{}
 		if secondListExpr == firstVar {
 			innerList = outerItem
+		} else if secondDependsOnFirst {
+			evaluatedExpr := e.replaceVariableInQuery(secondListExpr, firstVar, outerItem)
+			innerList = e.evaluateExpressionWithContext(evaluatedExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
 		} else {
-			// Cartesian product - evaluate second list independently
-			innerList = e.evaluateExpressionWithContext(secondListExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+			innerList = independentInnerList
 		}
 
 		switch inner := innerList.(type) {
@@ -1192,7 +1509,9 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 				} else if item.expr == firstVar {
 					row[i] = paired.outer
 				} else {
-					row[i] = e.evaluateExpressionWithContext(item.expr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+					evaluatedExpr := e.replaceVariableInQuery(item.expr, firstVar, paired.outer)
+					evaluatedExpr = e.replaceVariableInQuery(evaluatedExpr, secondVar, paired.inner)
+					row[i] = e.evaluateExpressionWithContext(evaluatedExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
 				}
 			}
 			result.Rows = append(result.Rows, row)

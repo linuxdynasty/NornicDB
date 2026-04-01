@@ -324,6 +324,11 @@ type StorageExecutor struct {
 	// vectorQueryEmbedInflight de-duplicates concurrent embedding work per key.
 	vectorQueryEmbedInflight map[string]*vectorEmbedInflight
 	vectorQueryEmbedMu       sync.Mutex
+
+	// unwindSimpleMergePlanCache memoizes parsed plans for the UNWIND ... MERGE
+	// batch fast path keyed by mutation query text.
+	unwindSimpleMergePlanCache map[string]unwindSimpleMergePlan
+	unwindSimpleMergePlanMu    sync.RWMutex
 }
 
 type vectorEmbedInflight struct {
@@ -408,20 +413,21 @@ type InferenceManager interface {
 //	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
 func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 	exec := &StorageExecutor{
-		parser:                   NewParser(),
-		storage:                  store,
-		cache:                    NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
-		planCache:                NewQueryPlanCache(500),   // Cache 500 parsed query plans
-		fabricPlanCache:          fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
-		analyzer:                 NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
-		nodeLookupCache:          make(map[string]*storage.Node, 1000),
-		shellParams:              make(map[string]interface{}),
-		searchService:            nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
-		vectorRegistry:           vectorspace.NewIndexRegistry(),
-		vectorIndexSpaces:        make(map[string]vectorspace.VectorSpaceKey),
-		hotPathTraceState:        &hotPathTraceState{},
-		vectorQueryEmbedCache:    make(map[string][]float32, 512),
-		vectorQueryEmbedInflight: make(map[string]*vectorEmbedInflight, 64),
+		parser:                     NewParser(),
+		storage:                    store,
+		cache:                      NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
+		planCache:                  NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		fabricPlanCache:            fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
+		analyzer:                   NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
+		nodeLookupCache:            make(map[string]*storage.Node, 1000),
+		shellParams:                make(map[string]interface{}),
+		searchService:              nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
+		vectorRegistry:             vectorspace.NewIndexRegistry(),
+		vectorIndexSpaces:          make(map[string]vectorspace.VectorSpaceKey),
+		hotPathTraceState:          &hotPathTraceState{},
+		vectorQueryEmbedCache:      make(map[string][]float32, 512),
+		vectorQueryEmbedInflight:   make(map[string]*vectorEmbedInflight, 64),
+		unwindSimpleMergePlanCache: make(map[string]unwindSimpleMergePlan, 128),
 	}
 	ensureBuiltInProceduresRegistered()
 	_ = exec.loadPersistedProcedures()
