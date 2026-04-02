@@ -1,74 +1,42 @@
 # WAL Compaction and Truncation
 
+**Managing Write-Ahead Log growth in NornicDB**
+
+Last Updated: December 2025
+
+---
+
 ## Overview
 
-NornicDB's Write-Ahead Log (WAL) now supports automatic compaction to prevent unbounded growth. Without compaction, the WAL would grow indefinitely in long-running databases, consuming disk space and slowing recovery.
+NornicDB's Write-Ahead Log (WAL) supports automatic compaction to prevent unbounded growth. Without compaction, the WAL would grow indefinitely in long-running databases, consuming disk space and slowing recovery.
 
-**Problem Solved**: WAL grows forever until manual snapshot + delete  
+**Problem Solved**: WAL grows forever until manual snapshot + delete
 **Solution**: Automatic periodic snapshots with WAL truncation
 
-## Implementation Date
-
-December 4, 2025
+---
 
 ## Features
 
-### 1. Manual WAL Truncation
+### 1. Automatic Compaction (Recommended)
 
-Truncate the WAL after creating a snapshot to remove old entries:
+Automatic compaction is the recommended approach for production deployments. Enable it through configuration:
 
-```go
-// Create snapshot
-snapshot, err := wal.CreateSnapshot(engine)
-if err != nil {
-    return err
-}
+**YAML configuration:**
 
-// Save snapshot to disk
-err = storage.SaveSnapshot(snapshot, "data/snapshot.json")
-if err != nil {
-    return err
-}
-
-// Truncate WAL - removes all entries before snapshot
-err = wal.TruncateAfterSnapshot(snapshot.Sequence)
-if err != nil {
-    log.Printf("Truncation failed: %v", err)
-    // Snapshot is still valid - can retry later
-}
+```yaml
+database:
+  wal_dir: "data/wal"
+  wal_sync_mode: "batch"
+  wal_snapshot_interval: "1h"       # Create snapshots hourly
+  wal_auto_compaction_enabled: true  # Enabled by default
+  wal_snapshot_dir: "data/snapshots"
 ```
 
-**Safety Guarantees:**
+**Environment variables:**
 
-- Atomic rename (crash-safe)
-- Old WAL remains intact until truncation succeeds
-- Can retry truncation if it fails
-- Recovery works from partial truncations
-
-### 2. Automatic Compaction (Recommended)
-
-Enable automatic snapshot creation and WAL truncation:
-
-```go
-// Create WAL with snapshot interval
-cfg := &storage.WALConfig{
-    Dir:              "data/wal",
-    SyncMode:         "batch",
-    SnapshotInterval: 1 * time.Hour, // Create snapshots hourly
-}
-wal, err := storage.NewWAL("", cfg)
-
-engine := storage.NewMemoryEngine()
-walEngine := storage.NewWALEngine(engine, wal)
-
-// Enable automatic compaction
-err = walEngine.EnableAutoCompaction("data/snapshots")
-if err != nil {
-    return err
-}
-
-// WAL will now be automatically truncated every hour
-// Old snapshots saved to data/snapshots/snapshot-<timestamp>.json
+```bash
+export NORNICDB_WAL_SNAPSHOT_INTERVAL=1h
+export NORNICDB_WAL_AUTO_COMPACTION_ENABLED=true
 ```
 
 **Behavior:**
@@ -77,15 +45,20 @@ if err != nil {
 - WAL truncated after each successful snapshot
 - Failures logged but don't crash the database
 - Automatic retry on next interval
+- Old snapshots saved to the snapshot directory as `snapshot-<timestamp>.json`
+
+### 2. Manual WAL Truncation
+
+For development or special cases, you can trigger truncation manually. Create a snapshot and then truncate the WAL to remove all entries before the snapshot point.
+
+**Safety Guarantees:**
+
+- Atomic rename (crash-safe)
+- Old WAL remains intact until truncation succeeds
+- Can retry truncation if it fails
+- Recovery works from partial truncations
 
 ### 3. Disable Automatic Compaction
-
-```go
-walEngine.DisableAutoCompaction()
-// Snapshots stop being created
-```
-
-Configuration:
 
 ```yaml
 database:
@@ -136,18 +109,13 @@ RETURN sequence, operation, tx_id, timestamp, data
 ORDER BY sequence;
 ```
 
+---
+
 ## How It Works
 
-### Truncation Process
+### Compaction Process
 
-1. **Flush pending writes** - ensure WAL is current
-2. **Close WAL file** - prepare for rewrite
-3. **Read all entries** - from current WAL
-4. **Filter entries** - keep only those AFTER snapshot sequence
-5. **Write new WAL** - with filtered entries to temp file
-6. **Atomic rename** - replace old WAL with new
-7. **Sync directory** - ensure rename is durable
-8. **Reopen WAL** - ready for new appends
+When a compaction cycle runs, NornicDB flushes any pending writes, then creates a point-in-time snapshot of the current database state. Once the snapshot is safely persisted, the WAL is rewritten to contain only entries that arrived after the snapshot. The old WAL file is replaced via an atomic rename so the operation is crash-safe — at no point can a crash leave the WAL in a partial or corrupt state.
 
 ### Crash Safety
 
@@ -183,6 +151,8 @@ Recovery:
   + Replay WAL since T=2h (20 new nodes)
   = 170 nodes recovered
 ```
+
+---
 
 ## Performance Impact
 
@@ -232,30 +202,21 @@ Recovery time = Snapshot load + O(interval writes)
 - **WAL truncation**: ~10-50ms (happens every hour, negligible amortized cost)
 - **Total overhead**: <0.001% of runtime
 
+---
+
 ## Configuration
 
-### WAL Config
+### WAL Settings
 
-```go
-type WALConfig struct {
-    Dir               string        // WAL directory
-    SyncMode          string        // "immediate", "batch", "none"
-    BatchSyncInterval time.Duration // Batch sync frequency
-    MaxFileSize       int64         // Rotation trigger (bytes)
-    MaxEntries        int64         // Rotation trigger (count)
-    SnapshotInterval  time.Duration // Auto-compaction frequency
-}
-
-// Defaults:
-DefaultWALConfig() = &WALConfig{
-    Dir:               "data/wal",
-    SyncMode:          "batch",
-    BatchSyncInterval: 100 * time.Millisecond,
-    MaxFileSize:       100 * 1024 * 1024, // 100MB
-    MaxEntries:        100000,
-    SnapshotInterval:  1 * time.Hour,      // Hourly compaction
-}
-```
+| Setting | Default | Description |
+|---|---|---|
+| `wal_dir` | `data/wal` | WAL directory |
+| `wal_sync_mode` | `batch` | Sync mode: `immediate`, `batch`, or `none` |
+| `wal_batch_sync_interval` | `100ms` | Batch sync frequency |
+| `wal_max_file_size` | `100MB` | File rotation trigger (bytes) |
+| `wal_max_entries` | `100000` | File rotation trigger (count) |
+| `wal_snapshot_interval` | `1h` | Auto-compaction frequency |
+| `wal_auto_compaction_enabled` | `true` | Enable/disable auto-compaction |
 
 ### Tuning Snapshot Interval
 
@@ -266,7 +227,7 @@ DefaultWALConfig() = &WALConfig{
 - More snapshot overhead
 - Good for: High-write, limited disk space
 
-**Moderate (every hour - default):**
+**Moderate (every hour — default):**
 
 - Balanced disk usage
 - Good recovery time
@@ -280,105 +241,20 @@ DefaultWALConfig() = &WALConfig{
 - Minimal overhead
 - Good for: Low-write, plenty of disk space
 
-## Statistics
+---
 
-Monitor compaction with:
+## Monitoring
 
-```go
-totalSnapshots, lastSnapshot := walEngine.GetSnapshotStats()
-fmt.Printf("Snapshots: %d, Last: %v\n", totalSnapshots, lastSnapshot)
+NornicDB exposes compaction metrics that you can use to monitor WAL health:
 
-walStats := wal.Stats()
-fmt.Printf("WAL: %d entries, %d bytes\n", walStats.EntryCount, walStats.BytesWritten)
-```
+- **Total snapshots created** — number of successful compaction cycles since startup
+- **Last snapshot time** — timestamp of the most recent snapshot
+- **WAL entry count** — current number of entries in the active WAL
+- **WAL bytes written** — total bytes in the active WAL
 
-## Testing
+These metrics are available through the server's diagnostics and can be monitored via the admin UI or log output.
 
-Comprehensive test coverage:
-
-### Unit Tests
-
-- `TestWAL_TruncateAfterSnapshot` - Manual truncation
-
-  - Removes old entries correctly
-  - Preserves data integrity
-  - Handles empty WAL after truncation
-
-- `TestWALEngine_AutoCompaction` - Automatic compaction
-  - Periodic snapshots created
-  - WAL truncated automatically
-  - Recovery works correctly
-  - Can disable compaction
-
-### Test Results
-
-```bash
-cd nornicdb
-go test -v -run TestWAL_TruncateAfterSnapshot ./pkg/storage/...
-# PASS (3 scenarios, all passing)
-
-go test -v -run TestWALEngine_AutoCompaction ./pkg/storage/...
-# PASS (3 scenarios, all passing)
-```
-
-## Examples
-
-### Example 1: Production Database
-
-```go
-// Setup with hourly compaction
-cfg := &storage.WALConfig{
-    Dir:              "/var/lib/nornicdb/wal",
-    SyncMode:         "batch",
-    SnapshotInterval: 1 * time.Hour,
-}
-wal, _ := storage.NewWAL("", cfg)
-
-engine := storage.NewBadgerEngine("/var/lib/nornicdb/data")
-walEngine := storage.NewWALEngine(engine, wal)
-
-// Enable auto-compaction (recommended for production)
-walEngine.EnableAutoCompaction("/var/lib/nornicdb/snapshots")
-
-// WAL will never grow beyond 1 hour of writes
-// Recovery always fast (<5 seconds)
-```
-
-### Example 2: Development (Manual Control)
-
-```go
-// Development - manual compaction
-wal, _ := storage.NewWAL("data/wal", nil)
-engine := storage.NewMemoryEngine()
-walEngine := storage.NewWALEngine(engine, wal)
-
-// Work on database...
-for i := 0; i < 10000; i++ {
-    walEngine.CreateNode(&storage.Node{ID: fmt.Sprintf("n%d", i)})
-}
-
-// Manual snapshot when needed
-snapshot, _ := wal.CreateSnapshot(engine)
-storage.SaveSnapshot(snapshot, "data/snapshot.json")
-wal.TruncateAfterSnapshot(snapshot.Sequence)
-
-// WAL now compact
-```
-
-### Example 3: Backup Strategy
-
-```go
-// Production backup with auto-compaction
-walEngine.EnableAutoCompaction("/backups/snapshots")
-
-// Snapshots are automatically created and stored
-// Each snapshot is a complete point-in-time backup
-// Format: /backups/snapshots/snapshot-20251204-153045.json
-
-// Recovery from specific snapshot:
-snapshot, _ := storage.LoadSnapshot("/backups/snapshots/snapshot-20251204-153045.json")
-engine, _ := storage.RecoverFromSnapshot(snapshot, "/var/lib/nornicdb/wal")
-```
+---
 
 ## Troubleshooting
 
@@ -386,14 +262,9 @@ engine, _ := storage.RecoverFromSnapshot(snapshot, "/var/lib/nornicdb/wal")
 
 **Check:**
 
-1. Is auto-compaction enabled?
+1. Verify auto-compaction is enabled in your configuration (`wal_auto_compaction_enabled: true`)
 
-   ```go
-   total, last := walEngine.GetSnapshotStats()
-   fmt.Printf("Snapshots: %d (last: %v)\n", total, last)
-   ```
-
-2. Check snapshot directory:
+2. Check snapshot directory for recent files:
 
    ```bash
    ls -lh data/snapshots/
@@ -437,54 +308,20 @@ lsof | grep wal.log
 ls -lt data/snapshots/ | head -1
 ```
 
-If snapshot is old, auto-compaction may not be running.
+If snapshot is old, auto-compaction may not be running. Verify your configuration and check server logs for compaction errors.
+
+---
 
 ## Best Practices
 
-1. **Always enable auto-compaction in production**
+1. **Always enable auto-compaction in production** — this is the default and should not be disabled unless you have a specific reason.
 
-   ```go
-   walEngine.EnableAutoCompaction("data/snapshots")
-   ```
+2. **Monitor snapshot creation** — check server logs or metrics to confirm snapshots are being created at the expected interval.
 
-2. **Monitor snapshot creation**
-
-   ```go
-   // Log snapshot stats periodically
-   go func() {
-       ticker := time.NewTicker(5 * time.Minute)
-       for range ticker.C {
-           total, last := walEngine.GetSnapshotStats()
-           log.Printf("Snapshots: %d, Last: %v", total, last)
-       }
-   }()
-   ```
-
-3. **Keep old snapshots for backup**
+3. **Rotate old snapshots** to avoid filling disk with historical snapshots:
 
    ```bash
-   # Rotate old snapshots
    find data/snapshots -name "snapshot-*.json" -mtime +7 -delete
    ```
 
-4. **Test recovery regularly**
-   ```go
-   // Periodic recovery test
-   snapshot, _ := storage.LoadSnapshot("latest-snapshot.json")
-   testEngine, _ := storage.RecoverFromSnapshot(snapshot, walDir)
-   // Verify testEngine has expected data
-   ```
-
-## References
-
-- **Source**: `pkg/storage/wal.go`
-- **Tests**: `pkg/storage/wal_test.go`
-- **Undo/Redo Tests**: `pkg/storage/wal_undo_test.go`
-- **Atomic Format Tests**: `pkg/storage/wal_atomic_test.go`
-- **Issue**: "WAL grows forever" - RESOLVED
-
-## Credits
-
-- Implementation: AI Assistant (Claudette)
-- Date: December 4, 2025
-- Status: ✅ Production Ready
+4. **Test recovery regularly** — periodically verify that your latest snapshot can be loaded and that the WAL replays correctly.

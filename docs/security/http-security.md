@@ -1,363 +1,276 @@
-# Security Implementation Summary
+# HTTP Request Security
 
 ## Overview
 
-NornicDB now has comprehensive security validation protecting all HTTP endpoints against injection attacks, SSRF, and protocol smuggling. This implementation mirrors the TypeScript security patterns from the Mimir project.
+NornicDB applies built-in HTTP request validation to protect exposed endpoints from common input-driven attacks before request handlers run.
 
-## Implementation Date
+The current protection set focuses on:
 
-December 4, 2025
+- token injection,
+- HTTP header injection and response splitting,
+- server-side request forgery (SSRF),
+- protocol smuggling,
+- unsafe callback and redirect targets.
 
-## Components Created
+This protection is enabled through the HTTP middleware layer and is intended to be active by default in normal server operation.
 
-### 1. Core Security Package (`pkg/security/`)
+## What Is Protected
 
-**Files:**
+The HTTP security layer validates the parts of a request most commonly used to smuggle attacker-controlled values into downstream systems.
 
-- `validation.go` (193 lines) - Core validation functions
-- `validation_test.go` (226 lines) - Comprehensive unit tests
-- `middleware.go` (86 lines) - HTTP middleware
-- `middleware_test.go` (172 lines) - Middleware tests
-- `README.md` - Complete documentation
+Automatically validated inputs include:
 
-**Test Coverage:**
+- all incoming HTTP headers,
+- `Authorization` credentials such as Bearer and Basic tokens,
+- query parameter tokens used by SSE or WebSocket-style flows,
+- URL-like parameters such as `callback`, `redirect`, `redirect_uri`, `url`, and `webhook`.
 
-- ✅ 19 unit tests (all passing)
-- ✅ 14 test functions
-- ✅ 30+ attack scenarios covered
-- ✅ Performance: <10µs per validation
+This means requests can be rejected before application logic processes a dangerous token, forwards an unsafe URL, or reflects an injected header.
 
-### 2. Server Integration (`pkg/server/`)
+## Validation Behavior
 
-**Modified:**
+### Token Validation
 
-- `server.go` - Added security middleware to router
+Token validation is designed to reject values that can break protocol boundaries or carry script payloads.
 
-**Added:**
+It blocks:
 
-- `security_integration_test.go` (192 lines) - End-to-end tests
+- CRLF injection such as `\r\n`,
+- newline injection such as `\n`,
+- HTML or script payloads such as `<script>`,
+- JavaScript-style protocol payloads such as `javascript:`,
+- protocol injection via `data:`, `file:`, or `ftp:`,
+- null byte injection such as `\x00`,
+- oversized token values above 8192 bytes.
 
-**Integration Point:**
+Typical rejected examples:
 
-```go
-// In buildRouter()
-securityMiddleware := security.NewSecurityMiddleware()
-handler := securityMiddleware.ValidateRequest(mux)
-// ... other middleware
-```
+- `token\r\nX-Malicious: header`
+- `token\nX-Evil: value`
+- `<script>alert('xss')</script>`
+- `javascript:alert('xss')`
+- `data:text/html,<script>...`
+- `file:///etc/passwd`
+- `token\x00evil`
 
-## Security Features
+Approximate performance: `1-2 µs` per validation.
 
-### Token Validation (`ValidateToken`)
+### URL Validation
 
-**Protects Against:**
+URL validation is intended to stop NornicDB from accepting user-supplied callback or webhook targets that could be used to reach internal infrastructure.
 
-- ✅ CRLF injection (`\r\n`)
-- ✅ XSS attacks (`<script>`, `javascript:`)
-- ✅ Protocol injection (`data:`, `file:`, `ftp:`)
-- ✅ Null byte injection (`\x00`)
-- ✅ DoS (length > 8192 bytes)
+It blocks:
 
-**Performance:** ~1-2µs per call
+- private IPv4 ranges such as `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`,
+- localhost and loopback targets in production,
+- link-local targets such as `169.254.0.0/16`,
+- cloud metadata endpoints used in AWS, Azure, and GCP environments,
+- unsafe schemes such as `file://`, `gopher://`, `dict://`, and `ftp://`,
+- plain HTTP URLs in production when secure transport is required.
 
-### URL Validation (`ValidateURL`)
+Typical rejected examples:
 
-**Protects Against:**
+- `http://192.168.1.1/steal`
+- `http://10.0.0.1/internal`
+- `http://172.16.0.1/admin`
+- `http://169.254.169.254/latest/meta-data/`
+- `http://169.254.169.254/metadata/instance`
+- `http://169.254.169.254/computeMetadata/`
+- `http://127.0.0.1:8080`
+- `http://localhost:3000`
+- `file:///etc/passwd`
+- `gopher://internal:70/`
 
-- ✅ SSRF to private IPs (10.0.0.0/8, 192.168.0.0/16, 172.16.0.0/12)
-- ✅ SSRF to localhost (127.0.0.0/8) in production
-- ✅ SSRF to link-local (169.254.0.0/16)
-- ✅ Cloud metadata services (AWS, Azure, GCP)
-- ✅ Protocol smuggling (file://, gopher://, dict://)
-- ✅ HTTP downgrade in production
+Approximate performance: `5-10 µs` per validation.
 
-**Performance:** ~5-10µs per call
+### Header Validation
 
-### Header Validation (`ValidateHeaderValue`)
+Header validation protects against request and response boundary corruption.
 
-**Protects Against:**
+It blocks:
 
-- ✅ HTTP header injection (CRLF)
-- ✅ Response splitting
-- ✅ Null bytes
-- ✅ Excessively long headers (> 4096 bytes)
+- CRLF injection,
+- newline injection,
+- null bytes,
+- excessively long header values above 4096 bytes.
 
-**Performance:** ~0.5-1µs per call
+Typical rejected examples:
 
-### Middleware (`SecurityMiddleware`)
+- `Value\r\nX-Injected: evil`
+- `Value\nX-Injected: evil`
+- `Value\x00evil`
 
-**Automatically Validates:**
+Approximate performance: `0.5-1 µs` per validation.
 
-- ✅ All HTTP headers
-- ✅ Authorization tokens (Bearer/Basic)
-- ✅ Query parameter tokens (SSE/WebSocket)
-- ✅ URL parameters: `callback`, `redirect`, `redirect_uri`, `url`, `webhook`
+## Environment-Specific Behavior
 
-**Environment Detection:**
+The middleware changes behavior depending on the runtime environment so local development stays usable without weakening default production posture.
 
-- Production: Blocks localhost, requires HTTPS
-- Development: Allows localhost/127.0.0.1, allows HTTP
-- Configurable via `NORNICDB_ENV` or `NODE_ENV`
+### Production
 
-## Mapping to TypeScript Security Tests
-
-### From `csrf-protection.test.ts`
-
-| TypeScript Pattern          | Go Implementation         | Status      |
-| --------------------------- | ------------------------- | ----------- |
-| Token validation            | `ValidateToken()`         | ✅ Complete |
-| State parameter validation  | `ValidateURL()`           | ✅ Complete |
-| Header injection prevention | `ValidateHeaderValue()`   | ✅ Complete |
-| OAuth state management      | Middleware auto-validates | ✅ Complete |
-
-### From `ssrf-protection.test.ts`
-
-| TypeScript Pattern           | Go Implementation | Status                      |
-| ---------------------------- | ----------------- | --------------------------- |
-| `validateOAuthTokenFormat()` | `ValidateToken()` | ✅ 1:1 mapping              |
-| `validateOAuthUserinfoUrl()` | `ValidateURL()`   | ✅ 1:1 mapping              |
-| Private IP detection         | `isPrivateIP()`   | ✅ All ranges               |
-| Cloud metadata blocking      | `ValidateURL()`   | ✅ AWS/Azure/GCP            |
-| Protocol smuggling           | `ValidateURL()`   | ✅ file://, gopher://, etc. |
-
-## Attack Scenarios Tested
-
-### Token Injection (10 scenarios)
-
-- ✅ CRLF injection: `token\r\nX-Malicious: header`
-- ✅ Newline injection: `token\nX-Evil: value`
-- ✅ HTML injection: `<script>alert('xss')</script>`
-- ✅ JavaScript protocol: `javascript:alert('xss')`
-- ✅ Data URI: `data:text/html,<script>...`
-- ✅ File protocol: `file:///etc/passwd`
-- ✅ Null byte: `token\x00evil`
-- ✅ Empty token
-- ✅ Semicolon injection
-- ✅ DoS via long token (> 8192 bytes)
-
-### SSRF Attacks (15+ scenarios)
-
-- ✅ Private IPs: `http://192.168.1.1/steal`
-- ✅ Private IPs: `http://10.0.0.1/internal`
-- ✅ Private IPs: `http://172.16.0.1/admin`
-- ✅ AWS metadata: `http://169.254.169.254/latest/meta-data/`
-- ✅ Azure metadata: `http://169.254.169.254/metadata/instance`
-- ✅ GCP metadata: `http://169.254.169.254/computeMetadata/`
-- ✅ Localhost (production): `http://127.0.0.1:8080`
-- ✅ Localhost (production): `http://localhost:3000`
-- ✅ Link-local: `http://169.254.1.1`
-
-### Protocol Smuggling (4 scenarios)
-
-- ✅ File protocol: `file:///etc/passwd`
-- ✅ FTP protocol: `ftp://internal-ftp/`
-- ✅ Gopher protocol: `gopher://internal:70/`
-- ✅ Dict protocol: `dict://internal:2628/`
-
-### Header Injection (3 scenarios)
-
-- ✅ CRLF: `Value\r\nX-Injected: evil`
-- ✅ Newline: `Value\nX-Injected: evil`
-- ✅ Null byte: `Value\x00evil`
-
-## Environment Configuration
-
-### Production (Default)
+Use either of the following:
 
 ```bash
-# Strict security
 NORNICDB_ENV=production
-# or
+```
+
+or:
+
+```bash
 NODE_ENV=production
 ```
 
-**Behavior:**
+Production behavior:
 
-- ❌ Blocks localhost/127.0.0.1
-- ❌ Blocks HTTP URLs (requires HTTPS)
-- ✅ Blocks all private IPs
-- ✅ Blocks cloud metadata services
+- blocks `localhost` and `127.0.0.1`,
+- blocks HTTP URLs when HTTPS is expected,
+- blocks private IP ranges,
+- blocks cloud metadata services.
 
 ### Development
 
+Use either of the following:
+
 ```bash
-# Relaxed for local development
 NORNICDB_ENV=development
-# or
+```
+
+or:
+
+```bash
 NODE_ENV=development
 ```
 
-**Behavior:**
+Development behavior:
 
-- ✅ Allows localhost/127.0.0.1
-- ✅ Allows HTTP URLs
-- ❌ Still blocks other private IPs
-- ❌ Still blocks cloud metadata
+- allows `localhost` and `127.0.0.1`,
+- allows HTTP callback targets for local workflows,
+- still blocks non-local private IP targets,
+- still blocks cloud metadata endpoints.
 
-### Allow HTTP (Not Recommended)
+### Allow HTTP Override
 
 ```bash
 NORNICDB_ALLOW_HTTP=true
 ```
 
-**Behavior:**
+This permits HTTP targets even when production-style restrictions would normally reject them.
 
-- ✅ Allows HTTP even in production
-- ⚠️ Use only for testing/development
+Use this only when you explicitly need it for a controlled environment. It is not recommended for internet-facing deployments.
 
-## Integration Tests
+## How It Is Integrated
 
-**Created:** `pkg/server/security_integration_test.go`
+The protection is enforced through middleware in the HTTP server stack.
 
-**Tests:**
-
-1. `TestSecurityMiddleware_Integration` - 8 attack scenarios
-2. `TestSecurityMiddleware_DevelopmentMode` - 3 environment tests
-3. `BenchmarkSecurityMiddleware` - Performance benchmark
-
-**Results:**
-
-- ✅ All attacks blocked correctly
-- ✅ Valid requests pass through
-- ✅ Development mode allows localhost
-- ✅ Negligible performance overhead
-
-## Usage Examples
-
-### Automatic Protection (Recommended)
-
-The middleware is **already integrated** into NornicDB's HTTP server. All endpoints are automatically protected.
+Integration point:
 
 ```go
-// No code changes needed - middleware is active!
-// Just configure environment:
-os.Setenv("NORNICDB_ENV", "production")
+securityMiddleware := security.NewSecurityMiddleware()
+handler := securityMiddleware.ValidateRequest(mux)
 ```
 
-### Manual Validation (Optional)
+That means user-facing endpoints benefit from the same request validation rules without each handler needing to reimplement them.
 
-For custom endpoints or non-HTTP use cases:
+## Using The Validators Directly
+
+If you add a custom endpoint or perform outbound HTTP requests using user-supplied values, you can apply the same validation functions directly.
 
 ```go
 import "github.com/orneryd/nornicdb/pkg/security"
 
-// Validate before external HTTP request
 webhookURL := r.URL.Query().Get("webhook")
 if err := security.ValidateURL(webhookURL, false, false); err != nil {
-    return fmt.Errorf("invalid webhook URL: %w", err)
+	return fmt.Errorf("invalid webhook URL: %w", err)
 }
 
-// Validate API token
 if err := security.ValidateToken(apiKey); err != nil {
-    return fmt.Errorf("invalid token: %w", err)
+	return fmt.Errorf("invalid token: %w", err)
 }
 
-// Validate custom header
 if err := security.ValidateHeaderValue(customHeader); err != nil {
-    return fmt.Errorf("invalid header: %w", err)
+	return fmt.Errorf("invalid header: %w", err)
 }
 ```
 
-## Performance Benchmarks
+This is useful when:
 
-```
+- building custom integrations,
+- validating webhook targets,
+- accepting callback URLs from users,
+- processing externally supplied API credentials.
+
+## Tested Attack Coverage
+
+The current test coverage includes more than 30 attack-oriented scenarios across unit and integration tests.
+
+Coverage includes:
+
+- token injection and script payload rejection,
+- SSRF attempts to private and metadata endpoints,
+- protocol smuggling using non-HTTP schemes,
+- header injection and response-splitting patterns,
+- development versus production behavior differences.
+
+Current test inventory:
+
+- 19 unit tests in the security package,
+- integration coverage for middleware behavior,
+- end-to-end request rejection tests in the server layer,
+- benchmark coverage for validator and middleware overhead.
+
+## Performance
+
+Representative benchmark results:
+
+```text
 BenchmarkValidateToken-10       1000000     1.2 µs/op
 BenchmarkValidateURL-10         200000      7.5 µs/op
 BenchmarkValidateHeader-10      2000000     0.8 µs/op
 BenchmarkMiddleware-10          500000      3.2 µs/op
 ```
 
-**Total overhead per request:** ~3-4µs (negligible)
+Typical total middleware overhead is about `3-4 µs` per request, which is negligible relative to normal network and handler latency.
 
-## Security Best Practices
+## Operational Guidance
 
-### DO ✅
+Recommended:
 
-- Always run in production mode on public servers
-- Use HTTPS in production
-- Monitor security logs for attack attempts
-- Keep dependencies updated
-- Review security middleware behavior in dev vs prod
+- run internet-facing deployments in production mode,
+- use HTTPS in production,
+- monitor logs for repeated validation failures,
+- validate user-supplied callback and webhook URLs before any outbound request,
+- keep security-sensitive dependencies current.
 
-### DON'T ❌
+Avoid:
 
-- Never disable security validations
-- Don't allow HTTP in production (unless absolutely required)
-- Don't whitelist private IPs without careful consideration
-- Don't expose security errors to end users (log them instead)
+- disabling validation for convenience,
+- allowing HTTP targets in production unless there is a strong operational reason,
+- permitting private-network callback targets without explicit review,
+- returning raw validator failure details directly to end users when generic client-facing errors are sufficient.
 
-## Files Modified
+## Compliance Relevance
 
-```
-nornicdb/
-├── pkg/
-│   ├── security/
-│   │   ├── validation.go          (NEW - 193 lines)
-│   │   ├── validation_test.go     (NEW - 226 lines)
-│   │   ├── middleware.go          (NEW - 86 lines)
-│   │   ├── middleware_test.go     (NEW - 172 lines)
-│   │   └── README.md              (NEW - comprehensive docs)
-│   └── server/
-│       ├── server.go              (MODIFIED - added security import + middleware)
-│       └── security_integration_test.go (NEW - 192 lines)
-└── docs/
-    └── security/
-        └── http-security.md (THIS FILE)
-```
+This request validation layer helps support:
 
-## Testing Summary
+- OWASP Top 10 protections related to injection and SSRF,
+- PCI DSS controls for injection-resistant input handling,
+- GDPR Article 32 expectations for appropriate technical safeguards,
+- SOC 2 logical access and system protection controls,
+- HIPAA technical safeguard expectations for secure processing.
 
-```bash
-# Run all security tests
-cd nornicdb
-go test -v ./pkg/security/...
+## Implementation References
 
-# Output:
-# PASS: 19/19 tests (all subtests passing)
-# Coverage: 30+ attack scenarios
-# Performance: 0.587s total runtime
-```
+If you need the underlying code or tests, the implementation lives in:
 
-## References
+- `pkg/security/validation.go`
+- `pkg/security/validation_test.go`
+- `pkg/security/middleware.go`
+- `pkg/security/middleware_test.go`
+- `pkg/server/security_integration_test.go`
 
-- **Go Source:** `pkg/security/validation.go`
-- **Go Tests:** `pkg/security/validation_test.go`
-- **Middleware:** `pkg/security/middleware.go`
-- **Integration Tests:** `pkg/server/security_integration_test.go`
-- **OWASP SSRF:** https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
-- **OWASP CSRF:** https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html
-- **CWE-918 (SSRF):** https://cwe.mitre.org/data/definitions/918.html
-- **CWE-352 (CSRF):** https://cwe.mitre.org/data/definitions/352.html
+## External References
 
-## Next Steps
-
-1. ✅ **COMPLETE:** Security validation package implemented
-2. ✅ **COMPLETE:** Comprehensive tests (19 tests, 30+ scenarios)
-3. ✅ **COMPLETE:** Server integration
-4. ✅ **COMPLETE:** Documentation
-5. ⏳ **OPTIONAL:** Add security monitoring/alerts
-6. ⏳ **OPTIONAL:** Add rate limiting per security event type
-7. ⏳ **OPTIONAL:** Add CSRF state store for OAuth flows (if needed)
-
-## Compliance Notes
-
-This implementation helps satisfy:
-
-- **OWASP Top 10:** Addresses A03:2021 (Injection) and A10:2021 (SSRF)
-- **PCI DSS:** Requirement 6.5.1 (Injection flaws)
-- **GDPR:** Art. 32 (Security of processing - appropriate technical measures)
-- **SOC 2:** CC6.1 (Logical and physical access controls)
-- **HIPAA:** 164.312(a)(1) (Technical safeguards)
-
-## Contributors
-
-- Implementation: AI Assistant (Claudette)
-- Review: Required before production deployment
-- Test Design: Based on TypeScript security test patterns
-
-## Version
-
-- **Implementation Version:** 1.0.0
-- **Date:** December 4, 2025
-- **Go Version:** 1.23+
-- **Status:** ✅ All tests passing, ready for production
+- OWASP SSRF Prevention Cheat Sheet
+- OWASP CSRF Prevention Cheat Sheet
+- CWE-918: Server-Side Request Forgery
+- CWE-352: Cross-Site Request Forgery

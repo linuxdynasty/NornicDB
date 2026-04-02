@@ -1,24 +1,27 @@
-# NornicDB Search Implementation
+# Hybrid Search
+
+**Complete guide to combined vector + keyword search in NornicDB**
+
+Last Updated: December 2025
+
+---
 
 ## Overview
 
-The search package (`pkg/search/`) implements a **hybrid search system** combining:
+NornicDB provides a **hybrid search system** that combines three retrieval strategies for best-of-both-worlds results:
 
-1. **Vector Search** - Cosine similarity on 1024-dimensional embeddings
-2. **BM25 Full-Text Search** - Keyword search with TF-IDF scoring
-3. **RRF (Reciprocal Rank Fusion)** - Industry-standard algorithm to merge rankings
+1. **Vector Search** — Cosine similarity on high-dimensional embeddings for semantic understanding
+2. **BM25 Full-Text Search** — Keyword search with TF-IDF scoring for exact term matching
+3. **RRF (Reciprocal Rank Fusion)** — Industry-standard algorithm to merge rankings from both strategies
 
 By default, **both sides see all node properties**:
 
-- **Embedding text / vector search**: the embedding worker builds text from **all node properties plus node labels** by default, excluding built-in metadata fields like `embedding`, `has_embedding`, timestamps, and similar internal keys. This is configurable through embedding include/exclude settings if you want to restrict which properties contribute to embeddings.
+- **Embedding text / vector search**: embeddings are built from **all node properties plus node labels** by default, excluding built-in metadata fields like `embedding`, `has_embedding`, timestamps, and similar internal keys. This is configurable through embedding include/exclude settings if you want to restrict which properties contribute to embeddings.
 - **BM25 full-text search**: BM25 also indexes **all node properties**. A small set of common text fields such as `content`, `text`, `title`, and `name` are added first for better ranking, but searchability is not limited to those fields.
 
-This is the same approach used by:
+This is the same approach used by Azure AI Search, Elasticsearch, Weaviate, and Google Cloud Search.
 
-- Azure AI Search
-- Elasticsearch
-- Weaviate
-- Google Cloud Search
+---
 
 ## Architecture
 
@@ -43,9 +46,11 @@ This is the same approach used by:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+---
+
 ## Full-Text Search Properties
 
-BM25 indexes **all node properties**, but these properties are treated as **priority fields** for ranking and are added first (matching Mimir's Neo4j `node_search` index):
+BM25 indexes **all node properties**, but these properties are treated as **priority fields** for ranking:
 
 | Property       | Description                |
 | -------------- | -------------------------- |
@@ -76,6 +81,8 @@ That means hybrid search is not limited to a single `content` field unless you c
 
 If you set embedding include/exclude options, the vector side follows those rules, while the BM25 side still indexes all properties.
 
+---
+
 ## RRF Algorithm
 
 **Formula**: `RRF_score(doc) = Σ (weight_i / (k + rank_i))`
@@ -96,48 +103,70 @@ The system automatically adjusts weights based on query characteristics:
 | Medium     | 3-5   | 1.0           | 1.0         | Balanced               |
 | Long       | 6+    | 1.5           | 0.5         | Semantic understanding |
 
+---
+
 ## Usage
 
-```go
-import "github.com/orneryd/nornicdb/pkg/search"
+### REST API
 
-// Create search service
-engine := storage.NewMemoryEngine()
-svc := search.NewService(engine)
+The primary way to run hybrid searches is the REST search endpoint:
 
-// Build indexes from storage
-ctx := context.Background()
-svc.BuildIndexes(ctx)
+```bash
+curl -X POST http://localhost:7474/nornicdb/search \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "query": "machine learning algorithms",
+    "limit": 10,
+    "min_similarity": 0.5
+  }'
+```
 
-// Hybrid RRF search
-opts := search.DefaultSearchOptions()
-opts.Limit = 10
-opts.MinSimilarity = 0.5
+Results include RRF metadata so you can see how each ranking strategy contributed:
 
-response, err := svc.Search(ctx, "authentication security", embedding, opts)
-
-// Results include RRF metadata
-for _, r := range response.Results {
-    fmt.Printf("%s: rrf=%.4f vectorRank=%d bm25Rank=%d\n",
-        r.ID, r.RRFScore, r.VectorRank, r.BM25Rank)
+```json
+{
+  "results": [
+    {
+      "id": "node-42",
+      "score": 0.0312,
+      "rrf_score": 0.0312,
+      "vector_rank": 2,
+      "bm25_rank": 1,
+      "labels": ["Document"],
+      "properties": { "title": "Introduction to ML Algorithms", "..." : "..." }
+    }
+  ]
 }
 ```
 
 ### Search Options
 
-```go
-type SearchOptions struct {
-    Limit         int       // Max results (default: 50)
-    MinSimilarity float64   // Vector threshold (default: 0.5)
-    Types         []string  // Filter by node labels
+| Parameter        | Default | Description                                     |
+| ---------------- | ------- | ----------------------------------------------- |
+| `query`          | —       | The search text (required)                      |
+| `limit`          | 50      | Maximum number of results                       |
+| `min_similarity` | 0.5     | Minimum vector similarity threshold             |
+| `types`          | all     | Filter results to specific node labels          |
+| `rrf_k`          | 60      | RRF constant (higher = more weight to lower ranks) |
+| `vector_weight`  | 1.0     | Weight for vector search results                |
+| `bm25_weight`    | 1.0     | Weight for BM25 results                         |
+| `min_rrf_score`  | 0.01    | Minimum RRF score to include in results         |
 
-    // RRF configuration
-    RRFK         float64   // RRF constant (default: 60)
-    VectorWeight float64   // Vector weight (default: 1.0)
-    BM25Weight   float64   // BM25 weight (default: 1.0)
-    MinRRFScore  float64   // Min RRF score (default: 0.01)
-}
+### Cypher Procedure
+
+You can also run vector search from Cypher using `db.index.vector.queryNodes`:
+
+```cypher
+CALL db.index.vector.queryNodes('embeddings', 10, $queryEmbedding)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
 ```
+
+See the [Vector Search Guide](vector-search.md) for full details on Cypher-based search.
+
+---
 
 ## Fallback Chain
 
@@ -149,13 +178,15 @@ The search automatically falls back when needed:
 
 ## Caching
 
-Search results are cached by the unified search service so that **repeated identical requests** (same query and options) return immediately from memory. The cache is shared by all entry points (HTTP `/nornicdb/search`, Cypher vector procedures, MCP, etc.).
+Search results are cached so that **repeated identical requests** (same query and options) return immediately from memory. The cache is shared by all entry points (HTTP `/nornicdb/search`, Cypher vector procedures, MCP, etc.).
 
 - **Key:** Query text + options (limit, types/labels, rerank, MMR settings). Same inputs ⇒ cache hit.
 - **Size:** Up to 1000 entries (LRU); entries expire after 5 minutes (TTL).
-- **Invalidation:** The cache is cleared whenever the index changes (`IndexNode` or `RemoveNode`), so results stay correct after updates.
+- **Invalidation:** The cache is cleared whenever the index changes (node created, updated, or removed), so results stay correct after mutations.
 
 Use the same query and options for repeated calls to benefit from the cache (e.g. same search box query and limit).
+
+---
 
 ## Performance (Apple M3 Max)
 
@@ -166,30 +197,7 @@ Use the same query and options for repeated calls to benefit from the cache (e.g
 | RRF Fusion    | 100 candidates | ~27µs  |
 | Index Build   | 38K nodes      | ~5.4s  |
 
-## Test Coverage
+## Related Guides
 
-```bash
-# Run all search tests
-go test -v ./pkg/search/...
-
-# Run with real Neo4j data
-go test -v ./pkg/search/... -run RealData
-
-# Run benchmarks
-go test -bench=. ./pkg/search/...
-```
-
-## Files
-
-- `search.go` - Main service with RRF fusion
-- `vector_index.go` - Cosine similarity search
-- `fulltext_index.go` - BM25 inverted index
-- `search_test.go` - Comprehensive tests
-
-## Future Improvements
-
-1. **HNSW Index** - O(log n) vector search vs current O(n)
-2. **GPU Acceleration** - Metal/CUDA for vector operations
-3. **Stemming** - Better text normalization
-4. **Field Boosting** - Weight title matches higher
-5. **Phrase Search** - Exact phrase matching
+- [Vector Search](vector-search.md) — dedicated vector search guide with Cypher index examples
+- [Data Import/Export](data-import-export.md) — importing data for search indexing

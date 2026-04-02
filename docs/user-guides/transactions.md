@@ -1,106 +1,132 @@
-# NornicDB Transaction Implementation
+# Transactions
 
-## Transaction Semantics
+**Complete guide to ACID transactions in NornicDB**
 
-### What's Implemented
+Last Updated: November 2025
 
-✅ **Atomicity** - All operations commit together or none do
+---
 
-✅ **Operation Buffering** - Changes are invisible until commit
+## Overview
 
-✅ **Read-Your-Writes** - Transaction can see its own uncommitted changes
+NornicDB transactions provide full ACID guarantees for graph mutations:
 
-✅ **Rollback** - Discard all buffered operations
+- **Atomicity** — All operations in a transaction commit together or none do
+- **Operation Buffering** — Changes are invisible to other readers until commit
+- **Read-Your-Writes** — A transaction can read its own uncommitted changes
+- **Rollback** — Discard all pending operations and restore the previous state
+- **Conflict Detection** — Concurrent write-write races fail at commit instead of silently overwriting newer state
 
-✅ **Closed Transaction Detection** - Error if operating on closed tx
+## Isolation
 
-### Isolation Semantics
+NornicDB provides **snapshot isolation** via MVCC:
 
-NornicDB storage transactions now provide snapshot isolation via MVCC:
+- Each transaction captures a read snapshot at the moment it begins
+- All reads inside the transaction see a consistent view of the graph as of that snapshot, plus the transaction's own pending changes
+- Uncommitted changes from other transactions are never visible
+- If two transactions attempt to write to the same data, the second to commit receives a conflict error
 
-- explicit transactions capture a read snapshot when `BeginTransaction()` starts
-- all committed reads inside the transaction are filtered to that snapshot
-- uncommitted changes are not visible to other transactions
-- read-your-writes still applies for changes buffered by the current transaction
-- concurrent write-write races fail at commit with a conflict instead of silently overwriting newer state
+---
 
-In practice, all reads within a transaction see a consistent storage-layer view of the graph as of the transaction start, plus the transaction's own pending changes.
+## Usage
 
-### Usage Example
+### Auto-Commit (Single Statement)
 
-```go
-engine := storage.NewMemoryEngine()
-tx := engine.BeginTransaction()
+The simplest way to run a query is the auto-commit endpoint. Each request is its own transaction:
 
-// Operations are buffered, not yet visible in engine
-tx.CreateNode(&Node{ID: "user-1", Labels: []string{"User"}})
-tx.CreateNode(&Node{ID: "user-2", Labels: []string{"User"}})
-tx.CreateEdge(&Edge{ID: "e1", StartNode: "user-1", EndNode: "user-2", Type: "FOLLOWS"})
-
-// Read-your-writes works
-node, _ := tx.GetNode("user-1")  // Returns the buffered node
-
-// Either commit all...
-err := tx.Commit()
-
-// ...or rollback all
-// tx.Rollback()
+```bash
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "statements": [{
+      "statement": "CREATE (u:User {name: $name, email: $email}) RETURN u",
+      "parameters": {"name": "Alice", "email": "alice@example.com"}
+    }]
+  }'
 ```
 
-## Performance Benchmarks
+Multiple statements in a single request execute atomically — they all commit together or all roll back:
 
-```
-BenchmarkTransaction_CommitNodes-16      129,942   10,618 ns/op   10,737 B/op   96 allocs/op
-BenchmarkTransaction_RollbackNodes-16    224,329    5,403 ns/op    6,776 B/op   66 allocs/op
-```
-
-**Interpretation:**
-
-- Committing 10 nodes takes ~10.6μs (~1μs per node)
-- Rolling back 10 nodes takes ~5.4μs (faster - no storage writes)
-- Memory overhead: ~1KB per node in transaction buffer
-
-## Test Coverage
-
-| Package         | Coverage |
-| --------------- | -------- |
-| `pkg/storage`   | 85.2%    |
-| `pkg/filter`    | 96.0%    |
-| `pkg/search`    | 89.8%    |
-| `pkg/decay`     | 87.4%    |
-| `pkg/inference` | 85.5%    |
-
-## Test Results
-
-```
-=== RUN   TestTransaction_CreateNode_Basic
---- PASS: TestTransaction_CreateNode_Basic (0.00s)
-=== RUN   TestTransaction_Rollback
---- PASS: TestTransaction_Rollback (0.00s)
-=== RUN   TestTransaction_Atomicity
---- PASS: TestTransaction_Atomicity (0.00s)
-=== RUN   TestTransaction_DeleteNode
---- PASS: TestTransaction_DeleteNode (0.00s)
-=== RUN   TestTransaction_UpdateNode
---- PASS: TestTransaction_UpdateNode (0.00s)
-=== RUN   TestTransaction_CreateEdge
---- PASS: TestTransaction_CreateEdge (0.00s)
-=== RUN   TestTransaction_CreateEdgeWithNewNodes
---- PASS: TestTransaction_CreateEdgeWithNewNodes (0.00s)
-=== RUN   TestTransaction_DeleteEdge
---- PASS: TestTransaction_DeleteEdge (0.00s)
-=== RUN   TestTransaction_ClosedTransaction
---- PASS: TestTransaction_ClosedTransaction (0.00s)
-=== RUN   TestTransaction_IsActive
---- PASS: TestTransaction_IsActive (0.00s)
-=== RUN   TestTransaction_Isolation
---- PASS: TestTransaction_Isolation (0.00s)
-=== RUN   TestTransaction_MultipleOperationTypes
---- PASS: TestTransaction_MultipleOperationTypes (0.00s)
-PASS
+```bash
+curl -X POST http://localhost:7474/db/nornicdb/tx/commit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "statements": [
+      {"statement": "CREATE (u:User {id: \"user-1\", name: \"Alice\"})"},
+      {"statement": "CREATE (u:User {id: \"user-2\", name: \"Bob\"})"},
+      {"statement": "MATCH (a:User {id: \"user-1\"}), (b:User {id: \"user-2\"}) CREATE (a)-[:FOLLOWS]->(b)"}
+    ]
+  }'
 ```
 
-## ELI12 Explanation
+### Bolt Protocol
+
+When connecting via the Bolt protocol (e.g. with the Neo4j driver), transactions follow standard Neo4j semantics:
+
+```javascript
+const neo4j = require('neo4j-driver');
+const driver = neo4j.driver('bolt://localhost:7687');
+const session = driver.session();
+
+// Auto-commit
+const result = await session.run(
+  'CREATE (u:User {name: $name}) RETURN u',
+  { name: 'Alice' }
+);
+
+// Explicit transaction
+const tx = session.beginTransaction();
+try {
+  await tx.run('CREATE (u:User {id: "user-1", name: "Alice"})');
+  await tx.run('CREATE (u:User {id: "user-2", name: "Bob"})');
+  await tx.run('MATCH (a:User {id: "user-1"}), (b:User {id: "user-2"}) CREATE (a)-[:FOLLOWS]->(b)');
+  await tx.commit();
+} catch (error) {
+  await tx.rollback();
+  console.error('Transaction failed:', error);
+}
+
+await session.close();
+await driver.close();
+```
+
+### Python (Neo4j Driver)
+
+```python
+from neo4j import GraphDatabase
+
+driver = GraphDatabase.driver("bolt://localhost:7687")
+
+# Transaction function (recommended — auto-retries on transient errors)
+def create_friendship(tx, name_a, name_b):
+    tx.run("MERGE (a:User {name: $name_a})", name_a=name_a)
+    tx.run("MERGE (b:User {name: $name_b})", name_b=name_b)
+    tx.run("""
+        MATCH (a:User {name: $name_a}), (b:User {name: $name_b})
+        CREATE (a)-[:FOLLOWS]->(b)
+    """, name_a=name_a, name_b=name_b)
+
+with driver.session() as session:
+    session.execute_write(create_friendship, "Alice", "Bob")
+
+driver.close()
+```
+
+---
+
+## Error Handling
+
+If a transaction encounters an error, all pending changes are automatically discarded:
+
+| Scenario | Behavior |
+|---|---|
+| Write conflict (concurrent modification) | Transaction fails at commit; no changes applied |
+| Constraint violation | Statement fails; transaction can be rolled back |
+| Syntax error in Cypher | Statement rejected; transaction remains open for rollback |
+| Connection lost | Transaction is automatically rolled back on the server |
+
+---
+
+## How It Works
 
 Imagine you're rearranging furniture in your room:
 
@@ -110,7 +136,3 @@ Imagine you're rearranging furniture in your room:
 4. **ROLLBACK** = "Nope, put everything back where it was"
 
 The transaction remembers where everything was before, so if you change your mind (ROLLBACK), everything goes back to the original spots!
-
-## Date
-
-Implemented: November 26, 2025

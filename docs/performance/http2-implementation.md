@@ -1,48 +1,37 @@
-# HTTP/2 Implementation
+# HTTP/2 Support
 
-**Date:** 2026-01-27  
-**Status:** Implemented
+**NornicDB HTTP/2 configuration and performance guide**
+
+Last Updated: January 27, 2026
+
+---
 
 ## Overview
 
-HTTP/2 support has been added to NornicDB's HTTP server. HTTP/2 is **always enabled** and is fully backwards compatible with HTTP/1.1 clients.
+NornicDB's HTTP server supports HTTP/2 for improved performance with concurrent workloads. HTTP/2 is **always enabled** and is fully backwards compatible — existing HTTP/1.1 clients continue to work without any changes.
 
-## Benefits
+### Benefits
 
-HTTP/2 provides several performance improvements:
-
-1. **Multiplexing**: Multiple requests can be sent over a single TCP connection
-2. **Header Compression**: Reduces overhead for repeated headers
-3. **Server Push**: Enables proactive resource pushing (not currently used)
-4. **Binary Protocol**: More efficient than HTTP/1.1's text-based protocol
+1. **Multiplexing** — Multiple requests can be sent over a single TCP connection
+2. **Header Compression** — Reduces overhead for repeated headers
+3. **Binary Protocol** — More efficient than HTTP/1.1's text-based protocol
 
 **Expected Performance Improvement:**
 - **10-20% latency reduction** for concurrent requests
 - **Reduced connection overhead** for high-concurrency workloads
 - **Better resource utilization** with connection multiplexing
 
-## Implementation Details
+---
 
-### Configuration
+## Modes
 
-HTTP/2 is automatically enabled with the following configuration:
-
-```go
-type Config struct {
-    // HTTP/2 is always enabled (backwards compatible)
-    HTTP2MaxConcurrentStreams uint32 // Default: 250 (matches Go's internal default)
-}
-```
-
-### Modes
-
-#### 1. HTTPS Mode (TLS)
+### HTTPS Mode (TLS)
 When TLS certificates are configured:
 - HTTP/2 is enabled via ALPN (Application-Layer Protocol Negotiation)
 - Clients automatically negotiate HTTP/2 during TLS handshake
 - Falls back to HTTP/1.1 for clients that don't support HTTP/2
 
-#### 2. HTTP Mode (Cleartext)
+### HTTP Mode (Cleartext)
 When running without TLS:
 - Uses **h2c** (HTTP/2 Cleartext) protocol
 - Automatically detects HTTP/2 vs HTTP/1.1 clients
@@ -50,57 +39,41 @@ When running without TLS:
 
 ### Backwards Compatibility
 
-**HTTP/2 is fully backwards compatible:**
+HTTP/2 is fully backwards compatible:
 - HTTP/1.1 clients continue to work without any changes
 - No client-side configuration required
 - Automatic protocol negotiation
 - No breaking changes to existing APIs
 
-## Usage
+---
 
-### Server Configuration
+## Client Usage
 
-HTTP/2 is enabled by default. No configuration required:
-
-```go
-config := server.DefaultConfig()
-config.HTTP2MaxConcurrentStreams = 500 // Optional: adjust concurrent streams (default: 250)
-
-server, err := server.New(db, auth, config)
-```
-
-### Client Usage
-
-#### HTTP/1.1 Clients (No Changes Required)
+### HTTP/1.1 Clients (No Changes Required)
 
 Existing HTTP/1.1 clients work without modification:
 
 ```bash
 # curl (HTTP/1.1 by default)
 curl http://localhost:7474/health
-
-# HTTP/1.1 Go clients
-resp, err := http.Get("http://localhost:7474/health")
 ```
 
-#### HTTP/2 Clients (Automatic Upgrade)
+### HTTP/2 Clients (Automatic Upgrade)
 
 Modern HTTP clients automatically use HTTP/2:
 
 ```bash
-# curl with HTTP/2 (if supported)
+# curl with HTTP/2
 curl --http2 http://localhost:7474/health
-
-# Go http.Client automatically uses HTTP/2 when available
-client := &http.Client{}
-resp, err := client.Get("http://localhost:7474/health")
 ```
+
+---
 
 ## Performance Impact
 
 ### Benchmark Results
 
-From our profiling analysis:
+From profiling analysis:
 - **Before HTTP/2:** 26,405 req/s, 0.57ms average latency
 - **Expected with HTTP/2:** 10-20% latency reduction for concurrent requests
 - **Connection overhead:** Reduced by multiplexing multiple requests per connection
@@ -108,39 +81,30 @@ From our profiling analysis:
 ### When HTTP/2 Helps Most
 
 HTTP/2 provides the most benefit for:
-1. **High concurrency workloads** - Multiple requests from same client
-2. **Many small requests** - Header compression reduces overhead
-3. **Latency-sensitive applications** - Reduced connection establishment overhead
+1. **High concurrency workloads** — Multiple requests from same client
+2. **Many small requests** — Header compression reduces overhead
+3. **Latency-sensitive applications** — Reduced connection establishment overhead
 
 ### When HTTP/2 Has Minimal Impact
 
 HTTP/2 has less impact for:
-1. **Single request scenarios** - No multiplexing benefit
-2. **Large payloads** - Header compression is less significant
-3. **Low concurrency** - Connection overhead is already minimal
+1. **Single request scenarios** — No multiplexing benefit
+2. **Large payloads** — Header compression is less significant
+3. **Low concurrency** — Connection overhead is already minimal
 
-## Configuration Options
+---
+
+## Configuration
 
 ### MaxConcurrentStreams
 
-Controls the maximum number of concurrent streams per HTTP/2 connection:
-
-```go
-config.HTTP2MaxConcurrentStreams = 250 // Default (matches Go's internal default)
-```
+Controls the maximum number of concurrent streams per HTTP/2 connection.
 
 **Default Value: 250**
-
-The default of **250** matches Go's standard library `http2.Server` default:
-- **Go's standard:** Matches `golang.org/x/net/http2` internal default (250)
-- **Good balance:** Provides adequate concurrency without excessive memory usage
-- **Security:** Reasonable protection against DoS attacks while allowing good performance
-- **Typical workloads:** Sufficient for most use cases (250 concurrent requests per connection)
 
 **Recommendations by Use Case:**
 
 - **Default (most cases):** 250 streams
-  - Matches Go's internal default
   - Good balance of performance and security
   - Adequate for typical API workloads
 
@@ -164,21 +128,18 @@ The default of **250** matches Go's standard library `http2.Server` default:
 - **Lower values:** Less memory, better security, but may require more connections for high concurrency
 
 **Memory Impact:**
-Each stream requires memory for:
-- Stream state tracking
-- Flow control windows (connection-level and stream-level)
-- Request/response buffers
-
-**Example:** With 1000 streams and 100 connections, you could theoretically have 100,000 concurrent streams, which could consume significant memory if all are active.
+Each stream requires memory for stream state tracking, flow control windows, and request/response buffers.
 
 **Security Consideration:**
-Malicious clients can open connections and create the maximum number of streams, potentially exhausting server memory. The default of 100 provides a good balance between functionality and security.
+Malicious clients can open connections and create the maximum number of streams, potentially exhausting server memory. The default of 250 provides a good balance between functionality and security.
 
-## Testing
+---
 
-### Verify HTTP/2 is Enabled
+## Verifying HTTP/2
 
-Check server logs on startup:
+### Check Server Logs
+
+On startup, look for:
 ```
 🚀 HTTP/2 enabled (h2c cleartext mode, backwards compatible with HTTP/1.1)
 ```
@@ -198,41 +159,31 @@ curl -v --http2 http://localhost:7474/health 2>&1 | grep -i "http/2"
 # < HTTP/2 200
 ```
 
-### Benchmark Comparison
-
-Run the HTTP write benchmark to measure impact:
-
-```bash
-go run testing/benchmarks/http_write_latency/main.go \
-    -url http://localhost:7474 \
-    -database nornic \
-    -requests 5000 \
-    -concurrency 20
-```
-
-Compare results with HTTP/1.1-only servers to see the improvement.
+---
 
 ## Troubleshooting
 
 ### HTTP/2 Not Working
 
-1. **Check server logs** - Should show "HTTP/2 enabled" message
-2. **Verify client support** - Some older clients don't support HTTP/2
-3. **Check network** - Some proxies/firewalls may block HTTP/2
+1. **Check server logs** — Should show "HTTP/2 enabled" message
+2. **Verify client support** — Some older clients don't support HTTP/2
+3. **Check network** — Some proxies/firewalls may block HTTP/2
 
 ### Performance Not Improved
 
-1. **Low concurrency** - HTTP/2 benefits are most visible with multiple concurrent requests
-2. **Single connection** - HTTP/2 multiplexing requires multiple requests on same connection
-3. **Large payloads** - Header compression has less impact on large responses
+1. **Low concurrency** — HTTP/2 benefits are most visible with multiple concurrent requests
+2. **Single connection** — HTTP/2 multiplexing requires multiple requests on same connection
+3. **Large payloads** — Header compression has less impact on large responses
 
 ### Compatibility Issues
 
 If you encounter issues with specific clients:
 
-1. **HTTP/2 is backwards compatible** - Clients should fall back to HTTP/1.1
-2. **Check client logs** - May show protocol negotiation details
-3. **Test with HTTP/1.1 explicitly** - Some clients allow forcing HTTP/1.1
+1. **HTTP/2 is backwards compatible** — Clients should fall back to HTTP/1.1
+2. **Check client logs** — May show protocol negotiation details
+3. **Test with HTTP/1.1 explicitly** — Some clients allow forcing HTTP/1.1
+
+---
 
 ## References
 
