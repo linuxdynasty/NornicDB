@@ -220,8 +220,8 @@ Plugins can choose their parsing/execution approach based on their needs:
 
 Traditional compiler approach using grammar-based parsing.
 
-> **Existing Work:** [Mimir PR #18](https://github.com/orneryd/Mimir/pull/18) contains an ANTLR-based
-> Cypher parser that was not merged due to performance overhead (~5-10ms vs inline's ~0.5ms).
+> **Existing Work:** A prior ANTLR-based Cypher parser prototype exists but was not merged due to
+> performance overhead (~5-10ms vs inline's ~0.5ms).
 > This could be extracted as an **optional plugin** for users who prefer:
 > - Strict grammar validation
 > - Better error messages
@@ -230,7 +230,7 @@ Traditional compiler approach using grammar-based parsing.
 
 ```go
 // pkg/plugins/antlr-cypher/plugin.go
-// Based on: https://github.com/orneryd/Mimir/pull/18
+// Based on prior ANTLR Cypher parser prototype
 
 type ANTLRCypherPlugin struct {
     // ANTLR-generated parser from PR #18

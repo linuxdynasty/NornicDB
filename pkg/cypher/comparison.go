@@ -438,7 +438,7 @@ func (e *StorageExecutor) evaluateIsNull(node *storage.Node, variable, whereClau
 	propName := propExpr[len(variable)+1:]
 
 	// Managed embedding metadata now lives in EmbedMeta.
-	// Keep Neo4j/Mimir compatibility for IS NULL checks on f.embedding.
+	// Keep Neo4j compatibility for IS NULL checks on f.embedding.
 	if propName == "embedding" {
 		hasEmbedding := len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
 		if !hasEmbedding && node.EmbedMeta != nil {

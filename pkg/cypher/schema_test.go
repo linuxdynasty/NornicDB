@@ -122,8 +122,8 @@ func TestCreateVectorIndex(t *testing.T) {
 	}
 }
 
-func TestMimirInitialization(t *testing.T) {
-	// Test the actual Mimir initialization queries
+func TestSchemaInitialization(t *testing.T) {
+	// Test the actual schema initialization queries
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")

@@ -545,9 +545,9 @@ The WAL atomic record writer (`writeAtomicRecordV2Bufio`) now uses buffered I/O 
 
 Operations like `CREATE DATABASE` and `DROP DATABASE` bypass the async engine and write synchronously, ensuring they are durable before the API response is returned. This prevents the race where a database appeared created but the metadata hadn't flushed yet.
 
-### 5.8 Mimir Loader Removed
+### 5.8 Legacy Loader Removed
 
-The legacy `pkg/storage/mimir_loader.go` compatibility shim (for importing data from the Mimir project's format) has been removed. If you need to migrate data from Mimir, use `scripts/migrate_neo4j_to_nornic.go` instead.
+The legacy data loader compatibility shim (for importing data from an earlier bundled format) has been removed. If you need to migrate data from a previous installation, use `scripts/migrate_neo4j_to_nornic.go` instead.
 
 ---
 
@@ -860,7 +860,7 @@ To run 40M × 1024-dim embeddings with flat HNSW (the recommended path), you nee
 
 - **Per-database config** is opt-in and additive — existing deployments are unaffected. The global config remains authoritative unless a database-level override is set.
 - **BM25 v2** is the new default. If you have issues with large text corpora, this should help. To revert: `NORNICDB_SEARCH_BM25_ENGINE=v1`.
-- **Mimir loader removed** — if you are importing Mimir-format data, switch to `scripts/migrate_neo4j_to_nornic.go`.
+- **Legacy loader removed** — if you are importing legacy-format data, switch to `scripts/migrate_neo4j_to_nornic.go`.
 - **Index persistence** is off by default. Enable with `NORNICDB_PERSIST_SEARCH_INDEXES=true` to avoid rebuild on restart. Read §11 before enabling.
 - **K-means and IVF-HNSW** are off by default and should remain off unless you have 40M+ embeddings. See §11.4 for the scale guidance and memory table.
 - **Embedding metadata** internal keys (`_embeddings_stored_separately`, `_embedding_chunk_count`) are no longer written to node properties. If your queries filter on these keys, remove those filters — nodes are transparently upgraded on first read.

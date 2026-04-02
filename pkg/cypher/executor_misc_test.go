@@ -1412,7 +1412,7 @@ func TestSubstituteParamsComplexQuery(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Test with a complex MERGE query like Mimir uses
+	// Test with a complex MERGE query pattern
 	query := `
 		MERGE (f:File:Node {path: $path})
 		ON CREATE SET f.id = 'file-123',
@@ -1763,7 +1763,7 @@ func TestWhereNotLabelMigrationPattern(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// This tests the exact pattern from the Mimir schema initialization:
+	// This tests the exact pattern from schema initialization:
 	// MATCH (f:File) WHERE NOT f:Node SET f:Node, f.type = 'file'
 
 	// Create File nodes - some with Node label, some without

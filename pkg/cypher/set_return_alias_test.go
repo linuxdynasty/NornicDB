@@ -160,14 +160,14 @@ func TestSetReturnMultipleNodes(t *testing.T) {
 // TestSetReturnAliasRegressionBug is a regression test for the bug where
 // MATCH ... SET ... RETURN n was returning results under 'matched' instead of 'n'
 func TestSetReturnAliasRegressionBug(t *testing.T) {
-	// This reproduces the exact scenario from the Mimir GraphManager
+	// This reproduces the exact scenario from a graph manager client
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Create a task node (simulating Mimir's task structure)
+	// Create a task node (simulating a task structure)
 	_, err := exec.Execute(ctx, `
 		CREATE (n:Node {
 			id: 'task-123',
@@ -189,7 +189,7 @@ func TestSetReturnAliasRegressionBug(t *testing.T) {
 
 	// BUG: This was returning 'matched' instead of 'n'
 	assert.Equal(t, []string{"n"}, result.Columns,
-		"RETURN n should return column 'n', not 'matched' (regression from Mimir bug)")
+		"RETURN n should return column 'n', not 'matched' (regression)")
 
 	require.Len(t, result.Rows, 1)
 

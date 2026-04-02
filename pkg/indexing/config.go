@@ -6,8 +6,8 @@
 //
 // Architecture Note:
 //
-// NornicDB follows a clear separation of concerns with Mimir:
-//   - **Mimir responsibilities**: File discovery, reading, embedding generation
+// NornicDB follows a clear separation of concerns:
+//   - **Application layer**: File discovery, reading, embedding generation
 //   - **NornicDB responsibilities**: Storage, search, relationships, persistence
 //
 // This package specifically handles the NornicDB side of content processing:
@@ -57,7 +57,7 @@
 //   - **workerRole**: Role descriptions (for agent/worker nodes)
 //   - **requirements**: Requirement specifications
 //
-// These properties match Mimir's Neo4j fulltext index configuration for consistency.
+// These properties match the Neo4j fulltext index configuration for compatibility.
 //
 // Text Processing Pipeline:
 //
@@ -100,7 +100,7 @@ import (
 )
 
 // SearchableProperties defines which node properties are indexed for full-text search.
-// These match Mimir's Neo4j node_search fulltext index configuration.
+// These match the Neo4j node_search fulltext index configuration.
 var SearchableProperties = []string{
 	"content",
 	"text",

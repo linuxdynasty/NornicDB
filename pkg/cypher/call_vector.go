@@ -13,13 +13,13 @@ import (
 )
 
 // ========================================
-// Neo4j Vector Index Procedures (CRITICAL for Mimir)
+// Neo4j Vector Index Procedures
 // ========================================
 
 // callDbIndexVectorQueryNodes implements db.index.vector.queryNodes
 // Syntax: CALL db.index.vector.queryNodes('indexName', k, queryVector) YIELD node, score
 //
-// This is the primary vector similarity search procedure used by Mimir for:
+// This is the primary vector similarity search procedure for:
 //   - Semantic memory retrieval
 //   - Similar document discovery
 //   - Embedding-based node matching

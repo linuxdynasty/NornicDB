@@ -178,7 +178,7 @@ type LinkResult struct {
 }
 
 // Note: IndexParams, IndexResult, UnindexParams, UnindexResult removed
-// File indexing is handled by Mimir (the intelligence layer), not NornicDB
+// File indexing is handled by the application layer, not NornicDB
 
 // TaskParams - Input for task tool
 type TaskParams struct {

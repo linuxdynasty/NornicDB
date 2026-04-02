@@ -475,10 +475,10 @@ func TestAggregation_WithMultipleAggregates(t *testing.T) {
 }
 
 // ====================================================================================
-// Production query from Mimir's index-api.ts
+// Production query from index-api.ts
 // ====================================================================================
 
-func TestMimirIndexStatsExtensionQuery(t *testing.T) {
+func TestIndexStatsExtensionQuery(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -487,7 +487,7 @@ func TestMimirIndexStatsExtensionQuery(t *testing.T) {
 
 	setupAggregationTestData(t, store)
 
-	t.Run("exact Mimir extension query", func(t *testing.T) {
+	t.Run("exact extension query", func(t *testing.T) {
 		// This is the exact query from index-api.ts that fails
 		result, err := exec.Execute(ctx, `
 			MATCH (f:File)
@@ -513,15 +513,15 @@ func TestMimirIndexStatsExtensionQuery(t *testing.T) {
 	})
 }
 
-// TestMimirIndexStatsTypeQuery tests the exact byType query from Mimir's index-api.ts
-func TestMimirIndexStatsTypeQuery(t *testing.T) {
+// TestIndexStatsTypeQuery tests the exact byType query from index-api.ts
+func TestIndexStatsTypeQuery(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Setup: Create File nodes like Mimir does (note: no "type" property)
+	// Setup: Create File nodes (note: no "type" property)
 	for i := 0; i < 5; i++ {
 		_, err := exec.Execute(ctx, fmt.Sprintf(`
 			CREATE (f:File {path: '/test/file%d.md', extension: '.md'})
@@ -530,7 +530,7 @@ func TestMimirIndexStatsTypeQuery(t *testing.T) {
 	}
 
 	t.Run("byType query groups by null property", func(t *testing.T) {
-		// This is the exact query from Mimir's index-api.ts
+		// This is the exact query from index-api.ts
 		result, err := exec.Execute(ctx, `
 			MATCH (f:File)
 			WITH f.type as type, COUNT(f) as count
@@ -546,8 +546,8 @@ func TestMimirIndexStatsTypeQuery(t *testing.T) {
 	})
 }
 
-// TestMimirComplexStatsQuery tests the complex stats query from Mimir's index-api.ts
-func TestMimirComplexStatsQuery(t *testing.T) {
+// TestComplexStatsQuery tests the complex stats query from index-api.ts
+func TestComplexStatsQuery(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -563,7 +563,7 @@ func TestMimirComplexStatsQuery(t *testing.T) {
 	}
 
 	t.Run("complex stats query with OPTIONAL MATCH and CASE WHEN", func(t *testing.T) {
-		// This is the exact query from Mimir's index-api.ts
+		// This is the exact query from index-api.ts
 		result, err := exec.Execute(ctx, `
 			MATCH (f:File)
 			OPTIONAL MATCH (f)-[:HAS_CHUNK]->(c:FileChunk)

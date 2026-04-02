@@ -335,7 +335,7 @@ Add to `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "mimir": {
+    "nornicdb": {
       "url": "http://localhost:7474/mcp",
       "type": "http",
       "description": "NornicDB MCP Server"

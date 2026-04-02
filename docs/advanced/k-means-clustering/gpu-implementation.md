@@ -1,4 +1,4 @@
-# GPU K-Means Clustering for Mimir/NornicDB: Combined Analysis & Implementation Plan
+# GPU K-Means Clustering for NornicDB: Combined Analysis & Implementation Plan
 
 ## 🔧 CRITICAL FIX: Metal Atomic Float Workaround
 
@@ -16,7 +16,7 @@ The fix uses atomic compare-exchange on `atomic_uint` to emulate atomic float op
 
 ## Executive Summary
 
-This document combines the theoretical analysis from K-MEANS.md and K-MEANS-RT.md with a critical evaluation of their applicability to Mimir's architecture. It provides a realistic implementation plan for enhancing NornicDB's vector search capabilities with GPU-accelerated k-means clustering.
+This document combines the theoretical analysis from K-MEANS.md and K-MEANS-RT.md with a critical evaluation of their applicability to NornicDB's architecture. It provides a realistic implementation plan for enhancing NornicDB's vector search capabilities with GPU-accelerated k-means clustering.
 
 ---
 
@@ -40,9 +40,9 @@ This document combines the theoretical analysis from K-MEANS.md and K-MEANS-RT.m
 - ❌ No integration with inference engine
 - ❌ No real-time clustering hooks
 
-### 1.2 Mimir Context: Why K-Means Matters
+### 1.2 NornicDB Context: Why K-Means Matters
 
-From `AGENTS.md` and `README.md`, Mimir's architecture uses:
+A typical NornicDB deployment uses:
 
 - **Neo4j Graph Database** for persistent storage
 - **Vector embeddings** with auto-detected dimensions (varies by model):
@@ -114,7 +114,7 @@ Query → Embedding → Cluster Lookup (O(1)) → Intra-cluster Refinement → R
 
 **Performance Claims**: ✅ The 100-400x speedup over CPU for batch operations is realistic based on existing Metal/CUDA benchmarks.
 
-**Use Cases**: ✅ The three main use cases are valid for Mimir:
+**Use Cases**: ✅ The three main use cases are valid for NornicDB:
 
 1. **Topic Discovery**: Cluster similar file chunks for concept mining
 2. **Related Documents**: O(1) lookup of related files via cluster membership
@@ -472,7 +472,7 @@ kernel void kmeans_find_nearest_centroid(
 
 ### Phase 2: Inference Engine Integration (2-3 weeks)
 
-**Goal**: Wire k-means clustering into Mimir's inference engine following existing patterns
+**Goal**: Wire k-means clustering into NornicDB's inference engine following existing patterns
 
 > **CRITICAL**: The inference engine uses **dependency injection** for vector search, not direct references.
 > Follow the `TopologyIntegration` pattern from `pkg/inference/topology_integration.go`.
@@ -1766,7 +1766,7 @@ export NORNICDB_CLUSTERING_RECLUSTER_THRESHOLD=10000
 
 ## Conclusion
 
-GPU k-means clustering is a valuable enhancement for Mimir/NornicDB that can dramatically improve related-document discovery and semantic search performance. The existing GPU infrastructure in `pkg/gpu/` provides a solid foundation.
+GPU k-means clustering is a valuable enhancement for NornicDB that can dramatically improve related-document discovery and semantic search performance. The existing GPU infrastructure in `pkg/gpu/` provides a solid foundation.
 
 **Key Recommendations:**
 

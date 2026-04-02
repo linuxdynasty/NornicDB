@@ -117,7 +117,7 @@ var ErrSearchIndexBuilding = errors.New("search index being built, please try ag
 // SearchableProperties defines PRIORITY properties for full-text search ranking.
 // These properties are indexed first for better BM25 ranking.
 // Note: ALL node properties are indexed, but these get priority weighting.
-// These match Mimir's Neo4j fulltext index configuration.
+// These match Neo4j's fulltext index configuration.
 var SearchableProperties = []string{
 	"content",
 	"text",

@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMimirStatsQueries tests the exact queries used by Mimir's index-stats API.
+// TestNeo4jCompatStatsQueries tests the exact queries used by the index-stats API.
 // These queries must work for the VSCode plugin to show correct stats.
-func TestMimirStatsQueries(t *testing.T) {
+func TestNeo4jCompatStatsQueries(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -31,8 +31,8 @@ func TestMimirStatsQueries(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Run("exact Mimir aggregate stats query", func(t *testing.T) {
-		// This is the EXACT query from Mimir's index-api.ts lines 642-658
+	t.Run("exact aggregate stats query", func(t *testing.T) {
+		// This is the EXACT query from index-api.ts lines 642-658
 		query := `
 			MATCH (f:File)
 			OPTIONAL MATCH (f)-[:HAS_CHUNK]->(c:FileChunk)
@@ -67,17 +67,17 @@ func TestMimirStatsQueries(t *testing.T) {
 		require.GreaterOrEqual(t, totalChunksIdx, 0, "Should have totalChunks column")
 		require.GreaterOrEqual(t, totalEmbeddingsIdx, 0, "Should have totalEmbeddings column")
 
-		totalFiles := mimirToInt64(row[totalFilesIdx])
-		totalChunks := mimirToInt64(row[totalChunksIdx])
-		totalEmbeddings := mimirToInt64(row[totalEmbeddingsIdx])
+		totalFiles := statsToInt64(row[totalFilesIdx])
+		totalChunks := statsToInt64(row[totalChunksIdx])
+		totalEmbeddings := statsToInt64(row[totalEmbeddingsIdx])
 
 		assert.Equal(t, int64(5), totalFiles, "Should count 5 files")
 		assert.Equal(t, int64(0), totalChunks, "No chunks created yet")
 		assert.Equal(t, int64(0), totalEmbeddings, "No embeddings yet")
 	})
 
-	t.Run("exact Mimir extension query", func(t *testing.T) {
-		// This is the EXACT query from Mimir's index-api.ts lines 666-680
+	t.Run("exact extension query", func(t *testing.T) {
+		// This is the EXACT query from index-api.ts lines 666-680
 		query := `
 			MATCH (f:File)
 			WHERE f.extension IS NOT NULL
@@ -98,8 +98,8 @@ func TestMimirStatsQueries(t *testing.T) {
 		assert.GreaterOrEqual(t, len(result.Rows), 1, "Should have at least 1 extension group")
 	})
 
-	t.Run("exact Mimir byType query", func(t *testing.T) {
-		// This is the EXACT query from Mimir's index-api.ts lines 682-689
+	t.Run("exact byType query", func(t *testing.T) {
+		// This is the EXACT query from index-api.ts lines 682-689
 		query := `
 			MATCH (f:File)
 			WITH f, [label IN labels(f) WHERE label <> 'File'] as filteredLabels
@@ -123,13 +123,13 @@ func TestMimirStatsQueries(t *testing.T) {
 		if len(result.Rows) > 0 {
 			// First row should be "Node" with count 5
 			assert.Equal(t, "Node", result.Rows[0][0])
-			assert.Equal(t, int64(5), mimirToInt64(result.Rows[0][1]))
+			assert.Equal(t, int64(5), statsToInt64(result.Rows[0][1]))
 		}
 	})
 }
 
-// TestMimirStatsWithEmbeddings tests stats queries when nodes have embeddings
-func TestMimirStatsWithEmbeddings(t *testing.T) {
+// TestNeo4jCompatStatsWithEmbeddings tests stats queries when nodes have embeddings
+func TestNeo4jCompatStatsWithEmbeddings(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -162,7 +162,7 @@ func TestMimirStatsWithEmbeddings(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
 
-		count := mimirToInt64(result.Rows[0][0])
+		count := statsToInt64(result.Rows[0][0])
 		assert.Equal(t, int64(1), count, "Should find 1 file with embedding")
 	})
 
@@ -181,8 +181,8 @@ func TestMimirStatsWithEmbeddings(t *testing.T) {
 
 		t.Logf("Result: %v", result.Rows[0])
 
-		totalFiles := mimirToInt64(result.Rows[0][0])
-		totalEmbeddings := mimirToInt64(result.Rows[0][1])
+		totalFiles := statsToInt64(result.Rows[0][0])
+		totalEmbeddings := statsToInt64(result.Rows[0][1])
 
 		assert.Equal(t, int64(1), totalFiles)
 		assert.Equal(t, int64(1), totalEmbeddings)
@@ -200,7 +200,7 @@ func findColumnIndex(columns []string, name string) int {
 }
 
 // Helper to convert to int64
-func mimirToInt64(v interface{}) int64 {
+func statsToInt64(v interface{}) int64 {
 	switch val := v.(type) {
 	case int64:
 		return val

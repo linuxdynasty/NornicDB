@@ -93,7 +93,7 @@ func AllMCPPermissions() []MCPPermission {
 }
 
 // MCPRolePermissions maps each MCP role to its allowed permissions.
-// Note: index/unindex permissions removed - file indexing is handled by Mimir.
+// Note: index/unindex permissions removed - file indexing is handled by the application layer.
 var MCPRolePermissions = map[MCPRole][]MCPPermission{
 	RoleSuperAdmin: {
 		PermissionStore, PermissionRecall, PermissionDiscover,

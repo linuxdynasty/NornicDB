@@ -1,6 +1,6 @@
 // FileIndexerWindow.swift
 // File Indexing UI with folder selection, real-time stats, and search
-// Similar to Mimir VS Code Intelligence panel
+
 
 import SwiftUI
 import AppKit

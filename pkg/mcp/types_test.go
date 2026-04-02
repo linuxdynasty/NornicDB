@@ -158,7 +158,7 @@ func TestLinkResultSerialization(t *testing.T) {
 }
 
 // Note: TestIndexResultSerialization and TestUnindexResultSerialization removed
-// These types were removed - file indexing is handled by Mimir
+// These types were removed - file indexing is handled by the application layer
 
 func TestTaskResultSerialization(t *testing.T) {
 	result := TaskResult{

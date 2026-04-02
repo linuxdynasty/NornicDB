@@ -7,9 +7,9 @@ This guide explains how to use NornicDB as a persistent memory system within Cur
 
 ---
 
-## 🎯 What is mimir-v2 Chat Mode?
+## 🎯 What is nornicdb-v2 Chat Mode?
 
-The `mimir-v2` chat mode transforms Cursor's AI assistant into a **memory-augmented coding agent** that:
+The `nornicdb-v2` chat mode transforms Cursor's AI assistant into a **memory-augmented coding agent** that:
 
 - **Remembers** decisions, solutions, and context across sessions
 - **Discovers** related knowledge semantically (by meaning, not keywords)
@@ -66,7 +66,7 @@ Add NornicDB to your Cursor MCP configuration:
 ```json
 {
   "mcpServers": {
-    "mimir": {
+    "nornicdb": {
       "url": "http://localhost:7474/mcp",
       "type": "http",
       "description": "NornicDB MCP Server for persistent memory and task management"
@@ -77,9 +77,9 @@ Add NornicDB to your Cursor MCP configuration:
 
 ### 3. Install the Chat Mode
 
-Copy the `claudette-mimir-v2.md` file to your Cursor chat modes directory or create a new chat mode in Cursor settings.
+Copy the `claudette-nornicdb-v2.md` file to your Cursor chat modes directory or create a new chat mode in Cursor settings.
 
-**Location:** `docs/agents/claudette-mimir-v2.md`
+**Location:** `docs/agents/claudette-nornicdb-v2.md`
 
 ### 4. Restart Cursor
 
@@ -100,7 +100,7 @@ NornicDB provides **8 tools** via MCP:
 | `task`     | Create/update single task         | `title` (create) or `id` (update) |
 | `tasks`    | Query multiple tasks              | (none - all optional)             |
 
-> **Note:** `index` and `unindex` tools are now handled by Mimir (the intelligence layer), not NornicDB directly.
+> **Note:** `index` and `unindex` tools are handled by the application layer, not NornicDB directly.
 
 ---
 
@@ -173,7 +173,7 @@ Shall I start on task-123?"
 
 ## 🔄 Memory-First Workflow
 
-The mimir-v2 chat mode enforces a **memory-first** approach:
+The nornicdb-v2 chat mode enforces a **memory-first** approach:
 
 ### Search Order (Mandatory)
 
@@ -300,7 +300,7 @@ discover(query="authentication", depth=2)
 
 ### File Indexing
 
-> **Note:** File indexing is handled by Mimir (the intelligence layer). When using the full Mimir+NornicDB stack, Mimir's `index()` tool handles file indexing.
+> **Note:** File indexing is handled by the application layer.
 
 Search indexed code by meaning:
 

@@ -2,7 +2,7 @@
 
 ## Problem
 
-Mimir reported that integer values (like `usedCount`) were being returned as JavaScript `BigInt` instead of regular `Number`, causing runtime errors:
+Client applications reported that integer values (like `usedCount`) were being returned as JavaScript `BigInt` instead of regular `Number`, causing runtime errors:
 
 ```javascript
 // ERROR: Cannot mix BigInt and other types
@@ -51,7 +51,7 @@ JavaScript's `Number.MAX_SAFE_INTEGER` is 2^53 - 1 (9,007,199,254,740,991), but 
 
 ## Examples
 
-### Mimir usedCount (Typical Values)
+### usedCount (Typical Values)
 
 ```go
 // usedCount values: 0, 1, 2, ..., 100
@@ -87,7 +87,7 @@ Tests verify:
 - Small integers use tiny encoding (1 byte)
 - Medium integers use INT16/INT32 encoding
 - Only values outside INT32 range use INT64
-- Mimir's usedCount scenario works correctly
+- The usedCount scenario works correctly
 
 ## Neo4j Driver Behavior by Language
 
@@ -107,6 +107,6 @@ Tests verify:
 
 ## Related Issues
 
-- Mimir Issue: `usedCount + 1` causing BigInt/Number mixing errors
+- Reported issue: `usedCount + 1` causing BigInt/Number mixing errors
 - Fix: Already using optimal encoding; added documentation
 - Tests: `pkg/bolt/javascript_compat_test.go`

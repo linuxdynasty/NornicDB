@@ -4,7 +4,7 @@
 // Phase 3: Core Procedures Implementation
 // =======================================
 //
-// Critical procedures for Mimir MCP tools:
+// Critical Neo4j-compatible procedures:
 //   - db.index.vector.queryNodes - Vector similarity search with cosine/euclidean
 //   - db.index.fulltext.queryNodes - Full-text search with BM25-like scoring
 //   - apoc.path.subgraphNodes - Graph traversal with depth/filter control
@@ -2588,13 +2588,13 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 	var err error
 
 	switch {
-	// Neo4j Vector Index Procedures (CRITICAL for Mimir)
+	// Neo4j Vector Index Procedures
 	case strings.Contains(upper, "DB.INDEX.VECTOR.QUERYNODES"):
 		result, err = e.callDbIndexVectorQueryNodes(ctx, callCypher)
-	// Neo4j Fulltext Index Procedures (CRITICAL for Mimir)
+	// Neo4j Fulltext Index Procedures
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.QUERYNODES"):
 		result, err = e.callDbIndexFulltextQueryNodes(callCypher)
-	// APOC Procedures (CRITICAL for Mimir graph traversal)
+	// APOC Procedures (graph traversal)
 	case strings.Contains(upper, "APOC.PATH.SUBGRAPHNODES"):
 		result, err = e.callApocPathSubgraphNodes(callCypher)
 	case strings.Contains(upper, "APOC.PATH.EXPAND"):

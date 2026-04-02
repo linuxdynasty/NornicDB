@@ -835,5 +835,5 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 }
 
 // executeMatchWithUnwind handles MATCH ... WITH ... UNWIND ... RETURN queries
-// This is the complex pattern used by Mimir's byType query:
+// Complex UNWIND + CALL pattern used by stats queries:
 // MATCH (f:File) WITH f, [...] as list UNWIND list as item WITH item, COUNT(*) RETURN item

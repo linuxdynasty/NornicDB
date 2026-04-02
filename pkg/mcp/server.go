@@ -20,7 +20,7 @@
 //   - task: Create/manage individual tasks
 //   - tasks: Query/list multiple tasks
 //
-// Note: File indexing (index/unindex) is handled by Mimir (the intelligence layer).
+// Note: File indexing (index/unindex) is handled by the application layer.
 // NornicDB is the storage/embedding layer - it receives already-processed content.
 //
 // Example Usage (standalone, usually MCP is integrated into main server on port 7474):

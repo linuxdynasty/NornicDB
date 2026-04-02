@@ -1448,12 +1448,12 @@ func TestSearchService_EnsureBuildVectorFileStore_Branches(t *testing.T) {
 
 // TestSearchService_WithRealData tests search with exported Neo4j data.
 func TestSearchService_WithRealData(t *testing.T) {
-	t.Skip("Mimir export loader support removed")
+	t.Skip("Legacy export loader support removed")
 }
 
 // TestSearchService_RRFHybrid tests the full RRF hybrid search with real data.
 func TestSearchService_RRFHybrid(t *testing.T) {
-	t.Skip("Mimir export loader support removed")
+	t.Skip("Legacy export loader support removed")
 }
 
 func truncateID(id string, maxLen int) string {

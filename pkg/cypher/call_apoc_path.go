@@ -10,13 +10,13 @@ import (
 )
 
 // ========================================
-// APOC Path Procedures (CRITICAL for Mimir graph traversal)
+// APOC Path Procedures (graph traversal)
 // ========================================
 
 // callApocPathSubgraphNodes implements apoc.path.subgraphNodes
 // Syntax: CALL apoc.path.subgraphNodes(startNode, {maxLevel: n, relationshipFilter: 'TYPE'})
 //
-// This is the primary graph traversal procedure used by Mimir for:
+// This is the primary graph traversal procedure for:
 //   - Knowledge graph exploration
 //   - Relationship discovery
 //   - Context gathering from connected nodes

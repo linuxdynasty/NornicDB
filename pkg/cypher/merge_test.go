@@ -560,7 +560,7 @@ func TestMerge_FileIndexerPattern(t *testing.T) {
 	})
 }
 
-// Test exact Mimir FileIndexer query format with SET on separate line
+// Test exact FileIndexer query format with SET on separate line
 func TestMerge_FileIndexerExactFormat(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
@@ -587,7 +587,7 @@ func TestMerge_FileIndexerExactFormat(t *testing.T) {
 	require.Len(t, fileResult.Rows, 1)
 	fileNodeId := fileResult.Rows[0][0]
 
-	// Use EXACT Mimir query format with SET on separate line
+	// Use exact query format with SET on separate line
 	_, err = e.Execute(ctx, `
 		MATCH (f:File) WHERE id(f) = $fileNodeId
 		MERGE (c:FileChunk:Node {id: $chunkId})

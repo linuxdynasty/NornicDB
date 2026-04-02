@@ -352,7 +352,7 @@ Auto-document project decisions and architecture using the graph.
 ```cypher
 // === Create project structure ===
 CREATE (proj:Project {
-  name: "Mimir",
+  name: "MyProject",
   description: "AI Knowledge Management System"
 })
 

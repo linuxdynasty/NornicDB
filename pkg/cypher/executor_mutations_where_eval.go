@@ -775,7 +775,7 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 		}
 
 		// Handle has_embedding specially - check EmbedMeta and native embedding field
-		// This supports Mimir's query: WHERE f.has_embedding = true
+		// This supports queries like: WHERE f.has_embedding = true
 		if propName == "has_embedding" {
 			if val, ok := node.EmbedMeta["has_embedding"]; ok {
 				return val

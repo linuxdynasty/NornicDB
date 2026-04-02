@@ -20,11 +20,11 @@ import (
 // masking the bug. In production the async engine is always active, causing schema
 // commands to be parsed as node CREATE patterns.
 //
-// Reported via: Mimir (https://github.com/orneryd/Mimir) integration — schema
+// Reported via: integration testing — schema
 // initialization failed on every startup when NornicDB was backed by an AsyncEngine.
 //
 // Environment: macOS 15 (Apple Silicon M1), NornicDB arm64-metal-bge-heimdall image,
-// Mimir MCP server v4.1, Docker with Colima (aarch64, VZ).
+// MCP server integration, Docker with Colima (aarch64, VZ).
 func TestBug_SchemaCommandsWithAsyncEngine(t *testing.T) {
 	// Setup full production-equivalent stack: BadgerEngine -> WALEngine -> AsyncEngine.
 	// This is the critical difference from MemoryEngine-based tests — the AsyncEngine
@@ -49,7 +49,7 @@ func TestBug_SchemaCommandsWithAsyncEngine(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// These are the exact schema queries Mimir v4.1 sends during GraphManager
+	// These are the exact schema queries sent during GraphManager
 	// initialization (pkg/managers/GraphManager.ts). Before the fix each query
 	// returned: invalid label name: "Node)" (must be alphanumeric starting with
 	// letter or underscore) because tryAsyncCreateNodeBatch parsed FOR (n:Node)

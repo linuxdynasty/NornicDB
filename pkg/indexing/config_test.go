@@ -8,7 +8,7 @@ import (
 )
 
 func TestSearchableProperties(t *testing.T) {
-	// These should match Mimir's Neo4j node_search fulltext index
+	// These should match the Neo4j node_search fulltext index
 	expectedProps := []string{
 		"content",
 		"text",

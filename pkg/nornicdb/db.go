@@ -38,7 +38,7 @@
 //		Title:     "ML Definition",
 //		Tier:      nornicdb.TierSemantic,
 //		Tags:      []string{"AI", "ML", "definition"},
-//		Embedding: embedding, // Pre-computed from Mimir
+//		Embedding: embedding, // Pre-computed by the application
 //	}
 //
 //	stored, err := db.Store(ctx, memory)
@@ -83,18 +83,18 @@
 //   - "How to ride a bicycle"
 //   - Very stable, minimal decay
 //
-// Integration with Mimir:
+// Integration with Application Layer:
 //
-// NornicDB is designed to work with Mimir (the file indexing system):
-//   - Mimir: File discovery, reading, embedding generation
+// NornicDB is designed as the storage and search backend:
+//   - Application layer: File discovery, reading, embedding generation
 //   - NornicDB: Storage, search, relationships, decay
 //   - Clean separation of concerns
-//   - Embeddings are pre-computed by Mimir and passed to NornicDB
+//   - Embeddings are pre-computed by the application and passed to NornicDB
 //
 // Data Flow:
-//  1. Mimir discovers and reads files
-//  2. Mimir generates embeddings via Ollama/OpenAI
-//  3. Mimir sends nodes with embeddings to NornicDB
+//  1. Application discovers and reads files
+//  2. Application generates embeddings via Ollama/OpenAI
+//  3. Application sends nodes with embeddings to NornicDB
 //  4. NornicDB stores, indexes, and infers relationships
 //  5. Applications query NornicDB for search and retrieval
 //
@@ -196,7 +196,7 @@ const (
 //		Tier:      nornicdb.TierSemantic,
 //		Tags:      []string{"biology", "cells", "education"},
 //		Source:    "textbook-chapter-3",
-//		Embedding: embedding, // From Mimir
+//		Embedding: embedding, // From application
 //		Properties: map[string]any{
 //			"subject":    "biology",
 //			"difficulty": "beginner",
@@ -636,7 +636,7 @@ type DatabaseAndStorage struct {
 //
 //	// Note: NornicDB expects pre-computed embeddings
 //	// The config documents what embeddings you're using
-//	// Actual embedding computation done by Mimir
+//	// Actual embedding computation done by the application
 //
 // Example (Disaster Recovery):
 //
@@ -676,7 +676,7 @@ type DatabaseAndStorage struct {
 //	// Migrate data
 //	nodes, _ := oldDB.GetAllNodes(context.Background())
 //	for _, node := range nodes {
-//		// Re-embed with new model (done by Mimir)
+//		// Re-embed with new model (done by the application)
 //		// Store in new database
 //		newDB.Store(context.Background(), node)
 //	}

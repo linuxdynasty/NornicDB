@@ -152,10 +152,9 @@ var (
 )
 
 // Role represents a user role with associated permissions.
-// Follows Mimir's role naming conventions.
 type Role string
 
-// Predefined roles following Neo4j/Mimir conventions.
+// Predefined roles following Neo4j conventions.
 const (
 	RoleAdmin  Role = "admin"  // Full access including user management
 	RoleEditor Role = "editor" // Read/write data
@@ -178,7 +177,7 @@ const (
 )
 
 // RolePermissions maps roles to their allowed permissions.
-// Follows Mimir's RBAC model.
+// Follows Neo4j's RBAC model.
 var RolePermissions = map[Role][]Permission{
 	RoleAdmin:  {PermRead, PermWrite, PermCreate, PermDelete, PermAdmin, PermSchema, PermUserManage},
 	RoleEditor: {PermRead, PermWrite, PermCreate, PermDelete},
@@ -307,7 +306,7 @@ func (u *User) HasPermission(perm Permission) bool {
 }
 
 // JWTClaims represents the claims in a JWT token.
-// Compatible with Mimir's JWT structure.
+// Standard JWT claims structure.
 type JWTClaims struct {
 	Sub      string   `json:"sub"`                // Subject (user ID)
 	Email    string   `json:"email,omitempty"`    // User email
@@ -318,7 +317,7 @@ type JWTClaims struct {
 }
 
 // TokenResponse follows OAuth 2.0 RFC 6749 token response format.
-// Compatible with Mimir's /auth/token endpoint.
+// Compatible with standard OAuth 2.0 token endpoints.
 type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`           // Always "Bearer"
@@ -327,7 +326,6 @@ type TokenResponse struct {
 }
 
 // AuthConfig holds authentication configuration.
-// Follows Mimir's configuration patterns.
 type AuthConfig struct {
 	// Password policy
 	MinPasswordLength int
@@ -335,7 +333,7 @@ type AuthConfig struct {
 
 	// Token settings
 	JWTSecret   []byte
-	TokenExpiry time.Duration // 0 = never expire (Mimir default)
+	TokenExpiry time.Duration // 0 = never expire (default)
 
 	// Lockout settings
 	MaxFailedLogins int
@@ -350,12 +348,12 @@ type AuthConfig struct {
 }
 
 // DefaultAuthConfig returns default authentication configuration.
-// Matches Mimir's defaults for compatibility.
+// Returns sensible defaults.
 func DefaultAuthConfig() AuthConfig {
 	return AuthConfig{
 		MinPasswordLength:    8,
 		BcryptCost:           bcrypt.DefaultCost,
-		TokenExpiry:          0, // Never expire by default (Mimir behavior)
+		TokenExpiry:          0, // Never expire by default
 		MaxFailedLogins:      5,
 		LockoutDuration:      15 * time.Minute,
 		DefaultAdminUsername: "admin", // Default root admin username
@@ -887,7 +885,7 @@ func (a *Authenticator) CreateUser(username, password string, roles []Role) (*Us
 	user := &User{
 		ID:           generateID(),
 		Username:     username,
-		Email:        username + "@localhost", // Mimir pattern for dev users
+		Email:        username + "@localhost", // Default pattern for dev users
 		PasswordHash: string(hash),
 		Roles:        roles,
 		CreatedAt:    now,
@@ -1689,7 +1687,7 @@ func (a *Authenticator) GenerateAPIToken(user *User, subject string, expiry time
 // JWT Generation and Validation
 
 // generateJWT creates a JWT token for the user.
-// Uses HS256 algorithm matching Mimir's implementation.
+// Uses HS256 algorithm.
 func (a *Authenticator) generateJWT(user *User) (string, error) {
 	if len(a.config.JWTSecret) == 0 {
 		return "", ErrMissingSecret
@@ -1711,7 +1709,7 @@ func (a *Authenticator) generateJWT(user *User) (string, error) {
 		Iat:      now,
 	}
 
-	// Only set expiration if configured (0 = never expire, Mimir default)
+	// Only set expiration if configured (0 = never expire)
 	if a.config.TokenExpiry > 0 {
 		claims.Exp = now + int64(a.config.TokenExpiry.Seconds())
 	}
@@ -1836,7 +1834,6 @@ func RoleFromString(s string) (Role, error) {
 }
 
 // HasCredentials checks if a request has any form of authentication credentials.
-// Compatible with Mimir's hasAuthCredentials() helper.
 // Checks: Authorization header, X-API-Key header, cookie, query params.
 func HasCredentials(authHeader, apiKeyHeader, cookie, queryToken, queryAPIKey string) bool {
 	return authHeader != "" ||
@@ -1848,7 +1845,7 @@ func HasCredentials(authHeader, apiKeyHeader, cookie, queryToken, queryAPIKey st
 
 // ExtractToken extracts the token from various sources.
 // Priority: Authorization header > X-API-Key > Cookie > Query param
-// Compatible with Mimir's token extraction pattern.
+
 func ExtractToken(authHeader, apiKeyHeader, cookie, queryToken, queryAPIKey string) string {
 	// 1. Authorization: Bearer header (OAuth 2.0 RFC 6750 standard)
 	if authHeader != "" {

@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMimirExactQueries tests the EXACT queries from Mimir's index-api.ts
+// TestNeo4jCompatExactQueries tests the EXACT queries from the index-stats API
 // with data that matches production: mostly .md files with File:Node labels
-func TestMimirExactQueries(t *testing.T) {
+func TestNeo4jCompatExactQueries(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -50,8 +50,8 @@ func TestMimirExactQueries(t *testing.T) {
 		t.Logf("  Node %s: labels=%v, ext=%v", n.ID, n.Labels, n.Properties["extension"])
 	}
 
-	t.Run("EXACT Mimir stats query (index-api.ts:642-658)", func(t *testing.T) {
-		// EXACT query from Mimir - copy-pasted from index-api.ts
+	t.Run("EXACT stats query (index-api.ts:642-658)", func(t *testing.T) {
+		// EXACT query from index-api.ts
 		query := `
 			MATCH (f:File)
 			OPTIONAL MATCH (f)-[:HAS_CHUNK]->(c:FileChunk)
@@ -96,8 +96,8 @@ func TestMimirExactQueries(t *testing.T) {
 		assert.Equal(t, int64(0), totalEmbeddings, "Should have 0 embeddings (none set)")
 	})
 
-	t.Run("EXACT Mimir extension query (index-api.ts:666-672)", func(t *testing.T) {
-		// EXACT query from Mimir - copy-pasted from index-api.ts
+	t.Run("EXACT extension query (index-api.ts:666-672)", func(t *testing.T) {
+		// EXACT query from index-api.ts
 		query := `
 			MATCH (f:File)
 			WHERE f.extension IS NOT NULL
@@ -125,8 +125,8 @@ func TestMimirExactQueries(t *testing.T) {
 		assert.Equal(t, int64(1), byExtension[".js"], "Should have 1 .js file")
 	})
 
-	t.Run("EXACT Mimir byType query (index-api.ts:682-689)", func(t *testing.T) {
-		// EXACT query from Mimir - copy-pasted from index-api.ts
+	t.Run("EXACT byType query (index-api.ts:682-689)", func(t *testing.T) {
+		// EXACT query from index-api.ts
 		query := `
 			MATCH (f:File)
 			WITH f, [label IN labels(f) WHERE label <> 'File'] as filteredLabels
@@ -155,8 +155,8 @@ func TestMimirExactQueries(t *testing.T) {
 	})
 }
 
-// TestMimirExactQueriesWithEmbeddings tests with files that have embeddings
-func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
+// TestNeo4jCompatExactQueriesWithEmbeddings tests with files that have embeddings
+func TestNeo4jCompatExactQueriesWithEmbeddings(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -188,7 +188,7 @@ func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Run("EXACT Mimir stats query with embeddings", func(t *testing.T) {
+	t.Run("EXACT stats query with embeddings", func(t *testing.T) {
 		query := `
 			MATCH (f:File)
 			OPTIONAL MATCH (f)-[:HAS_CHUNK]->(c:FileChunk)
@@ -234,19 +234,19 @@ func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
 	})
 }
 
-// TestMimirE2EWithAsyncStorageAndEmbeddings is a full end-to-end test that:
+// TestNeo4jCompatE2EWithAsyncStorageAndEmbeddings is a full end-to-end test that:
 // 1. Uses AsyncEngine + BadgerDB (like production)
 // 2. Creates File nodes via Cypher
 // 3. Creates FileChunk nodes with HAS_CHUNK relationships
 // 4. Sets embeddings on Files and Chunks manually
-// 5. Verifies the exact Mimir stats queries return correct counts
+// 5. Verifies the exact stats queries return correct counts
 //
 // This test verifies the fix for the bug where embeddings weren't persisting
 // through the AsyncEngine flush to BadgerDB.
-func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
+func TestNeo4jCompatE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	skipDiskIOTestOnWindows(t)
 	// Create temp directory for BadgerDB
-	tmpDir, err := os.MkdirTemp("", "mimir-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "neo4j-compat-e2e-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -265,7 +265,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	ctx := context.Background()
 
 	// ==========================================================================
-	// Step 1: Create 10 File nodes via Cypher (like Mimir does)
+	// Step 1: Create 10 File nodes via Cypher
 	// ==========================================================================
 	setupQueries := []string{
 		`CREATE (:File:Node {id: 'file1', path: '/test/doc1.md', extension: '.md', name: 'doc1.md', content: 'content 1'})`,
@@ -404,7 +404,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	chunksWithEmbeddings := []string{"chunk1a", "chunk1b", "chunk2a", "chunk2b", "chunk3a", "chunk3b"}
 
 	// Set embeddings on files
-	// Mimir stores the actual embedding ARRAY as a property, not just a marker!
+	// Store the actual embedding ARRAY as a property, not just a marker!
 	// From FileIndexer.ts: SET f.embedding = $embedding, f.embedding_dimensions = ...
 	for _, filePath := range []string{"/test/doc1.md", "/test/doc2.md", "/test/doc3.md"} {
 		node := fileNodes[filePath]
@@ -412,7 +412,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 			t.Logf("Warning: file node not found for %s", filePath)
 			continue
 		}
-		// Store embedding as []interface{} property (like Mimir/Neo4j does)
+		// Store embedding as []interface{} property (following Neo4j conventions)
 		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}}
 		node.Properties["embedding"] = true
 		node.EmbedMeta = map[string]any{
@@ -431,7 +431,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 		if node == nil {
 			continue
 		}
-		// Store embedding as []interface{} property (like Mimir does)
+		// Store embedding as []interface{} property (following Neo4j conventions)
 		node.ChunkEmbeddings = [][]float32{{0.5, 0.6, 0.7, 0.8}}
 		node.Properties["embedding"] = true
 		node.EmbedMeta = map[string]any{
@@ -450,12 +450,12 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	t.Logf("Set embeddings: %d files, %d chunks", len(filesWithEmbeddings), len(chunksWithEmbeddings))
 
 	// ==========================================================================
-	// Step 5: Run EXACT Mimir stats query and verify counts
+	// Step 5: Run EXACT stats query and verify counts
 	// Expected:
 	// - totalFiles: 10
 	// - totalChunks: 10 (5 files × 2 chunks each)
-	// - totalEmbeddings: 12 (Mimir query behavior: 3 files × 2 chunks = 6 file counts + 6 chunk counts)
-	//   NOTE: The Mimir query counts file embeddings ONCE PER CHUNK due to OPTIONAL MATCH
+	// - totalEmbeddings: 12 (query behavior: 3 files × 2 chunks = 6 file counts + 6 chunk counts)
+	//   NOTE: The query counts file embeddings ONCE PER CHUNK due to OPTIONAL MATCH
 	//         So 3 files with embeddings, each with 2 chunks = 6 fileHasEmbedding counts
 	//         Plus 6 chunks with embeddings = 6 chunkHasEmbedding counts = 12 total
 	// ==========================================================================

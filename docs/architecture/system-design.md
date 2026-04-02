@@ -5,7 +5,10 @@
 
 ## Overview
 
-NornicDB is a **drop-in replacement for Neo4j** designed for LLM agent memory systems. It maintains full compatibility with Mimir's existing API while providing:
+NornicDB is a **high-performance graph database** compatible with Neo4j's Cypher query language and Bolt protocol. It combines:
+
+- Full Neo4j protocol compatibility (Bolt, Cypher, HTTP/REST)
+- Hybrid vector + graph semantics for embedding-driven applications
 
 - **MCP Server** - Native LLM tool integration (6 tools)
 - **Auto-Embedding** - Server-side embedding for vector queries
@@ -128,53 +131,42 @@ graph TB
 
 ## Design Philosophy
 
-**NornicDB = Smart Storage. Mimir = Intelligence Layer.**
+**Core Concept:** NornicDB consolidates the critical path for low-latency retrieval (transport, embedding, search, ranking) into a single operational unit rather than scattering these stages across microservices.
 
-| NornicDB Does | Mimir Does |
-|---------------|------------|
-| Store nodes/edges with embeddings | File discovery and reading |
-| Vector similarity search | VL image descriptions |
-| BM25 full-text search | PDF/DOCX text extraction |
-| Auto-embed string queries | Multi-agent orchestration |
-| GPU-accelerated operations | Content-to-text conversion |
-| MCP tool interface | Chunk strategy decisions |
+Key Design Decisions:
+
+- **Co-located retrieval path** - In-process embedding, search orchestration, reranking, and transactional state for single-digit millisecond retrieval
+- **Protocol pluralism** - Bolt/Cypher, REST/HTTP, MCP JSON-RPC, and future GraphQL/gRPC interfaces share the same underlying engine
+- **Fail-open degradation** - Reranker/embedder unavailability doesn't block retrieval; system gracefully degrades
+- **Runtime adaptability** - Strategy switching (CPU brute-force ↔ GPU ↔ HNSW) with configurable thresholds for resource-conscious deployment
 
 ## Data Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                              MIMIR                                   │
-│  ┌──────────────┐    ┌─────────────────┐    ┌───────────────────┐  │
-│  │ File Indexer │───►│ Content → Text  │───►│ Graph Operations  │  │
-│  │ • Discovery  │    │ • VL → images   │    │ • CreateNode      │  │
-│  │ • .gitignore │    │ • PDF → text    │    │ • CreateEdge      │  │
-│  │ • Filtering  │    │ • DOCX → text   │    │ • Search          │  │
-│  └──────────────┘    └─────────────────┘    └─────────┬─────────┘  │
-└────────────────────────────────────────────────────────┼────────────┘
-                                                         │ Cypher/Bolt
-                                                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                            NORNICDB                                  │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Protocol Layer: Bolt :7687 | HTTP :7474 | MCP /mcp          │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                               │                                      │
-│       ┌───────────────────────┼───────────────────────┐             │
-│       ▼                       ▼                       ▼             │
-│  ┌──────────┐          ┌────────────┐          ┌───────────┐       │
-│  │ Cypher   │          │ Embedding  │          │ MCP Tools │       │
-│  │ Executor │◄────────►│ Service    │◄────────►│ 6 tools   │       │
-│  │          │          │            │          │           │       │
-│  │ • Parse  │          │ • Auto-emb │          │ • store   │       │
-│  │ • Execute│          │ • Cache    │          │ • recall  │       │
-│  │ • Vector │          │ • Queue    │          │ • discover│       │
-│  │   procs  │          │            │          │ • link    │       │
-│  └────┬─────┘          └────────────┘          │ • task(s) │       │
-│       │                                         └───────────┘       │
-│       ▼                                                             │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Storage: BadgerDB + WAL + Vector Index + BM25 Index         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
+│                    NornicDB Operational Core                         │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  Protocol Layer: Bolt :7687 | HTTP :7474 | MCP /mcp            │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                              │                                       │
+│      ┌──────────────────────┼──────────────────────┐               │
+│      ▼                      ▼                      ▼               │
+│  ┌──────────┐          ┌────────────┐          ┌──────────┐       │
+│  │ Cypher   │          │ Embedding  │          │ MCP Tools│       │
+│  │ Executor │◄────────►│ Service    │◄────────►│ (6 tools)│       │
+│  │          │          │            │          │          │       │
+│  │ • Parse  │          │ • Auto-emb │          │ • store  │       │
+│  │ • Execute│          │ • Cache    │          │ • recall │       │
+│  │ • Vector │          │ • Queue    │          │ • discover
+│  │   procs  │          │            │          │ • link   │       │
+│  └────┬─────┘          └────────────┘          │ • tasks  │       │
+│       │                                         └──────────┘       │
+│       ▼                                                            │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  Storage: BadgerDB + WAL + Vector Index + BM25 Index            │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -182,39 +174,41 @@ graph TB
 
 ### Protocol Support
 
-| Operation | Protocol | Port | Status |
-|-----------|----------|------|--------|
-| Cypher queries | Bolt | 7687 | ✅ |
-| HTTP/REST | HTTP | 7474 | ✅ |
-| MCP Tools | JSON-RPC | 7474/mcp | ✅ |
-| Authentication | Basic/JWT | Both | ✅ |
+| Operation      | Protocol  | Port     | Status |
+| -------------- | --------- | -------- | ------ |
+| Cypher queries | Bolt      | 7687     | ✅     |
+| HTTP/REST      | HTTP      | 7474     | ✅     |
+| MCP Tools      | JSON-RPC  | 7474/mcp | ✅     |
+| Authentication | Basic/JWT | Both     | ✅     |
 
 ### Vector Search Features
 
-| Feature | Neo4j GDS | NornicDB |
-|---------|-----------|----------|
-| Vector array queries | ✅ | ✅ |
-| String auto-embedding | ❌ | ✅ |
-| Multi-line SET with arrays | ❌ | ✅ |
-| Native embedding field | ❌ | ✅ |
-| Server-side embedding | ❌ | ✅ |
-| GPU acceleration | ❌ | ✅ |
-| Embedding cache | ❌ | ✅ |
+| Feature                    | Neo4j GDS | NornicDB |
+| -------------------------- | --------- | -------- |
+| Vector array queries       | ✅        | ✅       |
+| String auto-embedding      | ❌        | ✅       |
+| Multi-line SET with arrays | ❌        | ✅       |
+| Native embedding field     | ❌        | ✅       |
+| Server-side embedding      | ❌        | ✅       |
+| GPU acceleration           | ❌        | ✅       |
+| Embedding cache            | ❌        | ✅       |
 
 ## Core Components
 
 ### MCP Server (`pkg/mcp`)
 
-LLM-native tool interface with 6 tools:
+Optional LLM-native tool interface (Claude, Cursor, etc.) with 6 tools:
 
 ```
-store    - Create/update knowledge nodes
-recall   - Retrieve by ID, type, tags, date
+store    - Create/update graph nodes with metadata
+recall   - Retrieve by ID, type, tags, date range
 discover - Semantic search with graph traversal
-link     - Create relationships between nodes
-task     - Create/update tasks with status
-tasks    - Query tasks by status/priority
+link     - Create edges and relationships
+task     - Create/manage tasks with status/priority
+tasks    - Query tasks with filtering and sorting
 ```
+
+MCP is configurable and can be disabled entirely for application-only deployments.
 
 ### Embedding Layer (`pkg/embed`)
 
@@ -237,12 +231,12 @@ tasks    - Query tasks by status/priority
 
 ### GPU Acceleration (`pkg/gpu`)
 
-| Backend | Platform | Performance |
-|---------|----------|-------------|
-| Metal | Apple Silicon | Excellent |
-| CUDA | NVIDIA | Highest |
-| OpenCL | Cross-platform | Good |
-| Vulkan | Cross-platform | Good |
+| Backend | Platform       | Performance |
+| ------- | -------------- | ----------- |
+| Metal   | Apple Silicon  | Excellent   |
+| CUDA    | NVIDIA         | Highest     |
+| OpenCL  | Cross-platform | Good        |
+| Vulkan  | Cross-platform | Good        |
 
 ## Configuration
 

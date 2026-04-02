@@ -15,7 +15,7 @@ This proposal outlines the addition of a **Vision-Language (VL) model** as a thi
 
 Adding a VL model creates a powerful image understanding pipeline:
 - Detect nodes with `:Image` label or image properties
-- Scale images to ≤3.2MP (like Mimir does for multimodal)
+- Scale images to ≤3.2MP (standard for multimodal pipelines)
 - Run through VL model (Qwen2.5-VL-2B) to get text description
 - Combine description with node properties
 - Generate text embedding using existing BGE-M3

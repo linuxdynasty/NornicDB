@@ -3,7 +3,7 @@
 // These tests verify that NornicDB supports the same Cypher query patterns as Neo4j.
 // Any query that works in Neo4j should also work in NornicDB (Neo4j drop-in replacement).
 //
-// Issues discovered from Mimir integration testing:
+// Issues discovered from integration testing:
 // 1. CREATE...SET - Neo4j allows SET after CREATE, NornicDB currently requires MATCH before SET
 // 2. Property access in RETURN after YIELD - Neo4j allows node.property in RETURN after YIELD
 // 3. DETACH DELETE with WHERE STARTS WITH - May hang instead of returning quickly
@@ -35,7 +35,7 @@ func TestCreateWithSetNeo4jCompat(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("CREATE single node then SET property", func(t *testing.T) {
-		// This is the exact query pattern from Mimir that fails
+		// This is the exact query pattern that fails
 		query := `CREATE (n:Node {id: 'test_update_123', type: 'memory', title: 'Update Test'})
 SET n.content = 'Updated content for testing'
 RETURN n`
@@ -53,7 +53,7 @@ RETURN n`
 	})
 
 	t.Run("CREATE with parameterized SET", func(t *testing.T) {
-		// Test with parameters like Mimir uses
+		// Test with parameters
 		query := `CREATE (n:Node {id: $id, type: 'memory', title: 'Update Test'})
 SET n.content = $newContent
 RETURN n`
@@ -138,7 +138,7 @@ func TestPropertyAccessAfterYieldNeo4jCompat(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("property access in RETURN after YIELD from procedure", func(t *testing.T) {
-		// This is the pattern that Mimir uses for type filtering
+		// This is the pattern used for type filtering
 		// The test will use a simpler procedure since we may not have vector index
 		query := `
 MATCH (n:TestNode)
@@ -195,7 +195,7 @@ func TestDetachDeleteWithWhereNeo4jCompat(t *testing.T) {
 	}
 
 	t.Run("DETACH DELETE with STARTS WITH", func(t *testing.T) {
-		// This is the exact cleanup query from Mimir that hangs
+		// This is the exact cleanup query that hangs
 		query := `
 MATCH (n:TestCleanup)
 WHERE n.id STARTS WITH 'integration_test_'
@@ -283,7 +283,7 @@ LIMIT 5`
 			},
 		})
 
-		// This is the exact query pattern Mimir uses
+		// This is the exact query pattern used
 		query := `
 CALL db.index.fulltext.queryNodes('node_search', 'authentication')
 YIELD node, score
@@ -292,7 +292,7 @@ ORDER BY score DESC
 LIMIT 10`
 
 		result, err := exec.Execute(ctx, query, nil)
-		require.NoError(t, err, "node_search index should work without explicit creation (Mimir compatibility)")
+		require.NoError(t, err, "node_search index should work without explicit creation (Neo4j compatibility)")
 		require.GreaterOrEqual(t, len(result.Rows), 1, "Should find at least one result")
 
 		// First result should be the authentication-related node
@@ -377,18 +377,18 @@ RETURN n`,
 }
 
 // ============================================================================
-// Complex Neo4j Patterns from Mimir
+// Complex Neo4j Patterns
 // ============================================================================
 
-// TestMimirSearchPatternNeo4jCompat tests the complex search query pattern from Mimir
-func TestMimirSearchPatternNeo4jCompat(t *testing.T) {
+// TestSearchPatternNeo4jCompat tests the complex search query pattern
+func TestSearchPatternNeo4jCompat(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Create test data that mimics Mimir's structure
+	// Create test data that mimics a typical graph structure
 	_, err := exec.Execute(ctx, `
 		CREATE (f:File {id: 'file1', path: '/test/file.ts', name: 'file.ts', type: 'file'})
 		CREATE (c1:FileChunk {id: 'chunk1', type: 'file_chunk', content: 'function test() {}'})
@@ -602,7 +602,7 @@ RETURN CASE WHEN parentFile IS NOT NULL THEN parentFile.path ELSE node.id END AS
 	})
 
 	t.Run("complex aggregation query pattern", func(t *testing.T) {
-		// This is similar to Mimir's vector search result aggregation
+		// This is similar to vector search result aggregation
 		query := `
 MATCH (node:FileChunk)
 WITH node, 0.75 as score
@@ -626,7 +626,7 @@ ORDER BY score DESC
 LIMIT 10`
 
 		result, err := exec.Execute(ctx, query, nil)
-		require.NoError(t, err, "Complex Mimir search pattern should execute")
+		require.NoError(t, err, "Complex search pattern should execute")
 		t.Logf("Complex query returned %d rows, columns: %v", len(result.Rows), result.Columns)
 		for i, row := range result.Rows {
 			t.Logf("Row %d: %+v", i, row)

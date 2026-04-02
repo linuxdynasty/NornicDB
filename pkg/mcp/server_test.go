@@ -149,7 +149,7 @@ func TestNewServer(t *testing.T) {
 	if server == nil {
 		t.Fatal("NewServer() returned nil")
 	}
-	// Note: 6 handlers now - index/unindex removed (handled by Mimir)
+	// Note: 6 handlers now - index/unindex removed (handled by the application layer)
 	if len(server.handlers) != 6 {
 		t.Errorf("Expected 6 handlers, got %d", len(server.handlers))
 	}
@@ -240,7 +240,7 @@ func TestHandleListTools(t *testing.T) {
 
 	var resp ListToolsResponse
 	json.NewDecoder(rec.Body).Decode(&resp)
-	// Note: 6 tools now - index/unindex removed (handled by Mimir)
+	// Note: 6 tools now - index/unindex removed (handled by the application layer)
 	if len(resp.Tools) != 6 {
 		t.Errorf("Expected 6 tools, got %d", len(resp.Tools))
 	}
@@ -1184,7 +1184,7 @@ func TestHandleLink_ScopedExecutorError(t *testing.T) {
 }
 
 // Note: TestHandleIndex_NoDB and TestHandleUnindex_NoDB removed
-// These handlers were removed - file indexing is handled by Mimir
+// These handlers were removed - file indexing is handled by the application layer
 
 func TestHandleTask_NoDB(t *testing.T) {
 	server := NewServer(nil, nil)

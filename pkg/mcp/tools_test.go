@@ -8,7 +8,7 @@ import (
 func TestGetToolDefinitions(t *testing.T) {
 	tools := GetToolDefinitions()
 
-	// Note: index/unindex tools removed - handled by Mimir
+	// Note: index/unindex tools removed - handled by the application layer
 	if len(tools) != 6 {
 		t.Errorf("Expected 6 tools, got %d", len(tools))
 	}
@@ -52,7 +52,7 @@ func TestToolConstants(t *testing.T) {
 	if ToolLink != "link" {
 		t.Error("ToolLink should be 'link'")
 	}
-	// Note: ToolIndex and ToolUnindex removed - handled by Mimir
+	// Note: ToolIndex and ToolUnindex removed - handled by the application layer
 	if ToolTask != "task" {
 		t.Error("ToolTask should be 'task'")
 	}

@@ -1,6 +1,6 @@
 {
-  "name": "mimir-search-quality",
-  "description": "Search quality tests for Mimir memory retrieval",
+  "name": "nornicdb-search-quality",
+  "description": "Search quality tests for memory retrieval",
   "version": "1.0.0",
   "created": "2025-12-01T00:00:00Z",
   "test_cases": [

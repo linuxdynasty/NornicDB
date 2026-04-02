@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-NornicDB has been successfully tested as a drop-in replacement for Neo4j in the Mimir architecture. All core functionality works correctly with significant performance and resource advantages.
+NornicDB has been successfully tested as a drop-in replacement for Neo4j. All core functionality works correctly with significant performance and resource advantages.
 
 ### Key Findings
 
@@ -25,7 +25,7 @@ NornicDB has been successfully tested as a drop-in replacement for Neo4j in the 
 
 - **Host:** macOS (Apple Silicon)
 - **Docker:** Docker Compose with ARM64 images
-- **Mimir Version:** 4.1.0
+- **Application Version:** 4.1.0
 - **NornicDB Version:** 0.1.0
 - **Test Date:** 2025-11-26
 
@@ -82,7 +82,7 @@ Status: ✅ PASSED
 
 ```
 NornicDB: 46.09 MiB / 15.6 GiB (0.29%)
-Mimir:    79.85 MiB / 15.6 GiB (0.50%)
+App Server: 79.85 MiB / 15.6 GiB (0.50%)
 ```
 
 ### 2.2 Process Memory (inside container)
@@ -211,7 +211,7 @@ CREATE (a:Agent:Node {name: "Claudette"})-[:USES]->(t:Tool:Node {name: "NornicDB
 
 - Status: ✅ PASSED
 
-### 5.3 Mimir File Indexing
+### 5.3 File Indexing
 
 - Folder: `/app/docs`
 - Files Indexed: 15
@@ -304,7 +304,7 @@ CREATE (a:Agent:Node {name: "Claudette"})-[:USES]->(t:Tool:Node {name: "NornicDB
 
 ## 10. Conclusion
 
-NornicDB is **production-ready** as a Neo4j replacement for Mimir with the following advantages:
+NornicDB is **production-ready** as a Neo4j replacement with the following advantages:
 
 1. **70x less memory** usage
 2. **27x smaller** Docker image
@@ -313,7 +313,7 @@ NornicDB is **production-ready** as a Neo4j replacement for Mimir with the follo
 5. **Stable under load** (no memory leaks)
 6. **Full Bolt protocol** compatibility
 
-### Implemented for Mimir Compatibility
+### Implemented for Neo4j Compatibility
 
 | Feature                        | Status | Notes                       |
 | ------------------------------ | ------ | --------------------------- |
@@ -369,7 +369,7 @@ NornicDB is **production-ready** as a Neo4j replacement for Mimir with the follo
 ### Start NornicDB
 
 ```bash
-docker compose -f docker-compose.arm64.yml up -d nornicdb mimir-server
+docker compose -f docker-compose.arm64.yml up -d nornicdb
 ```
 
 ### Health Check

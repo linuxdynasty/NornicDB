@@ -10,13 +10,13 @@ import (
 )
 
 // ========================================
-// Neo4j Fulltext Index Procedures (CRITICAL for Mimir)
+// Neo4j Fulltext Index Procedures
 // ========================================
 
 // callDbIndexFulltextQueryNodes implements db.index.fulltext.queryNodes
 // Syntax: CALL db.index.fulltext.queryNodes('indexName', query) YIELD node, score
 //
-// This is the primary text search procedure used by Mimir for:
+// This is the primary text search procedure for:
 //   - Keyword-based memory search
 //   - Content discovery
 //   - Text matching across node properties
@@ -60,10 +60,10 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 	}
 
 	// Known built-in index names that don't require explicit creation
-	// These use the default searchable properties for Mimir compatibility
+	// These use the default searchable properties for Neo4j compatibility
 	builtInIndexes := map[string]bool{
 		"default":     true,
-		"node_search": true, // Used by Mimir's UnifiedSearchService
+		"node_search": true, // Built-in fulltext search index
 	}
 
 	// Neo4j compatibility: error if index doesn't exist and isn't a built-in
@@ -72,7 +72,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 	}
 
 	// Default searchable properties if no index config or using built-in index
-	// Includes Mimir-specific properties: path, workerRole, requirements
+	// Includes additional searchable properties: path, workerRole, requirements
 	if len(targetProperties) == 0 {
 		targetProperties = []string{"content", "text", "title", "name", "description", "body", "summary", "path", "workerRole", "requirements"}
 	}

@@ -265,7 +265,7 @@ CALL gds.linkPrediction.predict.stream({
 **Best**: Adamic-Adar, Preferential Attachment  
 **Why**: Common citations + popular papers get more citations
 
-### 4. AI Agent Memory (Mimir)
+### 4. AI Agent Memory
 **Best**: Hybrid with high semantic weight  
 **Why**: Semantic similarity drives associations, structure is secondary
 
@@ -287,7 +287,7 @@ CALL gds.linkPrediction.predict.stream({
 | **Use When** | Structure matters | Semantics matter |
 | **Example** | "Mutual friends" | "Similar interests" |
 
-**Recommendation**: Use hybrid for best results in Mimir.
+**Recommendation**: Use hybrid for best results in AI agent memory workloads.
 
 ## Future Enhancements
 

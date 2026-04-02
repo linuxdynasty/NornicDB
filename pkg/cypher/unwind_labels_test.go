@@ -1,5 +1,5 @@
 // Unit tests for UNWIND with labels() and list comprehension.
-// These queries are used by Mimir's index-stats API and are currently failing.
+// These queries are used by the index-stats API and are currently failing.
 
 package cypher
 
@@ -191,7 +191,7 @@ func TestListComprehensionWithLabels(t *testing.T) {
 	})
 
 	t.Run("list comprehension on labels() with WHERE", func(t *testing.T) {
-		// This is the exact pattern from Mimir's byType query
+		// This is the exact pattern from the byType query
 		result, err := exec.Execute(ctx, `
 			MATCH (f:File {path: '/test/file1.ts'})
 			WITH f, [label IN labels(f) WHERE label <> 'File'] as filteredLabels
@@ -261,10 +261,10 @@ func TestMatchUnwindCombined(t *testing.T) {
 }
 
 // ====================================================================================
-// The exact Mimir byType query
+// The exact byType query
 // ====================================================================================
 
-func TestMimirByTypeQuery(t *testing.T) {
+func TestByTypeQuery(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -273,8 +273,8 @@ func TestMimirByTypeQuery(t *testing.T) {
 
 	setupMultiLabelNodes(t, store, exec)
 
-	t.Run("exact Mimir byType query", func(t *testing.T) {
-		// This is the exact query from Mimir's index-api.ts line 682-689
+	t.Run("exact byType query", func(t *testing.T) {
+		// This is the exact query from index-api.ts line 682-689
 		result, err := exec.Execute(ctx, `
 			MATCH (f:File)
 			WITH f, [label IN labels(f) WHERE label <> 'File'] as filteredLabels

@@ -10,7 +10,7 @@ import (
 )
 
 // TestYieldReturnIntegration tests the CALL...YIELD...RETURN pattern
-// which is critical for Mimir's fulltext search functionality.
+// which is critical for fulltext search functionality.
 // This covers:
 // - RETURN clause after YIELD with property projection
 // - ORDER BY, LIMIT, SKIP clauses
@@ -252,7 +252,7 @@ func TestYieldReturnIntegration(t *testing.T) {
 	})
 
 	t.Run("node_search built-in index", func(t *testing.T) {
-		// Verify node_search works without explicit index creation (Mimir compatibility)
+		// Verify node_search works without explicit index creation (Neo4j compatibility)
 		result, err := exec.Execute(ctx, `
 			CALL db.index.fulltext.queryNodes('node_search', 'database')
 			YIELD node, score

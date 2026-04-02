@@ -1,5 +1,5 @@
-// Comprehensive test suite for all Cypher queries that Mimir sends to NornicDB.
-// This ensures full compatibility with Mimir's graph operations.
+// Comprehensive test suite for all Cypher queries that Neo4j-compatible clients send to NornicDB.
+// This ensures full compatibility with standard graph operations.
 
 package cypher
 
@@ -17,7 +17,7 @@ import (
 // 1. Connection Test
 // ====================================================================================
 
-func TestMimirConnectionTest(t *testing.T) {
+func TestNeo4jCompatConnectionTest(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -34,7 +34,7 @@ func TestMimirConnectionTest(t *testing.T) {
 // 2. Schema Initialization Queries
 // ====================================================================================
 
-func TestMimirSchemaInitialization(t *testing.T) {
+func TestNeo4jCompatSchemaInitialization(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -126,7 +126,7 @@ func TestMimirSchemaInitialization(t *testing.T) {
 // 3. Node Operations (THE CRITICAL ONES)
 // ====================================================================================
 
-func TestMimirNodeOperations(t *testing.T) {
+func TestNeo4jCompatNodeOperations(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -175,7 +175,7 @@ func TestMimirNodeOperations(t *testing.T) {
 			SET n += {status: 'worker_executing', updated: '2025-12-14T18:00:01.000Z'} 
 			RETURN n
 		`, nil)
-		require.NoError(t, err, "SET n += {props} must work for Mimir compatibility")
+		require.NoError(t, err, "SET n += {props} must work for Neo4j compatibility")
 		require.Len(t, result.Rows, 1)
 
 		node := result.Rows[0][0].(*storage.Node)
@@ -220,7 +220,7 @@ func TestMimirNodeOperations(t *testing.T) {
 // 4. Edge Operations
 // ====================================================================================
 
-func TestMimirEdgeOperations(t *testing.T) {
+func TestNeo4jCompatEdgeOperations(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -264,7 +264,7 @@ func TestMimirEdgeOperations(t *testing.T) {
 // 5. Embedding Updates
 // ====================================================================================
 
-func TestMimirEmbeddingUpdates(t *testing.T) {
+func TestNeo4jCompatEmbeddingUpdates(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -313,7 +313,7 @@ func TestMimirEmbeddingUpdates(t *testing.T) {
 // 6. Chunk Operations (MERGE with ON CREATE SET)
 // ====================================================================================
 
-func TestMimirChunkOperations(t *testing.T) {
+func TestNeo4jCompatChunkOperations(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -362,7 +362,7 @@ func TestMimirChunkOperations(t *testing.T) {
 // Quick Test Suite - All critical operations in sequence
 // ====================================================================================
 
-func TestMimirQuickTestSuite(t *testing.T) {
+func TestNeo4jCompatQuickTestSuite(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -380,7 +380,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 	t.Run("2. Create test node", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
 			CREATE (n:Node {
-				id: 'test-mimir-1', 
+				id: 'test-compat-1', 
 				type: 'todo', 
 				created: '2025-12-14T18:00:00.000Z', 
 				updated: '2025-12-14T18:00:00.000Z', 
@@ -395,7 +395,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 	// 3. Get the test node
 	t.Run("3. Get test node", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
-			MATCH (n:Node {id: 'test-mimir-1'}) RETURN n
+			MATCH (n:Node {id: 'test-compat-1'}) RETURN n
 		`, nil)
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
@@ -404,7 +404,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 	// 4. Update with SET += (THE CRITICAL ONE)
 	t.Run("4. Update with SET += (CRITICAL)", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
-			MATCH (n:Node {id: 'test-mimir-1'}) 
+			MATCH (n:Node {id: 'test-compat-1'}) 
 			SET n += {status: 'in_progress', updated: '2025-12-14T18:01:00.000Z'} 
 			RETURN n
 		`, nil)
@@ -418,7 +418,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 	// 5. Alternative update syntax
 	t.Run("5. Alternative SET syntax", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
-			MATCH (n:Node {id: 'test-mimir-1'}) 
+			MATCH (n:Node {id: 'test-compat-1'}) 
 			SET n.status = 'completed', n.updated = '2025-12-14T18:02:00.000Z' 
 			RETURN n
 		`, nil)
@@ -432,7 +432,7 @@ func TestMimirQuickTestSuite(t *testing.T) {
 	// 6. Delete the test node
 	t.Run("6. Delete test node", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
-			MATCH (n:Node {id: 'test-mimir-1'}) 
+			MATCH (n:Node {id: 'test-compat-1'}) 
 			DETACH DELETE n 
 			RETURN count(*) as deleted
 		`, nil)

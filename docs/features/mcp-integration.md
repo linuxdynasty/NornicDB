@@ -1,8 +1,7 @@
 # MCP Tools Quick Reference
 **For LLMs:** This is your cheat sheet for using NornicDB's memory system.
 
-> **Note:** `index` and `unindex` tools have been moved to Mimir (the intelligence layer).  
-> NornicDB focuses on storage, embeddings, and search. File indexing is handled by Mimir.
+> **Note:** NornicDB focuses on storage, embeddings, and search. File indexing is handled by the application layer.
 
 ---
 
@@ -54,7 +53,7 @@
 
 ### Code Search Pattern
 ```
-# File indexing is done by Mimir; NornicDB stores and searches the result.
+# File indexing is done by the application layer; NornicDB stores and searches the result.
 1. discover(query="database connection pool", type=["file", "file_chunk"])
 2. recall(id="file-xyz")  # Get full file content
 ```

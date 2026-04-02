@@ -696,7 +696,7 @@ func TestReturnMathFunctions(t *testing.T) {
 }
 
 // ========================================
-// Neo4j Vector Index Procedure Tests (CRITICAL for Mimir)
+// Neo4j Vector Index Procedure Tests
 // ========================================
 
 func TestCallDbIndexVectorQueryNodes(t *testing.T) {
@@ -727,7 +727,7 @@ func TestCallDbIndexVectorQueryNodes(t *testing.T) {
 }
 
 // ========================================
-// Neo4j Fulltext Index Procedure Tests (CRITICAL for Mimir)
+// Neo4j Fulltext Index Procedure Tests
 // ========================================
 
 func TestCallDbIndexFulltextQueryNodes(t *testing.T) {
@@ -804,7 +804,7 @@ func TestCallDbIndexFulltextQueryNoMatch(t *testing.T) {
 }
 
 // ========================================
-// APOC Path Procedure Tests (CRITICAL for Mimir)
+// APOC Path Procedure Tests
 // ========================================
 
 func TestCallApocPathSubgraphNodes(t *testing.T) {
@@ -999,7 +999,7 @@ func TestApocPathConfig(t *testing.T) {
 }
 
 // ========================================
-// EXISTS Subquery Tests (CRITICAL for Mimir)
+// EXISTS Subquery Tests
 // ========================================
 
 func TestExistsSubquery(t *testing.T) {
@@ -1063,7 +1063,7 @@ func TestNotExistsSubquery(t *testing.T) {
 }
 
 // ========================================
-// SET += Property Merge Tests (CRITICAL for Mimir)
+// SET += Property Merge Tests
 // ========================================
 
 func TestSetPlusMerge(t *testing.T) {

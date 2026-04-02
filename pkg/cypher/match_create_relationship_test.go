@@ -162,7 +162,7 @@ func TestMatchCreateRelationship_ByID(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// Setup - Mimir-style nodes with id property
+	// Setup - application-style nodes with id property
 	_, err := exec.Execute(ctx, `
 		CREATE (n:Node {id: 'node-source-123', type: 'task', title: 'Task 1'})
 	`, nil)
@@ -172,17 +172,17 @@ func TestMatchCreateRelationship_ByID(t *testing.T) {
 	`, nil)
 	require.NoError(t, err)
 
-	t.Run("Mimir addEdge pattern - comma separated", func(t *testing.T) {
+	t.Run("addEdge pattern - comma separated", func(t *testing.T) {
 		result, err := exec.Execute(ctx, `
 			MATCH (s:Node {id: 'node-source-123'}), (t:Node {id: 'node-target-456'})
 			CREATE (s)-[e:EDGE {id: 'edge-001', type: 'depends_on'}]->(t)
 			RETURN e
 		`, nil)
-		require.NoError(t, err, "Mimir addEdge pattern should work")
+		require.NoError(t, err, "addEdge pattern should work")
 		require.Len(t, result.Rows, 1)
 	})
 
-	t.Run("Mimir addEdge pattern - multiple MATCH", func(t *testing.T) {
+	t.Run("addEdge pattern - multiple MATCH", func(t *testing.T) {
 		// Create new nodes for this test
 		_, _ = exec.Execute(ctx, `CREATE (n:Node {id: 'node-a', type: 'doc'})`, nil)
 		_, _ = exec.Execute(ctx, `CREATE (n:Node {id: 'node-b', type: 'doc'})`, nil)

@@ -324,7 +324,7 @@ Features NornicDB has that Neo4j doesn't:
 ✅ Neo4j driver compatibility  
 ✅ Unique LLM-native features  
 
-**For Mimir/LLM workloads:** ✅ **STRONGLY APPROVED** (99% effective parity)  
+**For LLM/AI workloads:** ✅ **STRONGLY APPROVED** (99% effective parity)  
 **For general Neo4j replacement:** ✅ **APPROVED** (96% feature parity)
 
 ---

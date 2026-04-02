@@ -147,7 +147,7 @@ func TestProductionScenario(t *testing.T) {
 	async := NewAsyncEngine(namespaced, config)
 	defer async.Close()
 
-	// Simulate Mimir indexing 10 files
+	// Simulate indexing 10 files
 	for i := 0; i < 10; i++ {
 		node := &Node{
 			ID:     NodeID("n" + string(rune('0'+i))),

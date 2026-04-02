@@ -7,7 +7,7 @@ import (
 // TestJavaScriptDriverCompatibility verifies that integer encodings match
 // Neo4j's behavior for JavaScript driver compatibility.
 //
-// BUG REPORT: Mimir reported that usedCount was returned as BigInt instead of Number,
+// BUG REPORT: Reported that usedCount was returned as BigInt instead of Number,
 // causing JavaScript errors like "Cannot mix BigInt and other types".
 //
 // ROOT CAUSE: Neo4j JavaScript driver behavior:
@@ -52,7 +52,7 @@ func TestJavaScriptDriverCompatibility(t *testing.T) {
 			jsType:         "Number",
 		},
 		{
-			name:           "usedCount=1 (typical Mimir value)",
+			name:           "usedCount=1 (typical value)",
 			value:          1,
 			expectedMarker: 0x01,
 			expectedLen:    1,
@@ -137,9 +137,9 @@ func TestJavaScriptDriverCompatibility(t *testing.T) {
 	}
 }
 
-// TestMimirUsedCountScenario specifically tests the reported bug scenario.
+// TestUsedCountScenario specifically tests the reported bug scenario.
 //
-// Mimir query:
+// Typical query:
 //
 //	MATCH (n:Node {type: 'preamble'})
 //	WHERE n.roleHash = $roleHash
@@ -148,8 +148,8 @@ func TestJavaScriptDriverCompatibility(t *testing.T) {
 // Problem: usedCount (typically 0-100) was returned as BigInt
 // Cause: Incorrect PackStream encoding (INT64 instead of INT32/tiny)
 // Fix: Use smallest encoding (typically tiny int for values 0-127)
-func TestMimirUsedCountScenario(t *testing.T) {
-	// Common usedCount values in Mimir
+func TestUsedCountScenario(t *testing.T) {
+	// Common usedCount values
 	usedCounts := []int64{0, 1, 2, 5, 10, 50, 100}
 
 	for _, count := range usedCounts {
@@ -256,7 +256,7 @@ func TestPackStreamEncodingRanges(t *testing.T) {
 	t.Log("\n🔑 Key Insight:")
 	t.Log("   INT32 and smaller → JavaScript Number (safe for arithmetic)")
 	t.Log("   INT64 → JavaScript BigInt (requires BigInt arithmetic)")
-	t.Log("\n💡 For Mimir compatibility: Always use INT32 or smaller when possible!")
+	t.Log("\n💡 For JavaScript compatibility: Always use INT32 or smaller when possible!")
 }
 
 // TestNeo4jCompatibilityDocumentation is a documentation test that explains

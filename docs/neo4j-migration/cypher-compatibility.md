@@ -400,7 +400,7 @@ SHOW DATABASES
 ```
 
 **Estimated Effort**: 1-2 weeks  
-**Priority**: LOW (Mimir uses single database)
+**Priority**: LOW (most deployments use single database)
 
 ---
 
@@ -433,7 +433,7 @@ SHOW DATABASES
 
 **Compatibility**: **100%** - Production Ready! 🚀  
 **Status**: ✅ **ALL CRITICAL FEATURES IMPLEMENTED**  
-**Deployment**: Ready for production use with Mimir
+**Deployment**: Ready for production use
 
 ### ✅ Complete Feature Set
 
@@ -474,7 +474,7 @@ SHOW DATABASES
 - ✅ 5 aggregation functions
 - ✅ 10 CALL procedures
 
-### ⏺️ Optional (Not Required for Mimir)
+### ⏺️ Optional (Not Required for Most Deployments)
 
 **Low Priority**:
 
@@ -508,5 +508,5 @@ SHOW DATABASES
 ---
 
 **Last Updated**: November 26, 2025 (Post EXPLAIN/PROFILE implementation)  
-**Status**: ✅ **PRODUCTION READY** - Deploy to Mimir  
+**Status**: ✅ **PRODUCTION READY**  
 **Test Results**: 1,171 tests passing

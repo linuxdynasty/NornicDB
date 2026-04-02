@@ -1,5 +1,5 @@
 // Unit tests for the VSCode Code Intelligence stats query.
-// This tests the complex compound query pattern used by Mimir's index-stats endpoint.
+// This tests the complex compound query pattern used by the index-stats endpoint.
 
 package cypher
 

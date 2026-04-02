@@ -505,7 +505,7 @@ func TestVectorSearchQueryModes(t *testing.T) {
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
 
-	// Create test nodes with embeddings via Cypher SET (like Mimir does with Neo4j)
+	// Create test nodes with embeddings via Cypher SET (like Neo4j clients do)
 	// Node 1: about machine learning
 	_, err := exec.Execute(ctx, `CREATE (n:Document {id: 'doc1', title: 'ML Guide', content: 'Machine learning basics'})`, nil)
 	require.NoError(t, err)
@@ -753,10 +753,10 @@ func TestVectorQueryNodes_StringInput_EmbeddingCacheCanonicalizesCase(t *testing
 	require.Equal(t, 1, emb.calls, "expected canonicalized string query embedding cache to avoid repeated embedding calls")
 }
 
-// TestVectorSearchEndToEnd simulates the Mimir workflow:
-// 1. Mimir generates embedding client-side
-// 2. Mimir stores embedding via Cypher SET
-// 3. Mimir queries via db.index.vector.queryNodes with vector
+// TestVectorSearchEndToEnd simulates a typical workflow:
+// 1. Application generates embedding client-side
+// 2. Application stores embedding via Cypher SET
+// 3. Application queries via db.index.vector.queryNodes with vector
 func TestVectorSearchEndToEnd(t *testing.T) {
 	baseEngine := newTestMemoryEngine(t)
 
@@ -764,11 +764,11 @@ func TestVectorSearchEndToEnd(t *testing.T) {
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
 
-	// Simulate Mimir storing a node with embedding (as it does with Neo4j today)
+	// Simulate storing a node with embedding (as done with Neo4j)
 	_, err := exec.Execute(ctx, `CREATE (n:Node {id: 'node-abc123', type: 'decision', content: 'Use PostgreSQL', title: 'Database Choice'})`, nil)
 	require.NoError(t, err)
 
-	// Mimir generates embedding and stores it (single SET for simplicity)
+	// Application generates embedding and stores it (single SET for simplicity)
 	_, err = exec.Execute(ctx, `MATCH (n:Node {id: 'node-abc123'}) SET n.embedding = [0.7, 0.2, 0.05, 0.05]`, nil)
 	require.NoError(t, err)
 
@@ -785,7 +785,7 @@ func TestVectorSearchEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Rows, 1)
 
-	// Query like Mimir does: with pre-computed query vector
+	// Query with pre-computed query vector
 	searchResult, err := exec.Execute(ctx, `CALL db.index.vector.queryNodes('node_embedding_index', 10, [0.65, 0.25, 0.05, 0.05]) YIELD node, score`, nil)
 	require.NoError(t, err)
 	require.NotNil(t, searchResult)
@@ -810,7 +810,7 @@ func TestMultiLineSetWithArray(t *testing.T) {
 	_, err := exec.Execute(ctx, `CREATE (n:Node {id: 'test-multi'})`, nil)
 	require.NoError(t, err)
 
-	// Multi-line SET with array - this is how Mimir sets embeddings with metadata
+	// Multi-line SET with array - this is how embeddings are set with metadata
 	_, err = exec.Execute(ctx, `
 		MATCH (n:Node {id: 'test-multi'})
 		SET n.embedding = [0.7, 0.2, 0.05, 0.05],
@@ -1784,17 +1784,17 @@ func TestVectorIndexWorkflow(t *testing.T) {
 	})
 }
 
-func TestMimirCompatibleWorkflow(t *testing.T) {
+func TestNeo4jCompatibleWorkflow(t *testing.T) {
 	baseEngine := newTestMemoryEngine(t)
 
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 	exec := NewStorageExecutor(engine)
 	ctx := context.Background()
 
-	t.Run("mimir_style_index_management", func(t *testing.T) {
-		// This simulates how Mimir would manage indexes in NornicDB
+	t.Run("neo4j_style_index_management", func(t *testing.T) {
+		// This simulates how a Neo4j-compatible client would manage indexes in NornicDB
 
-		// 1. Create default indexes that Mimir expects
+		// 1. Create default indexes that clients expect
 		_, err := exec.Execute(ctx,
 			"CALL db.index.vector.createNodeIndex('node_embedding_index', 'Node', 'embedding', 1024, 'cosine')", nil)
 		require.NoError(t, err)
@@ -1808,7 +1808,7 @@ func TestMimirCompatibleWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, result)
 
-		// 3. Store a decision node like Mimir would
+		// 3. Store a decision node
 		_, err = exec.Execute(ctx, `
 			CREATE (n:Decision {
 				id: 'decision-123',
@@ -1820,13 +1820,13 @@ func TestMimirCompatibleWorkflow(t *testing.T) {
 		`, nil)
 		require.NoError(t, err)
 
-		// 4. Set embedding (simulating what Mimir's embedding service does)
+		// 4. Set embedding (simulating what an embedding service does)
 		embedding := make([]float32, 1024)
 		for i := range embedding {
 			embedding[i] = float32(i) / 1024.0
 		}
 
-		// Using Cypher SET instead of procedure for embedding (Mimir style)
+		// Using Cypher SET instead of procedure for embedding (Neo4j style)
 		_, err = exec.Execute(ctx, `
 			MATCH (n:Decision {id: 'decision-123'})
 			SET n.embedding = [0.1, 0.2, 0.3, 0.4],

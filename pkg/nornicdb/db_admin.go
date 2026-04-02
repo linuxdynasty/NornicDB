@@ -915,7 +915,7 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 	}
 
 	// Full-text search only (no embedding generation)
-	// For hybrid search, Mimir should call VectorSearch with pre-computed embedding
+	// For hybrid search, call VectorSearch with a pre-computed embedding
 	response, err := svc.Search(ctx, query, nil, opts)
 	if err != nil {
 		// DB API is expected to be usable right after Open() in tests and local usage.
@@ -934,7 +934,7 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 }
 
 // HybridSearch performs RRF hybrid search combining vector similarity and BM25 full-text.
-// The queryEmbedding should be pre-computed by Mimir using its embedding service.
+// The queryEmbedding should be pre-computed by the caller.
 // This is the primary search method for semantic search with ranking fusion.
 func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []float32, labels []string, limit int) ([]*SearchResult, error) {
 	db.mu.RLock()
@@ -956,7 +956,7 @@ func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []f
 		opts.Types = labels
 	}
 
-	// Execute RRF hybrid search with Mimir's pre-computed embedding
+	// Execute RRF hybrid search with the caller's pre-computed embedding
 	response, err := svc.Search(ctx, query, queryEmbedding, opts)
 	if err != nil {
 		// If startup background indexing is still running, wait once and retry.

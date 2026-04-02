@@ -30,7 +30,7 @@ func databaseParamSchema(defaultDatabase string) map[string]interface{} {
 // - Smart defaults
 // - Rich, actionable responses
 //
-// Note: File indexing (index/unindex) is handled by Mimir (the intelligence layer).
+// Note: File indexing (index/unindex) is handled by the application layer.
 // NornicDB is the storage/embedding layer - it receives already-processed content.
 func GetToolDefinitions() []Tool {
 	return GetToolDefinitionsWithDefaultDatabase("")

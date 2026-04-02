@@ -187,7 +187,7 @@ Performance improvements implemented (no functionality changes):
 ### Full Vitest Output
 
 ```
- RUN  v3.2.4 c:/Users/timot/Documents/GitHub/Mimir/testing
+ RUN  v3.2.4 c:/Users/timot/Documents/GitHub/NornicDB/testing
 
  ✓ benchmarks/nornicdb-vs-neo4j-movies.bench.ts
    ✓ Movies Dataset Benchmark
@@ -378,7 +378,7 @@ Customers with order lists - testing/benchmarks/nornicdb-vs-neo4j-northwind.benc
 3.11x faster than Count all relationships
 4.01x faster than Count all nodes
 
-c815719@MACCJ2NWKVH7K Mimir %
+c815719@MACCJ2NWKVH7K NornicDB %
 
 what does this data mean?
 
@@ -448,15 +448,15 @@ APPLE METAL ENABLED::
 
 Timothy-Sweet_cvsh: these are with metal enabled for northwind. give me a breakdown of the performance difference
 
-c815719@MACCJ2NWKVH7K Mimir % npm run bench:northwind
+c815719@MACCJ2NWKVH7K NornicDB % npm run bench:northwind
 
-> mimir@1.0.0 bench:northwind
+> nornicdb@1.0.0 bench:northwind
 > npx vitest bench testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts --run
 
 Benchmarking is an experimental feature.
 Breaking changes might not follow SemVer, please pin Vitest's version when using it.
 
-RUN v3.2.4 /Users/c815719/src/Mimir
+RUN v3.2.4 /Users/c815719/src/NornicDB
 
 stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:346:11
 
@@ -477,7 +477,7 @@ stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:356:13
 stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:358:13
 Loading Northwind dataset into NornicDB...
 
-stdout | loadNorthwindDataset (/Users/c815719/src/Mimir/testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:55:13)
+stdout | loadNorthwindDataset (/Users/c815719/src/NornicDB/testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:55:13)
 → Cleared existing data
 
 stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:361:13
@@ -505,7 +505,7 @@ stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:385:13
 stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:387:13
 Loading Northwind dataset into Neo4j...
 
-stdout | loadNorthwindDataset (/Users/c815719/src/Mimir/testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:55:13)
+stdout | loadNorthwindDataset (/Users/c815719/src/NornicDB/testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:55:13)
 → Cleared existing data
 
 stdout | testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts:390:13
@@ -662,7 +662,7 @@ Find category by name - testing/benchmarks/nornicdb-vs-neo4j-northwind.bench.ts 
 1.29x faster than Create and delete product node
 1.60x faster than Create and delete relationship
 
-c815719@MACCJ2NWKVH7K Mimir %
+c815719@MACCJ2NWKVH7K NornicDB %
 
 GitHub Copilot: ## 📊 NornicDB vs Neo4j Performance Breakdown (Metal GPU Enabled)
 
@@ -784,11 +784,11 @@ Searched for regex `regexp\.Compile\(|regexp\.MustCompile\(` (`**/nornicdb/**/*.
 
 Found several regex patterns being compiled inside functions in create.go! Let me check those:
 
-Read [](file:///Users/c815719/src/Mimir/nornicdb/pkg/cypher/create.go#855-855), lines 855 to 915
+Read [](file:///Users/c815719/src/NornicDB/pkg/cypher/create.go#855-855), lines 855 to 915
 
-Read [](file:///Users/c815719/src/Mimir/nornicdb/pkg/cypher/create.go#1000-1000), lines 1000 to 1100
+Read [](file:///Users/c815719/src/NornicDB/pkg/cypher/create.go#1000-1000), lines 1000 to 1100
 
-Read [](file:///Users/c815719/src/Mimir/nornicdb/pkg/cypher/create.go#1100-1100), lines 1100 to 1200
+Read [](file:///Users/c815719/src/NornicDB/pkg/cypher/create.go#1100-1100), lines 1100 to 1200
 
 I found several regex patterns being compiled inside functions in hot paths. Let me also check if there are any in the executor or match files:
 
@@ -796,7 +796,7 @@ Searched for regex `func.*\{[^}]*regexp\.(Must)?Compile` (`**/nornicdb/pkg/cyphe
 
 Searched for regex `regexp\.` (`**/nornicdb/pkg/cypher/executor.go`), 1 result
 
-Read [](file:///Users/c815719/src/Mimir/nornicdb/pkg/cypher/executor.go#2360-2360), lines 2360 to 2380
+Read [](file:///Users/c815719/src/NornicDB/pkg/cypher/executor.go#2360-2360), lines 2360 to 2380
 
 Found one! `regexp.MatchString` compiles the regex every call. Let me also look for other common inefficiencies - strings.Split in loops, unnecessary allocations, etc:
 
@@ -936,4 +936,4 @@ stdout | testing\benchmarks\nornicdb-vs-neo4j-northwind.bench.ts:426:11
     1.71x faster than Get all products
     1.80x faster than Get all customers
 
-PS C:\Users\timot\Documents\GitHub\Mimir> 
+PS C:\Users\timot\Documents\GitHub\NornicDB> 

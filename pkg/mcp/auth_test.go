@@ -82,7 +82,7 @@ func TestHasPermission(t *testing.T) {
 		// LLMAgent has graph tools
 		{RoleLLMAgent, PermissionStore, true},
 		{RoleLLMAgent, PermissionRecall, true},
-		// Note: PermissionIndex/Unindex removed - file indexing handled by Mimir
+		// Note: PermissionIndex/Unindex removed - file indexing handled by the application layer
 
 		// ServiceAccount has specific tools
 		{RoleServiceAccount, PermissionStore, true},
@@ -114,7 +114,7 @@ func TestCanUseTool(t *testing.T) {
 		{RoleSuperAdmin, ToolRecall, true},
 		{RoleSuperAdmin, ToolDiscover, true},
 		{RoleSuperAdmin, ToolLink, true},
-		// Note: ToolIndex/ToolUnindex removed - file indexing handled by Mimir
+		// Note: ToolIndex/ToolUnindex removed - file indexing handled by the application layer
 		{RoleSuperAdmin, ToolTask, true},
 		{RoleSuperAdmin, ToolTasks, true},
 
@@ -147,7 +147,7 @@ func TestCanUseTool(t *testing.T) {
 
 func TestAllMCPPermissions(t *testing.T) {
 	perms := AllMCPPermissions()
-	// Note: index/unindex permissions removed - file indexing handled by Mimir
+	// Note: index/unindex permissions removed - file indexing handled by the application layer
 	if len(perms) != 8 {
 		t.Errorf("AllMCPPermissions() returned %d permissions, want 8", len(perms))
 	}

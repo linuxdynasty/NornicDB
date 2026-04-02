@@ -149,7 +149,7 @@ volumes:
   open-webui-data:
 ```
 
-### With Mimir Server (`docker-compose.mimir.yml`)
+### With Application Server
 
 ```yaml
 version: "3.8"
@@ -169,9 +169,9 @@ services:
       - NORNICDB_EMBEDDING_ENDPOINT=http://ollama:11434
     restart: unless-stopped
 
-  mimir-server:
-    image: timothyswt/mimir-server:latest
-    container_name: mimir-server
+  app-server:
+    image: your-app-server:latest
+    container_name: app-server
     ports:
       - "3100:3100"
     environment:
