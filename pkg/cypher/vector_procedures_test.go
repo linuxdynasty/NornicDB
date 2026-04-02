@@ -827,12 +827,14 @@ func TestMultiLineSetWithArray(t *testing.T) {
 
 	node := nodes[0]
 
-	// Check embedding was set (routed to node.Embedding)
-	assert.Equal(t, 1, len(node.ChunkEmbeddings), "Should have 1 chunk embedding")
-	assert.Equal(t, 4, len(node.ChunkEmbeddings[0]), "Embedding should have 4 dimensions")
-	assert.InDelta(t, 0.7, node.ChunkEmbeddings[0][0], 0.01, "First embedding value")
+	// Check embedding was stored as a regular property (no special routing)
+	embProp, hasEmb := node.Properties["embedding"]
+	require.True(t, hasEmb, "embedding property should exist in Properties")
+	embSlice, ok := embProp.([]interface{})
+	require.True(t, ok, "embedding should be stored as []interface{}")
+	assert.Len(t, embSlice, 4, "Embedding should have 4 dimensions")
 
-	// Check embedding metadata was set via Cypher (goes to Properties, not EmbedMeta)
+	// Check embedding metadata was set via Cypher (all stored as regular properties)
 	assert.Equal(t, int64(4), node.Properties["embedding_dimensions"])
 	assert.Equal(t, "bge-m3", node.Properties["embedding_model"])
 	assert.Equal(t, true, node.Properties["has_embedding"])

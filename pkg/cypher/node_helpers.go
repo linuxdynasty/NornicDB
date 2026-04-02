@@ -10,7 +10,6 @@
 //
 //   - nodeToMap: Convert storage.Node to map for RETURN
 //   - edgeToMap: Convert storage.Edge to map for RETURN
-//   - buildEmbeddingSummary: Create embedding status summary
 //
 // # Pattern Extraction
 //
@@ -18,19 +17,6 @@
 //
 //   - extractVarName: Get variable name from "(n:Label)"
 //   - extractLabels: Get labels from "(n:Label1:Label2)"
-//
-// # Internal Properties
-//
-// Some properties are marked as internal and filtered from results:
-//
-//   - embedding, embeddings, vector, vectors
-//   - embedding_model, embedding_dimensions
-//   - has_embedding, embedded_at
-//
-// These are filtered because:
-//  1. Embedding arrays are huge (hundreds of floats)
-//  2. They're internal implementation details
-//  3. They're exposed via buildEmbeddingSummary instead
 //
 // # ELI12
 //
@@ -99,47 +85,7 @@ func (e *StorageExecutor) nodeToMap(node *storage.Node) map[string]interface{} {
 		result["id"] = string(node.ID)
 	}
 
-	// Add embedding summary instead of large array
-	result["embedding"] = e.buildEmbeddingSummary(node)
-
 	return result
-}
-
-// buildEmbeddingSummary creates a summary of embedding status without the actual vector.
-// Embeddings are internal-only and generated asynchronously by the embed queue.
-//
-// # Parameters
-//
-//   - node: The node whose embedding status to summarize
-//
-// # Returns
-//
-//   - A map with status, dimensions, and optionally model info
-//
-// # Example
-//
-//	summary := exec.buildEmbeddingSummary(node)
-//	// If embedded: {"status": "ready", "dimensions": 384, "model": "all-minilm"}
-//	// If pending:  {"status": "pending", "dimensions": 0}
-func (e *StorageExecutor) buildEmbeddingSummary(node *storage.Node) map[string]interface{} {
-	summary := map[string]interface{}{}
-
-	// Check if node has embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
-	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
-		summary["status"] = "ready"
-		summary["dimensions"] = len(node.ChunkEmbeddings[0])
-	} else {
-		// No embedding yet - will be generated asynchronously by embed queue
-		summary["status"] = "pending"
-		summary["dimensions"] = 0
-	}
-
-	// Include model info from EmbedMeta
-	if model, ok := node.EmbedMeta["embedding_model"]; ok {
-		summary["model"] = model
-	}
-
-	return summary
 }
 
 // edgeToMap converts a storage.Edge to a map for result output.

@@ -659,12 +659,11 @@ func TestSetNodeProperty_ManagedEmbeddingInvalidation(t *testing.T) {
 	assert.NotNil(t, node.ChunkEmbeddings)
 	assert.NotNil(t, node.EmbedMeta)
 
-	// embedding key stores into ChunkEmbeddings and leaves Properties untouched.
+	// embedding key is stored as a regular property (no special routing).
 	setNodeProperty(node, "embedding", []float32{0.1, 0.2, 0.3})
-	require.Len(t, node.ChunkEmbeddings, 1)
-	assert.Equal(t, float32(0.1), node.ChunkEmbeddings[0][0])
-	_, hasEmbeddingProp := node.Properties["embedding"]
-	assert.False(t, hasEmbeddingProp)
+	embVal, hasEmbeddingProp := node.Properties["embedding"]
+	assert.True(t, hasEmbeddingProp, "embedding should be stored in Properties")
+	assert.Equal(t, []float32{0.1, 0.2, 0.3}, embVal)
 }
 
 func TestInvalidateManagedEmbeddings_NilSafe(t *testing.T) {

@@ -2195,17 +2195,19 @@ func TestResolveReturnItem_AdditionalBranches(t *testing.T) {
 	assert.Equal(t, "alice", exec.resolveReturnItem(returnItem{expr: "p.name"}, "p", node))
 	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.unknown"}, "p", node))
 
-	// embedding summary branches (managed embedding and embed meta).
+	// embedding is a regular property — no special routing from ChunkEmbeddings/EmbedMeta.
 	noEmbedding := &storage.Node{ID: "n2", Labels: []string{"Person"}, Properties: map[string]interface{}{}}
 	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", noEmbedding))
-	withChunk := &storage.Node{ID: "n3", Labels: []string{"Person"}, ChunkEmbeddings: [][]float32{{0.3, 0.4}}}
-	assert.NotNil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withChunk))
+	withChunkOnly := &storage.Node{ID: "n3", Labels: []string{"Person"}, ChunkEmbeddings: [][]float32{{0.3, 0.4}}, Properties: map[string]interface{}{}}
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withChunkOnly)) // not in Properties
+	withEmbProp := &storage.Node{ID: "n3b", Labels: []string{"Person"}, Properties: map[string]interface{}{"embedding": []float32{0.3, 0.4}}}
+	assert.Equal(t, []float32{0.3, 0.4}, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withEmbProp))
 	withMeta := &storage.Node{ID: "n4", Labels: []string{"Person"}, EmbedMeta: map[string]interface{}{"has_embedding": true}}
-	assert.NotNil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withMeta))
+	assert.Nil(t, exec.resolveReturnItem(returnItem{expr: "p.embedding"}, "p", withMeta)) // not in Properties
 
-	// has_embedding branches.
+	// has_embedding branches (from EmbedMeta).
 	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", withMeta))
-	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", withChunk))
+	assert.Equal(t, true, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", &storage.Node{ID: "n5", Labels: []string{"Person"}, ChunkEmbeddings: [][]float32{{0.3, 0.4}}}))
 	assert.Equal(t, false, exec.resolveReturnItem(returnItem{expr: "p.has_embedding"}, "p", noEmbedding))
 
 	// Fallback unresolved expression branch.

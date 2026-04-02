@@ -27,28 +27,12 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 			if node == nil {
 				return nil
 			}
-			// Handle embedding specially:
-			// - If user stored an "embedding" property, return it.
-			// - Otherwise expose managed embedding only when present (for IS NOT NULL compatibility).
-			if propName == "embedding" {
-				if val, ok := node.Properties["embedding"]; ok {
-					return val
-				}
-				hasManagedEmbedding := len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
-				if !hasManagedEmbedding && node.EmbedMeta != nil {
-					if v, ok := node.EmbedMeta["has_embedding"].(bool); ok {
-						hasManagedEmbedding = v
-					}
-				}
-				if hasManagedEmbedding {
-					return e.buildEmbeddingSummary(node)
-				}
-				return nil
-			}
-			// Handle has_embedding specially - check EmbedMeta and native embedding field
+			// has_embedding is stored in EmbedMeta by the managed embedding system
 			if propName == "has_embedding" {
-				if val, ok := node.EmbedMeta["has_embedding"]; ok {
-					return val
+				if node.EmbedMeta != nil {
+					if val, ok := node.EmbedMeta["has_embedding"]; ok {
+						return val
+					}
 				}
 				return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
 			}
@@ -74,12 +58,6 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 				}
 				return nil
 			case *storage.Node:
-				if propName == "embedding" {
-					if ev, ok := v.Properties["embedding"]; ok {
-						return ev
-					}
-					return nil
-				}
 				if pv, exists := v.Properties[propName]; exists {
 					return pv
 				}

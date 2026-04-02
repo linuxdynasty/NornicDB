@@ -532,7 +532,7 @@ curl http://localhost:8080/health
 | Vector array queries       | ✅        | ✅       |
 | String auto-embedding      | ❌        | ✅       |
 | Multi-line SET with arrays | ❌        | ✅       |
-| Native embedding field     | ❌        | ✅       |
+| Managed embedding storage  | ❌        | ✅       |
 | Server-side embedding      | ❌        | ✅       |
 | GPU acceleration           | ❌        | ✅       |
 | Embedding cache            | ❌        | ✅       |

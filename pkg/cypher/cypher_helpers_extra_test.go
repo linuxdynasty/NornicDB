@@ -107,37 +107,35 @@ func TestCypherHelpers_ProcedureCatalogNodeID(t *testing.T) {
 	assert.Equal(t, storage.NodeID(procedureCatalogPrefix+"db.labels"), id)
 }
 
-func TestCypherHelpers_NodeMapAndEmbeddingSummary(t *testing.T) {
+func TestCypherHelpers_NodeMapAndProperties(t *testing.T) {
 	exec := &StorageExecutor{}
 
-	nodePending := &storage.Node{
+	nodeNoEmb := &storage.Node{
 		ID:         "n-pending",
 		Labels:     []string{"Doc"},
 		Properties: map[string]interface{}{"name": "pending"},
 	}
-	pending := exec.nodeToMap(nodePending)
+	pending := exec.nodeToMap(nodeNoEmb)
 	require.Equal(t, "n-pending", pending["_nodeId"])
 	require.Equal(t, "n-pending", pending["id"]) // fallback to storage ID when user id absent
-	pEmb, ok := pending["embedding"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "pending", pEmb["status"])
+	// embedding is not injected — only present if user stored it
+	_, hasEmb := pending["embedding"]
+	assert.False(t, hasEmb, "embedding should not be injected into node map")
 
-	nodeReady := &storage.Node{
-		ID:              "n-ready",
-		Labels:          []string{"Doc"},
-		ChunkEmbeddings: [][]float32{{1, 2, 3, 4}},
-		EmbedMeta: map[string]interface{}{
-			"embedding_model": "bge-m3",
+	nodeWithUserEmb := &storage.Node{
+		ID:     "n-ready",
+		Labels: []string{"Doc"},
+		Properties: map[string]interface{}{
+			"id":        "user-id",
+			"name":      "ready",
+			"embedding": []float32{1, 2, 3, 4},
 		},
-		Properties: map[string]interface{}{"id": "user-id", "name": "ready"},
 	}
-	ready := exec.nodeToMap(nodeReady)
+	ready := exec.nodeToMap(nodeWithUserEmb)
 	require.Equal(t, "user-id", ready["id"]) // preserve user-provided id
-	rEmb, ok := ready["embedding"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "ready", rEmb["status"])
-	assert.Equal(t, 4, rEmb["dimensions"])
-	assert.Equal(t, "bge-m3", rEmb["model"])
+	embVal, ok := ready["embedding"].([]float32)
+	require.True(t, ok, "user embedding property should be returned as-is")
+	assert.Len(t, embVal, 4)
 }
 
 func TestCypherHelpers_ProcedureRegistryAndPatternNames(t *testing.T) {
@@ -1408,9 +1406,9 @@ func TestCypherHelpers_SubstituteBoundVariablesInCall(t *testing.T) {
 	assert.Contains(t, out, "7")
 	assert.Contains(t, out, "true")
 
-	// Embedding from ChunkEmbeddings.
+	// Embedding from Properties (stored as regular property, no special routing).
 	out = exec.substituteBoundVariablesInCall("CALL db.index.vector.queryNodes('idx', 5, n.embedding)", ctxNodes)
-	assert.Contains(t, out, "[0.1, 0.2]")
+	assert.Contains(t, out, "[1, 2, 3]")
 
 	// Embedding from []float64 property.
 	nodeFloat64 := &storage.Node{
@@ -2836,11 +2834,10 @@ func TestCypherHelpers_ComparisonHelpers_Branches(t *testing.T) {
 	assert.True(t, exec.evaluateIsNull(node, "n", "n.source IS NOT NULL", true))
 	assert.True(t, exec.evaluateIsNull(node, "n", "n.nullable_meta IS NULL", false))
 
-	// Managed embedding special-case.
-	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NOT NULL", true))
-	node.ChunkEmbeddings = nil
-	node.EmbedMeta["has_embedding"] = false
-	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NULL", false))
+	// embedding is a regular property — no special routing.
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NULL", false)) // not in Properties
+	node.Properties["embedding"] = []float32{0.1, 0.2}
+	assert.True(t, exec.evaluateIsNull(node, "n", "n.embedding IS NOT NULL", true)) // now in Properties
 }
 
 func TestCypherHelpers_ExecuteUnwind_Branches(t *testing.T) {

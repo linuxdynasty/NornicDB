@@ -233,38 +233,9 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 		if node, exists := nodeContext[varName]; exists {
 			// Evaluate the property access
 			var value interface{}
-			if propName == "embedding" {
-				// Special handling for embedding - return the first chunk vector (always stored in ChunkEmbeddings)
-				if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
-					value = node.ChunkEmbeddings[0]
-				} else if emb, ok := node.Properties["embedding"].([]float32); ok {
-					value = emb
-				} else if emb, ok := node.Properties["embedding"].([]float64); ok {
-					// Convert []float64 to []float32
-					emb32 := make([]float32, len(emb))
-					for i, v := range emb {
-						emb32[i] = float32(v)
-					}
-					value = emb32
-				} else if emb, ok := node.Properties["embedding"].([]interface{}); ok {
-					// Convert []interface{} to []float32
-					emb32 := make([]float32, 0, len(emb))
-					for _, item := range emb {
-						switch v := item.(type) {
-						case float32:
-							emb32 = append(emb32, v)
-						case float64:
-							emb32 = append(emb32, float32(v))
-						case int:
-							emb32 = append(emb32, float32(v))
-						case int64:
-							emb32 = append(emb32, float32(v))
-						}
-					}
-					value = emb32
-				}
-			} else {
-				// Regular property access
+			{
+				// Regular property access — no special-casing for any property name.
+				// Users can store embeddings in any property and create a vector index for it.
 				if val, ok := node.Properties[propName]; ok {
 					value = val
 				}
@@ -294,6 +265,24 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 					replacement = fmt.Sprintf("%d", v)
 				case float32, float64:
 					replacement = fmt.Sprintf("%g", v)
+				case []interface{}:
+					// Format as array (common for embedding vectors from Cypher parameters)
+					parts := make([]string, len(v))
+					for i, item := range v {
+						switch iv := item.(type) {
+						case float64:
+							parts[i] = fmt.Sprintf("%g", iv)
+						case float32:
+							parts[i] = fmt.Sprintf("%g", iv)
+						case int:
+							parts[i] = fmt.Sprintf("%d", iv)
+						case int64:
+							parts[i] = fmt.Sprintf("%d", iv)
+						default:
+							parts[i] = fmt.Sprintf("%v", iv)
+						}
+					}
+					replacement = "[" + strings.Join(parts, ", ") + "]"
 				case bool:
 					if v {
 						replacement = "true"
@@ -3278,6 +3267,22 @@ func (e *StorageExecutor) applyOrderByToResult(result *ExecuteResult, orderByCla
 		}
 	}
 
+	// If the ORDER BY column is a dotted property (e.g. t.createdAt) and not directly
+	// projected, look for the variable name (e.g. "t") in the result columns and
+	// extract the property from the returned node map.
+	propName := ""
+	if colIdx == -1 && strings.Contains(colName, ".") {
+		parts := strings.SplitN(colName, ".", 2)
+		varName, prop := parts[0], parts[1]
+		for i, col := range result.Columns {
+			if col == varName {
+				colIdx = i
+				propName = prop
+				break
+			}
+		}
+	}
+
 	if colIdx == -1 {
 		return result
 	}
@@ -3286,6 +3291,11 @@ func (e *StorageExecutor) applyOrderByToResult(result *ExecuteResult, orderByCla
 	sort.SliceStable(result.Rows, func(i, j int) bool {
 		vi := result.Rows[i][colIdx]
 		vj := result.Rows[j][colIdx]
+		// Extract property from node map if ORDER BY uses var.property on a returned node
+		if propName != "" {
+			vi = extractPropertyFromValue(vi, propName)
+			vj = extractPropertyFromValue(vj, propName)
+		}
 		cmp := compareValuesForSort(vi, vj)
 		if descending {
 			return cmp > 0
@@ -3297,6 +3307,22 @@ func (e *StorageExecutor) applyOrderByToResult(result *ExecuteResult, orderByCla
 }
 
 // compareValuesForSort compares two values for sorting, returns -1, 0, or 1
+// extractPropertyFromValue extracts a named property from a value that may be a node map.
+func extractPropertyFromValue(val interface{}, propName string) interface{} {
+	if m, ok := val.(map[string]interface{}); ok {
+		if pv, exists := m[propName]; exists {
+			return pv
+		}
+		// Check nested properties map
+		if props, ok := m["properties"].(map[string]interface{}); ok {
+			if pv, exists := props[propName]; exists {
+				return pv
+			}
+		}
+	}
+	return nil
+}
+
 func compareValuesForSort(a, b interface{}) int {
 	if a == nil && b == nil {
 		return 0

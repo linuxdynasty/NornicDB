@@ -159,7 +159,7 @@ If you are using the MCP tools (`store`, `discover`, etc.):
   - Applies to `/mcp`, `/mcp/tools/call`, and `/mcp/initialize`.
 - **Embedding input limits**: the effective max “query size” for vector search is bounded by the embedding model context.
   - For **local GGUF embeddings**, long queries are **chunked** into embedding-safe pieces and searched across all chunks (results are fused), so vector search can still work with paragraph-sized queries.
-- **Stored content**: large content is chunked for embeddings (default **512 tokens per chunk** with overlap), but very large payloads will increase background embedding work.
+- **Stored content**: large content is chunked for embeddings (default **8192 tokens per chunk** with 50-token overlap), but very large payloads will increase background embedding work.
 
 ### High Memory Usage
 

@@ -755,32 +755,14 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 			return string(node.ID)
 		}
 
-		// Handle special "embedding" property:
-		// - Return user-provided property if present.
-		// - Otherwise expose managed embedding summary only when embedding exists.
-		if propName == "embedding" {
-			if val, ok := node.Properties["embedding"]; ok {
-				return val
-			}
-			hasManagedEmbedding := len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
-			if !hasManagedEmbedding && node.EmbedMeta != nil {
-				if v, ok := node.EmbedMeta["has_embedding"].(bool); ok {
-					hasManagedEmbedding = v
-				}
-			}
-			if hasManagedEmbedding {
-				return e.buildEmbeddingSummary(node)
-			}
-			return nil
-		}
-
-		// Handle has_embedding specially - check EmbedMeta and native embedding field
+		// has_embedding is stored in EmbedMeta by the managed embedding system
 		// This supports queries like: WHERE f.has_embedding = true
 		if propName == "has_embedding" {
-			if val, ok := node.EmbedMeta["has_embedding"]; ok {
-				return val
+			if node.EmbedMeta != nil {
+				if val, ok := node.EmbedMeta["has_embedding"]; ok {
+					return val
+				}
 			}
-			// Fall back to checking native embedding field (always stored in ChunkEmbeddings)
 			return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
 		}
 

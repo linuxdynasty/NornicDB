@@ -245,7 +245,6 @@ NornicDB supports two embedding modes:
 - **Vector Procedures** - `db.index.vector.queryNodes` with string auto-embedding
 - **`WITH EMBEDDING`** - Inline embedding within mutation transactions (CREATE/MERGE/SET)
 - **Multi-line SET** - Arrays and multiple properties in single SET
-- **Native embedding** - Routes `embedding` property to `node.Embedding` field
 
 ### Search Service (`pkg/search`)
 

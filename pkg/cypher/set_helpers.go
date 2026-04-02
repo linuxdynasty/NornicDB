@@ -138,8 +138,12 @@ func (e *StorageExecutor) applySetMapMergeToNode(node *storage.Node, varName str
 
 // setNodeProperty sets a property on a node.
 //
-// Special handling for "embedding" property which goes to node.ChunkEmbeddings (always stored as array of arrays)
-// instead of node.Properties.
+// setNodeProperty sets a property on a node.
+//
+// The "embedding" property is treated like any other property — it is stored in
+// node.Properties and indexed normally. Managed embeddings (from WITH EMBEDDING
+// or the background worker) are stored separately in node.ChunkEmbeddings via
+// ApplyManagedEmbedding and are not affected by user property writes.
 //
 // # Parameters
 //
@@ -147,14 +151,6 @@ func (e *StorageExecutor) applySetMapMergeToNode(node *storage.Node, varName str
 //   - propName: The property name
 //   - value: The value to set
 func setNodeProperty(node *storage.Node, propName string, value interface{}) {
-	if propName == "embedding" {
-		// Store as ChunkEmbeddings (always array of arrays, even single chunk = array of 1)
-		if floatSlice := toFloat32Slice(value); len(floatSlice) > 0 {
-			node.ChunkEmbeddings = [][]float32{floatSlice}
-		}
-		return
-	}
-
 	// For managed embeddings (ChunkEmbeddings), any mutation to non-metadata properties
 	// should invalidate the embedding so it can be regenerated. This prevents stale
 	// embeddings after SET/REMOVE operations.
