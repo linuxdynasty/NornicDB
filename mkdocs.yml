@@ -151,9 +151,12 @@ nav:
   - Security:
       - Overview: security/README.md
       - HTTP Security: security/http-security.md
+      - CMEK Setup: encryption/cmek-setup.md
+      - HSM Integration: encryption/hsm-integration.md
   - Compliance:
       - Overview: compliance/README.md
       - Background Workers, MVCC, and Audit Evidence: compliance/background-workers-mvcc-audit-guide.md
+      - Encryption Compliance Evidence: encryption/compliance-evidence.md
   - Development:
       - Overview: development/README.md
   - AI Agents:

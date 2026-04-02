@@ -94,6 +94,38 @@ Recommended starting points:
 
 For query examples and maintenance usage, see [Historical Reads & MVCC Retention](../user-guides/historical-reads-mvcc-retention.md).
 
+### Provider-backed at-rest encryption
+
+NornicDB supports provider-backed storage encryption for Badger using a wrapped data-encryption key persisted in the data directory.
+
+Supported provider modes:
+
+- `password`
+- `local`
+- `aws-kms`
+- `azure-keyvault`
+- `gcp-cloudkms`
+
+Example:
+
+```yaml
+database:
+  encryption_enabled: true
+  encryption_provider: "aws-kms"
+  encryption_aws_region: "us-east-1"
+  encryption_aws_kms_key_id: "arn:aws:kms:us-east-1:123456789012:key/..."
+  encryption_audit_sign_events: true
+  encryption_audit_sign_key: "replace-with-hmac-signing-key"
+  encryption_rotation_enabled: true
+  encryption_rotation_interval: "2160h"
+```
+
+See:
+
+- [CMEK Setup](../encryption/cmek-setup.md)
+- [HSM Integration](../encryption/hsm-integration.md)
+- [Compliance Evidence](../encryption/compliance-evidence.md)
+
 ### Per-database configuration overrides
 
 Instance-level configuration (env, config file) is the **default** for every database. You can override specific settings **per database** so that embedding, search, HNSW, k-means, and related options can differ by database.

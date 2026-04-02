@@ -205,6 +205,58 @@ type DatabaseConfig struct {
 	// Env: NORNICDB_ENCRYPTION_PASSWORD
 	EncryptionPassword string
 
+	// EncryptionProvider selects key management mode for at-rest DB key material.
+	// Supported: "password" (default), "local".
+	// Env: NORNICDB_ENCRYPTION_PROVIDER
+	EncryptionProvider string
+
+	// EncryptionKeyURI identifies the KEK in provider-backed modes.
+	// Env: NORNICDB_ENCRYPTION_KEY_URI
+	EncryptionKeyURI string
+
+	// EncryptionMasterKey provides the provider master key material (dev/local).
+	// Expected encoding: raw 32-byte string OR hex/base64 depending on provider.
+	// Env: NORNICDB_ENCRYPTION_MASTER_KEY
+	EncryptionMasterKey string
+
+	// AWS KMS provider settings.
+	EncryptionAWSRegion               string
+	EncryptionAWSKMSKeyID             string
+	EncryptionAWSEndpoint             string
+	EncryptionAWSRoleARN              string
+	EncryptionAWSRoleSessionName      string
+	EncryptionAWSAccessKey            string
+	EncryptionAWSSecretKey            string
+	EncryptionAWSSessionToken         string
+	EncryptionAWSSharedCredsFilename  string
+	EncryptionAWSSharedCredsProfile   string
+	EncryptionAWSWebIdentityTokenFile string
+
+	// Azure Key Vault provider settings.
+	EncryptionAzureVaultName    string
+	EncryptionAzureKeyName      string
+	EncryptionAzureTenantID     string
+	EncryptionAzureClientID     string
+	EncryptionAzureClientSecret string
+	EncryptionAzureEnvironment  string
+	EncryptionAzureResource     string
+
+	// GCP Cloud KMS provider settings.
+	EncryptionGCPProject         string
+	EncryptionGCPLocation        string
+	EncryptionGCPKeyRing         string
+	EncryptionGCPKeyName         string
+	EncryptionGCPCredentialsFile string
+
+	// Encryption audit settings for provider-backed modes.
+	EncryptionAuditLogPath    string
+	EncryptionAuditSignEvents bool
+	EncryptionAuditSignKey    string
+
+	// Encryption rotation settings for persisted wrapped DEKs.
+	EncryptionRotationEnabled  bool
+	EncryptionRotationInterval time.Duration
+
 	// === Async Write Settings ===
 	// These control the async write-behind cache for better throughput.
 
@@ -951,6 +1003,46 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid embedding dimensions: %d", c.Memory.EmbeddingDimensions)
 	}
 
+	providerMode := strings.ToLower(strings.TrimSpace(c.Database.EncryptionProvider))
+	if providerMode == "" {
+		providerMode = "password"
+	}
+	switch providerMode {
+	case "password", "local", "aws-kms", "azure-keyvault", "gcp-cloudkms":
+	default:
+		return fmt.Errorf("invalid encryption provider: %s", c.Database.EncryptionProvider)
+	}
+	if c.Database.EncryptionRotationInterval < 0 {
+		return fmt.Errorf("invalid encryption rotation interval: %s", c.Database.EncryptionRotationInterval)
+	}
+	if c.Database.EncryptionAuditSignEvents && strings.TrimSpace(c.Database.EncryptionAuditSignKey) == "" {
+		return fmt.Errorf("encryption audit signing is enabled but no signing key was provided")
+	}
+	if c.Database.EncryptionEnabled {
+		switch providerMode {
+		case "password":
+			if strings.TrimSpace(c.Database.EncryptionPassword) == "" {
+				return fmt.Errorf("encryption is enabled but no encryption password was provided")
+			}
+		case "local":
+			if strings.TrimSpace(c.Database.EncryptionMasterKey) == "" {
+				return fmt.Errorf("local encryption provider requires encryption_master_key")
+			}
+		case "aws-kms":
+			if strings.TrimSpace(c.Database.EncryptionAWSRegion) == "" || strings.TrimSpace(c.Database.EncryptionAWSKMSKeyID) == "" {
+				return fmt.Errorf("aws-kms encryption provider requires encryption_aws_region and encryption_aws_kms_key_id")
+			}
+		case "azure-keyvault":
+			if strings.TrimSpace(c.Database.EncryptionAzureVaultName) == "" || strings.TrimSpace(c.Database.EncryptionAzureKeyName) == "" {
+				return fmt.Errorf("azure-keyvault encryption provider requires encryption_azure_vault_name and encryption_azure_key_name")
+			}
+		case "gcp-cloudkms":
+			if strings.TrimSpace(c.Database.EncryptionGCPProject) == "" || strings.TrimSpace(c.Database.EncryptionGCPLocation) == "" || strings.TrimSpace(c.Database.EncryptionGCPKeyRing) == "" || strings.TrimSpace(c.Database.EncryptionGCPKeyName) == "" {
+				return fmt.Errorf("gcp-cloudkms encryption provider requires encryption_gcp_project, encryption_gcp_location, encryption_gcp_key_ring, and encryption_gcp_key_name")
+			}
+		}
+	}
+
 	switch strings.ToLower(strings.TrimSpace(c.Database.StorageSerializer)) {
 	case "", "gob", "msgpack":
 	default:
@@ -1024,32 +1116,63 @@ type YAMLConfig struct {
 
 	// Database/Storage configuration
 	Database struct {
-		DataDir                      string `yaml:"data_dir"`
-		DefaultDatabase              string `yaml:"default_database"`
-		ReadOnly                     bool   `yaml:"read_only"`
-		TransactionTimeout           string `yaml:"transaction_timeout"`
-		MaxConcurrentTransactions    int    `yaml:"max_concurrent_transactions"`
-		StrictDurability             bool   `yaml:"strict_durability"`
-		WALSyncMode                  string `yaml:"wal_sync_mode"`
-		WALSyncInterval              string `yaml:"wal_sync_interval"`
-		WALAutoCompactionEnabled     *bool  `yaml:"wal_auto_compaction_enabled"`
-		WALRetentionMaxSegments      int    `yaml:"wal_retention_max_segments"`
-		WALRetentionMaxAge           string `yaml:"wal_retention_max_age"`
-		WALRetentionLedgerDefaults   bool   `yaml:"wal_ledger_retention_defaults"`
-		WALSnapshotRetentionMaxCount int    `yaml:"wal_snapshot_retention_max_count"`
-		WALSnapshotRetentionMaxAge   string `yaml:"wal_snapshot_retention_max_age"`
-		EncryptionEnabled            bool   `yaml:"encryption_enabled"`
-		EncryptionPassword           string `yaml:"encryption_password"`
-		BadgerNodeCacheMaxEntries    int    `yaml:"badger_node_cache_max_entries"`
-		BadgerEdgeTypeCacheMaxTypes  int    `yaml:"badger_edge_type_cache_max_types"`
-		MVCCRetentionMaxVersions     int    `yaml:"mvcc_retention_max_versions"`
-		MVCCRetentionTTL             string `yaml:"mvcc_retention_ttl"`
-		MVCCLifecycleEnabled         *bool  `yaml:"mvcc_lifecycle_enabled"`
-		MVCCLifecycleCycleInterval   string `yaml:"mvcc_lifecycle_interval"`
-		MVCCLifecycleMaxSnapshotAge  string `yaml:"mvcc_lifecycle_max_snapshot_age"`
-		MVCCLifecycleMaxChainCap     int    `yaml:"mvcc_lifecycle_max_chain_cap"`
-		StorageSerializer            string `yaml:"storage_serializer"`
-		PersistSearchIndexes         bool   `yaml:"persist_search_indexes"`
+		DataDir                           string `yaml:"data_dir"`
+		DefaultDatabase                   string `yaml:"default_database"`
+		ReadOnly                          bool   `yaml:"read_only"`
+		TransactionTimeout                string `yaml:"transaction_timeout"`
+		MaxConcurrentTransactions         int    `yaml:"max_concurrent_transactions"`
+		StrictDurability                  bool   `yaml:"strict_durability"`
+		WALSyncMode                       string `yaml:"wal_sync_mode"`
+		WALSyncInterval                   string `yaml:"wal_sync_interval"`
+		WALAutoCompactionEnabled          *bool  `yaml:"wal_auto_compaction_enabled"`
+		WALRetentionMaxSegments           int    `yaml:"wal_retention_max_segments"`
+		WALRetentionMaxAge                string `yaml:"wal_retention_max_age"`
+		WALRetentionLedgerDefaults        bool   `yaml:"wal_ledger_retention_defaults"`
+		WALSnapshotRetentionMaxCount      int    `yaml:"wal_snapshot_retention_max_count"`
+		WALSnapshotRetentionMaxAge        string `yaml:"wal_snapshot_retention_max_age"`
+		EncryptionEnabled                 bool   `yaml:"encryption_enabled"`
+		EncryptionPassword                string `yaml:"encryption_password"`
+		EncryptionProvider                string `yaml:"encryption_provider"`
+		EncryptionKeyURI                  string `yaml:"encryption_key_uri"`
+		EncryptionMasterKey               string `yaml:"encryption_master_key"`
+		EncryptionAWSRegion               string `yaml:"encryption_aws_region"`
+		EncryptionAWSKMSKeyID             string `yaml:"encryption_aws_kms_key_id"`
+		EncryptionAWSEndpoint             string `yaml:"encryption_aws_endpoint"`
+		EncryptionAWSRoleARN              string `yaml:"encryption_aws_role_arn"`
+		EncryptionAWSRoleSessionName      string `yaml:"encryption_aws_role_session_name"`
+		EncryptionAWSAccessKey            string `yaml:"encryption_aws_access_key"`
+		EncryptionAWSSecretKey            string `yaml:"encryption_aws_secret_key"`
+		EncryptionAWSSessionToken         string `yaml:"encryption_aws_session_token"`
+		EncryptionAWSSharedCredsFilename  string `yaml:"encryption_aws_shared_creds_filename"`
+		EncryptionAWSSharedCredsProfile   string `yaml:"encryption_aws_shared_creds_profile"`
+		EncryptionAWSWebIdentityTokenFile string `yaml:"encryption_aws_web_identity_token_file"`
+		EncryptionAzureVaultName          string `yaml:"encryption_azure_vault_name"`
+		EncryptionAzureKeyName            string `yaml:"encryption_azure_key_name"`
+		EncryptionAzureTenantID           string `yaml:"encryption_azure_tenant_id"`
+		EncryptionAzureClientID           string `yaml:"encryption_azure_client_id"`
+		EncryptionAzureClientSecret       string `yaml:"encryption_azure_client_secret"`
+		EncryptionAzureEnvironment        string `yaml:"encryption_azure_environment"`
+		EncryptionAzureResource           string `yaml:"encryption_azure_resource"`
+		EncryptionGCPProject              string `yaml:"encryption_gcp_project"`
+		EncryptionGCPLocation             string `yaml:"encryption_gcp_location"`
+		EncryptionGCPKeyRing              string `yaml:"encryption_gcp_key_ring"`
+		EncryptionGCPKeyName              string `yaml:"encryption_gcp_key_name"`
+		EncryptionGCPCredentialsFile      string `yaml:"encryption_gcp_credentials_file"`
+		EncryptionAuditLogPath            string `yaml:"encryption_audit_log_path"`
+		EncryptionAuditSignEvents         *bool  `yaml:"encryption_audit_sign_events"`
+		EncryptionAuditSignKey            string `yaml:"encryption_audit_sign_key"`
+		EncryptionRotationEnabled         *bool  `yaml:"encryption_rotation_enabled"`
+		EncryptionRotationInterval        string `yaml:"encryption_rotation_interval"`
+		BadgerNodeCacheMaxEntries         int    `yaml:"badger_node_cache_max_entries"`
+		BadgerEdgeTypeCacheMaxTypes       int    `yaml:"badger_edge_type_cache_max_types"`
+		MVCCRetentionMaxVersions          int    `yaml:"mvcc_retention_max_versions"`
+		MVCCRetentionTTL                  string `yaml:"mvcc_retention_ttl"`
+		MVCCLifecycleEnabled              *bool  `yaml:"mvcc_lifecycle_enabled"`
+		MVCCLifecycleCycleInterval        string `yaml:"mvcc_lifecycle_interval"`
+		MVCCLifecycleMaxSnapshotAge       string `yaml:"mvcc_lifecycle_max_snapshot_age"`
+		MVCCLifecycleMaxChainCap          int    `yaml:"mvcc_lifecycle_max_chain_cap"`
+		StorageSerializer                 string `yaml:"storage_serializer"`
+		PersistSearchIndexes              bool   `yaml:"persist_search_indexes"`
 	} `yaml:"database"`
 
 	// Storage alias for database
@@ -1271,6 +1394,37 @@ func LoadDefaults() *Config {
 	config.Database.WALSnapshotRetentionMaxCount = 0 // 0 = use storage default (3)
 	config.Database.WALSnapshotRetentionMaxAge = 0   // Unlimited by default
 	config.Database.EncryptionPassword = ""          // disabled by default
+	config.Database.EncryptionProvider = "password"
+	config.Database.EncryptionKeyURI = ""
+	config.Database.EncryptionMasterKey = ""
+	config.Database.EncryptionAWSRegion = ""
+	config.Database.EncryptionAWSKMSKeyID = ""
+	config.Database.EncryptionAWSEndpoint = ""
+	config.Database.EncryptionAWSRoleARN = ""
+	config.Database.EncryptionAWSRoleSessionName = ""
+	config.Database.EncryptionAWSAccessKey = ""
+	config.Database.EncryptionAWSSecretKey = ""
+	config.Database.EncryptionAWSSessionToken = ""
+	config.Database.EncryptionAWSSharedCredsFilename = ""
+	config.Database.EncryptionAWSSharedCredsProfile = ""
+	config.Database.EncryptionAWSWebIdentityTokenFile = ""
+	config.Database.EncryptionAzureVaultName = ""
+	config.Database.EncryptionAzureKeyName = ""
+	config.Database.EncryptionAzureTenantID = ""
+	config.Database.EncryptionAzureClientID = ""
+	config.Database.EncryptionAzureClientSecret = ""
+	config.Database.EncryptionAzureEnvironment = ""
+	config.Database.EncryptionAzureResource = ""
+	config.Database.EncryptionGCPProject = ""
+	config.Database.EncryptionGCPLocation = ""
+	config.Database.EncryptionGCPKeyRing = ""
+	config.Database.EncryptionGCPKeyName = ""
+	config.Database.EncryptionGCPCredentialsFile = ""
+	config.Database.EncryptionAuditLogPath = ""
+	config.Database.EncryptionAuditSignEvents = false
+	config.Database.EncryptionAuditSignKey = ""
+	config.Database.EncryptionRotationEnabled = true
+	config.Database.EncryptionRotationInterval = 90 * 24 * time.Hour
 	config.Database.AsyncWritesEnabled = true
 	config.Database.AsyncFlushInterval = 50 * time.Millisecond
 	config.Database.AsyncMaxNodeCacheSize = 50000  // ~35MB assuming 700 bytes/node
@@ -1665,6 +1819,110 @@ func applyEnvVars(config *Config) error {
 		// Auto-enable encryption if password is provided via env var
 		if config.Database.EncryptionPassword != "" {
 			config.Database.EncryptionEnabled = true
+		}
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_PROVIDER", ""); v != "" {
+		config.Database.EncryptionProvider = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_KEY_URI", ""); v != "" {
+		config.Database.EncryptionKeyURI = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_MASTER_KEY", ""); v != "" {
+		config.Database.EncryptionMasterKey = strings.TrimSpace(v)
+		if config.Database.EncryptionMasterKey != "" {
+			config.Database.EncryptionEnabled = true
+		}
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_REGION", ""); v != "" {
+		config.Database.EncryptionAWSRegion = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_KMS_KEY_ID", ""); v != "" {
+		config.Database.EncryptionAWSKMSKeyID = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_ENDPOINT", ""); v != "" {
+		config.Database.EncryptionAWSEndpoint = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_ROLE_ARN", ""); v != "" {
+		config.Database.EncryptionAWSRoleARN = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_ROLE_SESSION_NAME", ""); v != "" {
+		config.Database.EncryptionAWSRoleSessionName = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_ACCESS_KEY", ""); v != "" {
+		config.Database.EncryptionAWSAccessKey = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_SECRET_KEY", ""); v != "" {
+		config.Database.EncryptionAWSSecretKey = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_SESSION_TOKEN", ""); v != "" {
+		config.Database.EncryptionAWSSessionToken = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_SHARED_CREDS_FILENAME", ""); v != "" {
+		config.Database.EncryptionAWSSharedCredsFilename = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_SHARED_CREDS_PROFILE", ""); v != "" {
+		config.Database.EncryptionAWSSharedCredsProfile = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AWS_WEB_IDENTITY_TOKEN_FILE", ""); v != "" {
+		config.Database.EncryptionAWSWebIdentityTokenFile = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_VAULT_NAME", ""); v != "" {
+		config.Database.EncryptionAzureVaultName = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_KEY_NAME", ""); v != "" {
+		config.Database.EncryptionAzureKeyName = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_TENANT_ID", ""); v != "" {
+		config.Database.EncryptionAzureTenantID = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_CLIENT_ID", ""); v != "" {
+		config.Database.EncryptionAzureClientID = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_CLIENT_SECRET", ""); v != "" {
+		config.Database.EncryptionAzureClientSecret = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_ENVIRONMENT", ""); v != "" {
+		config.Database.EncryptionAzureEnvironment = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AZURE_RESOURCE", ""); v != "" {
+		config.Database.EncryptionAzureResource = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_GCP_PROJECT", ""); v != "" {
+		config.Database.EncryptionGCPProject = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_GCP_LOCATION", ""); v != "" {
+		config.Database.EncryptionGCPLocation = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_GCP_KEY_RING", ""); v != "" {
+		config.Database.EncryptionGCPKeyRing = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_GCP_KEY_NAME", ""); v != "" {
+		config.Database.EncryptionGCPKeyName = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_GCP_CREDENTIALS_FILE", ""); v != "" {
+		config.Database.EncryptionGCPCredentialsFile = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AUDIT_LOG_PATH", ""); v != "" {
+		config.Database.EncryptionAuditLogPath = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AUDIT_SIGN_EVENTS", ""); v != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err == nil {
+			config.Database.EncryptionAuditSignEvents = parsed
+		}
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_AUDIT_SIGN_KEY", ""); v != "" {
+		config.Database.EncryptionAuditSignKey = strings.TrimSpace(v)
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_ROTATION_ENABLED", ""); v != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err == nil {
+			config.Database.EncryptionRotationEnabled = parsed
+		}
+	}
+	if v := getEnv("NORNICDB_ENCRYPTION_ROTATION_INTERVAL", ""); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil {
+			config.Database.EncryptionRotationInterval = d
 		}
 	}
 
@@ -2174,6 +2432,101 @@ func LoadFromFile(configPath string) (*Config, error) {
 		yamlCfg.Database.EncryptionPassword != "[stored-in-keychain]" &&
 		!strings.Contains(yamlCfg.Database.EncryptionPassword, "stored-in-keychain") {
 		config.Database.EncryptionPassword = yamlCfg.Database.EncryptionPassword
+	}
+	if yamlCfg.Database.EncryptionProvider != "" {
+		config.Database.EncryptionProvider = strings.ToLower(strings.TrimSpace(yamlCfg.Database.EncryptionProvider))
+	}
+	if yamlCfg.Database.EncryptionKeyURI != "" {
+		config.Database.EncryptionKeyURI = strings.TrimSpace(yamlCfg.Database.EncryptionKeyURI)
+	}
+	if yamlCfg.Database.EncryptionMasterKey != "" {
+		config.Database.EncryptionMasterKey = strings.TrimSpace(yamlCfg.Database.EncryptionMasterKey)
+	}
+	if yamlCfg.Database.EncryptionAWSRegion != "" {
+		config.Database.EncryptionAWSRegion = strings.TrimSpace(yamlCfg.Database.EncryptionAWSRegion)
+	}
+	if yamlCfg.Database.EncryptionAWSKMSKeyID != "" {
+		config.Database.EncryptionAWSKMSKeyID = strings.TrimSpace(yamlCfg.Database.EncryptionAWSKMSKeyID)
+	}
+	if yamlCfg.Database.EncryptionAWSEndpoint != "" {
+		config.Database.EncryptionAWSEndpoint = strings.TrimSpace(yamlCfg.Database.EncryptionAWSEndpoint)
+	}
+	if yamlCfg.Database.EncryptionAWSRoleARN != "" {
+		config.Database.EncryptionAWSRoleARN = strings.TrimSpace(yamlCfg.Database.EncryptionAWSRoleARN)
+	}
+	if yamlCfg.Database.EncryptionAWSRoleSessionName != "" {
+		config.Database.EncryptionAWSRoleSessionName = strings.TrimSpace(yamlCfg.Database.EncryptionAWSRoleSessionName)
+	}
+	if yamlCfg.Database.EncryptionAWSAccessKey != "" {
+		config.Database.EncryptionAWSAccessKey = strings.TrimSpace(yamlCfg.Database.EncryptionAWSAccessKey)
+	}
+	if yamlCfg.Database.EncryptionAWSSecretKey != "" {
+		config.Database.EncryptionAWSSecretKey = strings.TrimSpace(yamlCfg.Database.EncryptionAWSSecretKey)
+	}
+	if yamlCfg.Database.EncryptionAWSSessionToken != "" {
+		config.Database.EncryptionAWSSessionToken = strings.TrimSpace(yamlCfg.Database.EncryptionAWSSessionToken)
+	}
+	if yamlCfg.Database.EncryptionAWSSharedCredsFilename != "" {
+		config.Database.EncryptionAWSSharedCredsFilename = strings.TrimSpace(yamlCfg.Database.EncryptionAWSSharedCredsFilename)
+	}
+	if yamlCfg.Database.EncryptionAWSSharedCredsProfile != "" {
+		config.Database.EncryptionAWSSharedCredsProfile = strings.TrimSpace(yamlCfg.Database.EncryptionAWSSharedCredsProfile)
+	}
+	if yamlCfg.Database.EncryptionAWSWebIdentityTokenFile != "" {
+		config.Database.EncryptionAWSWebIdentityTokenFile = strings.TrimSpace(yamlCfg.Database.EncryptionAWSWebIdentityTokenFile)
+	}
+	if yamlCfg.Database.EncryptionAzureVaultName != "" {
+		config.Database.EncryptionAzureVaultName = strings.TrimSpace(yamlCfg.Database.EncryptionAzureVaultName)
+	}
+	if yamlCfg.Database.EncryptionAzureKeyName != "" {
+		config.Database.EncryptionAzureKeyName = strings.TrimSpace(yamlCfg.Database.EncryptionAzureKeyName)
+	}
+	if yamlCfg.Database.EncryptionAzureTenantID != "" {
+		config.Database.EncryptionAzureTenantID = strings.TrimSpace(yamlCfg.Database.EncryptionAzureTenantID)
+	}
+	if yamlCfg.Database.EncryptionAzureClientID != "" {
+		config.Database.EncryptionAzureClientID = strings.TrimSpace(yamlCfg.Database.EncryptionAzureClientID)
+	}
+	if yamlCfg.Database.EncryptionAzureClientSecret != "" {
+		config.Database.EncryptionAzureClientSecret = strings.TrimSpace(yamlCfg.Database.EncryptionAzureClientSecret)
+	}
+	if yamlCfg.Database.EncryptionAzureEnvironment != "" {
+		config.Database.EncryptionAzureEnvironment = strings.TrimSpace(yamlCfg.Database.EncryptionAzureEnvironment)
+	}
+	if yamlCfg.Database.EncryptionAzureResource != "" {
+		config.Database.EncryptionAzureResource = strings.TrimSpace(yamlCfg.Database.EncryptionAzureResource)
+	}
+	if yamlCfg.Database.EncryptionGCPProject != "" {
+		config.Database.EncryptionGCPProject = strings.TrimSpace(yamlCfg.Database.EncryptionGCPProject)
+	}
+	if yamlCfg.Database.EncryptionGCPLocation != "" {
+		config.Database.EncryptionGCPLocation = strings.TrimSpace(yamlCfg.Database.EncryptionGCPLocation)
+	}
+	if yamlCfg.Database.EncryptionGCPKeyRing != "" {
+		config.Database.EncryptionGCPKeyRing = strings.TrimSpace(yamlCfg.Database.EncryptionGCPKeyRing)
+	}
+	if yamlCfg.Database.EncryptionGCPKeyName != "" {
+		config.Database.EncryptionGCPKeyName = strings.TrimSpace(yamlCfg.Database.EncryptionGCPKeyName)
+	}
+	if yamlCfg.Database.EncryptionGCPCredentialsFile != "" {
+		config.Database.EncryptionGCPCredentialsFile = strings.TrimSpace(yamlCfg.Database.EncryptionGCPCredentialsFile)
+	}
+	if yamlCfg.Database.EncryptionAuditLogPath != "" {
+		config.Database.EncryptionAuditLogPath = strings.TrimSpace(yamlCfg.Database.EncryptionAuditLogPath)
+	}
+	if yamlCfg.Database.EncryptionAuditSignEvents != nil {
+		config.Database.EncryptionAuditSignEvents = *yamlCfg.Database.EncryptionAuditSignEvents
+	}
+	if yamlCfg.Database.EncryptionAuditSignKey != "" {
+		config.Database.EncryptionAuditSignKey = strings.TrimSpace(yamlCfg.Database.EncryptionAuditSignKey)
+	}
+	if yamlCfg.Database.EncryptionRotationEnabled != nil {
+		config.Database.EncryptionRotationEnabled = *yamlCfg.Database.EncryptionRotationEnabled
+	}
+	if yamlCfg.Database.EncryptionRotationInterval != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(yamlCfg.Database.EncryptionRotationInterval)); err == nil {
+			config.Database.EncryptionRotationInterval = d
+		}
 	}
 	if yamlCfg.Database.BadgerNodeCacheMaxEntries > 0 {
 		config.Database.BadgerNodeCacheMaxEntries = yamlCfg.Database.BadgerNodeCacheMaxEntries

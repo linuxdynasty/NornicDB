@@ -141,6 +141,71 @@ database:
   # Uses AES-256-GCM with PBKDF2 key derivation.
   encryption_password: ""
 
+  # Encryption provider mode.
+  # Env: NORNICDB_ENCRYPTION_PROVIDER
+  # Supported: "password" (default), "local", "aws-kms", "azure-keyvault", "gcp-cloudkms"
+  encryption_provider: "password"
+
+  # Optional provider key URI used for DEK metadata/audit.
+  # Env: NORNICDB_ENCRYPTION_KEY_URI
+  encryption_key_uri: ""
+
+  # Provider master key material (dev/local mode only).
+  # Env: NORNICDB_ENCRYPTION_MASTER_KEY
+  # Accepts 32-byte raw string, base64, or hex.
+  encryption_master_key: ""
+
+  # AWS KMS provider settings
+  encryption_aws_region: ""
+  encryption_aws_kms_key_id: ""
+  encryption_aws_endpoint: ""
+  encryption_aws_role_arn: ""
+  encryption_aws_role_session_name: ""
+  encryption_aws_access_key: ""
+  encryption_aws_secret_key: ""
+  encryption_aws_session_token: ""
+  encryption_aws_shared_creds_filename: ""
+  encryption_aws_shared_creds_profile: ""
+  encryption_aws_web_identity_token_file: ""
+
+  # Azure Key Vault provider settings
+  encryption_azure_vault_name: ""
+  encryption_azure_key_name: ""
+  encryption_azure_tenant_id: ""
+  encryption_azure_client_id: ""
+  encryption_azure_client_secret: ""
+  encryption_azure_environment: ""
+  encryption_azure_resource: ""
+
+  # GCP Cloud KMS provider settings
+  encryption_gcp_project: ""
+  encryption_gcp_location: ""
+  encryption_gcp_key_ring: ""
+  encryption_gcp_key_name: ""
+  encryption_gcp_credentials_file: ""
+
+  # Provider-backed audit log for KMS/KEK lifecycle operations.
+  # Defaults to <data_dir>/encryption-audit.jsonl when unset.
+  # Env: NORNICDB_ENCRYPTION_AUDIT_LOG_PATH
+  encryption_audit_log_path: ""
+
+  # Sign each audit event with HMAC-SHA256.
+  # Env: NORNICDB_ENCRYPTION_AUDIT_SIGN_EVENTS
+  encryption_audit_sign_events: false
+
+  # Audit signing key used when encryption_audit_sign_events is true.
+  # Env: NORNICDB_ENCRYPTION_AUDIT_SIGN_KEY
+  encryption_audit_sign_key: ""
+
+  # Automatically rewrap the persisted wrapped DEK when it ages past the interval.
+  # This rotates the wrapped DEK metadata safely without changing the live Badger data key.
+  # Env: NORNICDB_ENCRYPTION_ROTATION_ENABLED
+  encryption_rotation_enabled: true
+
+  # Interval for wrapped-DEK rotation checks.
+  # Env: NORNICDB_ENCRYPTION_ROTATION_INTERVAL
+  encryption_rotation_interval: "2160h"
+
   # WAL (Write-Ahead Log) sync mode: "batch" or "immediate"
   # Env: NORNICDB_WAL_SYNC_MODE
   #   batch: Batches syncs for better performance (default)

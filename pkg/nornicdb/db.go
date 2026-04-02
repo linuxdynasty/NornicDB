@@ -776,40 +776,56 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			}
 			badgerOpts.Serializer = serializer
 		}
-		// Require password if encryption is enabled
-		if config.Database.EncryptionEnabled && config.Database.EncryptionPassword == "" {
-			return nil, fmt.Errorf("encryption is enabled but no password was provided")
+		providerMode := strings.TrimSpace(strings.ToLower(config.Database.EncryptionProvider))
+		if providerMode == "" {
+			providerMode = "password"
 		}
 
 		// Enable BadgerDB-level encryption at rest if configured
 		if config.Database.EncryptionEnabled {
-			// Load or generate salt for this database
-			saltFile := dataDir + "/db.salt"
-			var salt []byte
-			if existingSalt, err := os.ReadFile(saltFile); err == nil && len(existingSalt) == 32 {
-				salt = existingSalt
-				fmt.Println("🔐 Loading existing encryption salt")
-			} else {
-				// Generate new salt for new encrypted database
-				salt = make([]byte, 32)
-				if _, err := rand.Read(salt); err != nil {
-					return nil, fmt.Errorf("failed to generate encryption salt: %w", err)
+			switch providerMode {
+			case "password":
+				// Require password if password-based encryption is enabled
+				if config.Database.EncryptionPassword == "" {
+					return nil, fmt.Errorf("encryption is enabled but no password was provided")
 				}
-				// Persist salt (required for decryption after restart)
-				if err := os.MkdirAll(dataDir, 0700); err != nil {
-					return nil, fmt.Errorf("failed to create data directory: %w", err)
+				// Load or generate salt for this database
+				saltFile := dataDir + "/db.salt"
+				var salt []byte
+				if existingSalt, err := os.ReadFile(saltFile); err == nil && len(existingSalt) == 32 {
+					salt = existingSalt
+					fmt.Println("🔐 Loading existing encryption salt")
+				} else {
+					// Generate new salt for new encrypted database
+					salt = make([]byte, 32)
+					if _, err := rand.Read(salt); err != nil {
+						return nil, fmt.Errorf("failed to generate encryption salt: %w", err)
+					}
+					// Persist salt (required for decryption after restart)
+					if err := os.MkdirAll(dataDir, 0700); err != nil {
+						return nil, fmt.Errorf("failed to create data directory: %w", err)
+					}
+					if err := os.WriteFile(saltFile, salt, 0600); err != nil {
+						return nil, fmt.Errorf("failed to save encryption salt: %w", err)
+					}
+					fmt.Println("🔐 Generated new encryption salt")
 				}
-				if err := os.WriteFile(saltFile, salt, 0600); err != nil {
-					return nil, fmt.Errorf("failed to save encryption salt: %w", err)
-				}
-				fmt.Println("🔐 Generated new encryption salt")
-			}
 
-			// Derive 32-byte AES-256 key from password using PBKDF2
-			encryptionKey := encryption.DeriveKey([]byte(config.Database.EncryptionPassword), salt, 600000)
-			badgerOpts.EncryptionKey = encryptionKey
-			db.encryptionEnabled = true
-			fmt.Println("🔒 Database encryption enabled (AES-256)")
+				// Derive 32-byte AES-256 key from password using PBKDF2
+				encryptionKey := encryption.DeriveKey([]byte(config.Database.EncryptionPassword), salt, 600000)
+				badgerOpts.EncryptionKey = encryptionKey
+				db.encryptionEnabled = true
+				fmt.Println("🔒 Database encryption enabled (AES-256/password)")
+			default:
+				// Provider-backed key management with persisted encrypted DEK
+				encryptionKey, err := resolveProviderManagedDBKey(dataDir, config, providerMode)
+				if err != nil {
+					return nil, err
+				}
+				badgerOpts.EncryptionKey = encryptionKey
+				db.encryptionEnabled = true
+				fmt.Printf("🔒 Database encryption enabled (AES-256/%s)\n", providerMode)
+			}
 		}
 
 		badgerEngine, err := storage.NewBadgerEngineWithOptions(badgerOpts)

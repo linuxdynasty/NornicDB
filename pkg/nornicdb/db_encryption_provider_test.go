@@ -1,0 +1,90 @@
+package nornicdb
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDecodeProviderMasterKey(t *testing.T) {
+	t.Parallel()
+	raw := "0123456789abcdef0123456789abcdef"
+
+	k, err := decodeProviderMasterKey(raw)
+	require.NoError(t, err)
+	require.Len(t, k, 32)
+
+	hexKey := hex.EncodeToString([]byte(raw))
+	k2, err := decodeProviderMasterKey(hexKey)
+	require.NoError(t, err)
+	require.Equal(t, []byte(raw), k2)
+
+	b64Key := base64.StdEncoding.EncodeToString([]byte(raw))
+	k3, err := decodeProviderMasterKey(b64Key)
+	require.NoError(t, err)
+	require.Equal(t, []byte(raw), k3)
+}
+
+func TestResolveProviderManagedDBKey_PersistsAndReuses(t *testing.T) {
+	t.Parallel()
+	cfg := nornicConfig.LoadDefaults()
+	cfg.Database.EncryptionEnabled = true
+	cfg.Database.EncryptionProvider = "local"
+	cfg.Database.EncryptionMasterKey = "0123456789abcdef0123456789abcdef"
+	cfg.Database.EncryptionKeyURI = "kms://local/nornicdb-test"
+
+	dir := t.TempDir()
+	k1, err := resolveProviderManagedDBKey(dir, cfg, "local")
+	require.NoError(t, err)
+	require.Len(t, k1, 32)
+
+	k2, err := resolveProviderManagedDBKey(dir, cfg, "local")
+	require.NoError(t, err)
+	require.Equal(t, k1, k2)
+
+	auditRaw, err := os.ReadFile(filepath.Join(dir, "encryption-audit.jsonl"))
+	require.NoError(t, err)
+	require.Contains(t, string(auditRaw), "KEY_GENERATED")
+	require.Contains(t, string(auditRaw), "KEY_DECRYPTED")
+}
+
+func TestResolveProviderManagedDBKey_RotatesWrappedDEKMetadata(t *testing.T) {
+	t.Parallel()
+	cfg := nornicConfig.LoadDefaults()
+	cfg.Database.EncryptionEnabled = true
+	cfg.Database.EncryptionProvider = "local"
+	cfg.Database.EncryptionMasterKey = "0123456789abcdef0123456789abcdef"
+	cfg.Database.EncryptionKeyURI = "kms://local/nornicdb-test"
+	cfg.Database.EncryptionRotationEnabled = true
+	cfg.Database.EncryptionRotationInterval = time.Nanosecond
+
+	dir := t.TempDir()
+	firstKey, err := resolveProviderManagedDBKey(dir, cfg, "local")
+	require.NoError(t, err)
+
+	metadataPath := filepath.Join(dir, "db.kms_dek.json")
+	raw, err := os.ReadFile(metadataPath)
+	require.NoError(t, err)
+	var persisted persistedProviderDEK
+	require.NoError(t, json.Unmarshal(raw, &persisted))
+	persisted.CreatedAtRFC33 = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+	rewritten, err := json.MarshalIndent(persisted, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(metadataPath, rewritten, 0600))
+
+	secondKey, err := resolveProviderManagedDBKey(dir, cfg, "local")
+	require.NoError(t, err)
+	require.Equal(t, firstKey, secondKey)
+
+	raw, err = os.ReadFile(metadataPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &persisted))
+	require.Equal(t, uint32(2), persisted.Version)
+}

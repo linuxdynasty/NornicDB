@@ -215,4 +215,6 @@ curl http://localhost:7474/api/status | jq '.encryption'
 - **[RBAC](rbac.md)** - Access control
 - **[Audit Logging](audit-logging.md)** - Compliance trails
 - **[HIPAA Compliance](hipaa-compliance.md)** - Healthcare requirements
-
+- **[CMEK Setup](../encryption/cmek-setup.md)** - Provider-backed key management
+- **[HSM Integration](../encryption/hsm-integration.md)** - Deployment guidance
+- **[Compliance Evidence](../encryption/compliance-evidence.md)** - Audit evidence export
