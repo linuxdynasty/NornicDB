@@ -1,152 +1,278 @@
 # Role-Based Access Control (RBAC)
 
-**Fine-grained access control with JWT authentication.**
+**Define roles, assign entitlements, and control per-database access.**
+
+Last Updated: April 2026
+
+---
 
 ## Overview
 
-NornicDB implements role-based access control (RBAC) to meet compliance requirements:
+NornicDB implements a layered RBAC system:
 
-- **JWT Authentication** - Stateless token-based auth
-- **4 Built-in Roles** - Admin, Editor, Viewer, None
-- **Permission System** - Read, Write, Admin permissions
-- **Account Security** - Lockout, password policies
+1. **Roles** — Built-in (admin, editor, viewer) and user-defined custom roles
+2. **Global entitlements** — Permissions that apply server-wide (read, write, admin, schema, etc.)
+3. **Per-database access** — Control which roles can see and access each database
+4. **Per-database privileges** — Fine-grained read/write control per (role, database) pair
+5. **JWT authentication** — Stateless token-based auth with password policies and account lockout
 
-## Roles and Permissions
+---
+
+## Roles
 
 ### Built-in Roles
 
-| Role | Read | Write | Admin | Description |
-|------|------|-------|-------|-------------|
-| `admin` | ✅ | ✅ | ✅ | Full access, user management |
-| `editor` | ✅ | ✅ | ❌ | Read and write data |
-| `viewer` | ✅ | ❌ | ❌ | Read-only access |
-| `none` | ❌ | ❌ | ❌ | No access (disabled) |
+| Role | Entitlements | Description |
+|---|---|---|
+| `admin` | read, write, create, delete, admin, schema, user_manage | Full access and system administration |
+| `editor` | read, write, create, delete | Read and write data |
+| `viewer` | read | Read-only access |
+| `none` | — | No access (disabled account) |
 
-### Permission Mapping
+Built-in roles cannot be renamed or deleted.
 
-```go
-// Permissions
-auth.PermRead   // Read nodes, edges, run queries
-auth.PermWrite  // Create, update, delete data
-auth.PermAdmin  // User management, configuration
-```
+### Custom Roles
 
-## Configuration
+Create custom roles to model your organization's access patterns. Custom roles start with no global entitlements — assign per-database privileges to control what they can do.
 
-### Server Configuration
-
-```yaml
-# nornicdb.yaml
-auth:
-  enabled: true
-  
-  # JWT settings
-  jwt_secret: "${NORNICDB_JWT_SECRET}"  # Min 32 chars
-  jwt_expiry: 24h
-  
-  # Password policy
-  min_password_length: 12
-  require_uppercase: true
-  require_number: true
-  require_special: true
-  
-  # Security
-  max_failed_attempts: 5
-  lockout_duration: 15m
-```
-
-### Environment Variables
+**List all roles:**
 
 ```bash
-# Required: JWT signing secret (min 32 characters)
-export NORNICDB_JWT_SECRET="your-super-secret-jwt-key-min-32-chars"
-
-# Optional: Disable auth for development
-export NORNICDB_NO_AUTH=true
+curl -X GET http://localhost:7474/auth/roles \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
+Response:
+
+```json
+["admin", "editor", "viewer", "analyst", "auditor"]
+```
+
+**Create a custom role:**
+
+```bash
+curl -X POST http://localhost:7474/auth/roles \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "analyst"}'
+```
+
+**Rename a custom role:**
+
+```bash
+curl -X PATCH http://localhost:7474/auth/roles/analyst \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "data_analyst"}'
+```
+
+Renaming a role automatically updates the allowlist and all user assignments.
+
+**Delete a custom role:**
+
+```bash
+curl -X DELETE http://localhost:7474/auth/roles/data_analyst \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+A role cannot be deleted while any user is assigned to it.
+
+---
+
+## Entitlements
+
+Entitlements are the individual permissions that can be assigned to roles. Query the full canonical list from the API:
+
+```bash
+curl -X GET http://localhost:7474/auth/entitlements \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Global Entitlements
+
+These apply server-wide and are assigned to roles by default (built-in roles) or via configuration (custom roles).
+
+| ID | Name | What It Controls |
+|---|---|---|
+| `read` | Read | Cypher MATCH, search, metrics, status, Bifrost/GraphQL reads, MCP reads |
+| `write` | Write | Cypher CREATE/DELETE/SET/MERGE, embed triggers, search rebuild, GraphQL mutations |
+| `create` | Create | Resource creation operations |
+| `delete` | Delete | Delete operations (e.g. GDPR delete) |
+| `admin` | Admin | Role management, database access/privileges, backup, GPU config, system admin |
+| `schema` | Schema | CREATE/DROP INDEX and CONSTRAINT via Bolt |
+| `user_manage` | User Management | Create, update, delete user accounts (distinct from admin) |
+
+### Per-Database Entitlements
+
+These apply per database and are controlled through the allowlist and privileges APIs.
+
+| ID | Name | What It Controls |
+|---|---|---|
+| `database_see` | Database: See | Database appears in `SHOW DATABASES` and the catalogue |
+| `database_access` | Database: Access | Role can run queries against this database |
+| `database_read` | Database: Read | Read operations (MATCH, property reads) on this database |
+| `database_write` | Database: Write | Write operations (CREATE, DELETE, SET, MERGE) on this database |
+
+---
+
+## Per-Database Access Control
+
+### Database Allowlist
+
+The allowlist controls which roles can **see** and **access** which databases. If no allowlist is configured for a role, that role can access **all databases** (empty list = all).
+
+**View current allowlist:**
+
+```bash
+curl -X GET http://localhost:7474/auth/access/databases \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Response:
+
+```json
+[
+  {"role": "analyst", "databases": ["analytics", "reporting"]},
+  {"role": "viewer", "databases": ["public_data"]}
+]
+```
+
+**Set allowlist for a single role:**
+
+```bash
+curl -X PUT http://localhost:7474/auth/access/databases \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role": "analyst",
+    "databases": ["analytics", "reporting"]
+  }'
+```
+
+**Set allowlist for multiple roles at once:**
+
+```bash
+curl -X PUT http://localhost:7474/auth/access/databases \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mappings": [
+      {"role": "analyst", "databases": ["analytics", "reporting"]},
+      {"role": "auditor", "databases": ["audit_logs"]}
+    ]
+  }'
+```
+
+### Per-Database Privileges
+
+The privileges matrix provides fine-grained **read** and **write** control per (role, database) pair. When no privilege entry exists for a combination, access falls back to the role's global permissions (e.g. editor = read+write, viewer = read-only).
+
+**View current privileges:**
+
+```bash
+curl -X GET http://localhost:7474/auth/access/privileges \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Response:
+
+```json
+[
+  {"role": "analyst", "database": "analytics", "read": true, "write": false},
+  {"role": "analyst", "database": "reporting", "read": true, "write": true},
+  {"role": "auditor", "database": "audit_logs", "read": true, "write": false}
+]
+```
+
+**Set privileges:**
+
+```bash
+curl -X PUT http://localhost:7474/auth/access/privileges \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"role": "analyst", "database": "analytics", "read": true, "write": false},
+    {"role": "analyst", "database": "reporting", "read": true, "write": true}
+  ]'
+```
+
+### How Access Is Resolved
+
+When a user queries a database, NornicDB resolves access in this order:
+
+1. **Allowlist check** — Can this user's role(s) see and access this database?
+2. **Privileges check** — Is there a (role, database) privilege entry? If yes, use it.
+3. **Global fallback** — If no privilege entry, use the role's global permissions (admin/editor = read+write, viewer = read-only).
+
+When a new database is created, the **admin** role and the creating user's roles are automatically granted full access.
+
+---
+
 ## User Management
-
-### User Storage and Persistence
-
-NornicDB stores all user accounts in the **system database** for persistence and security:
-
-- **Persistent Storage**: Users are stored as nodes in the system database with labels `["_User", "_System"]`
-- **Automatic Loading**: All users are automatically loaded from the system database on server startup
-- **Backup Integration**: User accounts are included in database backups automatically
-- **GDPR Compliance**: User data can be exported and deleted via GDPR endpoints
-- **Security**: Internal database IDs are never exposed in API responses
-
-**Storage Details:**
-- Users are stored as graph nodes (not separate tables)
-- Node ID format: `user:{username}` (e.g., `user:admin`)
-- All user operations (create, update, delete) are persisted immediately
-- In-memory cache provides fast lookups while maintaining persistence
 
 ### Create Users
 
 ```bash
-# Via Web UI (Admin Panel)
-# Navigate to /security/admin as an admin user
-
-# Via API
 curl -X POST http://localhost:7474/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "username": "alice",
     "password": "SecurePass123!",
-    "roles": ["viewer"]
+    "roles": ["analyst"]
   }'
 ```
 
-**Response:**
+Response:
+
 ```json
 {
   "username": "alice",
   "email": "alice@localhost",
-  "roles": ["viewer"],
-  "created_at": "2024-12-01T10:30:00Z",
+  "roles": ["analyst"],
+  "created_at": "2026-04-01T10:30:00Z",
   "disabled": false
 }
 ```
 
-**Note:** Internal database IDs are never included in responses for security reasons.
-
-### Manage Users
+### Update User Roles
 
 ```bash
-# List all users (admin only)
-curl -X GET http://localhost:7474/auth/users \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-
-# Get specific user
-curl -X GET http://localhost:7474/auth/users/alice \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-
-# Update user roles
 curl -X PUT http://localhost:7474/auth/users/alice \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"roles": ["editor"]}'
+  -d '{"roles": ["analyst", "viewer"]}'
+```
 
-# Disable user
+### List Users
+
+```bash
+curl -X GET http://localhost:7474/auth/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### Disable a User
+
+```bash
 curl -X PUT http://localhost:7474/auth/users/alice \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"disabled": true}'
+```
 
-# Delete user
+### Delete a User
+
+```bash
 curl -X DELETE http://localhost:7474/auth/users/alice \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-### User Profile Management
+### User Profile (Self-Service)
 
-Users can manage their own profiles via the Security page (`/security`):
+Users can update their own password and profile without admin privileges:
 
-**Change Password:**
 ```bash
+# Change password
 curl -X POST http://localhost:7474/auth/password \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
@@ -154,32 +280,40 @@ curl -X POST http://localhost:7474/auth/password \
     "old_password": "OldPass123!",
     "new_password": "NewSecurePass456!"
   }'
-```
 
-**Update Profile:**
-```bash
+# Update profile metadata
 curl -X PUT http://localhost:7474/auth/profile \
   -H "Authorization: Bearer $USER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "alice@example.com",
-    "metadata": {
-      "department": "Engineering",
-      "team": "Backend"
-    }
+    "metadata": {"department": "Engineering", "team": "Data"}
   }'
 ```
+
+### User Storage
+
+User accounts are stored as nodes in the **system database**:
+
+- Persisted immediately on create/update/delete
+- Loaded automatically on server startup
+- Included in database backups
+- Internal database IDs and password hashes are never exposed in API responses
+
+---
 
 ## Authentication
 
 ### Login (Get Token)
 
 ```bash
-# OAuth 2.0 password grant
 curl -X POST http://localhost:7474/auth/token \
   -d "grant_type=password&username=alice&password=SecurePass123!"
+```
 
-# Response
+Response:
+
+```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIs...",
   "token_type": "Bearer",
@@ -196,120 +330,107 @@ curl http://localhost:7474/db/nornicdb/tx/commit \
 
 # Or API key header
 curl http://localhost:7474/db/nornicdb/tx/commit \
-  -H "X-API-Key: your-api-key"
+  -H "X-API-Key: ndb_sk_abc123..."
 ```
 
-## API Key Authentication
+### API Keys
 
 For service-to-service communication:
 
 ```bash
-# Create API key
 nornicdb apikey create --name "backend-service" --role editor
-
-# Use API key
-curl http://localhost:7474/nornicdb/search \
-  -H "X-API-Key: ndb_sk_abc123..."
 ```
 
-## Endpoint Protection
-
-### Protected Endpoints
-
-| Endpoint | Required Permission |
-|----------|-------------------|
-| `GET /health` | None (public) |
-| `GET /status` | `read` |
-| `GET /metrics` | `read` |
-| `POST /db/nornicdb/tx/commit` | `read` or `write` |
-| `POST /nornicdb/search` | `read` |
-| `DELETE /nornicdb/gdpr/*` | `admin` |
-| `POST /auth/users` | `admin` |
-
-### Code Example
-
-```go
-// Check permissions in handler
-func (s *Server) handleProtectedEndpoint(w http.ResponseWriter, r *http.Request) {
-    claims := r.Context().Value(claimsKey).(*auth.Claims)
-    
-    if !claims.HasPermission(auth.PermWrite) {
-        http.Error(w, "Forbidden", http.StatusForbidden)
-        return
-    }
-    
-    // Handle request...
-}
-```
+---
 
 ## Security Features
 
 ### Account Lockout
 
-After 5 failed login attempts, accounts are locked for 15 minutes:
+After repeated failed login attempts, accounts are locked automatically:
 
-```go
-// Attempt login
-token, user, err := auth.Authenticate("alice", "wrongpass", ip, agent)
-// After 5 failures: ErrAccountLocked
-
-// Check lockout status
-user.IsLocked()     // true
-user.LockedUntil    // time.Time
-```
-
-### Password Hashing
-
-Passwords are hashed using bcrypt with automatic salt generation:
-
-- **Algorithm**: bcrypt with configurable cost factor (default: 10)
-- **Salt**: Automatically generated and embedded in the hash (no separate salt storage needed)
-- **Storage**: Password hashes are stored in the system database, never in plain text
-- **Security**: Internal database IDs and password hashes are never exposed in API responses
-
-```go
-// Passwords are never stored in plain text
-// Bcrypt automatically salts passwords
-// Uses bcrypt.DefaultCost (10) - configurable via BcryptCost
-hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-// Salt is embedded in the hash - no separate storage needed
-```
-
-**Configuration:**
 ```yaml
 auth:
-  bcrypt_cost: 10  # Higher = more secure but slower (4-31, default: 10)
-  min_password_length: 8  # Minimum password length
+  max_failed_attempts: 5
+  lockout_duration: 15m
 ```
+
+### Password Policy
+
+```yaml
+auth:
+  min_password_length: 12
+  require_uppercase: true
+  require_number: true
+  require_special: true
+```
+
+Passwords are hashed using **bcrypt** with automatic salt generation. Plain-text passwords are never stored.
 
 ### Session Management
 
-```go
-// Logout invalidates token (adds to blacklist)
-auth.Logout(token)
+Tokens can be revoked (logout) by adding them to a server-side blacklist. Revoked tokens are rejected on subsequent requests.
 
-// Validate token checks blacklist
-claims, err := auth.ValidateToken(token)
-// Returns ErrTokenRevoked if blacklisted
+---
+
+## Configuration
+
+```yaml
+auth:
+  enabled: true
+
+  # JWT
+  jwt_secret: "${NORNICDB_JWT_SECRET}"  # Min 32 characters
+  jwt_expiry: 24h
+
+  # Password policy
+  min_password_length: 12
+  require_uppercase: true
+  require_number: true
+  require_special: true
+  bcrypt_cost: 10
+
+  # Security
+  max_failed_attempts: 5
+  lockout_duration: 15m
 ```
 
-## Compliance Mapping
+```bash
+# Required: JWT signing secret (min 32 characters)
+export NORNICDB_JWT_SECRET="your-super-secret-jwt-key-min-32-chars"
 
-| Requirement | NornicDB Feature |
-|-------------|------------------|
-| GDPR Art.32 | Access controls, authentication |
-| HIPAA §164.312(a)(1) | Unique user identification |
-| HIPAA §164.312(d) | Person or entity authentication |
-| FISMA AC-2 | Account management |
-| SOC2 CC6.1 | Logical access controls |
+# Optional: Disable auth for development
+export NORNICDB_NO_AUTH=true
+```
+
+---
+
+## Endpoint Protection
+
+| Endpoint | Required Permission |
+|---|---|
+| `GET /health` | None (public) |
+| `GET /status` | read |
+| `GET /metrics` | read |
+| `POST /db/{db}/tx/commit` | read or write (per-database) |
+| `POST /nornicdb/search` | read |
+| `POST /auth/users` | user_manage |
+| `GET/POST /auth/roles` | admin |
+| `GET/PUT /auth/access/databases` | admin |
+| `GET/PUT /auth/access/privileges` | admin |
+| `GET /auth/entitlements` | read |
+| `DELETE /nornicdb/gdpr/*` | admin |
+| `GET /admin/*` | admin |
+
+---
 
 ## Audit Integration
 
-All authentication events are logged:
+All authentication and access events are logged:
 
 ```json
 {
-  "timestamp": "2024-12-01T10:30:00Z",
+  "timestamp": "2026-04-01T10:30:00Z",
   "event_type": "LOGIN",
   "user_id": "usr_abc123",
   "username": "alice",
@@ -319,13 +440,27 @@ All authentication events are logged:
 }
 ```
 
-See **[Audit Logging](audit-logging.md)** for details.
+See **[Audit Logging](audit-logging.md)** for full details.
+
+---
+
+## Compliance Mapping
+
+| Requirement | NornicDB Feature |
+|---|---|
+| GDPR Art. 32 | Access controls, authentication |
+| HIPAA §164.312(a)(1) | Unique user identification |
+| HIPAA §164.312(d) | Person or entity authentication |
+| FISMA AC-2 | Account management |
+| SOC2 CC6.1 | Logical access controls |
+
+---
 
 ## See Also
 
-- **[User Storage in System Database](../user-guides/multi-database.md#system-database)** - User persistence architecture
-- **[Encryption](encryption.md)** - Data protection
-- **[Audit Logging](audit-logging.md)** - Compliance trails
-- **[HIPAA Compliance](hipaa-compliance.md)** - Healthcare requirements
-- **[Backup & Restore](../operations/backup-restore.md)** - Database backup (includes users)
-
+- **[Entitlements Reference](../security/entitlements.md)** — Canonical list of all assignable entitlements
+- **[Per-Database RBAC & Lockout Recovery](../security/per-database-rbac.md)** — Allowlist details and admin lockout recovery
+- **[Encryption](encryption.md)** — Data protection at rest
+- **[Audit Logging](audit-logging.md)** — Access and event audit trails
+- **[HIPAA Compliance](hipaa-compliance.md)** — Healthcare compliance mapping
+- **[Multi-Database Guide](../user-guides/multi-database.md#system-database)** — System database and user storage
