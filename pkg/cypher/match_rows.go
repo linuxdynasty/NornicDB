@@ -224,6 +224,7 @@ func (e *StorageExecutor) filterNodesByWhereClause(nodes []*storage.Node, whereC
 type orderSpec struct {
 	colIdx     int
 	descending bool
+	propPath   []string
 }
 
 // orderResultRows sorts result rows by the specified ORDER BY expression.
@@ -242,7 +243,13 @@ func (e *StorageExecutor) orderResultRows(rows [][]interface{}, columns []string
 	// Sort rows using all order specifications
 	sort.Slice(rows, func(i, j int) bool {
 		for _, spec := range orderSpecs {
-			cmp := e.compareOrderValues(rows[i][spec.colIdx], rows[j][spec.colIdx])
+			left := rows[i][spec.colIdx]
+			right := rows[j][spec.colIdx]
+			if len(spec.propPath) > 0 {
+				left = extractOrderByPropertyValue(left, spec.propPath)
+				right = extractOrderByPropertyValue(right, spec.propPath)
+			}
+			cmp := e.compareOrderValues(left, right)
 			if cmp != 0 {
 				if spec.descending {
 					return cmp > 0
@@ -279,7 +286,7 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 		colName := tokens[0]
 		descending := len(tokens) > 1 && strings.ToUpper(tokens[1]) == "DESC"
 
-		// Find column index
+		// Find direct column index first.
 		colIdx := -1
 		for i, col := range columns {
 			if strings.EqualFold(col, colName) {
@@ -287,14 +294,100 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 				break
 			}
 		}
+		propPath := make([]string, 0)
 		if colIdx == -1 {
-			continue // Column not found, skip
+			// Support ORDER BY var.prop when RETURN contains var.
+			dot := strings.Index(colName, ".")
+			if dot <= 0 || dot >= len(colName)-1 {
+				continue // Unsupported ORDER BY expression for row-level sorting
+			}
+			varName := strings.TrimSpace(colName[:dot])
+			propExpr := strings.TrimSpace(colName[dot+1:])
+			if varName == "" || propExpr == "" {
+				continue
+			}
+			for i, col := range columns {
+				if strings.EqualFold(col, varName) {
+					colIdx = i
+					break
+				}
+			}
+			if colIdx == -1 {
+				continue // Variable column not found
+			}
+			for _, segment := range strings.Split(propExpr, ".") {
+				segment = strings.TrimSpace(segment)
+				if segment == "" {
+					propPath = nil
+					break
+				}
+				propPath = append(propPath, segment)
+			}
+			if len(propPath) == 0 {
+				continue
+			}
 		}
 
-		specs = append(specs, orderSpec{colIdx: colIdx, descending: descending})
+		specs = append(specs, orderSpec{colIdx: colIdx, descending: descending, propPath: propPath})
 	}
 
 	return specs
+}
+
+func extractOrderByPropertyValue(value interface{}, propPath []string) interface{} {
+	current := value
+	for _, part := range propPath {
+		switch v := current.(type) {
+		case *storage.Node:
+			switch {
+			case strings.EqualFold(part, "id"):
+				current = string(v.ID)
+			case strings.EqualFold(part, "createdAt"):
+				current = v.CreatedAt
+			case strings.EqualFold(part, "updatedAt"):
+				current = v.UpdatedAt
+			default:
+				if v.Properties == nil {
+					return nil
+				}
+				current = v.Properties[part]
+			}
+		case map[string]interface{}:
+			// Match evaluateExpressionFromValues semantics:
+			// properties sub-map first, then top-level keys.
+			if propsRaw, ok := mapLookupCaseInsensitive(v, "properties"); ok {
+				if props, ok := propsRaw.(map[string]interface{}); ok {
+					if propVal, ok := mapLookupCaseInsensitive(props, part); ok {
+						current = propVal
+						break
+					}
+				}
+			}
+			if propVal, ok := mapLookupCaseInsensitive(v, part); ok {
+				current = propVal
+			} else {
+				return nil
+			}
+		default:
+			return nil
+		}
+		if current == nil {
+			return nil
+		}
+	}
+	return current
+}
+
+func mapLookupCaseInsensitive(m map[string]interface{}, key string) (interface{}, bool) {
+	if val, ok := m[key]; ok {
+		return val, true
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return nil, false
 }
 
 // compareOrderValues compares two values for ordering
