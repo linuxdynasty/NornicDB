@@ -678,23 +678,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     
     @objc func startServer() {
         updateStatus(.starting)
-        executeCommand("launchctl", args: ["start", "com.nornicdb.server"])
+        ensureServerLaunchAgentExists()
+
+        if !isLaunchAgentLoaded(label: "com.nornicdb.server") {
+            _ = executeLaunchctl(arguments: ["load", serverLaunchAgentPath])
+        }
+
+        _ = executeLaunchctl(arguments: ["start", "com.nornicdb.server"], wait: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             self.checkHealth()
         }
     }
     
     @objc func stopServer() {
-        executeCommand("launchctl", args: ["stop", "com.nornicdb.server"])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.updateStatus(.stopped)
+        if isLaunchAgentLoaded(label: "com.nornicdb.server") {
+            _ = executeLaunchctl(arguments: ["unload", serverLaunchAgentPath])
         }
+        self.updateStatus(.stopped)
     }
     
     @objc func restartServer() {
-        stopServer()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.startServer()
+        updateStatus(.starting)
+        ensureServerLaunchAgentExists()
+
+        if isLaunchAgentLoaded(label: "com.nornicdb.server") {
+            _ = executeLaunchctl(arguments: ["kickstart", "-k", launchdServiceTarget(for: "com.nornicdb.server")], wait: false)
+        } else {
+            _ = executeLaunchctl(arguments: ["load", serverLaunchAgentPath])
+            _ = executeLaunchctl(arguments: ["start", "com.nornicdb.server"], wait: false)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            self.checkHealth()
+        }
+    }
+
+    private var serverLaunchAgentPath: String {
+        return NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
+    }
+
+    private func ensureServerLaunchAgentExists() {
+        guard !FileManager.default.fileExists(atPath: serverLaunchAgentPath) else {
+            return
+        }
+
+        do {
+            try writeLaunchAgentPlist(config: configManager, to: serverLaunchAgentPath)
+        } catch {
+            print("Failed to create server LaunchAgent plist: \(error)")
         }
     }
     
@@ -869,6 +900,33 @@ enum ServerStatus {
     case stopped
     case starting
     case unknown
+}
+
+private func launchdServiceTarget(for label: String) -> String {
+    return "gui/\(getuid())/\(label)"
+}
+
+@discardableResult
+private func executeLaunchctl(arguments: [String], wait: Bool = true) -> Int32? {
+    let task = Process()
+    task.launchPath = "/usr/bin/env"
+    task.arguments = ["launchctl"] + arguments
+
+    do {
+        try task.run()
+        if wait {
+            task.waitUntilExit()
+            return task.terminationStatus
+        }
+        return nil
+    } catch {
+        print("launchctl command failed: \(arguments.joined(separator: " ")): \(error)")
+        return nil
+    }
+}
+
+private func isLaunchAgentLoaded(label: String) -> Bool {
+    return executeLaunchctl(arguments: ["print", launchdServiceTarget(for: label)]) == 0
 }
 
 // MARK: - Config Manager
@@ -1495,20 +1553,14 @@ class ConfigManager: ObservableObject {
     
     private func updateAutoStart() {
         let launchAgentPath = self.launchAgentPath
-        let isLoaded = FileManager.default.fileExists(atPath: launchAgentPath)
+        let isLoaded = isLaunchAgentLoaded(label: "com.nornicdb.server")
         
         if autoStartEnabled && !isLoaded {
             // Load launch agent
-            let task = Process()
-            task.launchPath = "/usr/bin/env"
-            task.arguments = ["launchctl", "load", launchAgentPath]
-            task.launch()
+            _ = executeLaunchctl(arguments: ["load", launchAgentPath], wait: false)
         } else if !autoStartEnabled && isLoaded {
             // Unload launch agent
-            let task = Process()
-            task.launchPath = "/usr/bin/env"
-            task.arguments = ["launchctl", "unload", launchAgentPath]
-            task.launch()
+            _ = executeLaunchctl(arguments: ["unload", launchAgentPath], wait: false)
         }
     }
     
