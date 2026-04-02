@@ -1,4 +1,4 @@
-# NornicDB Cypher Implementation Audit
+# NornicDB Cypher Compatibility
 
 **Date**: November 26, 2025  
 **Status**: ✅ **100% COMPLETE** - Production Ready  
@@ -71,6 +71,26 @@
 - ✅ Type functions: toInteger, toFloat, toString, toBoolean
 - ✅ Spatial functions: point, distance
 - ✅ Date/time functions: date, datetime, timestamp
+
+### Bolt Handshake Compatibility for `cypher-shell`
+
+NornicDB speaks Bolt directly, and most Bolt drivers work without special handling. One notable edge case is Neo4j's `cypher-shell`, which may reject an otherwise valid Bolt connection if the Bolt `HELLO` success metadata does not advertise a Neo4j-style `server` string.
+
+For that case, NornicDB includes an explicit compatibility override:
+
+```bash
+export NORNICDB_BOLT_SERVER_ANNOUNCEMENT="Neo4j/5.26.0"
+cypher-shell -a bolt://localhost:7687 -u admin -p password
+```
+
+Equivalent YAML setting:
+
+```yaml
+server:
+  bolt_server_announcement: "Neo4j/5.26.0"
+```
+
+This changes only the announced Bolt server string used during handshake compatibility checks. It does not change Cypher behavior or query semantics. Leave it unset unless you specifically need compatibility with `cypher-shell` or another strict Neo4j client.
 
 ---
 
@@ -281,9 +301,6 @@ RETURN nodes(p), relationships(p), length(p)
 
 ### 13. **Transaction Atomicity** ✅ FULLY WORKING
 
-**Status**: ✅ **PRODUCTION READY** (12 passing tests)  
-**Files**: `pkg/storage/transaction.go` (521 lines), `pkg/storage/transaction_test.go`
-
 ```go
 // Transaction support with full rollback
 tx := engine.BeginTransaction()
@@ -368,6 +385,7 @@ PROFILE MATCH (n:Person)-[:KNOWS]->(m) RETURN n, m
 - ✅ Visual plan formatting
 
 **Example Output**:
+
 ```
 +--------------------------------------------------------------+
 | PROFILE Query Plan                                           |
@@ -408,24 +426,24 @@ SHOW DATABASES
 
 ### ✅ ALL CRITICAL FEATURES COMPLETE
 
-| Feature | Status | Tests | Coverage |
-|---------|--------|-------|----------|
-| CASE expressions | ✅ COMPLETE | 7+ tests | 376 lines |
-| shortestPath() | ✅ COMPLETE | 16 tests | 372 lines |
-| allShortestPaths() | ✅ COMPLETE | 16 tests | included |
-| Transaction Atomicity | ✅ COMPLETE | 12 tests | 521 lines |
-| WHERE after YIELD | ✅ COMPLETE | 6 tests | integrated |
-| MATCH...CREATE | ✅ COMPLETE | 16+ tests | 427 lines |
-| Composite Indexes | ✅ COMPLETE | multiple | integrated |
-| EXPLAIN/PROFILE | ✅ COMPLETE | 27 tests | 560 lines |
+| Feature               | Status      | Tests     | Coverage   |
+| --------------------- | ----------- | --------- | ---------- |
+| CASE expressions      | ✅ COMPLETE | 7+ tests  | 376 lines  |
+| shortestPath()        | ✅ COMPLETE | 16 tests  | 372 lines  |
+| allShortestPaths()    | ✅ COMPLETE | 16 tests  | included   |
+| Transaction Atomicity | ✅ COMPLETE | 12 tests  | 521 lines  |
+| WHERE after YIELD     | ✅ COMPLETE | 6 tests   | integrated |
+| MATCH...CREATE        | ✅ COMPLETE | 16+ tests | 427 lines  |
+| Composite Indexes     | ✅ COMPLETE | multiple  | integrated |
+| EXPLAIN/PROFILE       | ✅ COMPLETE | 27 tests  | 560 lines  |
 
 ### 📊 Test Coverage
 
-| Package | Tests | Coverage |
-|---------|-------|----------|
-| **pkg/cypher** | 863 tests | 82%+ |
-| **pkg/storage** | 308 tests | 85.2% |
-| **Total** | **1,171 tests** | **~83%** |
+| Package         | Tests           | Coverage |
+| --------------- | --------------- | -------- |
+| **pkg/cypher**  | 863 tests       | 82%+     |
+| **pkg/storage** | 308 tests       | 85.2%    |
+| **Total**       | **1,171 tests** | **~83%** |
 
 ---
 
@@ -489,6 +507,7 @@ SHOW DATABASES
 **Problem**: `shortestPath((start)-[:KNOWS*]->(end))` was not correctly resolving `start` and `end` variables from the preceding MATCH clause.
 
 **Solution**: Implemented Neo4j-style variable resolution:
+
 1. Parse the first MATCH clause to extract variable bindings
 2. Resolve which `nodePatternInfo` each variable maps to
 3. Find actual nodes matching those patterns
@@ -499,6 +518,7 @@ SHOW DATABASES
 ### Transaction Atomicity Implementation
 
 **Added**: Full transaction support with:
+
 - Buffered operations (Write-Ahead Log pattern)
 - Atomic commit (all operations applied together)
 - Rollback support (discard all buffered changes)

@@ -2,9 +2,9 @@
 
 **Drop-in Replacement Validation**
 
-**Date:** December 1, 2025  
-**NornicDB Version:** 0.1.4  
-**Scope:** Production workloads excluding plugins and multi-database orchestration
+Last Updated: December 2025
+
+Scope: Production workloads excluding plugins and multi-database orchestration.
 
 ---
 
@@ -14,19 +14,20 @@
 
 NornicDB is a **production-ready drop-in replacement** for Neo4j with:
 
-| Category | Status | Notes |
-|----------|--------|-------|
-| Core Data Model | ✅ 100% | Nodes, relationships, properties, arrays, maps |
-| Cypher Language | ✅ 100% | All clauses, pattern matching, subqueries |
-| Functions | ✅ 109% | 147 functions vs Neo4j's 135 |
-| Indexes | ✅ 100% | B-tree, full-text, vector, composite, range |
-| Constraints | ✅ 100% | UNIQUE, NODE KEY, EXISTS, property types |
-| Transactions | ✅ 100% | Full ACID with BEGIN/COMMIT/ROLLBACK |
-| Built-in Procedures | ✅ 100% | 41 procedures (34 db.* + 7 dbms.*) |
-| APOC | ✅ 100% | 960+ (plugins provide all algorithms) |
-| Protocol/Drivers | ✅ 95% | Bolt v4.x, all major drivers |
+| Category            | Status  | Notes                                          |
+| ------------------- | ------- | ---------------------------------------------- |
+| Core Data Model     | ✅ 100% | Nodes, relationships, properties, arrays, maps |
+| Cypher Language     | ✅ 100% | All clauses, pattern matching, subqueries      |
+| Functions           | ✅ 109% | 147 functions vs Neo4j's 135                   |
+| Indexes             | ✅ 100% | B-tree, full-text, vector, composite, range    |
+| Constraints         | ✅ 100% | UNIQUE, NODE KEY, EXISTS, property types       |
+| Transactions        | ✅ 100% | Full ACID with BEGIN/COMMIT/ROLLBACK           |
+| Built-in Procedures | ✅ 100% | 41 procedures (34 db._ + 7 dbms._)             |
+| APOC                | ✅ 100% | 960+ (plugins provide all algorithms)          |
+| Protocol/Drivers    | ✅ 95%  | Bolt v4.x, all major drivers                   |
 
 **New in 0.1.4:**
+
 - ✅ String query auto-embedding in `db.index.vector.queryNodes`
 - ✅ Multi-line SET with arrays support
 - ✅ Server-side query embedding
@@ -35,17 +36,17 @@ NornicDB is a **production-ready drop-in replacement** for Neo4j with:
 
 ## Feature Parity Scorecard
 
-| Category | Weight | Score | Weighted |
-|----------|--------|-------|----------|
-| Core Data Model | 20% | 100% | 20.0 |
-| Cypher Language | 20% | 100% | 20.0 |
-| Functions | 10% | 109% | 10.9 |
-| Indexes | 10% | 100% | 10.0 |
-| Constraints | 10% | 100% | 10.0 |
-| Transactions | 15% | 100% | 15.0 |
-| Procedures | 10% | 60% | 6.0 |
-| Protocol/Drivers | 5% | 95% | 4.75 |
-| **TOTAL** | 100% | **96.65%** | **96.65%** |
+| Category         | Weight | Score      | Weighted   |
+| ---------------- | ------ | ---------- | ---------- |
+| Core Data Model  | 20%    | 100%       | 20.0       |
+| Cypher Language  | 20%    | 100%       | 20.0       |
+| Functions        | 10%    | 109%       | 10.9       |
+| Indexes          | 10%    | 100%       | 10.0       |
+| Constraints      | 10%    | 100%       | 10.0       |
+| Transactions     | 15%    | 100%       | 15.0       |
+| Procedures       | 10%    | 60%        | 6.0        |
+| Protocol/Drivers | 5%     | 95%        | 4.75       |
+| **TOTAL**        | 100%   | **96.65%** | **96.65%** |
 
 ---
 
@@ -65,18 +66,18 @@ All 12 features fully implemented: node/relationship creation, multiple labels, 
 
 ### 3. Functions - 109% ✅ (147 vs 135)
 
-| Category | Count | Status |
-|----------|-------|--------|
-| String | 23 | ✅ 100% |
-| List | 17 | ✅ 100% |
-| Mathematical | 24 | ✅ 126% (exceeds Neo4j's 19) |
-| Trigonometric | 11 | ✅ 100% |
-| Aggregation | 12 | ✅ 133% (exceeds Neo4j's 9) |
-| Temporal | 25 | ✅ 100% |
-| Spatial | 19 | ✅ 127% |
-| Type Conversion | 12 | ✅ 100% |
-| Node/Relationship | 12 | ✅ 100% |
-| Vector/Similarity | 3 | ✅ 100% |
+| Category          | Count | Status                       |
+| ----------------- | ----- | ---------------------------- |
+| String            | 23    | ✅ 100%                      |
+| List              | 17    | ✅ 100%                      |
+| Mathematical      | 24    | ✅ 126% (exceeds Neo4j's 19) |
+| Trigonometric     | 11    | ✅ 100%                      |
+| Aggregation       | 12    | ✅ 133% (exceeds Neo4j's 9)  |
+| Temporal          | 25    | ✅ 100%                      |
+| Spatial           | 19    | ✅ 127%                      |
+| Type Conversion   | 12    | ✅ 100%                      |
+| Node/Relationship | 12    | ✅ 100%                      |
+| Vector/Similarity | 3     | ✅ 100%                      |
 
 ### 4. Indexes - 100% ✅
 
@@ -89,6 +90,7 @@ All constraint types enforced: UNIQUE (with full database scan), NODE KEY (compo
 ### 6. Transactions - 100% ✅
 
 Full ACID guarantees via BadgerDB:
+
 - **Atomicity:** All operations commit together or none
 - **Consistency:** Constraint validation before commit
 - **Isolation:** Snapshot isolation via MVCC at the storage transaction layer, including read-your-writes and write-write conflict detection at commit
@@ -98,13 +100,13 @@ Supports: BEGIN/COMMIT/ROLLBACK, implicit transactions, automatic rollback on er
 
 ### 7. Protocol & Drivers - 95% ✅
 
-| Driver | Status |
-|--------|--------|
-| Python (neo4j-driver) | ✅ Full |
-| JavaScript/TypeScript | ✅ Full |
-| Go (neo4j-go-driver) | ✅ Full |
-| Java (neo4j-java-driver) | ✅ Full |
-| .NET, Ruby | ⚠️ Untested (should work) |
+| Driver                   | Status                    |
+| ------------------------ | ------------------------- |
+| Python (neo4j-driver)    | ✅ Full                   |
+| JavaScript/TypeScript    | ✅ Full                   |
+| Go (neo4j-go-driver)     | ✅ Full                   |
+| Java (neo4j-java-driver) | ✅ Full                   |
+| .NET, Ruby               | ⚠️ Untested (should work) |
 
 Bolt v4.x fully supported. v5.x backward compatible.
 
@@ -112,7 +114,7 @@ Bolt v4.x fully supported. v5.x backward compatible.
 
 ## Built-in Procedures (18+ Implemented)
 
-### db.* Procedures ✅
+### db.\* Procedures ✅
 
 ```
 db.labels, db.propertyKeys, db.relationshipTypes, db.info, db.ping
@@ -126,7 +128,7 @@ db.clearQueryCaches
 db.create.setNodeVectorProperty, db.create.setRelationshipVectorProperty
 ```
 
-### dbms.* Procedures ✅
+### dbms.\* Procedures ✅
 
 ```
 dbms.info, dbms.listConfig, dbms.clientConfig
@@ -159,15 +161,15 @@ SET n.embedding = [0.7, 0.2, 0.05, 0.05],
 
 ### Core Utilities ✅
 
-| Category | Functions |
-|----------|-----------|
-| **Path/Graph** | `apoc.path.subgraphNodes`, `apoc.path.expand`, `apoc.path.spanningTree` |
-| **Map** | `merge`, `setKey`, `removeKey`, `fromPairs`, `fromLists` |
+| Category       | Functions                                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Path/Graph** | `apoc.path.subgraphNodes`, `apoc.path.expand`, `apoc.path.spanningTree`                                                                       |
+| **Map**        | `merge`, `setKey`, `removeKey`, `fromPairs`, `fromLists`                                                                                      |
 | **Collection** | `flatten`, `toSet`, `sum`, `avg`, `min`, `max`, `sort`, `reverse`, `union`, `unionAll`, `intersection`, `subtract`, `contains`, `containsAll` |
-| **Text** | `apoc.text.join` |
-| **Conversion** | `toJson`, `fromJsonMap`, `fromJsonList` |
-| **Meta** | `apoc.meta.type`, `apoc.meta.isType` |
-| **UUID** | `apoc.create.uuid` |
+| **Text**       | `apoc.text.join`                                                                                                                              |
+| **Conversion** | `toJson`, `fromJsonMap`, `fromJsonList`                                                                                                       |
+| **Meta**       | `apoc.meta.type`, `apoc.meta.isType`                                                                                                          |
+| **UUID**       | `apoc.create.uuid`                                                                                                                            |
 
 ### Dynamic Cypher ✅
 
@@ -188,33 +190,33 @@ CALL apoc.periodic.iterate(
 
 ### Graph Algorithms ✅
 
-| Algorithm | Procedure | Status |
-|-----------|-----------|--------|
-| Dijkstra | `apoc.algo.dijkstra` | ✅ |
-| A* | `apoc.algo.aStar` | ✅ |
-| All Simple Paths | `apoc.algo.allSimplePaths` | ✅ |
-| PageRank | `apoc.algo.pageRank` | ✅ |
-| Betweenness | `apoc.algo.betweenness` | ✅ |
-| Closeness | `apoc.algo.closeness` | ✅ |
-| Neighbors | `apoc.neighbors.tohop`, `apoc.neighbors.byhop` | ✅ |
+| Algorithm        | Procedure                                      | Status |
+| ---------------- | ---------------------------------------------- | ------ |
+| Dijkstra         | `apoc.algo.dijkstra`                           | ✅     |
+| A\*              | `apoc.algo.aStar`                              | ✅     |
+| All Simple Paths | `apoc.algo.allSimplePaths`                     | ✅     |
+| PageRank         | `apoc.algo.pageRank`                           | ✅     |
+| Betweenness      | `apoc.algo.betweenness`                        | ✅     |
+| Closeness        | `apoc.algo.closeness`                          | ✅     |
+| Neighbors        | `apoc.neighbors.tohop`, `apoc.neighbors.byhop` | ✅     |
 
 ### Community Detection ✅
 
-| Algorithm | Procedure | Status |
-|-----------|-----------|--------|
-| Louvain | `apoc.algo.louvain` | ✅ |
-| Label Propagation | `apoc.algo.labelPropagation` | ✅ |
-| Connected Components | `apoc.algo.wcc` | ✅ |
+| Algorithm            | Procedure                    | Status |
+| -------------------- | ---------------------------- | ------ |
+| Louvain              | `apoc.algo.louvain`          | ✅     |
+| Label Propagation    | `apoc.algo.labelPropagation` | ✅     |
+| Connected Components | `apoc.algo.wcc`              | ✅     |
 
 ### Data Import/Export ✅
 
-| Operation | Procedure | Status |
-|-----------|-----------|--------|
-| Load JSON | `apoc.load.json`, `apoc.load.jsonArray` | ✅ |
-| Load CSV | `apoc.load.csv` | ✅ |
-| Export JSON | `apoc.export.json.all`, `apoc.export.json.query` | ✅ |
-| Export CSV | `apoc.export.csv.all`, `apoc.export.csv.query` | ✅ |
-| Import JSON | `apoc.import.json` | ✅ |
+| Operation   | Procedure                                        | Status |
+| ----------- | ------------------------------------------------ | ------ |
+| Load JSON   | `apoc.load.json`, `apoc.load.jsonArray`          | ✅     |
+| Load CSV    | `apoc.load.csv`                                  | ✅     |
+| Export JSON | `apoc.export.json.all`, `apoc.export.json.query` | ✅     |
+| Export CSV  | `apoc.export.csv.all`, `apoc.export.csv.query`   | ✅     |
+| Import JSON | `apoc.import.json`                               | ✅     |
 
 ---
 
@@ -222,51 +224,51 @@ CALL apoc.periodic.iterate(
 
 Features NornicDB has that Neo4j doesn't:
 
-| Feature | Description |
-|---------|-------------|
-| **Automatic Vector Index** | All node embeddings indexed automatically, no setup required |
+| Feature                    | Description                                                           |
+| -------------------------- | --------------------------------------------------------------------- |
+| **Automatic Vector Index** | All node embeddings indexed automatically, no setup required          |
 | **String Query Embedding** | `db.index.vector.queryNodes` accepts strings, auto-embeds server-side |
-| **Hybrid Search REST API** | `/nornicdb/search` with RRF fusion of vector + BM25 |
-| **Memory Decay System** | 3-tier cognitive memory (Episodic/Semantic/Procedural) |
-| **Auto-Relationships** | Automatic edge creation via embedding similarity |
-| **GPU Acceleration** | Metal/CUDA/OpenCL/Vulkan for vector ops |
-| **Embedded Mode** | Use as library without server |
-| **Link Prediction** | ML-based relationship prediction (TLP algorithms) |
-| **MCP Server** | Native Model Context Protocol for LLM tools |
+| **Hybrid Search REST API** | `/nornicdb/search` with RRF fusion of vector + BM25                   |
+| **Memory Decay System**    | 3-tier cognitive memory (Episodic/Semantic/Procedural)                |
+| **Auto-Relationships**     | Automatic edge creation via embedding similarity                      |
+| **GPU Acceleration**       | Metal/CUDA/OpenCL/Vulkan for vector ops                               |
+| **Embedded Mode**          | Use as library without server                                         |
+| **Link Prediction**        | ML-based relationship prediction (TLP algorithms)                     |
+| **MCP Server**             | Native Model Context Protocol for LLM tools                           |
 
 ### Performance Advantages
 
-| Metric | Neo4j | NornicDB | Advantage |
-|--------|-------|----------|-----------|
-| Memory footprint | 1-4GB | 100-500MB | 4-10x smaller |
-| Cold start time | 10-30s | <1s | 10-30x faster |
-| Binary size | ~200MB | ~50MB | 4x smaller |
-| Dependencies | JVM required | None | Self-contained |
+| Metric           | Neo4j        | NornicDB  | Advantage      |
+| ---------------- | ------------ | --------- | -------------- |
+| Memory footprint | 1-4GB        | 100-500MB | 4-10x smaller  |
+| Cold start time  | 10-30s       | <1s       | 10-30x faster  |
+| Binary size      | ~200MB       | ~50MB     | 4x smaller     |
+| Dependencies     | JVM required | None      | Self-contained |
 
 ---
 
 ### ✅ Recently Completed
 
-| Feature | Implementation |
-|---------|----------------|
-| Bookmarks (causal consistency) | Returns `nornicdb:bookmark:*` on commit, accepts in BEGIN |
-| String query auto-embedding | `db.index.vector.queryNodes` accepts text strings |
-| Multi-line SET with arrays | Full support for embedding storage workflow |
-| db.index.fulltext.createNodeIndex | Create fulltext indexes on node labels |
-| db.index.fulltext.createRelationshipIndex | Create fulltext indexes on relationship types |
-| db.index.vector.createRelationshipIndex | Create vector indexes on relationships |
-| db.index.fulltext.drop | Drop fulltext indexes |
-| db.index.vector.drop | Drop vector indexes |
-| Prometheus /metrics endpoint | Full metrics export (requests, nodes, edges, embeddings, slow queries) |
-| Slow query logging | Configurable threshold (default 100ms), file or stderr output |
+| Feature                                   | Implementation                                                         |
+| ----------------------------------------- | ---------------------------------------------------------------------- |
+| Bookmarks (causal consistency)            | Returns `nornicdb:bookmark:*` on commit, accepts in BEGIN              |
+| String query auto-embedding               | `db.index.vector.queryNodes` accepts text strings                      |
+| Multi-line SET with arrays                | Full support for embedding storage workflow                            |
+| db.index.fulltext.createNodeIndex         | Create fulltext indexes on node labels                                 |
+| db.index.fulltext.createRelationshipIndex | Create fulltext indexes on relationship types                          |
+| db.index.vector.createRelationshipIndex   | Create vector indexes on relationships                                 |
+| db.index.fulltext.drop                    | Drop fulltext indexes                                                  |
+| db.index.vector.drop                      | Drop vector indexes                                                    |
+| Prometheus /metrics endpoint              | Full metrics export (requests, nodes, edges, embeddings, slow queries) |
+| Slow query logging                        | Configurable threshold (default 100ms), file or stderr output          |
 
 ### 🟢 Not Applicable
 
-| Feature | Reason |
-|---------|--------|
-| Cluster management (dbms.*) | Single-node design |
-| Enterprise security | Use external auth |
-| Multi-database | Use separate instances |
+| Feature                      | Reason                 |
+| ---------------------------- | ---------------------- |
+| Cluster management (dbms.\*) | Single-node design     |
+| Enterprise security          | Use external auth      |
+| Multi-database               | Use separate instances |
 
 ---
 
@@ -301,14 +303,14 @@ Features NornicDB has that Neo4j doesn't:
 
 ### 🎯 Next Priority
 
-| Task | Effort | Status |
-|------|--------|--------|
-| Prometheus metrics | 2 days | ✅ Done |
-| Slow query logging | 1 day | ✅ Done |
-| MMR diversification | 1 day | ✅ Done |
-| Cross-encoder rerank | 3 days | ✅ Done |
+| Task                   | Effort | Status  |
+| ---------------------- | ------ | ------- |
+| Prometheus metrics     | 2 days | ✅ Done |
+| Slow query logging     | 1 day  | ✅ Done |
+| MMR diversification    | 1 day  | ✅ Done |
+| Cross-encoder rerank   | 3 days | ✅ Done |
 | Plugin system for APOC | 3 days | ✅ Done |
-| Eval harness | 2 days | ✅ Done |
+| Eval harness           | 2 days | ✅ Done |
 
 ---
 
@@ -322,7 +324,7 @@ Features NornicDB has that Neo4j doesn't:
 ✅ Full ACID transactions  
 ✅ All constraint types enforced  
 ✅ Neo4j driver compatibility  
-✅ Unique LLM-native features  
+✅ Unique LLM-native features
 
 **For LLM/AI workloads:** ✅ **STRONGLY APPROVED** (99% effective parity)  
 **For general Neo4j replacement:** ✅ **APPROVED** (96% feature parity)
@@ -330,6 +332,7 @@ Features NornicDB has that Neo4j doesn't:
 ---
 
 **Badge:**
+
 ```
 ✅ Neo4j-Compatible (96% feature parity)
 ✅ Full ACID Transactions & Constraints

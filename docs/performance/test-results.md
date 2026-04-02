@@ -1,8 +1,6 @@
 # NornicDB Test Results
 
-**Date:** November 26, 2025  
-**Version:** 0.1.0  
-**Tester:** Claudette (Automated E2E Testing)
+Last Updated: November 2025 | Version 0.1.0
 
 ---
 
