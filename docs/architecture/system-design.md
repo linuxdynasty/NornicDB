@@ -38,7 +38,8 @@ graph TB
     end
 
     subgraph Embedding["🧠 Embedding Layer"]
-        EmbedQueue["Embed Worker<br/>• Pull-based processing<br/>• Chunking (512/50 overlap)<br/>• Retry with backoff"]
+        EmbedQueue["Embed Worker<br/>• Background scan (15m)<br/>• Chunking (8192/50 overlap)<br/>• Retry with backoff (3x)"]
+        EmbedInline["WITH EMBEDDING<br/>• Inline transactional<br/>• Same-transaction embed<br/>• CREATE/MERGE/SET"]
         EmbedCache["Embedding Cache<br/>• LRU (10K default)<br/>• 450,000x speedup"]
         EmbedService["Embedding Service<br/>• Ollama/OpenAI/Local GGUF<br/>• String query auto-embed"]
     end
@@ -85,6 +86,8 @@ graph TB
     EmbedService --> EmbedCache
     EmbedCache --> EmbedQueue
     EmbedQueue --> Storage
+    EmbedInline --> EmbedService
+    QueryExecutor --> EmbedInline
 
     %% Protocol to processing
     BoltServer --> CypherParser
@@ -122,7 +125,7 @@ graph TB
     class Neo4jDriver,HTTPClient,MCPClient clientStyle
     class TLS,Auth securityStyle
     class BoltServer,HTTPServer,MCPServer protocolStyle
-    class EmbedQueue,EmbedCache,EmbedService embedStyle
+    class EmbedQueue,EmbedInline,EmbedCache,EmbedService embedStyle
     class CypherParser,QueryExecutor,TxManager processingStyle
     class BadgerDB,Schema,Persistence storageStyle
     class GPUManager,VectorOps gpuStyle
@@ -158,9 +161,11 @@ Key Design Decisions:
 │  │          │          │            │          │          │       │
 │  │ • Parse  │          │ • Auto-emb │          │ • store  │       │
 │  │ • Execute│          │ • Cache    │          │ • recall │       │
-│  │ • Vector │          │ • Queue    │          │ • discover
-│  │   procs  │          │            │          │ • link   │       │
-│  └────┬─────┘          └────────────┘          │ • tasks  │       │
+│  │ • Vector │          │ • Queue    │          │ • discover│      │
+│  │   procs  │          │ • WITH     │          │ • link   │       │
+│  │ • WITH   │          │   EMBEDDING│          │ • tasks  │       │
+│  │  EMBEDDING│         │   (inline) │          │          │       │
+│  └────┬─────┘          └────────────┘          └──────────┘       │
 │       │                                         └──────────┘       │
 │       ▼                                                            │
 │  ┌────────────────────────────────────────────────────────────────┐ │
@@ -183,15 +188,15 @@ Key Design Decisions:
 
 ### Vector Search Features
 
-| Feature                    | Neo4j GDS | NornicDB |
-| -------------------------- | --------- | -------- |
-| Vector array queries       | ✅        | ✅       |
-| String auto-embedding      | ❌        | ✅       |
-| Multi-line SET with arrays | ❌        | ✅       |
-| Native embedding field     | ❌        | ✅       |
-| Server-side embedding      | ❌        | ✅       |
-| GPU acceleration           | ❌        | ✅       |
-| Embedding cache            | ❌        | ✅       |
+| Feature                         | Neo4j GDS | NornicDB |
+| ------------------------------- | --------- | -------- |
+| Vector array queries            | ✅        | ✅       |
+| String auto-embedding           | ❌        | ✅       |
+| `WITH EMBEDDING` (inline embed) | ❌        | ✅       |
+| Multi-line SET with arrays      | ❌        | ✅       |
+| Server-side embedding           | ❌        | ✅       |
+| GPU acceleration                | ❌        | ✅       |
+| Embedding cache                 | ❌        | ✅       |
 
 ## Core Components
 
@@ -212,14 +217,33 @@ MCP is configurable and can be disabled entirely for application-only deployment
 
 ### Embedding Layer (`pkg/embed`)
 
-- **Pull-based worker** - Processes nodes without embeddings
-- **Chunking** - 512 tokens with 50 token overlap
-- **LRU Cache** - 10K entries, 450,000x speedup for repeated queries
-- **Providers** - Ollama, OpenAI, Local GGUF
+NornicDB supports two embedding modes:
+
+**Background Worker** (async, eventual):
+
+- Scans for unembedded nodes every 15 minutes (configurable)
+- Chunking: 8192 tokens with 50 token overlap (configurable)
+- Retry with backoff (3 attempts), debounced triggers on writes
+- Configurable property inclusion/exclusion and label prepending
+
+**`WITH EMBEDDING`** (sync, transactional):
+
+- Appended to any mutation: `CREATE ... WITH EMBEDDING RETURN ...`
+- Embeds all mutated nodes inline within the same implicit transaction
+- Works with CREATE, MERGE, MATCH...SET, UNWIND...MERGE
+- Rolls back both data and embeddings atomically on failure
+- Uses the same chunking/provider config as the background worker
+
+**Common:**
+
+- **LRU Cache** - 10K entries (configurable), 450,000x speedup for repeated queries
+- **Providers** - Ollama, OpenAI, Local GGUF (llama.cpp)
+- **Chunk-level embeddings** - Each node stores multiple chunk embeddings with metadata (model, dimensions, timestamp)
 
 ### Cypher Executor (`pkg/cypher`)
 
 - **Vector Procedures** - `db.index.vector.queryNodes` with string auto-embedding
+- **`WITH EMBEDDING`** - Inline embedding within mutation transactions (CREATE/MERGE/SET)
 - **Multi-line SET** - Arrays and multiple properties in single SET
 - **Native embedding** - Routes `embedding` property to `node.Embedding` field
 
@@ -250,12 +274,26 @@ NORNICDB_BOLT_PORT=7687
 # MCP (disable with false)
 NORNICDB_MCP_ENABLED=true
 
-# Embedding
+# Embedding provider
 NORNICDB_EMBEDDING_ENABLED=true
+NORNICDB_EMBEDDING_PROVIDER=ollama          # ollama | openai | local
 NORNICDB_EMBEDDING_API_URL=http://localhost:11434
-NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+NORNICDB_EMBEDDING_MODEL=bge-m3
 NORNICDB_EMBEDDING_DIMENSIONS=1024
 NORNICDB_EMBEDDING_CACHE_SIZE=10000
+
+# Embedding worker (background async)
+NORNICDB_EMBED_SCAN_INTERVAL=15m
+NORNICDB_EMBED_BATCH_DELAY=500ms
+NORNICDB_EMBED_TRIGGER_DEBOUNCE=2s
+NORNICDB_EMBED_MAX_RETRIES=3
+NORNICDB_EMBED_CHUNK_SIZE=8192
+NORNICDB_EMBED_CHUNK_OVERLAP=50
+
+# Embedding text control
+NORNICDB_EMBEDDING_PROPERTIES_INCLUDE=      # empty = all properties
+NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE=
+NORNICDB_EMBEDDING_INCLUDE_LABELS=true
 
 # Auth (default: disabled)
 NORNICDB_AUTH=admin:password
