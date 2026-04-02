@@ -11,6 +11,7 @@
 ### Current State (Gap Analysis)
 
 **What NornicDB Has:**
+
 - ✅ At-rest encryption layer (`pkg/encryption/encryption.go`)
 - ✅ PBKDF2/Argon2 key derivation
 - ✅ AES-256-GCM authenticated encryption
@@ -18,6 +19,7 @@
 - ✅ Badger storage integration (EncryptionKey injection)
 
 **What's Missing (Compliance Gap):**
+
 - ❌ **CMEK provider abstraction** — No pluggable KMS/HSM interface
 - ❌ **Envelope encryption** — Master key separation from data keys
 - ❌ **Key lifecycle (rotation, versioning, audit)** — No versioning of key versions
@@ -57,6 +59,7 @@ After surveying available Go libraries, this plan now adopts a **build-on-proven
 
 Using external libraries does **not** imply automatic FIPS validation for the full stack.  
 FIPS 140-2/3 posture remains dependent on:
+
 - selected cloud/HSM service and endpoint configuration (e.g. FIPS endpoints),
 - deployment controls,
 - cryptographic module boundary for the target environment.
@@ -67,22 +70,22 @@ FIPS 140-2/3 posture remains dependent on:
 
 ### Regulatory Requirements
 
-| Requirement               | NornicDB Implementation                                  |
-|---------------------------|-----------------------------------------------------------|
-| **GDPR Art.32**          | Encryption + key separation + audit trail                |
-| **HIPAA §164.312(e)(2)** | CMEK + HSM + FIPS 140-2 Level 2+ + encryption audit      |
-| **FISMA SC-13**          | NIST-approved algorithms (AES-256) + CMEK orchestration  |
-| **SOC2 CC6.1/CC6.2**     | Key management controls + operator access controls       |
-| **PCI-DSS 3.6**          | Strong KMS + key rotation every 90 days                  |
-| **NIST SP 800-57**       | Key derivation, lifetime, rotation, storage separation   |
+| Requirement              | NornicDB Implementation                                 |
+| ------------------------ | ------------------------------------------------------- |
+| **GDPR Art.32**          | Encryption + key separation + audit trail               |
+| **HIPAA §164.312(e)(2)** | CMEK + HSM + FIPS 140-2 Level 2+ + encryption audit     |
+| **FISMA SC-13**          | NIST-approved algorithms (AES-256) + CMEK orchestration |
+| **SOC2 CC6.1/CC6.2**     | Key management controls + operator access controls      |
+| **PCI-DSS 3.6**          | Strong KMS + key rotation every 90 days                 |
+| **NIST SP 800-57**       | Key derivation, lifetime, rotation, storage separation  |
 
 ### FIPS 140-2 Levels (Target: Level 2+)
 
-| Level | Primary Requirement                    | KMS Recommendation                           |
-|-------|----------------------------------------|----------------------------------------------|
-| 1     | Algorithm approval (basic)             | ❌ Insufficient                              |
-| 2     | Physical tamper detection + CMEK      | ✅ AWS KMS, Azure Key Vault, GCP Cloud KMS  |
-| 3     | Identity-based access + HSM + audit   | ✅ Thales HSM, CloudHSM, Vult HSM           |
+| Level | Primary Requirement                 | KMS Recommendation                         |
+| ----- | ----------------------------------- | ------------------------------------------ |
+| 1     | Algorithm approval (basic)          | ❌ Insufficient                            |
+| 2     | Physical tamper detection + CMEK    | ✅ AWS KMS, Azure Key Vault, GCP Cloud KMS |
+| 3     | Identity-based access + HSM + audit | ✅ Thales HSM, CloudHSM, Vult HSM          |
 
 ---
 
@@ -135,19 +138,19 @@ package kms
 type KeyProvider interface {
     // GenerateDataKey creates a new data encryption key
     GenerateDataKey(ctx context.Context, opts KeyGenOpts) (*DataKey, error)
-    
+
     // DecryptDataKey decrypts an already-protected data key
     DecryptDataKey(ctx context.Context, encryptedKey []byte, opts DecryptOpts) ([]byte, error)
-    
+
     // RotateDataKey re-encrypts a data key with latest master key
     RotateDataKey(ctx context.Context, encryptedKey []byte) (*DataKey, error)
-    
+
     // GetKeyMetadata retrieves key version and expiry info
     GetKeyMetadata(ctx context.Context, keyURI string) (*KeyMetadata, error)
-    
+
     // SignAuditEvent writes immutable audit record (compliance)
     SignAuditEvent(ctx context.Context, event AuditEvent) error
-    
+
     // Close releases resources
     Close(ctx context.Context) error
 }
@@ -188,22 +191,26 @@ type WrappingAdapter struct {
 ```
 
 Notes:
+
 - NornicDB owns canonical key URI, audit envelope format, and policy checks.
 - Wrapping providers handle provider-specific cryptographic operations.
 
 ### 3. KMS Implementations (Priority Order)
 
 #### Phase 1: Cloud (80% of enterprise use, via go-kms-wrapping adapters)
+
 1. **AWS KMS** — FIPS 140-2 Level 2+ path, audit via CloudTrail
 2. **Azure Key Vault** — FIPS 140-2 Level 2+ path, RBAC integration
 3. **GCP Cloud KMS** — FIPS 140-2 Level 2+ path, Cloud Audit Logs integration
 
 #### Phase 2: HSM (compliance-critical)
+
 4. **Thales TSM HSM** — FIPS 140-2 Level 3, highest assurance
 5. **AWS CloudHSM** — Customer-managed FIPS 140-2 Level 3
 6. **Azure Dedicated HSM** — Thales backend, on-prem integration
 
 #### Phase 3: On-Prem/Air-Gap
+
 7. **HashiCorp Vault** — Flexible; integrates with HSMs
 8. **Local KMS (fallback)** — File-based encryption for dev/test
 
@@ -214,7 +221,9 @@ Notes:
 ### Phase 1: Core Infrastructure (Weeks 1-4)
 
 #### 1.1 KMS Provider Abstraction + Wrapping Adapters
+
 **Files to Create:**
+
 - `pkg/kms/provider.go` — KeyProvider interface + common types
 - `pkg/kms/errors.go` — Compliance-specific error codes
 - `pkg/kms/audit.go` — Audit event types + signing
@@ -222,6 +231,7 @@ Notes:
 - `pkg/kms/adapters/wrapping_adapter_test.go` — adapter contract tests
 
 **Code Structure:**
+
 ```go
 // pkg/kms/provider.go
 package kms
@@ -247,16 +257,20 @@ type AuditEvent struct {
 ```
 
 **Tests:**
+
 - `pkg/kms/provider_test.go` — Interface compliance tests
 - `pkg/kms/audit_test.go` — Audit event signing validation
 - `pkg/kms/adapters/*_test.go` — wrapper adapter behavior and failure mapping
 
 #### 1.2 Envelope Encryption Layer
+
 **Files to Modify:**
+
 - `pkg/encryption/envelope.go` (new) — Envelope encryption logic
 - `pkg/encryption/encryption.go` — Wire in envelope model
 
 **Changes:**
+
 ```go
 // pkg/encryption/envelope.go (new 150 lines)
 
@@ -270,10 +284,10 @@ type EnvelopeEncryptor struct {
 func (e *EnvelopeEncryptor) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
     // 1. Get or generate DEK from KMS
     dek := e.getOrGenerateDEK(ctx)
-    
+
     // 2. Encrypt plaintext with DEK
     ciphertext := aesGcmEncrypt(plaintext, dek.Plaintext)
-    
+
     // 3. Return: [DEK-ciphertext || IV || ciphertext]
     return e.formatEnvelope(dek, ciphertext)
 }
@@ -282,7 +296,7 @@ func (e *EnvelopeEncryptor) Encrypt(ctx context.Context, plaintext []byte) ([]by
 func (e *EnvelopeEncryptor) Decrypt(ctx context.Context, envelope []byte) ([]byte, error) {
     // 1. Parse envelope: extract encrypted DEK + IV + ciphertext
     dekCiphertext, iv, ciphertext := e.parseEnvelope(envelope)
-    
+
     // 2. Decrypt DEK using KMS provider
     dek, err := e.kmProvider.DecryptDataKey(ctx, dekCiphertext)
     if err != nil {
@@ -290,7 +304,7 @@ func (e *EnvelopeEncryptor) Decrypt(ctx context.Context, envelope []byte) ([]byt
         e.auditKeyDecryptionFailure(ctx, dekCiphertext, err)
         return nil, err
     }
-    
+
     // 3. Decrypt ciphertext with DEK
     plaintext := aesGcmDecrypt(ciphertext, dek, iv)
     return plaintext, nil
@@ -298,6 +312,7 @@ func (e *EnvelopeEncryptor) Decrypt(ctx context.Context, envelope []byte) ([]byt
 ```
 
 **Tests:**
+
 - `pkg/encryption/envelope_test.go` — 20+ test cases covering:
   - Envelope format correctness
   - DEK rotation triggering
@@ -307,11 +322,14 @@ func (e *EnvelopeEncryptor) Decrypt(ctx context.Context, envelope []byte) ([]byt
 ### Phase 2: KMS Provider Implementations (Weeks 5-8)
 
 #### 2.1 AWS KMS Provider
+
 **Files to Create:**
+
 - `pkg/kms/providers/aws_kms.go` — Adapter over go-kms-wrapping AWS wrapper
 - `pkg/kms/providers/aws_kms_test.go` — AWS integration tests (mock + real)
 
 **Configuration (YAML):**
+
 ```yaml
 encryption:
   provider: "aws-kms"
@@ -320,20 +338,21 @@ encryption:
     key_id: "arn:aws:kms:us-east-1:123456789:key/abc123"
     role_arn: "arn:aws:iam::123456789:role/nornicdb-kms"
     endpoint: "https://kms.us-east-1.amazonaws.com"
-    
+
     # FIPS 140-2 enforcement
     enforce_fips: true
-    
+
     # Compliance audit trail
     enable_cloudtrail: true
     cloudtrail_bucket: "s3://audit-logs/"
-    
+
     # Key rotation policy
     rotation_interval: "90d"
     enable_auto_rotation: true
 ```
 
 **Implementation Strategy:**
+
 ```go
 // pkg/kms/providers/aws_kms.go
 
@@ -356,32 +375,36 @@ func (p *AWSKMSProvider) GenerateDataKey(ctx context.Context, opts kms.KeyGenOpt
 ```
 
 **Tests:**
+
 - AWS KMS mock tests (no real API calls)
 - Integration test with real AWS account (opt-in with `TEST_AWS_ENABLED=1`)
 - CloudTrail audit log verification
 
 #### 2.2 Azure Key Vault Provider
+
 **Files to Create:**
+
 - `pkg/kms/providers/azure_keyvault.go` — Azure SDK integration
 - `pkg/kms/providers/azure_keyvault_test.go`
 
 **Configuration:**
+
 ```yaml
 encryption:
   provider: "azure-keyvault"
   azure_keyvault:
     vault_uri: "https://nornicdb-kv.vault.azure.net/"
     key_name: "nornicdb-master-key"
-    key_version: "replace-with-your-key-version"  # Optional; latest if omitted
-    
+    key_version: "replace-with-your-key-version" # Optional; latest if omitted
+
     # Managed identity or service principal
-    auth_method: "managed-identity"  # or "service-principal"
+    auth_method: "managed-identity" # or "service-principal"
     client_id: "${AZURE_CLIENT_ID}"
     client_secret: "${AZURE_CLIENT_SECRET}"
-    
+
     # FIPS 140-2 Level 2+
     enforce_fips: true
-    
+
     # Compliance features
     enable_audit_logging: true
     audit_storage_account: "nornicdbaudit"
@@ -389,11 +412,14 @@ encryption:
 ```
 
 #### 2.3 GCP Cloud KMS Provider
+
 **Files to Create:**
+
 - `pkg/kms/providers/gcp_cloudkms.go`
 - `pkg/kms/providers/gcp_cloudkms_test.go`
 
 **Configuration:**
+
 ```yaml
 encryption:
   provider: "gcp-cloudkms"
@@ -402,13 +428,13 @@ encryption:
     location: "us-central1"
     key_ring: "nornicdb-keys"
     key_name: "master-key"
-    
+
     # Service account for auth
     credentials_file: "/secrets/gcp-sa-key.json"
-    
+
     # FIPS 140-2
     enforce_fips: true
-    
+
     # Compliance
     enable_cloud_audit_logs: true
     rotation_interval: "90d"
@@ -417,11 +443,14 @@ encryption:
 ### Phase 3: Envelope Encryption Integration (Weeks 9-10)
 
 #### 3.1 Wire Envelope Into Storage Layer
+
 **Files to Modify:**
+
 - `pkg/nornicdb/db.go` — Initialize envelope encryptor at startup
 - `pkg/storage/badger_engine.go` — Remove old single-key model; use envelope
 
 **Startup Flow:**
+
 ```go
 // cmd/nornicdb/main.go (additions)
 func initializeEncryption(cfg *config.Config) (*encryption.EnvelopeEncryptor, error) {
@@ -430,24 +459,26 @@ func initializeEncryption(cfg *config.Config) (*encryption.EnvelopeEncryptor, er
     if err != nil {
         return nil, fmt.Errorf("failed to initialize KMS: %w", err)
     }
-    
+
     // 2. Validate KMS connectivity (permissions, key access)
     if err := kmProvider.TestConnectivity(context.Background()); err != nil {
         return nil, fmt.Errorf("KMS connectivity check failed: %w", err)
     }
-    
+
     // 3. Initialize envelope encryptor
     enc := encryption.NewEnvelopeEncryptor(kmProvider, cfg.Encryption.EnvelopeOpts)
-    
+
     // 4. Wire to Badger (no static key anymore)
     badgerOpts.EncryptionProvider = enc
-    
+
     return enc, nil
 }
 ```
 
 #### 3.2 Data Key Caching Strategy
+
 **Design:**
+
 - **Cache TTL:** 24 hours (configurable)
 - **Max cached keys:** 10 (configurable)
 - **On expiry:** Automatically request new DEK from KMS
@@ -473,7 +504,7 @@ func (c *DEKCache) GetOrGenerate(ctx context.Context) (*kms.DataKey, error) {
         }
     }
     c.mu.RUnlock()
-    
+
     // Generate new DEK
     dek, err := c.provider.GenerateDataKey(ctx, kms.KeyGenOpts{
         Algorithm: "AES-256",
@@ -482,12 +513,12 @@ func (c *DEKCache) GetOrGenerate(ctx context.Context) (*kms.DataKey, error) {
     if err != nil {
         return nil, err
     }
-    
+
     // Cache it
     c.mu.Lock()
     c.cache.Add("current", dek)
     c.mu.Unlock()
-    
+
     return dek, nil
 }
 ```
@@ -495,26 +526,31 @@ func (c *DEKCache) GetOrGenerate(ctx context.Context) (*kms.DataKey, error) {
 ### Phase 4: Key Rotation Orchestration (Weeks 11-12)
 
 #### 4.1 Automatic Key Rotation
+
 **Files to Create:**
+
 - `pkg/encryption/rotation.go` — Rotation orchestration
 
 **Features:**
+
 - Quarterly automatic rotation (configurable)
 - Background goroutine that monitors key age
 - Re-encrypt existing encrypted values with new DEK
 - Audit trail for each rotation
 
 **Configuration:**
+
 ```yaml
 encryption:
   rotation:
     enabled: true
     interval: "90d"
     max_concurrent_keys: 3
-    retention_count: 5  # Keep last 5 old keys for decryption
+    retention_count: 5 # Keep last 5 old keys for decryption
 ```
 
 **Implementation:**
+
 ```go
 // pkg/encryption/rotation.go (200 lines)
 
@@ -546,10 +582,10 @@ func (rm *RotationManager) performRotation(ctx context.Context) {
     // 1. Generate new DEK from KMS
     newDEK, err := rm.provider.GenerateDataKey(ctx, kms.KeyGenOpts{})
     // ... error handling ...
-    
+
     // 2. Scan all encrypted nodes/edges
     nodes, _ := rm.storage.ListNodes(ctx)
-    
+
     // 3. Re-encrypt each value
     for _, node := range nodes {
         newEncrypted, err := rm.reEncrypt(ctx, node.EncryptedData, newDEK)
@@ -557,18 +593,19 @@ func (rm *RotationManager) performRotation(ctx context.Context) {
             rm.auditRotationFailure(ctx, node.ID, err)
             continue
         }
-        
+
         // 4. Update storage
         node.EncryptedData = newEncrypted
         _ = rm.storage.UpdateNode(ctx, node)
     }
-    
+
     // 5. Audit rotation completion
     rm.auditRotationSuccess(ctx, len(nodes))
 }
 ```
 
 **Tests:**
+
 - Rotation trigger validation
 - Concurrent rotation safety
 - Old key retention rules
@@ -577,40 +614,47 @@ func (rm *RotationManager) performRotation(ctx context.Context) {
 ### Phase 5: Compliance & Audit (Weeks 13-14)
 
 #### 5.1 Audit Event Archival
+
 **Files to Create:**
+
 - `pkg/kms/audit_archiver.go` — Immutable audit log export
 
 **Features:**
+
 - Signed audit events (HMAC-SHA256 over operations)
 - Immutable storage (write-once)
 - Export to CloudTrail, Azure Activity Log, GCP Cloud Audit Logs
 - Compliance report generation (SOC2, HIPAA evidence)
 
 **Configuration:**
+
 ```yaml
 encryption:
   audit:
     enabled: true
     # Local immutable log + cloud export
     local_log_path: "/var/log/nornicdb/audit.jsonl"
-    local_log_retention: "2555d"  # 7 years (HIPAA requirement)
-    
+    local_log_retention: "2555d" # 7 years (HIPAA requirement)
+
     # Export to cloud
     cloud_export:
       enabled: true
       destination: "s3://audit-bucket/"
-      format: "cloudtrail"  # or "azure-activity", "gcp-cloud-audit"
-      
+      format: "cloudtrail" # or "azure-activity", "gcp-cloud-audit"
+
     # Integrity checking
     sign_events: true
     hmac_key_rotation: "90d"
 ```
 
 #### 5.2 Compliance Reporting
+
 **Files to Create:**
+
 - `pkg/compliance/report.go` — Evidence export for auditors
 
 **Capabilities:**
+
 ```go
 type ComplianceReporter struct {
     auditLog   *audit.Log
@@ -639,12 +683,15 @@ func (cr *ComplianceReporter) ExportSOC2Evidence(period string) (*SOC2Report, er
 ### Phase 6: Documentation & Testing (Weeks 15-16)
 
 #### 6.1 Configuration Documentation
+
 **Files to Create:**
+
 - `docs/encryption/cmek-setup.md` — CMEK deployment guide
 - `docs/encryption/hsm-integration.md` — HSM configuration
 - `docs/encryption/compliance-evidence.md` — Audit evidence generation
 
 **Contents:**
+
 - AWS KMS setup (role policies, key permissions)
 - Azure Key Vault setup (RBAC, soft-delete recovery)
 - GCP Cloud KMS setup (service account roles)
@@ -652,51 +699,53 @@ func (cr *ComplianceReporter) ExportSOC2Evidence(period string) (*SOC2Report, er
 - Audit log export to SIEM (Splunk, ELK, DataDog)
 
 #### 6.2 Testing Matrix
+
 **Comprehensive Tests (500+ test cases):**
 
-| Category | Scenarios | Count |
-|----------|-----------|-------|
-| **Unit** | Envelope format, DEK cache, rotation logic | 150 |
-| **Integration** | KMS provider roundtrips (mock) | 120 |
-| **E2E** | Full encryption pipeline with storage | 100 |
-| **Compliance** | Audit trail, key rotation, immutability | 80 |
-| **Failure Modes** | KMS unavailable, key expire, rotation conflict | 60 |
+| Category          | Scenarios                                      | Count |
+| ----------------- | ---------------------------------------------- | ----- |
+| **Unit**          | Envelope format, DEK cache, rotation logic     | 150   |
+| **Integration**   | KMS provider roundtrips (mock)                 | 120   |
+| **E2E**           | Full encryption pipeline with storage          | 100   |
+| **Compliance**    | Audit trail, key rotation, immutability        | 80    |
+| **Failure Modes** | KMS unavailable, key expire, rotation conflict | 60    |
 
 ---
 
 ## Configuration Examples
 
 ### AWS KMS (Production)
+
 ```yaml
 encryption:
   provider: "aws-kms"
   enabled: true
-  
+
   aws_kms:
     region: "us-east-1"
     key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
     role_arn: "arn:aws:iam::123456789012:role/nornicdb-encryption"
-    
+
     # FIPS 140-2 Level 2+
     enforce_fips: true
     endpoint: "https://kms-fips.us-east-1.amazonaws.com"
-    
+
     # Audit trail
     enable_cloudtrail: true
     cloudtrail_bucket: "s3://audit-logs/nornicdb/"
-    
+
   # Key management
   rotation:
     enabled: true
     interval: "90d"
     retention_count: 5
-    
+
   # Envelope encryption specifics
   envelope:
     dek_cache_ttl: "24h"
     max_cached_deks: 10
     algorithm: "AES-256-GCM"
-    
+
   # Audit logging
   audit:
     enabled: true
@@ -706,31 +755,32 @@ encryption:
 ```
 
 ### Azure Key Vault (Production)
+
 ```yaml
 encryption:
   provider: "azure-keyvault"
   enabled: true
-  
+
   azure_keyvault:
     vault_uri: "https://nornicdb-prod-kv.vault.azure.net/"
     key_name: "nornicdb-de-key"
-    
+
     # Managed identity authentication
     auth_method: "managed-identity"
-    
+
     # FIPS 140-2
     enforce_fips: true
-    
+
     # Features
     enable_soft_delete: true
     soft_delete_days: 90
     enable_purge_protection: true
-    
+
   rotation:
     enabled: true
     interval: "90d"
     retention_count: 5
-    
+
   audit:
     enabled: true
     storage_account: "nornicdbaudit"
@@ -739,35 +789,36 @@ encryption:
 ```
 
 ### Thales HSM (High-Security)
+
 ```yaml
 encryption:
   provider: "thales-hsm"
   enabled: true
-  
+
   thales_hsm:
     # Network HSM configuration
     servers:
       - "hsm-1.internal.company.com:9000"
       - "hsm-2.internal.company.com:9000"
-    
+
     # Authentication
     username: "nornicdb-user"
-    password_env: "NORNICDB_HSM_PASSWORD"  # From secret manager
-    
+    password_env: "NORNICDB_HSM_PASSWORD" # From secret manager
+
     # FIPS 140-2 Level 3
     fips_mode: true
-    
+
     # Key configuration
     key_identity: "NORNICDB-MASTER-2026"
     key_backup: true
     backup_frequency: "daily"
     backup_location: "/secure/backups/"
-    
+
   rotation:
     enabled: true
     interval: "90d"
     require_operator_approval: true
-    
+
   audit:
     enabled: true
     hsm_audit_log: true
@@ -780,16 +831,19 @@ encryption:
 ## Migration Strategy (Zero-Downtime)
 
 ### Phase 1: Dual-Write (Week 1)
+
 - Keep existing single-key encryption active
 - New data encrypted with envelope model
 - Old data readable by both paths
 
 ### Phase 2: Background Re-Encryption (Weeks 2-4)
+
 - Background job re-encrypts old data with envelope
 - No performance impact (off-peak)
 - Audit trail for each re-encryption
 
 ### Phase 3: Cutover (Week 5)
+
 - Disable legacy encryption path
 - All reads use envelope decryption
 - Rollback available via backup restoration
@@ -799,6 +853,7 @@ encryption:
 ## Test Coverage Matrix
 
 ### Unit Tests (pkg/kms, pkg/encryption)
+
 ```
 ├── KMS Provider Interface
 │   ├── AWS KMS mock
@@ -825,6 +880,7 @@ encryption:
 ```
 
 ### Integration Tests (with mock KMS)
+
 ```
 ├── KMS Provider Integration
 │   ├── AWS KMS roundtrip (mock SDK)
@@ -844,6 +900,7 @@ encryption:
 ```
 
 ### End-to-End Tests (optional real KMS)
+
 ```
 ├── AWS KMS (requires TEST_AWS_ENABLED=1)
 │   ├── Real credential from env
@@ -863,6 +920,7 @@ encryption:
 ## Success Criteria
 
 ### Technical
+
 - ✅ All 500+ tests passing (unit + integration + E2E)
 - ✅ Zero data loss during migration
 - ✅ Sub-millisecond envelope overhead (<5% latency impact)
@@ -871,6 +929,7 @@ encryption:
 - ✅ `go-kms-wrapping/v2` adapters pass provider contract suite
 
 ### Compliance
+
 - ✅ Audit trail immutable + signed (HMAC-SHA256)
 - ✅ FIPS 140-2 Level 2+ validation path clear
 - ✅ SOC2 evidence automatically generated
@@ -878,6 +937,7 @@ encryption:
 - ✅ Key rotation policy documented + enforced
 
 ### Operational
+
 - ✅ Zero KMS provider lock-in (pluggable interface)
 - ✅ Graceful degradation if KMS unavailable (cached DEK)
 - ✅ Audit log retention configurable (default 7 years)
@@ -888,15 +948,15 @@ encryption:
 
 ## Effort Estimate
 
-| Phase | Duration | FTE | Deliverables |
-|-------|----------|-----|--------------|
-| 1. Infrastructure | 4w | 2 | KMS interface, envelope encryption |
-| 2. Implementations | 4w | 2 | AWS/Azure/GCP providers |
-| 3. Integration | 2w | 1.5 | Storage wiring, caching |
-| 4. Rotation | 2w | 1 | Orchestration, re-encryption |
-| 5. Compliance | 2w | 1.5 | Audit, reporting, evidence |
-| 6. Testing/Docs | 2w | 1.5 | Test matrix, configuration guides |
-| **Total** | **16 weeks** | **~10 FTE** | **Production-ready CMEK/HSM** |
+| Phase              | Duration     | FTE         | Deliverables                       |
+| ------------------ | ------------ | ----------- | ---------------------------------- |
+| 1. Infrastructure  | 4w           | 2           | KMS interface, envelope encryption |
+| 2. Implementations | 4w           | 2           | AWS/Azure/GCP providers            |
+| 3. Integration     | 2w           | 1.5         | Storage wiring, caching            |
+| 4. Rotation        | 2w           | 1           | Orchestration, re-encryption       |
+| 5. Compliance      | 2w           | 1.5         | Audit, reporting, evidence         |
+| 6. Testing/Docs    | 2w           | 1.5         | Test matrix, configuration guides  |
+| **Total**          | **16 weeks** | **~10 FTE** | **Production-ready CMEK/HSM**      |
 
 ---
 
@@ -904,17 +964,18 @@ encryption:
 
 **How Neo4j Approaches Encryption (Enterprise):**
 
-| Aspect | Neo4j Enterprise | NornicDB (Post-CMEK) |
-|--------|------------------|----------------------|
-| **Provider** | Enterprise-only feature | Open-source + enterprise CMEK |
-| **Key Storage** | File-based + KMS integration | KMS/HSM exclusively |
-| **Encryption Scope** | Data at rest + transport (TLS) | Data at rest (envelope) + transport |
-| **Key Rotation** | Manual + scheduled | Automatic + operator-controlled |
-| **Multi-KMS** | Limited | AWS/Azure/GCP/Thales/Vault |
-| **Audit Trail** | Neo4j logs | Immutable, signed, SIEM-exportable |
-| **FIPS Compliance Path** | Via FIPS edition | Native FIPS-140-2 Level 2+ |
+| Aspect                   | Neo4j Enterprise               | NornicDB (Post-CMEK)                |
+| ------------------------ | ------------------------------ | ----------------------------------- |
+| **Provider**             | Enterprise-only feature        | Open-source + enterprise CMEK       |
+| **Key Storage**          | File-based + KMS integration   | KMS/HSM exclusively                 |
+| **Encryption Scope**     | Data at rest + transport (TLS) | Data at rest (envelope) + transport |
+| **Key Rotation**         | Manual + scheduled             | Automatic + operator-controlled     |
+| **Multi-KMS**            | Limited                        | AWS/Azure/GCP/Thales/Vault          |
+| **Audit Trail**          | Neo4j logs                     | Immutable, signed, SIEM-exportable  |
+| **FIPS Compliance Path** | Via FIPS edition               | Native FIPS-140-2 Level 2+          |
 
 **Key Differentiator:**
+
 > NornicDB CMEK is **provider-agnostic** (AWS/Azure/GCP equally first-class) vs. Neo4j's tighter integration with specific KMS services.
 
 ---
