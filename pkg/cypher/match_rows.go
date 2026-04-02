@@ -343,14 +343,34 @@ func extractOrderByPropertyValue(value interface{}, propPath []string) interface
 			case strings.EqualFold(part, "id"):
 				current = string(v.ID)
 			case strings.EqualFold(part, "createdAt"):
+				// Cypher property access should prefer explicit node properties.
+				// Fall back to metadata field for nodes without a createdAt property.
+				if v.Properties != nil {
+					if propVal, ok := mapLookupCaseInsensitive(v.Properties, "createdAt"); ok {
+						current = propVal
+						break
+					}
+				}
 				current = v.CreatedAt
 			case strings.EqualFold(part, "updatedAt"):
+				// Cypher property access should prefer explicit node properties.
+				// Fall back to metadata field for nodes without an updatedAt property.
+				if v.Properties != nil {
+					if propVal, ok := mapLookupCaseInsensitive(v.Properties, "updatedAt"); ok {
+						current = propVal
+						break
+					}
+				}
 				current = v.UpdatedAt
 			default:
 				if v.Properties == nil {
 					return nil
 				}
-				current = v.Properties[part]
+				if propVal, ok := mapLookupCaseInsensitive(v.Properties, part); ok {
+					current = propVal
+				} else {
+					current = nil
+				}
 			}
 		case map[string]interface{}:
 			// Match evaluateExpressionFromValues semantics:
