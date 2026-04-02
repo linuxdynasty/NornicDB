@@ -15,7 +15,7 @@ import (
 
 func TestDecodeProviderMasterKey(t *testing.T) {
 	t.Parallel()
-	raw := "0123456789abcdef0123456789abcdef"
+	raw := "example-test-key-do-not-use-0001"
 
 	k, err := decodeProviderMasterKey(raw)
 	require.NoError(t, err)
@@ -37,7 +37,7 @@ func TestResolveProviderManagedDBKey_PersistsAndReuses(t *testing.T) {
 	cfg := nornicConfig.LoadDefaults()
 	cfg.Database.EncryptionEnabled = true
 	cfg.Database.EncryptionProvider = "local"
-	cfg.Database.EncryptionMasterKey = "0123456789abcdef0123456789abcdef"
+	cfg.Database.EncryptionMasterKey = "example-test-key-do-not-use-0001"
 	cfg.Database.EncryptionKeyURI = "kms://local/nornicdb-test"
 
 	dir := t.TempDir()
@@ -60,7 +60,7 @@ func TestResolveProviderManagedDBKey_RotatesWrappedDEKMetadata(t *testing.T) {
 	cfg := nornicConfig.LoadDefaults()
 	cfg.Database.EncryptionEnabled = true
 	cfg.Database.EncryptionProvider = "local"
-	cfg.Database.EncryptionMasterKey = "0123456789abcdef0123456789abcdef"
+	cfg.Database.EncryptionMasterKey = "example-test-key-do-not-use-0001"
 	cfg.Database.EncryptionKeyURI = "kms://local/nornicdb-test"
 	cfg.Database.EncryptionRotationEnabled = true
 	cfg.Database.EncryptionRotationInterval = time.Nanosecond

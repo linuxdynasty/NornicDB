@@ -372,7 +372,7 @@ encryption:
   azure_keyvault:
     vault_uri: "https://nornicdb-kv.vault.azure.net/"
     key_name: "nornicdb-master-key"
-    key_version: "abc123def456"  # Optional; latest if omitted
+    key_version: "replace-with-your-key-version"  # Optional; latest if omitted
     
     # Managed identity or service principal
     auth_method: "managed-identity"  # or "service-principal"

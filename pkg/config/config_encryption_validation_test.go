@@ -40,7 +40,7 @@ func TestValidate_EncryptionProviderRequirements(t *testing.T) {
 		cfg := LoadDefaults()
 		cfg.Database.EncryptionEnabled = true
 		cfg.Database.EncryptionProvider = "local"
-		cfg.Database.EncryptionMasterKey = "0123456789abcdef0123456789abcdef"
+		cfg.Database.EncryptionMasterKey = "example-test-key-do-not-use-0001"
 		cfg.Database.EncryptionAuditSignEvents = true
 		cfg.Database.EncryptionAuditSignKey = "audit-sign-key"
 		require.NoError(t, cfg.Validate())

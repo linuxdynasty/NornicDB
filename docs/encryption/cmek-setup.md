@@ -24,7 +24,7 @@ database:
   encryption_enabled: true
   encryption_provider: "local"
   encryption_key_uri: "kms://local/nornicdb"
-  encryption_master_key: "0123456789abcdef0123456789abcdef"
+  encryption_master_key: "replace-with-32-byte-test-placeholder"
   encryption_audit_sign_events: true
   encryption_audit_sign_key: "replace-with-hmac-signing-key"
   encryption_rotation_enabled: true
