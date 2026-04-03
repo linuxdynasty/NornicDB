@@ -9,6 +9,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.38] - 2026-04-02
+
+### Added
+
+- **Neo4j relationship constraint parity**:
+  - all constraint families now work on both nodes and relationships: uniqueness, existence (IS NOT NULL), property type (IS :: TYPE), and key constraints (IS RELATIONSHIP KEY).
+  - relationship constraints use the `FOR ()-[r:TYPE]-()` target pattern, matching Neo4j 5.x syntax.
+  - uniqueness and key constraints on relationships automatically create owned backing indexes that are dropped when the constraint is dropped.
+
+Example — relationship uniqueness:
+
+```cypher
+CREATE CONSTRAINT transfer_ref_unique IF NOT EXISTS
+FOR ()-[r:TRANSFERRED]-()
+REQUIRE r.reference_id IS UNIQUE
+```
+
+Example — relationship existence:
+
+```cypher
+CREATE CONSTRAINT transferred_amount_exists IF NOT EXISTS
+FOR ()-[r:TRANSFERRED]-()
+REQUIRE r.amount IS NOT NULL
+```
+
+Example — relationship property type:
+
+```cypher
+CREATE CONSTRAINT transferred_amount_type IF NOT EXISTS
+FOR ()-[r:TRANSFERRED]-()
+REQUIRE r.amount IS :: FLOAT
+```
+
+Example — relationship key (composite uniqueness + existence):
+
+```cypher
+CREATE CONSTRAINT works_at_key IF NOT EXISTS
+FOR ()-[r:WORKS_AT]-()
+REQUIRE (r.employee_id, r.department) IS RELATIONSHIP KEY
+```
+
+- **Temporal no-overlap constraints on relationships (NornicDB extension)**:
+  - extends the existing node temporal no-overlap constraint to relationships.
+  - supports a composite endpoint-pair form where the last two properties are always the time range and any preceding properties form the grouping key.
+
+Example — 3-property form (single grouping key):
+
+```cypher
+CREATE CONSTRAINT employment_temporal IF NOT EXISTS
+FOR ()-[r:WORKS_AT]-()
+REQUIRE (r.employee_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP
+```
+
+Example — 4-property form (composite grouping key):
+
+```cypher
+CREATE CONSTRAINT assignment_temporal IF NOT EXISTS
+FOR ()-[r:ASSIGNED_TO]-()
+REQUIRE (r.employee_id, r.project_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP
+```
+
+- **Domain/enum constraints (NornicDB extension)**:
+  - new constraint type that restricts a property to a fixed set of allowed values.
+  - works on both nodes and relationships.
+  - domain constraints with different allowed-value sets on the same schema are treated as conflicting.
+
+Example — node domain:
+
+```cypher
+CREATE CONSTRAINT person_status_domain IF NOT EXISTS
+FOR (n:Person)
+REQUIRE n.status IN ['active', 'inactive', 'suspended']
+```
+
+Example — relationship domain:
+
+```cypher
+CREATE CONSTRAINT works_at_role_domain IF NOT EXISTS
+FOR ()-[r:WORKS_AT]-()
+REQUIRE r.role IN ['engineer', 'manager', 'director']
+```
+
+- **CMEK/HSM-backed at-rest encryption**:
+  - added customer-managed encryption key (CMEK) and HSM-backed at-rest encryption for the database engine.
+
+- **macOS installer service lifecycle**:
+  - added macOS packager workflow with automatic release upload.
+  - separated macOS packager from Docker CD pipeline.
+
+### Changed
+
+- **`IF NOT EXISTS` semantics for `CREATE CONSTRAINT`**:
+  - exact-duplicate `CREATE CONSTRAINT` now returns an error unless `IF NOT EXISTS` is specified, matching Neo4j behavior. Previously, duplicates were silently idempotent.
+
+- **`SHOW INDEXES` and `SHOW CONSTRAINTS` relationship awareness**:
+  - `SHOW INDEXES` now reports `entityType` (NODE or RELATIONSHIP) and `owningConstraint` for backing indexes created by relationship uniqueness/key constraints.
+  - `SHOW CONSTRAINTS` now reports `entityType` as RELATIONSHIP for relationship-scoped constraints.
+
+- **Branding and documentation**:
+  - abstracted Mimir-specific references to NornicDB-focused language across docs, source comments, test files, and configuration.
+  - updated system-design documentation with WITH EMBEDDING support and correct embedding defaults (8192 chunk size, bge-m3 model).
+  - updated user-facing documentation for all new constraint types with syntax examples.
+
+### Fixed
+
+- **Embedding property namespace pollution**:
+  - removed special-case routing that intercepted the `embedding` property name during SET/GET operations. The `embedding` property is now treated as a regular user property. Users can name their embedding fields anything and create vector indexes for them.
+
+- **ORDER BY on returned node properties**:
+  - stabilized ORDER BY when sorting on properties of returned nodes (e.g., `ORDER BY t.createdAt` when only `t` is returned).
+  - fixed row-sorting to resolve `var.prop` against map-backed node values the same way expression evaluation does.
+
+- **Constraint enforcement namespace filtering**:
+  - fixed empty-namespace prefix filtering that caused unnamespaced edge IDs to be skipped during constraint enforcement scans.
+  - fixed cross-namespace leak in transaction-level temporal constraint enforcement where pending edges from other namespaces could cause false violations.
+
+- **Owned backing index metadata**:
+  - fixed `SHOW INDEXES` to carry `entityType` and `owningConstraint` through relationship-scoped backing indexes instead of hardcoding NODE and nil.
+
+- **macOS installer service lifecycle**:
+  - fixed start/stop/restart controls to behave correctly for the macOS service.
+
+- **Graph API hardening**:
+  - hardened graph MVCC/diff handlers, aligned graph endpoint contracts, and improved validation and error mapping for the graph API.
+
+### Security
+
+- Updated dependencies to resolve vulnerability scan findings.
+- Updated example code to pass security scanning.
+
+### Tests
+
+- Added and expanded regression coverage for:
+  - all relationship constraint families (uniqueness, existence, property type, key) with DDL, creation-time validation, and write-path enforcement tests
+  - relationship temporal no-overlap constraints (3-property and 4-property forms)
+  - domain/enum constraints on nodes and relationships with conflict detection
+  - `IF NOT EXISTS` idempotency semantics for all constraint types
+  - embedding property namespace pollution removal
+  - ORDER BY stability on returned node properties
+  - CMEK/HSM encryption compliance
+  - expanded unit test coverage across uncovered packages
+
+### Technical Details
+
+- **Range covered**: `v1.0.37..HEAD`
+- **Commits in range**: 30 (non-merge)
+- **Repository delta**: 180 files changed, +15,077 / -2,619 lines
+- **Primary focus areas**: Neo4j relationship constraint parity, NornicDB constraint extensions (temporal no-overlap, domain/enum), CMEK encryption, embedding property namespace cleanup, ORDER BY stability, and macOS packaging.
+
 ## [v1.0.37] - 2026-04-01
 
 ### Added
