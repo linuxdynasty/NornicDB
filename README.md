@@ -120,15 +120,13 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 | Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |
 | Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
 
-Bolt is now ahead on both throughput and tail latency for this vector-only path.
-
 **Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
 
 - Vector only: ~110.7 ms P50
 - Vector + 1 hop: ~112.9 ms P50
 - The delta between local and remote matched network RTT closely enough that end-to-end latency was network-bound rather than compute-bound.
 
-This is the practical point: once vector search plus one-hop traversal stays in low single-digit milliseconds locally, the bottleneck shifts from retrieval logic to deployment topology.
+This point is: once vector search plus one-hop traversal stays in low single-digit milliseconds locally, the bottleneck shifts from retrieval logic to deployment topology.
 
 See the [hybrid retrieval benchmark write-up](docs/performance/hybrid-query-benchmarks.md) for methodology, caveats, and reproduction queries, and see [Graph-RAG: NornicDB vs Typical](docs/architecture/graph-rag-nornicdb-comparison.md) for the architectural implications.
 
