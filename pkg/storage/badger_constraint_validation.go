@@ -480,7 +480,16 @@ func (b *BadgerEngine) validateEdgeConstraintsInTxn(txn *badger.Txn, edge *Edge,
 					}
 				}
 			}
+		case ConstraintCardinality:
+			if err := b.checkEdgeCardinalityInTxn(txn, edge, c, namespace, excludeEdgeID); err != nil {
+				return err
+			}
 		}
+	}
+
+	// Policy constraints must be evaluated as a set (all ALLOWED policies form a union).
+	if err := b.checkEdgePolicyInTxn(txn, edge, schema, namespace); err != nil {
+		return err
 	}
 
 	ptConstraints := schema.GetPropertyTypeConstraintsForLabels([]string{edge.Type})
@@ -727,4 +736,319 @@ func (b *BadgerEngine) checkEdgeTemporalInTxn(txn *badger.Txn, edge *Edge, c Con
 	}
 
 	return nil
+}
+
+// checkEdgeCardinalityInTxn counts edges of the given type connected to the anchor
+// node (determined by constraint direction) and rejects the new edge if adding it
+// would exceed MaxCount.
+func (b *BadgerEngine) checkEdgeCardinalityInTxn(txn *badger.Txn, edge *Edge, c Constraint, namespace string, excludeEdgeID EdgeID) error {
+	// Determine anchor node based on direction.
+	var anchorNode NodeID
+	if c.Direction == "OUTGOING" {
+		anchorNode = NodeID(edge.StartNode)
+	} else {
+		anchorNode = NodeID(edge.EndNode)
+	}
+
+	// Choose the index prefix based on direction.
+	var prefix []byte
+	if c.Direction == "OUTGOING" {
+		prefix = outgoingIndexPrefix(anchorNode)
+	} else {
+		prefix = incomingIndexPrefix(anchorNode)
+	}
+
+	count := 0
+	nsPrefix := namespace + ":"
+
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+	iter := txn.NewIterator(opts)
+	defer iter.Close()
+
+	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
+		edgeID := extractEdgeIDFromIndexKey(iter.Item().Key())
+		if edgeID == "" || edgeID == excludeEdgeID {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(edgeID), nsPrefix) {
+			continue
+		}
+
+		// Read the edge to check its type.
+		item, err := txn.Get(edgeKey(edgeID))
+		if err != nil {
+			continue
+		}
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			continue
+		}
+		existingEdge, err := decodeEdge(edgeBytes)
+		if err != nil {
+			continue
+		}
+		if existingEdge.Type == c.Label {
+			count++
+			if count >= c.MaxCount {
+				dir := strings.ToLower(c.Direction)
+				return &ConstraintViolationError{
+					Type:  ConstraintCardinality,
+					Label: c.Label,
+					Message: fmt.Sprintf("Adding this edge would exceed max %s count of %d for relationship type %s on node %s (current: %d)",
+						dir, c.MaxCount, c.Label, anchorNode, count),
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkEdgePolicyInTxn validates DISALLOWED and ALLOWED endpoint policies for an edge.
+// All policies for the edge type are evaluated as a set: DISALLOWED policies are checked
+// individually, while ALLOWED policies form a union (at least one must match).
+func (b *BadgerEngine) checkEdgePolicyInTxn(txn *badger.Txn, edge *Edge, schema *SchemaManager, namespace string) error {
+	constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+
+	var allowedPolicies []Constraint
+	var disallowedPolicies []Constraint
+	for _, c := range constraints {
+		if c.Type != ConstraintPolicy || c.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		if c.PolicyMode == "ALLOWED" {
+			allowedPolicies = append(allowedPolicies, c)
+		} else if c.PolicyMode == "DISALLOWED" {
+			disallowedPolicies = append(disallowedPolicies, c)
+		}
+	}
+
+	if len(allowedPolicies) == 0 && len(disallowedPolicies) == 0 {
+		return nil
+	}
+
+	// Read source node labels.
+	srcLabels, err := b.readNodeLabelsInTxn(txn, NodeID(edge.StartNode))
+	if err != nil {
+		return nil // If node can't be read, skip policy check (other validation catches missing nodes)
+	}
+
+	// Read target node labels.
+	tgtLabels, err := b.readNodeLabelsInTxn(txn, NodeID(edge.EndNode))
+	if err != nil {
+		return nil
+	}
+
+	// Check DISALLOWED policies first (they take precedence).
+	for _, c := range disallowedPolicies {
+		if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+			return &ConstraintViolationError{
+				Type:  ConstraintPolicy,
+				Label: c.Label,
+				Message: fmt.Sprintf("DISALLOWED policy violation: (:%s)-[:%s]->(:%s) is forbidden (constraint %q)",
+					c.SourceLabel, c.Label, c.TargetLabel, c.Name),
+			}
+		}
+	}
+
+	// Check ALLOWED policies: if any exist, at least one must match.
+	if len(allowedPolicies) > 0 {
+		matched := false
+		for _, c := range allowedPolicies {
+			if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return &ConstraintViolationError{
+				Type:  ConstraintPolicy,
+				Label: edge.Type,
+				Message: fmt.Sprintf("ALLOWED policy violation: no ALLOWED policy permits (:%s)-[:%s]->(:%s)",
+					strings.Join(srcLabels, ":"), edge.Type, strings.Join(tgtLabels, ":")),
+			}
+		}
+	}
+
+	return nil
+}
+
+// readNodeLabelsInTxn reads a node's labels from within a Badger transaction.
+func (b *BadgerEngine) readNodeLabelsInTxn(txn *badger.Txn, nodeID NodeID) ([]string, error) {
+	item, err := txn.Get(nodeKey(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	var nodeBytes []byte
+	if err := item.Value(func(val []byte) error {
+		nodeBytes = append([]byte{}, val...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	node, err := decodeNode(nodeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return node.Labels, nil
+}
+
+// validatePolicyOnNodeLabelChangeInTxn checks all policy constraints on edges connected
+// to a node whose labels are changing. This enforces that label mutations (SET n:Label,
+// REMOVE n:Label) don't violate endpoint policies.
+func (b *BadgerEngine) validatePolicyOnNodeLabelChangeInTxn(txn *badger.Txn, node *Node, oldNode *Node, schema *SchemaManager, namespace string) error {
+	if schema == nil || node == nil || oldNode == nil {
+		return nil
+	}
+	// Quick check: did labels actually change?
+	if labelsEqual(node.Labels, oldNode.Labels) {
+		return nil
+	}
+
+	// Check all edges connected to this node.
+	return b.validatePolicyForAdjacentEdgesInTxn(txn, node, schema, namespace)
+}
+
+// validatePolicyForAdjacentEdgesInTxn scans all outgoing and incoming edges for a node
+// and re-validates policy constraints with the node's current labels.
+func (b *BadgerEngine) validatePolicyForAdjacentEdgesInTxn(txn *badger.Txn, node *Node, schema *SchemaManager, namespace string) error {
+	// Scan outgoing edges.
+	if err := b.validatePolicyForEdgesWithPrefixInTxn(txn, outgoingIndexPrefix(node.ID), node, true, schema, namespace); err != nil {
+		return err
+	}
+	// Scan incoming edges.
+	return b.validatePolicyForEdgesWithPrefixInTxn(txn, incomingIndexPrefix(node.ID), node, false, schema, namespace)
+}
+
+// validatePolicyForEdgesWithPrefixInTxn scans edges with the given index prefix and
+// validates policy constraints. isOutgoing indicates whether the node is the source (true)
+// or target (false) of the edges.
+func (b *BadgerEngine) validatePolicyForEdgesWithPrefixInTxn(txn *badger.Txn, prefix []byte, node *Node, isOutgoing bool, schema *SchemaManager, namespace string) error {
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+	iter := txn.NewIterator(opts)
+	defer iter.Close()
+
+	nsPrefix := namespace + ":"
+	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
+		edgeID := extractEdgeIDFromIndexKey(iter.Item().Key())
+		if edgeID == "" {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(edgeID), nsPrefix) {
+			continue
+		}
+
+		// Read edge.
+		item, err := txn.Get(edgeKey(edgeID))
+		if err != nil {
+			continue
+		}
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			continue
+		}
+		edge, err := decodeEdge(edgeBytes)
+		if err != nil {
+			continue
+		}
+
+		// Get the other node's labels.
+		var otherNodeID NodeID
+		if isOutgoing {
+			otherNodeID = NodeID(edge.EndNode)
+		} else {
+			otherNodeID = NodeID(edge.StartNode)
+		}
+		otherLabels, err := b.readNodeLabelsInTxn(txn, otherNodeID)
+		if err != nil {
+			continue
+		}
+
+		// Determine source/target labels based on edge direction.
+		var srcLabels, tgtLabels []string
+		if isOutgoing {
+			srcLabels = node.Labels
+			tgtLabels = otherLabels
+		} else {
+			srcLabels = otherLabels
+			tgtLabels = node.Labels
+		}
+
+		// Check policy constraints for this edge type.
+		constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+		var allowedPolicies []Constraint
+		var disallowedPolicies []Constraint
+		for _, c := range constraints {
+			if c.Type != ConstraintPolicy || c.EffectiveEntityType() != ConstraintEntityRelationship {
+				continue
+			}
+			if c.PolicyMode == "ALLOWED" {
+				allowedPolicies = append(allowedPolicies, c)
+			} else if c.PolicyMode == "DISALLOWED" {
+				disallowedPolicies = append(disallowedPolicies, c)
+			}
+		}
+
+		if len(allowedPolicies) == 0 && len(disallowedPolicies) == 0 {
+			continue
+		}
+
+		// DISALLOWED check.
+		for _, c := range disallowedPolicies {
+			if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+				return &ConstraintViolationError{
+					Type:  ConstraintPolicy,
+					Label: c.Label,
+					Message: fmt.Sprintf("Label change would violate DISALLOWED policy: (:%s)-[:%s]->(:%s) (constraint %q)",
+						c.SourceLabel, c.Label, c.TargetLabel, c.Name),
+				}
+			}
+		}
+
+		// ALLOWED check.
+		if len(allowedPolicies) > 0 {
+			matched := false
+			for _, c := range allowedPolicies {
+				if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return &ConstraintViolationError{
+					Type:  ConstraintPolicy,
+					Label: edge.Type,
+					Message: fmt.Sprintf("Label change would violate ALLOWED policy: no ALLOWED policy permits (:%s)-[:%s]->(:%s)",
+						strings.Join(srcLabels, ":"), edge.Type, strings.Join(tgtLabels, ":")),
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// labelsEqual checks whether two label slices have the same content (order-independent).
+func labelsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, l := range a {
+		set[l] = struct{}{}
+	}
+	for _, l := range b {
+		if _, ok := set[l]; !ok {
+			return false
+		}
+	}
+	return true
 }

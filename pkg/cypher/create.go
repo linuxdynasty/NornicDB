@@ -1787,8 +1787,15 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 						}
 						if node, exists := combinedNodeVars[varName]; exists {
 							if !containsString(node.Labels, newLabel) {
+								oldLabels := make([]string, len(node.Labels))
+								copy(oldLabels, node.Labels)
 								node.Labels = append(node.Labels, newLabel)
+								if err := validatePolicyOnLabelChange(store, node, oldLabels); err != nil {
+									node.Labels = oldLabels // restore
+									return nil, err
+								}
 								if err := store.UpdateNode(node); err != nil {
+									node.Labels = oldLabels // restore
 									return nil, fmt.Errorf("failed to add label: %w", err)
 								}
 								result.Stats.LabelsAdded++
@@ -2376,8 +2383,15 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 				if node, exists := createdNodes[varName]; exists {
 					// Add label to existing node
 					if !containsString(node.Labels, newLabel) {
+						oldLabels := make([]string, len(node.Labels))
+						copy(oldLabels, node.Labels)
 						node.Labels = append(node.Labels, newLabel)
+						if err := validatePolicyOnLabelChange(store, node, oldLabels); err != nil {
+							node.Labels = oldLabels // restore
+							return nil, err
+						}
 						if err := store.UpdateNode(node); err != nil {
+							node.Labels = oldLabels // restore
 							return nil, fmt.Errorf("failed to add label: %w", err)
 						}
 						result.Stats.LabelsAdded++

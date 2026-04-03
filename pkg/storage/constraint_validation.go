@@ -62,6 +62,10 @@ func validateRelationshipConstraintOnCreationForEngine(engine Engine, c Constrai
 		return validateRelTemporalOnCreationForEngine(edges, c)
 	case ConstraintDomain:
 		return validateRelDomainOnCreationForEngine(edges, c)
+	case ConstraintCardinality:
+		return validateCardinalityOnCreationForEngine(edges, c)
+	case ConstraintPolicy:
+		return validatePolicyOnCreationForEngine(engine, edges, c)
 	default:
 		return fmt.Errorf("unsupported relationship constraint type: %s", c.Type)
 	}
@@ -314,6 +318,99 @@ func validateRelDomainOnCreationForEngine(edges []*Edge, c Constraint) error {
 		}
 	}
 
+	return nil
+}
+
+// validateCardinalityOnCreationForEngine checks that no node exceeds the max edge count.
+func validateCardinalityOnCreationForEngine(edges []*Edge, c Constraint) error {
+	counts := make(map[NodeID]int)
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		var anchor NodeID
+		if c.Direction == "OUTGOING" {
+			anchor = NodeID(edge.StartNode)
+		} else {
+			anchor = NodeID(edge.EndNode)
+		}
+		counts[anchor]++
+	}
+	for nodeID, count := range counts {
+		if count > c.MaxCount {
+			return &ConstraintViolationError{
+				Type:  ConstraintCardinality,
+				Label: c.Label,
+				Message: fmt.Sprintf("Cannot create CARDINALITY constraint: node %s has %d %s %s edges, exceeding max count %d",
+					nodeID, count, strings.ToLower(c.Direction), c.Label, c.MaxCount),
+			}
+		}
+	}
+	return nil
+}
+
+// validatePolicyOnCreationForEngine checks that all existing edges satisfy the policy.
+func validatePolicyOnCreationForEngine(engine Engine, edges []*Edge, c Constraint) error {
+	// For ALLOWED policies, gather the full set of ALLOWED policies for this relationship type
+	// (existing ones from the schema plus the new one being created) and verify every edge
+	// of this type is covered by at least one ALLOWED pair.
+	var allowedSet []Constraint
+	if c.PolicyMode == "ALLOWED" {
+		schema := engine.GetSchema()
+		if schema != nil {
+			for _, existing := range schema.GetAllConstraints() {
+				if existing.Type == ConstraintPolicy && existing.Label == c.Label && existing.PolicyMode == "ALLOWED" {
+					allowedSet = append(allowedSet, existing)
+				}
+			}
+		}
+		// Add the new constraint being created (not yet in schema).
+		allowedSet = append(allowedSet, c)
+	}
+
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		srcNode, err := engine.GetNode(NodeID(edge.StartNode))
+		if err != nil || srcNode == nil {
+			continue
+		}
+		tgtNode, err := engine.GetNode(NodeID(edge.EndNode))
+		if err != nil || tgtNode == nil {
+			continue
+		}
+
+		if c.PolicyMode == "DISALLOWED" {
+			srcHas := hasLabel(srcNode.Labels, c.SourceLabel)
+			tgtHas := hasLabel(tgtNode.Labels, c.TargetLabel)
+			if srcHas && tgtHas {
+				return &ConstraintViolationError{
+					Type:  ConstraintPolicy,
+					Label: c.Label,
+					Message: fmt.Sprintf("Cannot create DISALLOWED policy: edge %s connects %s (:%s) to %s (:%s) via :%s",
+						edge.ID, edge.StartNode, c.SourceLabel, edge.EndNode, c.TargetLabel, c.Label),
+				}
+			}
+		} else if c.PolicyMode == "ALLOWED" {
+			// Check that this edge is covered by at least one ALLOWED pair in the full set.
+			matched := false
+			for _, ap := range allowedSet {
+				if hasLabel(srcNode.Labels, ap.SourceLabel) && hasLabel(tgtNode.Labels, ap.TargetLabel) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return &ConstraintViolationError{
+					Type:  ConstraintPolicy,
+					Label: c.Label,
+					Message: fmt.Sprintf("Cannot create ALLOWED policy: existing edge %s connects %s to %s via :%s, which is not covered by any ALLOWED pair",
+						edge.ID, edge.StartNode, edge.EndNode, c.Label),
+				}
+			}
+		}
+	}
 	return nil
 }
 

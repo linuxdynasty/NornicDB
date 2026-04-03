@@ -992,13 +992,22 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 								}
 							}
 							if !hasLabel {
+								oldLabels := make([]string, len(node.Labels))
+								copy(oldLabels, node.Labels)
 								node.Labels = append(node.Labels, labelName)
+								// Validate policy constraints before committing the label change.
+								if err := validatePolicyOnLabelChange(store, node, oldLabels); err != nil {
+									node.Labels = oldLabels // restore
+									return nil, err
+								}
 								// Labels are part of the embedding text; invalidate managed embeddings so they regenerate.
 								embeddingutil.InvalidateManagedEmbeddings(node)
-								if err := store.UpdateNode(node); err == nil {
-									result.Stats.LabelsAdded++
-									e.notifyNodeMutated(string(node.ID))
+								if err := store.UpdateNode(node); err != nil {
+									node.Labels = oldLabels // restore
+									return nil, err
 								}
+								result.Stats.LabelsAdded++
+								e.notifyNodeMutated(string(node.ID))
 							}
 						}
 					}
@@ -2022,12 +2031,21 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 				embeddingutil.InvalidateManagedEmbeddings(node)
 			}
 			if len(labelsToRemove) > 0 {
+				oldLabels := make([]string, len(node.Labels))
+				copy(oldLabels, node.Labels)
 				next, removed := removeNodeLabels(node.Labels, labelsToRemove)
 				if removed > 0 {
 					node.Labels = next
+					// Validate policy constraints before committing the label change.
+					if err := validatePolicyOnLabelChange(store, node, oldLabels); err != nil {
+						node.Labels = oldLabels // restore
+						return nil, err
+					}
 				}
 			}
-			_ = store.UpdateNode(node)
+			if err := store.UpdateNode(node); err != nil {
+				return nil, err
+			}
 			e.notifyNodeMutated(string(node.ID))
 		}
 	}
@@ -2147,8 +2165,16 @@ func (e *StorageExecutor) applyRemoveToMatchedRows(
 				}
 			}
 			if len(labelsToRemove) > 0 {
-				next, _ := removeNodeLabels(node.Labels, labelsToRemove)
-				node.Labels = next
+				oldLabels := make([]string, len(node.Labels))
+				copy(oldLabels, node.Labels)
+				next, removed := removeNodeLabels(node.Labels, labelsToRemove)
+				if removed > 0 {
+					node.Labels = next
+					if err := validatePolicyOnLabelChange(store, node, oldLabels); err != nil {
+						node.Labels = oldLabels // restore
+						return err
+					}
+				}
 			}
 			if invalidated {
 				embeddingutil.InvalidateManagedEmbeddings(node)
@@ -3353,4 +3379,98 @@ func (e *StorageExecutor) countSubqueryMatches(node *storage.Node, variable, sub
 	}
 
 	return count
+}
+
+// validatePolicyOnLabelChange checks RELATIONSHIP_POLICY constraints when a node's labels
+// change. It validates all adjacent edges (outgoing and incoming) against the current
+// policy constraints to ensure no DISALLOWED pair is formed and any ALLOWED whitelist
+// is still satisfied.
+func validatePolicyOnLabelChange(store storage.Engine, node *storage.Node, oldLabels []string) error {
+	schema := store.GetSchema()
+	if schema == nil {
+		return nil
+	}
+
+	// Collect all policy constraints.
+	constraints := schema.GetAllConstraints()
+	var policies []storage.Constraint
+	for _, c := range constraints {
+		if c.Type == storage.ConstraintPolicy {
+			policies = append(policies, c)
+		}
+	}
+	if len(policies) == 0 {
+		return nil
+	}
+
+	// Check outgoing edges (node is the source).
+	outgoing, _ := store.GetOutgoingEdges(node.ID)
+	for _, edge := range outgoing {
+		targetNode, err := store.GetNode(storage.NodeID(edge.EndNode))
+		if err != nil || targetNode == nil {
+			continue
+		}
+		if err := checkPolicyForEdge(edge.Type, node.Labels, targetNode.Labels, policies); err != nil {
+			return err
+		}
+	}
+
+	// Check incoming edges (node is the target).
+	incoming, _ := store.GetIncomingEdges(node.ID)
+	for _, edge := range incoming {
+		sourceNode, err := store.GetNode(storage.NodeID(edge.StartNode))
+		if err != nil || sourceNode == nil {
+			continue
+		}
+		if err := checkPolicyForEdge(edge.Type, sourceNode.Labels, node.Labels, policies); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkPolicyForEdge validates a single edge against all policy constraints for its type.
+// DISALLOWED policies are checked first (they take precedence).
+func checkPolicyForEdge(edgeType string, sourceLabels, targetLabels []string, policies []storage.Constraint) error {
+	// Gather policies for this edge type.
+	var relevantAllowed []storage.Constraint
+	for _, p := range policies {
+		if p.Label != edgeType {
+			continue
+		}
+		if p.PolicyMode == "DISALLOWED" {
+			if sliceContains(sourceLabels, p.SourceLabel) && sliceContains(targetLabels, p.TargetLabel) {
+				return fmt.Errorf("policy constraint %q violated: (%s)-[:%s]->(%s) is DISALLOWED",
+					p.Name, p.SourceLabel, edgeType, p.TargetLabel)
+			}
+		} else if p.PolicyMode == "ALLOWED" {
+			relevantAllowed = append(relevantAllowed, p)
+		}
+	}
+
+	// If ALLOWED policies exist for this edge type, at least one must match.
+	if len(relevantAllowed) > 0 {
+		matched := false
+		for _, p := range relevantAllowed {
+			if sliceContains(sourceLabels, p.SourceLabel) && sliceContains(targetLabels, p.TargetLabel) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("policy constraint violated: no ALLOWED policy permits edge of type %s with these endpoint labels", edgeType)
+		}
+	}
+
+	return nil
+}
+
+func sliceContains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

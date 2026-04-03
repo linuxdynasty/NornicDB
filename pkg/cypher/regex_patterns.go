@@ -93,6 +93,23 @@ var (
 	constraintRelNamedForRequireDomain   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
 	constraintRelUnnamedForRequireDomain = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
 
+	// Cardinality constraints (NornicDB extension) — outgoing direction
+	// CREATE CONSTRAINT name [IF NOT EXISTS] FOR ()-[r:TYPE]->() REQUIRE MAX COUNT N
+	constraintCardinalityOutNamedForRequire   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*\)\s+REQUIRE\s+MAX\s+COUNT\s+(\d+)` + ddlOptionsTail + `\s*$`)
+	constraintCardinalityOutUnnamedForRequire = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*\)\s+REQUIRE\s+MAX\s+COUNT\s+(\d+)` + ddlOptionsTail + `\s*$`)
+
+	// Cardinality constraints (NornicDB extension) — incoming direction
+	// CREATE CONSTRAINT name [IF NOT EXISTS] FOR ()<-[r:TYPE]-() REQUIRE MAX COUNT N
+	constraintCardinalityInNamedForRequire   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+MAX\s+COUNT\s+(\d+)` + ddlOptionsTail + `\s*$`)
+	constraintCardinalityInUnnamedForRequire = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*<-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+MAX\s+COUNT\s+(\d+)` + ddlOptionsTail + `\s*$`)
+
+	// Relationship endpoint policy constraints (NornicDB extension)
+	// CREATE CONSTRAINT name [IF NOT EXISTS] FOR (:SrcLabel)-[r:TYPE]->(:TgtLabel) REQUIRE ALLOWED
+	constraintPolicyAllowedNamedForRequire      = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+ALLOWED` + ddlOptionsTail + `\s*$`)
+	constraintPolicyAllowedUnnamedForRequire    = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+ALLOWED` + ddlOptionsTail + `\s*$`)
+	constraintPolicyDisallowedNamedForRequire   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+DISALLOWED` + ddlOptionsTail + `\s*$`)
+	constraintPolicyDisallowedUnnamedForRequire = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*->\s*\(\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+DISALLOWED` + ddlOptionsTail + `\s*$`)
+
 	// DROP CONSTRAINT
 	dropConstraintPattern = regexp.MustCompile(`(?is)^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(` + ddlIdentifierToken + `)(?:\s+IF\s+EXISTS)?\s*$`)
 

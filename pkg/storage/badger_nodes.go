@@ -250,6 +250,11 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			return err
 		}
 
+		// Validate policy constraints on label changes.
+		if err := b.validatePolicyOnNodeLabelChangeInTxn(txn, node, existingNode, schema, dbName); err != nil {
+			return err
+		}
+
 		// Remove old label indexes
 		for _, label := range existingNode.Labels {
 			if err := txn.Delete(labelIndexKey(label, node.ID)); err != nil {

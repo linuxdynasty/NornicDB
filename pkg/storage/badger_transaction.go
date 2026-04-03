@@ -368,6 +368,13 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 		}
 	}
 
+	// Validate policy constraints on label changes.
+	if !tx.deferConstraintValidation && !labelsEqual(node.Labels, oldNode.Labels) {
+		if err := tx.validatePolicyOnNodeLabelChange(node, oldNode); err != nil {
+			return err
+		}
+	}
+
 	// Buffer updated node write
 	nodeBytes, err := serializeNode(node)
 	if err != nil {
@@ -1733,7 +1740,16 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 					}
 				}
 			}
+		case ConstraintCardinality:
+			if err := tx.checkEdgeCardinality(edge, c, dbName); err != nil {
+				return err
+			}
 		}
+	}
+
+	// Policy constraints must be evaluated as a set (all ALLOWED policies form a union).
+	if err := tx.checkEdgePolicy(edge, schema, dbName); err != nil {
+		return err
 	}
 
 	ptConstraints := schema.GetPropertyTypeConstraintsForLabels([]string{edge.Type})
@@ -1969,6 +1985,279 @@ func (tx *BadgerTransaction) checkEdgeTemporalConstraint(edge *Edge, c Constrain
 	}
 
 	return nil
+}
+
+// checkEdgeCardinality enforces cardinality constraints within a transaction.
+// It counts pending + committed edges of the given type connected to the anchor node,
+// excluding deleted edges, and rejects the new edge if adding it would exceed MaxCount.
+func (tx *BadgerTransaction) checkEdgeCardinality(edge *Edge, c Constraint, namespace string) error {
+	// Determine anchor node based on direction.
+	var anchorNode NodeID
+	if c.Direction == "OUTGOING" {
+		anchorNode = NodeID(edge.StartNode)
+	} else {
+		anchorNode = NodeID(edge.EndNode)
+	}
+
+	nsPrefix := namespace + ":"
+	count := 0
+
+	// Count pending edges in this transaction that match type + anchor + direction.
+	for id, pendingEdge := range tx.pendingEdges {
+		if id == edge.ID || pendingEdge.Type != c.Label {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(id), nsPrefix) {
+			continue
+		}
+		var pendingAnchor NodeID
+		if c.Direction == "OUTGOING" {
+			pendingAnchor = NodeID(pendingEdge.StartNode)
+		} else {
+			pendingAnchor = NodeID(pendingEdge.EndNode)
+		}
+		if pendingAnchor == anchorNode {
+			count++
+		}
+	}
+
+	// Count committed edges from the engine.
+	var committedEdges []*Edge
+	var err error
+	if c.Direction == "OUTGOING" {
+		committedEdges, err = tx.engine.GetOutgoingEdges(anchorNode)
+	} else {
+		committedEdges, err = tx.engine.GetIncomingEdges(anchorNode)
+	}
+	if err == nil {
+		for _, existingEdge := range committedEdges {
+			if existingEdge.ID == edge.ID || existingEdge.Type != c.Label {
+				continue
+			}
+			if namespace != "" && !strings.HasPrefix(string(existingEdge.ID), nsPrefix) {
+				continue
+			}
+			// Skip edges that are deleted in this transaction.
+			if _, deleted := tx.deletedEdges[existingEdge.ID]; deleted {
+				continue
+			}
+			// Skip edges already counted as pending (they may have been updated).
+			if _, isPending := tx.pendingEdges[existingEdge.ID]; isPending {
+				continue
+			}
+			count++
+		}
+	}
+
+	if count >= c.MaxCount {
+		dir := strings.ToLower(c.Direction)
+		return &ConstraintViolationError{
+			Type:  ConstraintCardinality,
+			Label: c.Label,
+			Message: fmt.Sprintf("Adding this edge would exceed max %s count of %d for relationship type %s on node %s (current: %d)",
+				dir, c.MaxCount, c.Label, anchorNode, count),
+		}
+	}
+
+	return nil
+}
+
+// checkEdgePolicy validates DISALLOWED and ALLOWED endpoint policies within a transaction.
+// Reads node labels from pending nodes first (read-your-writes), then falls back to committed storage.
+func (tx *BadgerTransaction) checkEdgePolicy(edge *Edge, schema *SchemaManager, namespace string) error {
+	constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+
+	var allowedPolicies []Constraint
+	var disallowedPolicies []Constraint
+	for _, c := range constraints {
+		if c.Type != ConstraintPolicy || c.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		if c.PolicyMode == "ALLOWED" {
+			allowedPolicies = append(allowedPolicies, c)
+		} else if c.PolicyMode == "DISALLOWED" {
+			disallowedPolicies = append(disallowedPolicies, c)
+		}
+	}
+
+	if len(allowedPolicies) == 0 && len(disallowedPolicies) == 0 {
+		return nil
+	}
+
+	// Read source node labels (check pending first for read-your-writes).
+	srcLabels := tx.getNodeLabels(NodeID(edge.StartNode))
+	if srcLabels == nil {
+		return nil // Node not found; other validation catches this
+	}
+
+	// Read target node labels.
+	tgtLabels := tx.getNodeLabels(NodeID(edge.EndNode))
+	if tgtLabels == nil {
+		return nil
+	}
+
+	// Check DISALLOWED policies first (they take precedence).
+	for _, c := range disallowedPolicies {
+		if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+			return &ConstraintViolationError{
+				Type:  ConstraintPolicy,
+				Label: c.Label,
+				Message: fmt.Sprintf("DISALLOWED policy violation: (:%s)-[:%s]->(:%s) is forbidden (constraint %q)",
+					c.SourceLabel, c.Label, c.TargetLabel, c.Name),
+			}
+		}
+	}
+
+	// Check ALLOWED policies: if any exist, at least one must match.
+	if len(allowedPolicies) > 0 {
+		matched := false
+		for _, c := range allowedPolicies {
+			if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return &ConstraintViolationError{
+				Type:  ConstraintPolicy,
+				Label: edge.Type,
+				Message: fmt.Sprintf("ALLOWED policy violation: no ALLOWED policy permits (:%s)-[:%s]->(:%s)",
+					strings.Join(srcLabels, ":"), edge.Type, strings.Join(tgtLabels, ":")),
+			}
+		}
+	}
+
+	return nil
+}
+
+// validatePolicyOnNodeLabelChange checks all policy constraints on edges connected to
+// a node whose labels are changing within a transaction.
+func (tx *BadgerTransaction) validatePolicyOnNodeLabelChange(node *Node, oldNode *Node) error {
+	dbName, _, _ := ParseDatabasePrefix(string(node.ID))
+	schema := tx.engine.GetSchemaForNamespace(dbName)
+	if schema == nil {
+		return nil
+	}
+
+	nsPrefix := dbName + ":"
+
+	// Scan both outgoing and incoming edges.
+	for _, isOutgoing := range []bool{true, false} {
+		var edges []*Edge
+		var err error
+		if isOutgoing {
+			edges, err = tx.engine.GetOutgoingEdges(node.ID)
+		} else {
+			edges, err = tx.engine.GetIncomingEdges(node.ID)
+		}
+		if err != nil {
+			continue
+		}
+
+		// Include pending edges in this transaction.
+		for _, pendingEdge := range tx.pendingEdges {
+			if isOutgoing && NodeID(pendingEdge.StartNode) == node.ID {
+				edges = append(edges, pendingEdge)
+			} else if !isOutgoing && NodeID(pendingEdge.EndNode) == node.ID {
+				edges = append(edges, pendingEdge)
+			}
+		}
+
+		for _, edge := range edges {
+			if _, deleted := tx.deletedEdges[edge.ID]; deleted {
+				continue
+			}
+			if dbName != "" && !strings.HasPrefix(string(edge.ID), nsPrefix) {
+				continue
+			}
+
+			// Get the other node's labels.
+			var otherNodeID NodeID
+			if isOutgoing {
+				otherNodeID = NodeID(edge.EndNode)
+			} else {
+				otherNodeID = NodeID(edge.StartNode)
+			}
+			otherLabels := tx.getNodeLabels(otherNodeID)
+			if otherLabels == nil {
+				continue
+			}
+
+			var srcLabels, tgtLabels []string
+			if isOutgoing {
+				srcLabels = node.Labels
+				tgtLabels = otherLabels
+			} else {
+				srcLabels = otherLabels
+				tgtLabels = node.Labels
+			}
+
+			// Check policy constraints.
+			constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+			var allowedPolicies []Constraint
+			var disallowedPolicies []Constraint
+			for _, c := range constraints {
+				if c.Type != ConstraintPolicy || c.EffectiveEntityType() != ConstraintEntityRelationship {
+					continue
+				}
+				if c.PolicyMode == "ALLOWED" {
+					allowedPolicies = append(allowedPolicies, c)
+				} else if c.PolicyMode == "DISALLOWED" {
+					disallowedPolicies = append(disallowedPolicies, c)
+				}
+			}
+
+			if len(allowedPolicies) == 0 && len(disallowedPolicies) == 0 {
+				continue
+			}
+
+			for _, c := range disallowedPolicies {
+				if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+					return &ConstraintViolationError{
+						Type:  ConstraintPolicy,
+						Label: c.Label,
+						Message: fmt.Sprintf("Label change would violate DISALLOWED policy: (:%s)-[:%s]->(:%s) (constraint %q)",
+							c.SourceLabel, c.Label, c.TargetLabel, c.Name),
+					}
+				}
+			}
+
+			if len(allowedPolicies) > 0 {
+				matched := false
+				for _, c := range allowedPolicies {
+					if hasLabel(srcLabels, c.SourceLabel) && hasLabel(tgtLabels, c.TargetLabel) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return &ConstraintViolationError{
+						Type:  ConstraintPolicy,
+						Label: edge.Type,
+						Message: fmt.Sprintf("Label change would violate ALLOWED policy: no ALLOWED policy permits (:%s)-[:%s]->(:%s)",
+							strings.Join(srcLabels, ":"), edge.Type, strings.Join(tgtLabels, ":")),
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// getNodeLabels returns labels for a node, checking pending nodes first for read-your-writes.
+func (tx *BadgerTransaction) getNodeLabels(nodeID NodeID) []string {
+	if _, deleted := tx.deletedNodes[nodeID]; deleted {
+		return nil
+	}
+	if pending, exists := tx.pendingNodes[nodeID]; exists {
+		return pending.Labels
+	}
+	node, err := tx.getCommittedNodeLocked(nodeID)
+	if err != nil {
+		return nil
+	}
+	return node.Labels
 }
 
 // Helper: check if node has label

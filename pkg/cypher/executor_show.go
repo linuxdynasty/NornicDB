@@ -113,6 +113,19 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 			if constraint.OwnedIndex != "" {
 				ownedIndex = constraint.OwnedIndex
 			}
+			// Direction and maxCount for cardinality constraints.
+			var direction, maxCount interface{}
+			if constraint.Type == storage.ConstraintCardinality {
+				direction = constraint.Direction
+				maxCount = int64(constraint.MaxCount)
+			}
+			// Source/target labels and policy mode for policy constraints.
+			var sourceLabel, targetLabel, policyMode interface{}
+			if constraint.Type == storage.ConstraintPolicy {
+				sourceLabel = constraint.SourceLabel
+				targetLabel = constraint.TargetLabel
+				policyMode = constraint.PolicyMode
+			}
 			rows = append(rows, []interface{}{
 				int64(i + 1),
 				constraint.Name,
@@ -122,6 +135,11 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 				constraint.Properties,
 				ownedIndex,
 				nil,
+				direction,
+				maxCount,
+				sourceLabel,
+				targetLabel,
+				policyMode,
 			})
 		}
 
@@ -136,12 +154,13 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 				[]string{constraint.Property},
 				nil,
 				string(constraint.ExpectedType),
+				nil, nil, nil, nil, nil,
 			})
 		}
 	}
 
 	return &ExecuteResult{
-		Columns: []string{"id", "name", "type", "entityType", "labelsOrTypes", "properties", "ownedIndex", "propertyType"},
+		Columns: []string{"id", "name", "type", "entityType", "labelsOrTypes", "properties", "ownedIndex", "propertyType", "direction", "maxCount", "sourceLabel", "targetLabel", "policyMode"},
 		Rows:    rows,
 	}, nil
 }

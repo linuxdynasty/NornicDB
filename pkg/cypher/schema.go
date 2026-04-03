@@ -524,6 +524,192 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	// Relationship constraint patterns
 	// =========================================================================
 
+	// Cardinality constraints — outgoing (NornicDB extension)
+	if matches := constraintCardinalityOutNamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		maxCount, err := strconv.Atoi(matches[4])
+		if err != nil || maxCount < 1 {
+			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[4])
+		}
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintCardinality,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			MaxCount:   maxCount,
+			Direction:  "OUTGOING",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	if matches := constraintCardinalityOutUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		maxCount, err := strconv.Atoi(matches[3])
+		if err != nil || maxCount < 1 {
+			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[3])
+		}
+		constraintName := fmt.Sprintf("constraint_%s_max_outgoing_%d", strings.ToLower(relType), maxCount)
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintCardinality,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			MaxCount:   maxCount,
+			Direction:  "OUTGOING",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Cardinality constraints — incoming (NornicDB extension)
+	if matches := constraintCardinalityInNamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		maxCount, err := strconv.Atoi(matches[4])
+		if err != nil || maxCount < 1 {
+			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[4])
+		}
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintCardinality,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			MaxCount:   maxCount,
+			Direction:  "INCOMING",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	if matches := constraintCardinalityInUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		maxCount, err := strconv.Atoi(matches[3])
+		if err != nil || maxCount < 1 {
+			return nil, fmt.Errorf("MAX COUNT must be a positive integer, got %q", matches[3])
+		}
+		constraintName := fmt.Sprintf("constraint_%s_max_incoming_%d", strings.ToLower(relType), maxCount)
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintCardinality,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			MaxCount:   maxCount,
+			Direction:  "INCOMING",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship endpoint policy constraints (NornicDB extension)
+	if matches := constraintPolicyAllowedNamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		sourceLabel := normalizeIdentifierToken(matches[2])
+		relType := normalizeIdentifierToken(matches[4])
+		targetLabel := normalizeIdentifierToken(matches[5])
+		constraint := storage.Constraint{
+			Name:        constraintName,
+			Type:        storage.ConstraintPolicy,
+			EntityType:  storage.ConstraintEntityRelationship,
+			Label:       relType,
+			SourceLabel: sourceLabel,
+			TargetLabel: targetLabel,
+			PolicyMode:  "ALLOWED",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	if matches := constraintPolicyAllowedUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		sourceLabel := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		targetLabel := normalizeIdentifierToken(matches[4])
+		constraintName := fmt.Sprintf("constraint_%s_%s_%s_allowed", strings.ToLower(sourceLabel), strings.ToLower(relType), strings.ToLower(targetLabel))
+		constraint := storage.Constraint{
+			Name:        constraintName,
+			Type:        storage.ConstraintPolicy,
+			EntityType:  storage.ConstraintEntityRelationship,
+			Label:       relType,
+			SourceLabel: sourceLabel,
+			TargetLabel: targetLabel,
+			PolicyMode:  "ALLOWED",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	if matches := constraintPolicyDisallowedNamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		sourceLabel := normalizeIdentifierToken(matches[2])
+		relType := normalizeIdentifierToken(matches[4])
+		targetLabel := normalizeIdentifierToken(matches[5])
+		constraint := storage.Constraint{
+			Name:        constraintName,
+			Type:        storage.ConstraintPolicy,
+			EntityType:  storage.ConstraintEntityRelationship,
+			Label:       relType,
+			SourceLabel: sourceLabel,
+			TargetLabel: targetLabel,
+			PolicyMode:  "DISALLOWED",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+	if matches := constraintPolicyDisallowedUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		sourceLabel := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		targetLabel := normalizeIdentifierToken(matches[4])
+		constraintName := fmt.Sprintf("constraint_%s_%s_%s_disallowed", strings.ToLower(sourceLabel), strings.ToLower(relType), strings.ToLower(targetLabel))
+		constraint := storage.Constraint{
+			Name:        constraintName,
+			Type:        storage.ConstraintPolicy,
+			EntityType:  storage.ConstraintEntityRelationship,
+			Label:       relType,
+			SourceLabel: sourceLabel,
+			TargetLabel: targetLabel,
+			PolicyMode:  "DISALLOWED",
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	// Relationship domain/enum constraints (NornicDB extension)
 	if matches := constraintRelNamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
 		constraintName := normalizeIdentifierToken(matches[1])

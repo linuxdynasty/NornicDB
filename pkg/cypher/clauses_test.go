@@ -3062,8 +3062,8 @@ func TestShowConstraints_WithSchemaConstraintsAndPropertyTypes(t *testing.T) {
 		foundPropertyTypeRow bool
 	)
 	for _, row := range result.Rows {
-		if len(row) != 8 {
-			t.Fatalf("unexpected SHOW CONSTRAINTS row shape: %v", row)
+		if len(row) != 13 {
+			t.Fatalf("unexpected SHOW CONSTRAINTS row shape (expected 13 columns, got %d): %v", len(row), row)
 		}
 		name, _ := row[1].(string)
 		typ, _ := row[2].(string)

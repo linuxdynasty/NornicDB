@@ -81,6 +81,11 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 				Properties:    props,
 				OwnedIndex:    c.OwnedIndex,
 				AllowedValues: allowedVals,
+				MaxCount:      c.MaxCount,
+				Direction:     c.Direction,
+				SourceLabel:   c.SourceLabel,
+				TargetLabel:   c.TargetLabel,
+				PolicyMode:    c.PolicyMode,
 			})
 		}
 		sort.Slice(def.Constraints, func(i, j int) bool {
@@ -247,6 +252,11 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 			Properties:    props,
 			OwnedIndex:    c.OwnedIndex,
 			AllowedValues: allowedVals,
+			MaxCount:      c.MaxCount,
+			Direction:     c.Direction,
+			SourceLabel:   c.SourceLabel,
+			TargetLabel:   c.TargetLabel,
+			PolicyMode:    c.PolicyMode,
 		}
 		sm.constraints[cc.Name] = cc
 

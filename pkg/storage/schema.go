@@ -32,6 +32,8 @@ const (
 	ConstraintTemporal        ConstraintType = "TEMPORAL_NO_OVERLAP"
 	ConstraintRelationshipKey ConstraintType = "RELATIONSHIP_KEY"
 	ConstraintDomain          ConstraintType = "DOMAIN"
+	ConstraintCardinality     ConstraintType = "CARDINALITY"
+	ConstraintPolicy          ConstraintType = "RELATIONSHIP_POLICY"
 )
 
 // ConstraintEntityType distinguishes node constraints from relationship constraints.
@@ -51,6 +53,11 @@ type Constraint struct {
 	Properties    []string             `json:"properties,omitempty"`
 	OwnedIndex    string               `json:"owned_index,omitempty"`    // name of the owned backing index (for uniqueness/key)
 	AllowedValues []interface{}        `json:"allowed_values,omitempty"` // for DOMAIN constraints: list of allowed values
+	MaxCount      int                  `json:"max_count,omitempty"`      // for CARDINALITY constraints: maximum edge count per node
+	Direction     string               `json:"direction,omitempty"`      // for CARDINALITY constraints: "OUTGOING" or "INCOMING"
+	SourceLabel   string               `json:"source_label,omitempty"`   // for RELATIONSHIP_POLICY constraints: required source node label
+	TargetLabel   string               `json:"target_label,omitempty"`   // for RELATIONSHIP_POLICY constraints: required target node label
+	PolicyMode    string               `json:"policy_mode,omitempty"`    // for RELATIONSHIP_POLICY constraints: "ALLOWED" or "DISALLOWED"
 }
 
 // EffectiveEntityType returns the entity type, defaulting to NODE for backward compatibility.
@@ -1095,7 +1102,15 @@ func constraintSchemaKey(c Constraint) string {
 	props := make([]string, len(c.Properties))
 	copy(props, c.Properties)
 	sort.Strings(props)
-	return fmt.Sprintf("%s:%s:%s", c.EffectiveEntityType(), c.Label, strings.Join(props, ","))
+	base := fmt.Sprintf("%s:%s:%s", c.EffectiveEntityType(), c.Label, strings.Join(props, ","))
+	// Policy constraints are further scoped by source/target labels and direction
+	if c.Type == ConstraintPolicy {
+		return fmt.Sprintf("%s:%s->%s:%s", base, c.SourceLabel, c.TargetLabel, c.PolicyMode)
+	}
+	if c.Type == ConstraintCardinality {
+		return fmt.Sprintf("%s:%s", base, c.Direction)
+	}
+	return base
 }
 
 // allowedValuesEqual checks whether two AllowedValues lists contain the same values (order-insensitive).
@@ -1142,6 +1157,10 @@ func (sm *SchemaManager) AddConstraint(c Constraint, ifNotExists ...bool) error 
 			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
 				return fmt.Errorf("constraint %q already exists with different allowed values", c.Name)
 			}
+			// For cardinality constraints, MaxCount must also match
+			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
+				return fmt.Errorf("constraint %q already exists with different max count (%d vs %d)", c.Name, existing.MaxCount, c.MaxCount)
+			}
 			// Exact same constraint — only silent with IF NOT EXISTS
 			if silentOnDuplicate {
 				return nil
@@ -1156,6 +1175,13 @@ func (sm *SchemaManager) AddConstraint(c Constraint, ifNotExists ...bool) error 
 	for _, existing := range sm.constraints {
 		existKey := constraintSchemaKey(existing)
 		if existKey != newKey {
+			// For policy constraints, check ALLOWED vs DISALLOWED conflict on same endpoint pair
+			if c.Type == ConstraintPolicy && existing.Type == ConstraintPolicy &&
+				c.Label == existing.Label &&
+				c.SourceLabel == existing.SourceLabel && c.TargetLabel == existing.TargetLabel &&
+				c.PolicyMode != existing.PolicyMode {
+				return fmt.Errorf("conflicting policy: cannot have both ALLOWED and DISALLOWED for %s-[:%s]->%s (constraint %q)", c.SourceLabel, c.Label, c.TargetLabel, existing.Name)
+			}
 			continue
 		}
 		// Same schema — check for conflicts
@@ -1163,6 +1189,10 @@ func (sm *SchemaManager) AddConstraint(c Constraint, ifNotExists ...bool) error 
 			// For domain constraints, different AllowedValues means conflict, not equivalence
 			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
 				return fmt.Errorf("conflicting domain constraint %q already exists on same schema with different allowed values", existing.Name)
+			}
+			// For cardinality, different MaxCount on same type+direction is a conflict
+			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
+				return fmt.Errorf("conflicting cardinality constraint %q already exists on %s %s with max count %d (new: %d)", existing.Name, existing.Direction, existing.Label, existing.MaxCount, c.MaxCount)
 			}
 			// Same type, different name — equivalent constraint already exists.
 			if silentOnDuplicate {
