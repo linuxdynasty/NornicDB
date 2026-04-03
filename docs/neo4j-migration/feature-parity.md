@@ -14,17 +14,17 @@ Scope: Production workloads excluding plugins and multi-database orchestration.
 
 NornicDB is a **production-ready drop-in replacement** for Neo4j with:
 
-| Category            | Status  | Notes                                          |
-| ------------------- | ------- | ---------------------------------------------- |
-| Core Data Model     | ✅ 100% | Nodes, relationships, properties, arrays, maps |
-| Cypher Language     | ✅ 100% | All clauses, pattern matching, subqueries      |
-| Functions           | ✅ 109% | 147 functions vs Neo4j's 135                   |
-| Indexes             | ✅ 100% | B-tree, full-text, vector, composite, range    |
-| Constraints         | ✅ 100% | UNIQUE, NODE KEY, EXISTS, property types       |
-| Transactions        | ✅ 100% | Full ACID with BEGIN/COMMIT/ROLLBACK           |
-| Built-in Procedures | ✅ 100% | 41 procedures (34 db._ + 7 dbms._)             |
-| APOC                | ✅ 100% | 960+ (plugins provide all algorithms)          |
-| Protocol/Drivers    | ✅ 95%  | Bolt v4.x, all major drivers                   |
+| Category            | Status  | Notes                                                                                                                           |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Core Data Model     | ✅ 100% | Nodes, relationships, properties, arrays, maps                                                                                  |
+| Cypher Language     | ✅ 100% | All clauses, pattern matching, subqueries                                                                                       |
+| Functions           | ✅ 109% | 147 functions vs Neo4j's 135                                                                                                    |
+| Indexes             | ✅ 100% | B-tree, full-text, vector, composite, range                                                                                     |
+| Constraints         | ✅ 100% | UNIQUE, EXISTS, NODE KEY, RELATIONSHIP KEY, property type (nodes + relationships) + temporal no-overlap, domain/enum extensions |
+| Transactions        | ✅ 100% | Full ACID with BEGIN/COMMIT/ROLLBACK                                                                                            |
+| Built-in Procedures | ✅ 100% | 41 procedures (34 db._ + 7 dbms._)                                                                                              |
+| APOC                | ✅ 100% | 960+ (plugins provide all algorithms)                                                                                           |
+| Protocol/Drivers    | ✅ 95%  | Bolt v4.x, all major drivers                                                                                                    |
 
 **New in 0.1.4:**
 
@@ -85,7 +85,15 @@ All index types supported: B-tree, full-text (Lucene-compatible), vector (HNSW),
 
 ### 5. Constraints & Schema - 100% ✅
 
-All constraint types enforced: UNIQUE (with full database scan), NODE KEY (composite uniqueness), EXISTS (required properties), property types (INTEGER, STRING, FLOAT, BOOLEAN), relationship constraints. Full validation on CREATE CONSTRAINT and cross-transaction enforcement.
+Full Neo4j constraint parity on both nodes and relationships:
+
+**Node constraints:** UNIQUE (single and composite), EXISTS (IS NOT NULL), NODE KEY (composite uniqueness + existence), property type (IS :: TYPE).
+
+**Relationship constraints:** UNIQUE (single and composite), EXISTS (IS NOT NULL), RELATIONSHIP KEY (composite uniqueness + existence), property type (IS :: TYPE). Uniqueness and key constraints on relationships automatically create owned backing indexes.
+
+**NornicDB extensions:** Temporal no-overlap (IS TEMPORAL NO OVERLAP) prevents overlapping time intervals on nodes or relationships grouped by a composite key. Domain/enum (IN ['val1', 'val2']) restricts a property to a fixed set of allowed values on nodes or relationships.
+
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation. Constraints are validated against existing data at creation time and enforced on all write paths (CREATE, MERGE, SET, REMOVE) including transactions and bulk operations. `SHOW CONSTRAINTS` reports entity type (NODE or RELATIONSHIP), constraint type, and owned backing indexes.
 
 ### 6. Transactions - 100% ✅
 
@@ -224,17 +232,19 @@ CALL apoc.periodic.iterate(
 
 Features NornicDB has that Neo4j doesn't:
 
-| Feature                    | Description                                                           |
-| -------------------------- | --------------------------------------------------------------------- |
-| **Automatic Vector Index** | All node embeddings indexed automatically, no setup required          |
-| **String Query Embedding** | `db.index.vector.queryNodes` accepts strings, auto-embeds server-side |
-| **Hybrid Search REST API** | `/nornicdb/search` with RRF fusion of vector + BM25                   |
-| **Memory Decay System**    | 3-tier cognitive memory (Episodic/Semantic/Procedural)                |
-| **Auto-Relationships**     | Automatic edge creation via embedding similarity                      |
-| **GPU Acceleration**       | Metal/CUDA/OpenCL/Vulkan for vector ops                               |
-| **Embedded Mode**          | Use as library without server                                         |
-| **Link Prediction**        | ML-based relationship prediction (TLP algorithms)                     |
-| **MCP Server**             | Native Model Context Protocol for LLM tools                           |
+| Feature                     | Description                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| **Automatic Vector Index**  | All node embeddings indexed automatically, no setup required (with managed embeddings enabled) |
+| **String Query Embedding**  | `db.index.vector.queryNodes` accepts strings, auto-embeds server-side                          |
+| **Hybrid Search REST API**  | `/nornicdb/search` with RRF fusion of vector + BM25                                            |
+| **Memory Decay System**     | 3-tier cognitive memory (Episodic/Semantic/Procedural)                                         |
+| **Auto-Relationships**      | Automatic edge creation via embedding similarity                                               |
+| **GPU Acceleration**        | Metal/CUDA/OpenCL/Vulkan for vector ops                                                        |
+| **Embedded Mode**           | Use as library without server                                                                  |
+| **Link Prediction**         | ML-based relationship prediction (TLP algorithms)                                              |
+| **MCP Server**              | Native Model Context Protocol for LLM tools                                                    |
+| **Temporal No-Overlap**     | Prevents overlapping time intervals on nodes or relationships                                  |
+| **Domain/Enum Constraints** | Restricts property values to a declared set of allowed values                                  |
 
 ### Performance Advantages
 

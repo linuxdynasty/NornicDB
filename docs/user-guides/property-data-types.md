@@ -297,7 +297,7 @@ See [Vector Embeddings](../features/vector-embeddings.md) for details.
 
 ## Type Constraints (Schema Validation)
 
-NornicDB supports property type constraints for schema enforcement:
+NornicDB supports property type constraints for schema enforcement on both nodes and relationships.
 
 **Supported Constraint Types:**
 - `STRING` - String values only
@@ -307,19 +307,56 @@ NornicDB supports property type constraints for schema enforcement:
 - `DATE` - Date values only
 - `DATETIME` - DateTime values only
 
-**Example:**
+### Node property type constraints
+
 ```cypher
-// Create type constraint
-CREATE CONSTRAINT person_age_integer FOR (p:Person) REQUIRE p.age IS INTEGER
+CREATE CONSTRAINT person_age_integer FOR (p:Person) REQUIRE p.age IS :: INTEGER
 
 // This will fail:
-CREATE (p:Person {age: "thirty"})  // ❌ Error: expected INTEGER, got string
+CREATE (p:Person {age: "thirty"})  // Error: expected INTEGER, got string
 
 // This will succeed:
-CREATE (p:Person {age: 30})  // ✅ Valid
+CREATE (p:Person {age: 30})  // Valid
 ```
 
-See [Schema Constraints](../features/apoc-functions.md) for details.
+### Relationship property type constraints
+
+Relationship constraints use the `FOR ()-[var:TYPE]-()` pattern:
+
+```cypher
+CREATE CONSTRAINT works_at_since_date
+FOR ()-[r:WORKS_AT]-() REQUIRE r.since IS :: DATE
+
+// This will fail:
+MATCH (a:Person), (b:Company)
+CREATE (a)-[:WORKS_AT {since: "not-a-date"}]->(b)  // Error: expected DATE
+
+// This will succeed:
+MATCH (a:Person), (b:Company)
+CREATE (a)-[:WORKS_AT {since: date("2024-01-15")}]->(b)  // Valid
+```
+
+### Domain/enum constraints (NornicDB extension)
+
+Domain constraints restrict a property to a fixed set of allowed values. They work on both nodes and relationships:
+
+```cypher
+// Node domain constraint
+CREATE CONSTRAINT person_status_domain
+FOR (n:Person) REQUIRE n.status IN ['active', 'inactive', 'suspended']
+
+// Relationship domain constraint
+CREATE CONSTRAINT works_at_role_domain
+FOR ()-[r:WORKS_AT]-() REQUIRE r.role IN ['engineer', 'manager', 'director']
+
+// This will fail:
+CREATE (p:Person {status: "unknown"})  // Error: value not in allowed set
+
+// This will succeed:
+CREATE (p:Person {status: "active"})  // Valid
+```
+
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation. See [APOC Schema Functions](../features/apoc-functions.md) for programmatic schema management.
 
 ---
 

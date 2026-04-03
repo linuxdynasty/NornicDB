@@ -95,13 +95,71 @@ cat docs/plans/canonical-bootstrap.cypher | cypher-shell -u admin -p password
 ```
 
 This creates:
-- Required fields (EXISTS)
-- Uniqueness constraints
-- NODE KEY constraints
-- Property type constraints
-- **Temporal no‑overlap** constraint (NornicDB extension)
+- Required fields (EXISTS) for nodes and relationships
+- Uniqueness constraints (single and composite) for nodes and relationships
+- NODE KEY and RELATIONSHIP KEY constraints
+- Property type constraints for nodes and relationships
+- **Temporal no‑overlap** constraints for nodes and relationships (NornicDB extension)
+- **Domain/enum** constraints restricting properties to allowed value sets (NornicDB extension)
 - Vector indexes
 - Property indexes for lookup speed
+
+### Node constraints
+
+```cypher
+// Uniqueness
+CREATE CONSTRAINT entity_id_unique IF NOT EXISTS
+FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE
+
+// Existence (required field)
+CREATE CONSTRAINT entity_type_exists IF NOT EXISTS
+FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL
+
+// Node key (composite uniqueness + existence)
+CREATE CONSTRAINT factkey_nk IF NOT EXISTS
+FOR (fk:FactKey) REQUIRE (fk.subject_entity_id, fk.predicate) IS NODE KEY
+
+// Property type
+CREATE CONSTRAINT fv_valid_from_type IF NOT EXISTS
+FOR (fv:FactVersion) REQUIRE fv.valid_from IS :: DATETIME
+
+// Temporal no‑overlap (NornicDB extension)
+CREATE CONSTRAINT fv_temporal IF NOT EXISTS
+FOR (fv:FactVersion) REQUIRE (fv.fact_key, fv.valid_from, fv.valid_to) IS TEMPORAL NO OVERLAP
+
+// Domain/enum (NornicDB extension)
+CREATE CONSTRAINT entity_status_domain IF NOT EXISTS
+FOR (e:Entity) REQUIRE e.status IN ['active', 'archived', 'deleted']
+```
+
+### Relationship constraints
+
+```cypher
+// Uniqueness — each CURRENT edge carries a unique fact_key
+CREATE CONSTRAINT current_fk_unique IF NOT EXISTS
+FOR ()-[r:CURRENT]-() REQUIRE r.fact_key IS UNIQUE
+
+// Existence — every HAS_VERSION edge must have a version number
+CREATE CONSTRAINT has_version_exists IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE r.version IS NOT NULL
+
+// Property type — version must be an integer
+CREATE CONSTRAINT has_version_type IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE r.version IS :: INTEGER
+
+// Relationship key (composite uniqueness + existence)
+CREATE CONSTRAINT has_version_rk IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE (r.fact_key, r.version) IS RELATIONSHIP KEY
+
+// Temporal no‑overlap on relationships (NornicDB extension)
+// The last two properties are always the time range; preceding properties form the grouping key
+CREATE CONSTRAINT has_version_temporal IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE (r.fact_key, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP
+
+// Domain/enum on relationships (NornicDB extension)
+CREATE CONSTRAINT affects_op_domain IF NOT EXISTS
+FOR ()-[r:AFFECTS]-() REQUIRE r.op_type IN ['CREATE_FACT', 'UPDATE_FACT', 'CLOSE_FACT']
+```
 
 Verify:
 

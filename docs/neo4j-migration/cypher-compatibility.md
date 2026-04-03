@@ -29,11 +29,41 @@
 
 ### Schema Management
 
-- ✅ **CREATE CONSTRAINT** - Unique constraints
+- ✅ **CREATE CONSTRAINT** - All constraint families (see below)
 - ✅ **CREATE INDEX** - Property indexes
 - ✅ **CREATE FULLTEXT INDEX** - Fulltext search indexes
 - ✅ **CREATE VECTOR INDEX** - Vector similarity indexes
-- ✅ **DROP** - Schema deletion (no-op)
+- ✅ **DROP CONSTRAINT** / **DROP INDEX** - Schema deletion
+
+#### Constraint Types
+
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation and named or unnamed forms.
+
+**Node constraints** (`FOR (var:Label)`):
+
+| Constraint | Syntax |
+|------------|--------|
+| Uniqueness | `REQUIRE var.prop IS UNIQUE` |
+| Existence | `REQUIRE var.prop IS NOT NULL` |
+| Node key | `REQUIRE (var.p1, var.p2) IS NODE KEY` |
+| Property type | `REQUIRE var.prop IS :: TYPE` |
+| Temporal no-overlap | `REQUIRE (var.key, var.from, var.to) IS TEMPORAL NO OVERLAP` |
+| Domain/enum | `REQUIRE var.prop IN ['val1', 'val2']` |
+
+**Relationship constraints** (`FOR ()-[var:TYPE]-()`):
+
+| Constraint | Syntax |
+|------------|--------|
+| Uniqueness | `REQUIRE var.prop IS UNIQUE` |
+| Composite uniqueness | `REQUIRE (var.p1, var.p2) IS UNIQUE` |
+| Existence | `REQUIRE var.prop IS NOT NULL` |
+| Relationship key | `REQUIRE (var.p1, var.p2) IS RELATIONSHIP KEY` |
+| Property type | `REQUIRE var.prop IS :: TYPE` |
+| Temporal no-overlap | `REQUIRE (var.key, var.from, var.to) IS TEMPORAL NO OVERLAP` |
+| Domain/enum | `REQUIRE var.prop IN ['val1', 'val2']` |
+
+Temporal no-overlap and domain/enum constraints are NornicDB extensions not available in Neo4j.
+Uniqueness and key constraints on relationships automatically create owned backing indexes.
 
 ### CALL Procedures
 
@@ -481,7 +511,10 @@ SHOW DATABASES
 
 **Schema & Indexes (100%)**:
 
-- ✅ Unique constraints with enforcement
+- ✅ All constraint families: UNIQUE, EXISTS, NODE KEY, RELATIONSHIP KEY, property type
+- ✅ Constraints on both nodes and relationships with full write-path enforcement
+- ✅ NornicDB extensions: temporal no-overlap, domain/enum constraints
+- ✅ IF NOT EXISTS idempotent creation, owned backing indexes
 - ✅ Property indexes (single and composite)
 - ✅ Fulltext indexes (BM25 scoring)
 - ✅ Vector indexes (cosine/euclidean/dot similarity)
