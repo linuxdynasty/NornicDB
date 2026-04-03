@@ -274,7 +274,7 @@ When using `link()`, use these standard relations:
 
 ---
 
-## 🚀 Advanced Features
+## Advanced Features
 
 ### Vector Search with Embeddings
 

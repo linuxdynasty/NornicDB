@@ -121,7 +121,7 @@ config.SetParserType(config.ParserTypeNornic)
 - High-throughput workloads
 
 **Pros:**
-- 🚀 **Fastest execution** — 3,000-4,200 ops/sec
+- **Fastest execution** — 3,000-4,200 ops/sec
 - 💾 **Lowest memory** — No parse tree allocation
 - 🔧 **Battle-tested** — Original implementation
 - ⚡ **Zero parsing overhead**

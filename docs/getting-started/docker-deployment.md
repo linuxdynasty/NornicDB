@@ -9,7 +9,7 @@
 - 4GB+ RAM recommended
 - Apple Silicon Mac (for Metal GPU acceleration) or x86_64 Linux
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Pull and Run
 

@@ -1,6 +1,6 @@
 # NornicDB Complete Functions Index
 
-**Comprehensive documentation with real-world examples and ELI12 explanations**
+**Comprehensive documentation with real-world examples**
 
 Last Updated: November 25, 2025
 
@@ -63,41 +63,41 @@ Last Updated: November 25, 2025
 
 ### 📐 Mathematical Functions (7 functions)
 
-| Function | What It Does | Example | ELI12 |
-|----------|-------------|---------|-------|
-| `abs(x)` | Absolute value | `RETURN abs(-5)` | Remove the minus sign |
-| `ceil(x)` | Round up | `RETURN ceil(3.2)` | Always round UP to next whole number |
-| `floor(x)` | Round down | `RETURN floor(3.8)` | Always round DOWN to previous number |
-| `round(x)` | Round normally | `RETURN round(3.5)` | Round to nearest (0.5+ goes up) |
-| `sign(x)` | Get sign (-1/0/1) | `RETURN sign(-5)` | Is it positive(+1), negative(-1), or zero(0)? |
-| `sqrt(x)` | Square root | `RETURN sqrt(16)` | What number × itself = x? |
-| `rand()` | Random 0-1 | `RETURN rand()` | Random decimal between 0 and 1 |
+| Function | What It Does | Example |
+|----------|-------------|---------|
+| `abs(x)` | Absolute value | `RETURN abs(-5)` |
+| `ceil(x)` | Round up | `RETURN ceil(3.2)` |
+| `floor(x)` | Round down | `RETURN floor(3.8)` |
+| `round(x)` | Round normally | `RETURN round(3.5)` |
+| `sign(x)` | Get sign (-1/0/1) | `RETURN sign(-5)` |
+| `sqrt(x)` | Square root | `RETURN sqrt(16)` |
+| `rand()` | Random 0-1 | `RETURN rand()` |
 
 ### 📊 Trigonometric Functions (11 functions)
 
-| Function | What It Does | Example | ELI12 |
-|----------|-------------|---------|-------|
-| `sin(x)` | Sine | `RETURN sin(radians(90))` | Height on a circle |
-| `cos(x)` | Cosine | `RETURN cos(radians(0))` | Distance forward on a circle |
-| `tan(x)` | Tangent | `RETURN tan(radians(45))` | Slope of the angle |
-| `cot(x)` | Cotangent | `RETURN cot(radians(45))` | Opposite of tangent |
-| `asin(x)` | Arc sine | `RETURN asin(0.5)` | What angle gives this height? |
-| `acos(x)` | Arc cosine | `RETURN acos(0.5)` | What angle gives this distance? |
-| `atan(x)` | Arc tangent | `RETURN atan(1)` | What angle has this slope? |
-| `atan2(y, x)` | 2-arg arc tangent | `RETURN atan2(y, x)` | Angle from origin to point |
-| `radians(deg)` | Degrees→radians | `RETURN radians(180)` | Convert 360° circle to 2π radians |
-| `degrees(rad)` | Radians→degrees | `RETURN degrees(3.14)` | Convert radians to 360° circle |
-| `haversin(x)` | Haversine | `RETURN haversin(x)` | Special function for Earth distances |
+| Function | What It Does | Example |
+|----------|-------------|---------|
+| `sin(x)` | Sine | `RETURN sin(radians(90))` |
+| `cos(x)` | Cosine | `RETURN cos(radians(0))` |
+| `tan(x)` | Tangent | `RETURN tan(radians(45))` |
+| `cot(x)` | Cotangent | `RETURN cot(radians(45))` |
+| `asin(x)` | Arc sine | `RETURN asin(0.5)` |
+| `acos(x)` | Arc cosine | `RETURN acos(0.5)` |
+| `atan(x)` | Arc tangent | `RETURN atan(1)` |
+| `atan2(y, x)` | 2-arg arc tangent | `RETURN atan2(y, x)` |
+| `radians(deg)` | Degrees→radians | `RETURN radians(180)` |
+| `degrees(rad)` | Radians→degrees | `RETURN degrees(3.14)` |
+| `haversin(x)` | Haversine | `RETURN haversin(x)` |
 
 ### 🌟 Advanced Math Functions (4 functions)
 
-| Function | What It Does | Example | ELI12 |
-|----------|-------------|---------|-------|
-| `exp(x)` | e^x | `RETURN exp(1)` | e (2.718...) raised to power x |
-| `log(x)` | Natural log | `RETURN log(2.718)` | Opposite of exp(), returns ~1 |
-| `log10(x)` | Base-10 log | `RETURN log10(100)` | How many 10s multiply to get x? (answer: 2) |
-| `pi()` | π constant | `RETURN pi()` | 3.14159... (circle circumference ÷ diameter) |
-| `e()` | e constant | `RETURN e()` | 2.71828... (natural growth rate) |
+| Function | What It Does | Example |
+|----------|-------------|---------|
+| `exp(x)` | e^x | `RETURN exp(1)` |
+| `log(x)` | Natural log | `RETURN log(2.718)` |
+| `log10(x)` | Base-10 log | `RETURN log10(100)` |
+| `pi()` | π constant | `RETURN pi()` |
+| `e()` | e constant | `RETURN e()` |
 
 ### 📋 List Functions (9 functions)
 
@@ -115,10 +115,10 @@ Last Updated: November 25, 2025
 
 ### 🎯 Vector Functions (2 functions)
 
-| Function | What It Does | Example | ELI12 |
-|----------|-------------|---------|-------|
-| `vector.similarity.cosine(v1, v2)` | Cosine similarity | `RETURN vector.similarity.cosine([1,2,3], [2,3,4])` | How similar are two lists of numbers? (angle between them) |
-| `vector.similarity.euclidean(v1, v2)` | Euclidean distance | `RETURN vector.similarity.euclidean([0,0], [3,4])` | Straight-line distance between two points |
+| Function | What It Does | Example |
+|----------|-------------|---------|
+| `vector.similarity.cosine(v1, v2)` | Cosine similarity | `RETURN vector.similarity.cosine([1,2,3], [2,3,4])` |
+| `vector.similarity.euclidean(v1, v2)` | Euclidean distance | `RETURN vector.similarity.euclidean([0,0], [3,4])` |
 
 ### 📈 Kalman Filter Functions (10 functions)
 
@@ -504,37 +504,6 @@ LIMIT 10
 
 ---
 
-## ELI12 Math Concepts
-
-### What is "Exponential"?
-Think of exponential like a virus spreading. One person infects 2, those 2 infect 4, those 4 infect 8, then 16, 32, 64, 128... It doubles each time! That's exponential growth. Exponential DECAY is the opposite - things shrink by half each time (like memory fading).
-
-### What is "Logarithmic"?
-Logarithmic is the opposite of exponential. If 2^10 = 1024, then log(1024) = 10. It asks "how many times do I multiply the base to get this number?" It grows really fast at first, then super slowly.
-
-### What is Cosine Similarity?
-Imagine two arrows pointing in different directions. If they point the SAME way, they're very similar (score = 1). If they point OPPOSITE ways, they're very different (score = -1). If they're perpendicular (90°), they're unrelated (score = 0). It measures the ANGLE between two vectors, not their length!
-
-### What is Euclidean Distance?
-This is just the straight-line distance between two points, like measuring with a ruler. If you're at (0,0) and your friend is at (3,4), the distance is sqrt(3² + 4²) = sqrt(9 + 16) = sqrt(25) = 5. It's the Pythagorean theorem!
-
-### What is a Kalman Filter?
-Imagine you're trying to guess tomorrow's weather by asking 10 friends. Some say "sunny", some say "rainy" - it's confusing and noisy! The Kalman filter is like having a really smart friend who:
-
-1. **Remembers what everyone said yesterday** (state tracking)
-2. **Notices if opinions are trending** toward "sunny" or "rainy" (velocity)
-3. **Doesn't freak out** when one person gives a weird answer (noise smoothing)
-4. **Uses all this to make a better prediction** than any single friend
-
-For stocks and news: Individual headlines are like those friends - some are right, some are wrong, some are just noise. One bad headline doesn't mean the stock will crash! The Kalman filter sees through the noise to find the real trend.
-
-**Basic vs Velocity vs Adaptive:**
-- **Basic** (`kalman.*`): Just smooths noise. Good for stable measurements like temperature.
-- **Velocity** (`kalman.velocity.*`): Also tracks HOW FAST things are changing. Good for trends like stock sentiment.
-- **Adaptive** (`kalman.adaptive.*`): Auto-switches between modes. Good when you don't know if your signal will be stable or trending.
-
----
-
 ## References & Further Reading
 
 ### Memory Models
@@ -560,6 +529,5 @@ For stocks and news: Individual headlines are like those friends - some are righ
 **Documentation Status:** ✅ Complete  
 **Functions Documented:** 62/62 (100%)  
 **Examples Provided:** 160+  
-**ELI12 Explanations:** All math/science functions covered
 
 **Last Updated:** November 29, 2025

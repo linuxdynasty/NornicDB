@@ -210,7 +210,7 @@ limit: 20
 
 ---
 
-## 🚀 Performance Tips
+## Performance Tips
 
 1. **Use IDs, not repeated queries**
    ```

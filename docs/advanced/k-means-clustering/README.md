@@ -17,7 +17,7 @@ K-Means clustering groups similar vectors together, enabling:
 - Anomaly detection
 - Dimensionality reduction
 
-## 🚀 Quick Start
+## Quick Start
 
 ```cypher
 // Create clusters from embeddings

@@ -196,21 +196,6 @@ if err != nil {
 }
 ```
 
-## ELI12 (Explain Like I'm 12)
-
-Embeddings are like a "smell" or "vibe" for text:
-- Similar things have similar smells
-- "Cat" and "kitten" smell similar
-- "Cat" and "car" smell different
-
-The computer represents each text as a list of 1024 numbers (a vector).
-When you search, it finds texts with similar number patterns (similar vibes).
-
-Think of it like this:
-- "Happy" might be [0.8, 0.2, 0.1, ...] (lots of positive vibes)
-- "Joyful" might be [0.7, 0.3, 0.1, ...] (similar vibes!)
-- "Sad" might be [0.1, 0.1, 0.9, ...] (very different vibes)
-
 ## See Also
 
 - [AUTO_EMBED_STATUS.md](./AUTO_EMBED_STATUS.md) - Status of experimental features

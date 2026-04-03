@@ -1405,7 +1405,7 @@ results, _ := svc.Search(ctx, query, embedding, opts)
 
 ---
 
-## 🚀 Future Improvements
+## Future Improvements
 
 - [ ] GPU-accelerated HNSW search for 100M+ vectors
 - [ ] Learned sparse retrieval (LSR) for semantic BM25

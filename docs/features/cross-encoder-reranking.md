@@ -45,13 +45,6 @@ score = model.cross_encode(query, document)  // Sees interaction!
 
 The cross-encoder can capture fine-grained semantic relationships that bi-encoders miss, but it's O(N) vs O(log N).
 
-### ELI12
-
-Imagine finding a book in a library:
-
-- **Stage 1 (Bi-encoder)**: Using the card catalog to find 100 potentially relevant books. Fast, but might miss nuances.
-- **Stage 2 (Cross-encoder)**: Actually reading each book's summary to pick the best 10. More accurate, but takes longer.
-
 ## Server Configuration
 
 When reranking is **enabled**, the server loads the configured reranker at startup (local GGUF asynchronously, external API immediately). Search requests then use Stage-2 reranking when `opts.RerankEnabled` is true (set from config for HTTP and gRPC search).

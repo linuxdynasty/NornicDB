@@ -10,13 +10,13 @@ This document outlines the implementation plan for advanced multi-database featu
 ## Table of Contents
 
 1. [Composite Databases](#composite-databases) - Future Enhancement
-2. [Completed Features](#completed-features) - ✅ **IMPLEMENTED**
+2. [Completed Features](#completed-features) - Implemented
 
 ---
 
 ## Composite Databases
 
-**Status:** ✅ **IMPLEMENTED** (v1.2)  
+**Status:** Implemented (v1.2)  
 **Priority:** Medium  
 **Estimated Effort:** 20-30 days
 
@@ -469,7 +469,7 @@ func (e *CompositeExecutor) mergeResults(
 
 ### ✅ Database Aliases (v1.2)
 
-**Status:** ✅ **IMPLEMENTED**  
+**Status:** Implemented  
 **See:** [Multi-Database User Guide - Database Aliases](../user-guides/multi-database.md#database-aliases)
 
 Database aliases allow creating alternate names for databases, enabling easier database management and migration scenarios.
@@ -482,7 +482,7 @@ Database aliases allow creating alternate names for databases, enabling easier d
 
 ### ✅ Per-Database Resource Limits (v1.2)
 
-**Status:** ✅ **IMPLEMENTED**  
+**Status:** Implemented  
 **See:** [Multi-Database User Guide - Resource Limits](../user-guides/multi-database.md#per-database-resource-limits)
 
 Per-database resource limits enable administrators to set resource limits per database, preventing any single database from consuming excessive resources.
@@ -501,19 +501,19 @@ Per-database resource limits enable administrators to set resource limits per da
 
 ### Completed ✅
 
-1. **Database Aliases** - ✅ **IMPLEMENTED** (v1.2)
+1. **Database Aliases** - Implemented (v1.2)
    - Fully functional with CREATE/DROP/SHOW ALIAS commands
    - Alias resolution integrated into all routing points
    - Persisted in database metadata
 
-2. **Per-Database Resource Limits** - ✅ **IMPLEMENTED** (v1.2)
+2. **Per-Database Resource Limits** - Implemented (v1.2)
    - Limit configuration and storage implemented
    - Limits persisted in database metadata
    - Enforcement implemented with comprehensive unit tests
 
 ### Completed ✅
 
-3. **Composite Databases** - ✅ **IMPLEMENTED** (v1.2)
+3. **Composite Databases** - Implemented (v1.2)
    - Provides unified view across multiple databases
    - Supersedes need for explicit cross-database queries
    - Better user experience for analytics/reporting use cases

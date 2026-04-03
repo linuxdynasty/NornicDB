@@ -31,14 +31,6 @@ go run ./cmd/eval -output json -save results.json
 | **MAP** | Mean Average Precision | 0-1 |
 | **Hit Rate** | Fraction of queries with at least one relevant result | 0-1 |
 
-### ELI12 (Explain Like I'm 12)
-
-Think of it like grading a spelling bee:
-- **Precision**: "How many of your first 10 guesses were correct?"
-- **Recall**: "Of all the correct answers, how many did you find?"
-- **MRR**: "How quickly did you get your first right answer?"
-- **Hit Rate**: "Did you get at least one right?"
-
 ## Command-Line Options
 
 ```bash

@@ -19,7 +19,7 @@
 | ARM64        | Metal + Heimdall | `timothyswt/nornicdb-arm64-metal-bge-heimdall` | Development with AI assistant |
 | AMD64        | CUDA + Heimdall  | `timothyswt/nornicdb-amd64-cuda-bge-heimdall`  | Development with AI assistant |
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Pull and run (Apple Silicon)

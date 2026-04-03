@@ -6,7 +6,7 @@ NornicDB provides a complete OpenAPI 3.0 specification for all REST API endpoint
 
 - **[openapi.yaml](openapi.yaml)** - Complete OpenAPI 3.0 specification
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Using Swagger UI
 

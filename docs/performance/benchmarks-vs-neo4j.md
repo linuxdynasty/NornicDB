@@ -8,11 +8,11 @@
 
 | Metric                | NornicDB (Metal) | Neo4j         | Winner             |
 | --------------------- | ---------------- | ------------- | ------------------ |
-| **Best Query Speed**  | 4,919 ops/sec    | 2,020 ops/sec | 🚀 NornicDB (2.4x) |
-| **Write Operations**  | 4,920 ops/sec    | 1,489 ops/sec | 🚀 NornicDB (3.3x) |
-| **Index Lookups**     | 4,010 ops/sec    | 2,020 ops/sec | 🚀 NornicDB (2.0x) |
-| **Consistency (RME)** | ±0.8-1.8%        | ±1.4-3.8%     | 🚀 NornicDB        |
-| **Metal GPU Boost**   | +35-47%          | N/A           | 🚀 NornicDB        |
+| **Best Query Speed**  | 4,919 ops/sec    | 2,020 ops/sec | NornicDB (2.4x) |
+| **Write Operations**  | 4,920 ops/sec    | 1,489 ops/sec | NornicDB (3.3x) |
+| **Index Lookups**     | 4,010 ops/sec    | 2,020 ops/sec | NornicDB (2.0x) |
+| **Consistency (RME)** | ±0.8-1.8%        | ±1.4-3.8%     | NornicDB        |
+| **Metal GPU Boost**   | +35-47%          | N/A           | NornicDB        |
 
 ---
 

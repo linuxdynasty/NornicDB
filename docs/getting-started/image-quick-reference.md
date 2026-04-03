@@ -17,7 +17,7 @@
 | Apple Silicon | ARM64 | Metal + Heimdall AI | `timothyswt/nornicdb-arm64-metal-bge-heimdall` | `docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-arm64-metal-bge-heimdall:latest` |
 | NVIDIA GPU | AMD64 | CUDA + Heimdall AI | `timothyswt/nornicdb-amd64-cuda-bge-heimdall` | `docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest` |
 
-## 🚀 Quick Start Commands
+## Quick Start Commands
 
 ### Basic Setup
 

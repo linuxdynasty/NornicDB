@@ -2,7 +2,7 @@
 
 **Get NornicDB running in minutes with Docker.**
 
-## 🚀 Option 1: Docker (Recommended)
+## Option 1: Docker (Recommended)
 
 ### Apple Silicon (Mac)
 

@@ -16,7 +16,7 @@ Embeddings are vector representations of text that capture semantic meaning, ena
 - K-Means clustering
 - Classification
 
-## 🚀 Quick Start
+## Quick Start
 
 ### With Ollama
 

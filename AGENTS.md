@@ -163,7 +163,6 @@ See [.agents/functional-patterns.md](.agents/functional-patterns.md) for advance
 2. **Type documentation** - What does this type represent?
 3. **Function documentation** - What does this do? When to use it?
 4. **1-3 Real-world examples** - Show actual usage
-5. **ELI12 explanation** - Complex concepts explained simply
 
 **Example from codebase:**
 ```go
@@ -187,13 +186,6 @@ See [.agents/functional-patterns.md](.agents/functional-patterns.md) for advance
 //
 //	// Execute Cypher queries
 //	result, err := executor.Execute(ctx, "CREATE (n:Person {name: 'Alice'})", nil)
-//
-// ELI12 (Explain Like I'm 12):
-//
-// Think of Cypher like asking questions about a social network:
-//   1. MATCH: "Find all people named Alice"
-//   2. CREATE: "Add a new person named Bob"
-//   3. Relationships: "Find who Alice knows"
 package cypher
 ```
 
@@ -446,7 +438,7 @@ nornicdb/
 
 ---
 
-## 🚀 Development Workflow
+## Development Workflow
 
 ### 1. **Before Starting Work**
 
@@ -807,7 +799,6 @@ Before submitting any code:
 - "Document this public function"
 - "Show benchmark results"
 - "This file is >2500 lines, please refactor"
-- "Add ELI12 explanation for this complex concept"
 
 ---
 
@@ -847,4 +838,4 @@ Before submitting any code:
 
 **Remember**: Quality over speed. Take time to write tests, document code, and prove improvements. NornicDB's reputation depends on reliability and performance.
 
-**Happy coding! 🚀**
+**Happy coding!**

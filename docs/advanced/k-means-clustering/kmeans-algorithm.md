@@ -789,10 +789,10 @@ concept_clustering:
 
 **For NornicDB, this enables:**
 
-🚀 **Instant concept discovery** across all chunks  
-🚀 **O(1) related document lookup** via cluster IDs  
-🚀 **Cross-chunk semantic relationships** without exhaustive search  
-🚀 **Real-time clustering** for new documents  
+- **Instant concept discovery** across all chunks
+- **O(1) related document lookup** via cluster IDs
+- **Cross-chunk semantic relationships** without exhaustive search
+- **Real-time clustering** for new documents
 
 **Recommended next steps:**
 
