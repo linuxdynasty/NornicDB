@@ -20,7 +20,7 @@ NornicDB is a **production-ready drop-in replacement** for Neo4j with:
 | Cypher Language     | ✅ 100% | All clauses, pattern matching, subqueries                                                                                       |
 | Functions           | ✅ 109% | 147 functions vs Neo4j's 135                                                                                                    |
 | Indexes             | ✅ 100% | B-tree, full-text, vector, composite, range                                                                                     |
-| Constraints         | ✅ 100% | UNIQUE, EXISTS, NODE KEY, RELATIONSHIP KEY, property type (nodes + relationships) + temporal no-overlap, domain/enum extensions |
+| Constraints         | ✅ 100% | UNIQUE, EXISTS, NODE KEY, RELATIONSHIP KEY, property type (nodes + relationships) + temporal no-overlap, domain/enum, cardinality, endpoint policy extensions |
 | Transactions        | ✅ 100% | Full ACID with BEGIN/COMMIT/ROLLBACK                                                                                            |
 | Built-in Procedures | ✅ 100% | 41 procedures (34 db._ + 7 dbms._)                                                                                              |
 | APOC                | ✅ 100% | 960+ (plugins provide all algorithms)                                                                                           |
@@ -91,9 +91,9 @@ Full Neo4j constraint parity on both nodes and relationships:
 
 **Relationship constraints:** UNIQUE (single and composite), EXISTS (IS NOT NULL), RELATIONSHIP KEY (composite uniqueness + existence), property type (IS :: TYPE). Uniqueness and key constraints on relationships automatically create owned backing indexes.
 
-**NornicDB extensions:** Temporal no-overlap (IS TEMPORAL NO OVERLAP) prevents overlapping time intervals on nodes or relationships grouped by a composite key. Domain/enum (IN ['val1', 'val2']) restricts a property to a fixed set of allowed values on nodes or relationships.
+**NornicDB extensions:** Temporal no-overlap (IS TEMPORAL NO OVERLAP) prevents overlapping time intervals on nodes or relationships grouped by a composite key. Domain/enum (IN ['val1', 'val2']) restricts a property to a fixed set of allowed values on nodes or relationships. Cardinality (REQUIRE MAX COUNT N) limits outgoing or incoming edge count per node for a given relationship type, with direction encoded in the FOR clause arrows (`FOR ()-[r:TYPE]->()` for outgoing, `FOR ()<-[r:TYPE]-()` for incoming). Endpoint policies (REQUIRE ALLOWED / REQUIRE DISALLOWED) restrict which label pairs may be connected by a relationship type; ALLOWED policies form a union whitelist and DISALLOWED policies are a blacklist with precedence.
 
-All constraint DDL supports `IF NOT EXISTS` for idempotent creation. Constraints are validated against existing data at creation time and enforced on all write paths (CREATE, MERGE, SET, REMOVE) including transactions and bulk operations. `SHOW CONSTRAINTS` reports entity type (NODE or RELATIONSHIP), constraint type, and owned backing indexes.
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation. Constraints are validated against existing data at creation time and enforced on all write paths (CREATE, MERGE, SET, REMOVE) including transactions and bulk operations. Label mutations (SET n:Label, REMOVE n:Label) are also validated against endpoint policy constraints. `SHOW CONSTRAINTS` reports entity type (NODE or RELATIONSHIP), constraint type, owned backing indexes, and additional columns for cardinality (direction, maxCount) and policy (sourceLabel, targetLabel, policyMode) constraints.
 
 ### 6. Transactions - 100% ✅
 
@@ -245,6 +245,8 @@ Features NornicDB has that Neo4j doesn't:
 | **MCP Server**              | Native Model Context Protocol for LLM tools                                                    |
 | **Temporal No-Overlap**     | Prevents overlapping time intervals on nodes or relationships                                  |
 | **Domain/Enum Constraints** | Restricts property values to a declared set of allowed values                                  |
+| **Cardinality Constraints** | Limits outgoing or incoming edge count per node for a given relationship type                   |
+| **Endpoint Policies**       | Restricts which (source, target) label pairs may be connected by a relationship type           |
 
 ### Performance Advantages
 

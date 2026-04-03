@@ -50,6 +50,24 @@ All constraint DDL supports `IF NOT EXISTS` for idempotent creation and named or
 | Temporal no-overlap | `REQUIRE (var.key, var.from, var.to) IS TEMPORAL NO OVERLAP` |
 | Domain/enum | `REQUIRE var.prop IN ['val1', 'val2']` |
 
+**Cardinality constraints** (`FOR ()-[var:TYPE]->()` or `FOR ()<-[var:TYPE]-()`):
+
+| Constraint | Syntax |
+|------------|--------|
+| Max outgoing | `FOR ()-[var:TYPE]->() REQUIRE MAX COUNT N` |
+| Max incoming | `FOR ()<-[var:TYPE]-() REQUIRE MAX COUNT N` |
+
+Limits the number of outgoing or incoming edges of a given type per node. Direction is encoded in the `FOR` clause arrows.
+
+**Relationship endpoint policies** (`FOR (:SrcLabel)-[var:TYPE]->(:TgtLabel)`):
+
+| Constraint | Syntax |
+|------------|--------|
+| Allowed pair | `FOR (:Src)-[var:TYPE]->(:Tgt) REQUIRE ALLOWED` |
+| Disallowed pair | `FOR (:Src)-[var:TYPE]->(:Tgt) REQUIRE DISALLOWED` |
+
+ALLOWED policies form a union whitelist: once any ALLOWED policy exists for a relationship type, only declared (source, target) label pairs are permitted. DISALLOWED policies are a blacklist and take precedence over ALLOWED.
+
 **Relationship constraints** (`FOR ()-[var:TYPE]-()`):
 
 | Constraint | Syntax |
@@ -62,8 +80,9 @@ All constraint DDL supports `IF NOT EXISTS` for idempotent creation and named or
 | Temporal no-overlap | `REQUIRE (var.key, var.from, var.to) IS TEMPORAL NO OVERLAP` |
 | Domain/enum | `REQUIRE var.prop IN ['val1', 'val2']` |
 
-Temporal no-overlap and domain/enum constraints are NornicDB extensions not available in Neo4j.
+Temporal no-overlap, domain/enum, cardinality, and endpoint policy constraints are NornicDB extensions not available in Neo4j.
 Uniqueness and key constraints on relationships automatically create owned backing indexes.
+`SHOW CONSTRAINTS` returns all constraint types with entity type, direction, maxCount, sourceLabel, targetLabel, and policyMode columns where applicable.
 
 ### CALL Procedures
 
@@ -513,7 +532,7 @@ SHOW DATABASES
 
 - ✅ All constraint families: UNIQUE, EXISTS, NODE KEY, RELATIONSHIP KEY, property type
 - ✅ Constraints on both nodes and relationships with full write-path enforcement
-- ✅ NornicDB extensions: temporal no-overlap, domain/enum constraints
+- ✅ NornicDB extensions: temporal no-overlap, domain/enum, cardinality, endpoint policy constraints
 - ✅ IF NOT EXISTS idempotent creation, owned backing indexes
 - ✅ Property indexes (single and composite)
 - ✅ Fulltext indexes (BM25 scoring)

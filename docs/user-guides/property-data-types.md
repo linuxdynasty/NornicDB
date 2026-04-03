@@ -356,7 +356,7 @@ CREATE (p:Person {status: "unknown"})  // Error: value not in allowed set
 CREATE (p:Person {status: "active"})  // Valid
 ```
 
-All constraint DDL supports `IF NOT EXISTS` for idempotent creation. See [APOC Schema Functions](../features/apoc-functions.md) for programmatic schema management.
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation. NornicDB also provides cardinality constraints (`REQUIRE MAX COUNT N`) to limit edge count per node and endpoint policy constraints (`REQUIRE ALLOWED` / `REQUIRE DISALLOWED`) to restrict which label pairs may be connected by a relationship type. See the [Canonical Graph Ledger](canonical-graph-ledger.md) guide for full examples and [APOC Schema Functions](../features/apoc-functions.md) for programmatic schema management.
 
 ---
 

@@ -10,7 +10,7 @@ Last Updated: January 21, 2026
 
 This guide shows how to implement a **canonical graph** in NornicDB with:
 
-- **Declarative constraints** (UNIQUE, EXISTS, NODE KEY, type, and temporal no‑overlap)
+- **Declarative constraints** (UNIQUE, EXISTS, NODE KEY, type, temporal no‑overlap, cardinality, and endpoint policies)
 - **Versioned facts** with validity windows
 - **Append‑only mutation log** (graph events + WAL txlog)
 - **Receipts** for auditability (tx_id, wal_seq_start/end, hash)
@@ -101,6 +101,8 @@ This creates:
 - Property type constraints for nodes and relationships
 - **Temporal no‑overlap** constraints for nodes and relationships (NornicDB extension)
 - **Domain/enum** constraints restricting properties to allowed value sets (NornicDB extension)
+- **Cardinality** constraints limiting outgoing/incoming edge count per node (NornicDB extension)
+- **Endpoint policy** constraints restricting allowed/disallowed label pairs for relationship types (NornicDB extension)
 - Vector indexes
 - Property indexes for lookup speed
 
@@ -159,6 +161,18 @@ FOR ()-[r:HAS_VERSION]-() REQUIRE (r.fact_key, r.valid_from, r.valid_to) IS TEMP
 // Domain/enum on relationships (NornicDB extension)
 CREATE CONSTRAINT affects_op_domain IF NOT EXISTS
 FOR ()-[r:AFFECTS]-() REQUIRE r.op_type IN ['CREATE_FACT', 'UPDATE_FACT', 'CLOSE_FACT']
+
+// Cardinality — each FactKey may have at most one CURRENT edge (NornicDB extension)
+CREATE CONSTRAINT current_max_one IF NOT EXISTS
+FOR ()-[r:CURRENT]->() REQUIRE MAX COUNT 1
+
+// Endpoint policy — only FactKey nodes may have outgoing HAS_VERSION to FactVersion (NornicDB extension)
+CREATE CONSTRAINT has_version_allowed IF NOT EXISTS
+FOR (:FactKey)-[r:HAS_VERSION]->(:FactVersion) REQUIRE ALLOWED
+
+// Endpoint policy — disallow MutationEvent directly linking to Entity (NornicDB extension)
+CREATE CONSTRAINT no_direct_mutation_entity IF NOT EXISTS
+FOR (:MutationEvent)-[r:AFFECTS]->(:Entity) REQUIRE DISALLOWED
 ```
 
 Verify:

@@ -116,6 +116,34 @@ CREATE CONSTRAINT evidence_id_unique IF NOT EXISTS
 FOR (n:Evidence) REQUIRE n.evidence_id IS UNIQUE;
 
 // ----------------------------------------------------------------------------
+// Relationship Constraints
+// ----------------------------------------------------------------------------
+
+CREATE CONSTRAINT current_fk_unique IF NOT EXISTS
+FOR ()-[r:CURRENT]-() REQUIRE r.fact_key IS UNIQUE;
+
+CREATE CONSTRAINT has_version_exists IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE r.version IS NOT NULL;
+
+CREATE CONSTRAINT has_version_type IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE r.version IS :: INTEGER;
+
+CREATE CONSTRAINT has_version_rk IF NOT EXISTS
+FOR ()-[r:HAS_VERSION]-() REQUIRE (r.fact_key, r.version) IS RELATIONSHIP KEY;
+
+// Cardinality — each FactKey may have at most one outgoing CURRENT edge
+CREATE CONSTRAINT current_max_one IF NOT EXISTS
+FOR ()-[r:CURRENT]->() REQUIRE MAX COUNT 1;
+
+// Endpoint policy — only FactKey -> FactVersion is allowed for HAS_VERSION
+CREATE CONSTRAINT has_version_allowed IF NOT EXISTS
+FOR (:FactKey)-[r:HAS_VERSION]->(:FactVersion) REQUIRE ALLOWED;
+
+// Endpoint policy — disallow MutationEvent directly linking to Entity via AFFECTS
+CREATE CONSTRAINT no_direct_mutation_entity IF NOT EXISTS
+FOR (:MutationEvent)-[r:AFFECTS]->(:Entity) REQUIRE DISALLOWED;
+
+// ----------------------------------------------------------------------------
 // Vector Indexes
 // ----------------------------------------------------------------------------
 
