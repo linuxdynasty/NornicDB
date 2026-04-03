@@ -61,17 +61,29 @@ func (e *StorageExecutor) executeShowIndexes(ctx context.Context, cypher string)
 				properties = ps
 			}
 
+			// Determine entity type (default NODE)
+			entityType := "NODE"
+			if et, ok := idxMap["entityType"].(string); ok && et != "" {
+				entityType = et
+			}
+
+			// Determine owning constraint (nil if standalone)
+			var owningConstraint interface{}
+			if oc, ok := idxMap["owningConstraint"].(string); ok && oc != "" {
+				owningConstraint = oc
+			}
+
 			rows = append(rows, []interface{}{
 				int64(i + 1),      // id
 				name,              // name
 				"ONLINE",          // state
 				100.0,             // populationPercent
 				idxType,           // type
-				"NODE",            // entityType
+				entityType,        // entityType
 				labelsOrTypes,     // labelsOrTypes
 				properties,        // properties
 				"nornicdb+schema", // indexProvider
-				nil,               // owningConstraint
+				owningConstraint,  // owningConstraint
 				nil,               // lastRead
 				int64(0),          // readCount
 			})

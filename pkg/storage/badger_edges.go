@@ -70,12 +70,11 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 
 	err = b.withUpdate(func(txn *badger.Txn) error {
 		// Validate relationship constraints before writing
-		if dbName, _, ok := ParseDatabasePrefix(string(edge.ID)); ok {
-			schema := b.GetSchemaForNamespace(dbName)
-			if schema != nil {
-				if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, ""); err != nil {
-					return err
-				}
+		dbName, _, _ := ParseDatabasePrefix(string(edge.ID))
+		schema := b.GetSchemaForNamespace(dbName)
+		if schema != nil {
+			if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, ""); err != nil {
+				return err
 			}
 		}
 
@@ -188,12 +187,11 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 		oldType = existing.Type
 
 		// Validate relationship constraints on updated edge
-		if dbName, _, ok := ParseDatabasePrefix(string(edge.ID)); ok {
-			schema := b.GetSchemaForNamespace(dbName)
-			if schema != nil {
-				if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, edge.ID); err != nil {
-					return err
-				}
+		dbName, _, _ := ParseDatabasePrefix(string(edge.ID))
+		schema := b.GetSchemaForNamespace(dbName)
+		if schema != nil {
+			if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, edge.ID); err != nil {
+				return err
 			}
 		}
 

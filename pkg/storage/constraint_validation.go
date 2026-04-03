@@ -29,6 +29,8 @@ func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
 		return validateExistenceConstraintOnCreationWithEngine(engine, c)
 	case ConstraintTemporal:
 		return validateTemporalConstraintOnCreationWithEngine(engine, c)
+	case ConstraintDomain:
+		return validateDomainConstraintOnCreationForEngine(engine, c)
 	default:
 		return fmt.Errorf("unknown constraint type: %s", c.Type)
 	}
@@ -56,6 +58,10 @@ func validateRelationshipConstraintOnCreationForEngine(engine Engine, c Constrai
 			return err
 		}
 		return validateRelCompositeUniquenessOnEdges(edges, c)
+	case ConstraintTemporal:
+		return validateRelTemporalOnCreationForEngine(edges, c)
+	case ConstraintDomain:
+		return validateRelDomainOnCreationForEngine(edges, c)
 	default:
 		return fmt.Errorf("unsupported relationship constraint type: %s", c.Type)
 	}
@@ -146,6 +152,168 @@ func validateRelExistenceOnEdges(edges []*Edge, c Constraint) error {
 			}
 		}
 	}
+	return nil
+}
+
+// temporalCompositeKey builds a composite key string from multiple key property values on an edge.
+func temporalCompositeKey(edge *Edge, keyProps []string) (string, error) {
+	parts := make([]string, len(keyProps))
+	for i, prop := range keyProps {
+		val := edge.Properties[prop]
+		if val == nil {
+			return "", fmt.Errorf("edge %s has null %s", edge.ID, prop)
+		}
+		parts[i] = fmt.Sprint(val)
+	}
+	return strings.Join(parts, "\x00"), nil
+}
+
+// validateRelTemporalOnCreationForEngine checks temporal no-overlap for relationship properties.
+// Supports 3+ properties: the last 2 are always (valid_from, valid_to), everything before
+// that forms a composite key (e.g., from_id, to_id, valid_from, valid_to).
+func validateRelTemporalOnCreationForEngine(edges []*Edge, c Constraint) error {
+	if len(c.Properties) < 3 {
+		return fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
+	}
+
+	keyProps := c.Properties[:len(c.Properties)-2]
+	startProp := c.Properties[len(c.Properties)-2]
+	endProp := c.Properties[len(c.Properties)-1]
+
+	type edgeInterval struct {
+		temporalInterval
+		edgeID EdgeID
+	}
+
+	byKey := make(map[string][]edgeInterval)
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		key, err := temporalCompositeKey(edge, keyProps)
+		if err != nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Cannot create TEMPORAL constraint: %s", err),
+			}
+		}
+
+		start, ok := coerceTemporalTime(edge.Properties[startProp])
+		if !ok {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Cannot create TEMPORAL constraint: edge %s has invalid %s", edge.ID, startProp),
+			}
+		}
+		end, hasEnd := coerceTemporalTime(edge.Properties[endProp])
+
+		byKey[key] = append(byKey[key], edgeInterval{
+			temporalInterval: temporalInterval{start: start, end: end, hasEnd: hasEnd},
+			edgeID:           edge.ID,
+		})
+	}
+
+	for _, intervals := range byKey {
+		sort.Slice(intervals, func(i, j int) bool {
+			return intervals[i].start.Before(intervals[j].start)
+		})
+		for i := 1; i < len(intervals); i++ {
+			prev := intervals[i-1]
+			curr := intervals[i]
+			if intervalsOverlap(prev.temporalInterval, curr.temporalInterval) {
+				return &ConstraintViolationError{
+					Type:       ConstraintTemporal,
+					Label:      c.Label,
+					Properties: c.Properties,
+					Message: fmt.Sprintf("Cannot create TEMPORAL constraint: overlap between edges %s and %s",
+						prev.edgeID, curr.edgeID),
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// isValueInAllowedList checks if a value matches any in the allowed values list.
+func isValueInAllowedList(value interface{}, allowedValues []interface{}) bool {
+	for _, allowed := range allowedValues {
+		if compareValues(value, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDomainConstraintOnCreationForEngine validates that all existing nodes satisfy the domain constraint.
+func validateDomainConstraintOnCreationForEngine(engine Engine, c Constraint) error {
+	if len(c.Properties) != 1 {
+		return fmt.Errorf("DOMAIN constraint requires exactly 1 property, got %d", len(c.Properties))
+	}
+	if len(c.AllowedValues) == 0 {
+		return fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+	}
+
+	property := c.Properties[0]
+
+	nodes, err := engine.GetNodesByLabel(c.Label)
+	if err != nil {
+		return fmt.Errorf("scanning nodes: %w", err)
+	}
+
+	for _, node := range nodes {
+		value := node.Properties[property]
+		if value == nil {
+			continue // NULL is valid for domain constraints
+		}
+		if !isValueInAllowedList(value, c.AllowedValues) {
+			return &ConstraintViolationError{
+				Type:       ConstraintDomain,
+				Label:      c.Label,
+				Properties: []string{property},
+				Message: fmt.Sprintf("Cannot create DOMAIN constraint: node %s has %s=%v which is not in allowed values %v",
+					node.ID, property, value, c.AllowedValues),
+			}
+		}
+	}
+
+	return nil
+}
+
+// validateRelDomainOnCreationForEngine validates that all existing edges satisfy the domain constraint.
+func validateRelDomainOnCreationForEngine(edges []*Edge, c Constraint) error {
+	if len(c.Properties) != 1 {
+		return fmt.Errorf("DOMAIN constraint requires exactly 1 property, got %d", len(c.Properties))
+	}
+	if len(c.AllowedValues) == 0 {
+		return fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+	}
+
+	property := c.Properties[0]
+
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		value := edge.Properties[property]
+		if value == nil {
+			continue // NULL is valid for domain constraints
+		}
+		if !isValueInAllowedList(value, c.AllowedValues) {
+			return &ConstraintViolationError{
+				Type:       ConstraintDomain,
+				Label:      c.Label,
+				Properties: []string{property},
+				Message: fmt.Sprintf("Cannot create DOMAIN constraint: edge %s has %s=%v which is not in allowed values %v",
+					edge.ID, property, value, c.AllowedValues),
+			}
+		}
+	}
+
 	return nil
 }
 

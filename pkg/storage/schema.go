@@ -31,6 +31,7 @@ const (
 	ConstraintPropertyType    ConstraintType = "PROPERTY_TYPE"
 	ConstraintTemporal        ConstraintType = "TEMPORAL_NO_OVERLAP"
 	ConstraintRelationshipKey ConstraintType = "RELATIONSHIP_KEY"
+	ConstraintDomain          ConstraintType = "DOMAIN"
 )
 
 // ConstraintEntityType distinguishes node constraints from relationship constraints.
@@ -43,12 +44,13 @@ const (
 
 // Constraint represents a Neo4j-compatible schema constraint.
 type Constraint struct {
-	Name       string               `json:"name"`
-	Type       ConstraintType       `json:"type"`
-	EntityType ConstraintEntityType `json:"entity_type,omitempty"` // defaults to NODE when empty
-	Label      string               `json:"label"`                 // label for nodes, relationship type for relationships
-	Properties []string             `json:"properties,omitempty"`
-	OwnedIndex string               `json:"owned_index,omitempty"` // name of the owned backing index (for uniqueness/key)
+	Name          string               `json:"name"`
+	Type          ConstraintType       `json:"type"`
+	EntityType    ConstraintEntityType `json:"entity_type,omitempty"` // defaults to NODE when empty
+	Label         string               `json:"label"`                 // label for nodes, relationship type for relationships
+	Properties    []string             `json:"properties,omitempty"`
+	OwnedIndex    string               `json:"owned_index,omitempty"`    // name of the owned backing index (for uniqueness/key)
+	AllowedValues []interface{}        `json:"allowed_values,omitempty"` // for DOMAIN constraints: list of allowed values
 }
 
 // EffectiveEntityType returns the entity type, defaulting to NODE for backward compatibility.
@@ -354,24 +356,31 @@ type VectorIndex struct {
 // RangeIndex represents an index for range queries on a single property.
 // It maintains a sorted list of entries for efficient O(log n) range queries.
 type RangeIndex struct {
-	Name      string
-	Label     string
-	Property  string
-	entries   []rangeEntry       // Sorted by value for binary search
-	nodeValue map[NodeID]float64 // NodeID -> current numeric value (for delete/update)
-	mu        sync.RWMutex
+	Name             string
+	Label            string
+	Property         string
+	Properties       []string             // composite properties (for multi-property constraint indexes)
+	EntityType       ConstraintEntityType // NODE or RELATIONSHIP
+	OwningConstraint string               // name of the constraint that owns this index (empty if standalone)
+	entries          []rangeEntry         // Sorted by value for binary search
+	nodeValue        map[NodeID]float64   // NodeID -> current numeric value (for delete/update)
+	mu               sync.RWMutex
 }
 
 // AddUniqueConstraint adds a unique constraint.
 // Stores in both uniqueConstraints (for value tracking) and constraints (for lookup by label).
-func (sm *SchemaManager) AddUniqueConstraint(name, label, property string) error {
+// Pass ifNotExists=true for IF NOT EXISTS semantics (duplicate is no-op).
+func (sm *SchemaManager) AddUniqueConstraint(name, label, property string, ifNotExists ...bool) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	silent := len(ifNotExists) > 0 && ifNotExists[0]
 	key := fmt.Sprintf("%s:%s", label, property)
 	if _, exists := sm.uniqueConstraints[key]; exists {
-		// Constraint already exists - this is fine with IF NOT EXISTS
-		return nil
+		if silent {
+			return nil
+		}
+		return fmt.Errorf("constraint %q already exists", name)
 	}
 
 	// Add to uniqueConstraints (for value tracking during CheckUniqueConstraint)
@@ -407,22 +416,41 @@ func (sm *SchemaManager) AddUniqueConstraint(name, label, property string) error
 // AddPropertyTypeConstraint adds a property type constraint to the schema.
 // This enforces a specific type for a property on a label (NULL values allowed).
 // An optional entityType can be passed to specify RELATIONSHIP constraints.
+// PropertyTypeConstraintOptions holds optional parameters for AddPropertyTypeConstraint.
+type PropertyTypeConstraintOptions struct {
+	EntityType  ConstraintEntityType
+	IfNotExists bool
+}
+
+// AddPropertyTypeConstraint adds a property type constraint to the schema.
+// The entityType parameter controls NODE vs RELATIONSHIP scoping.
 func (sm *SchemaManager) AddPropertyTypeConstraint(name, label, property string, expectedType PropertyType, entityType ...ConstraintEntityType) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if _, exists := sm.propertyTypeConstraints[name]; exists {
-		return nil
-	}
-
 	var et ConstraintEntityType
 	if len(entityType) > 0 {
 		et = entityType[0]
 	}
+	return sm.addPropertyTypeConstraint(name, label, property, expectedType, et, false)
+}
+
+// AddPropertyTypeConstraintWithOptions adds a property type constraint with full options.
+func (sm *SchemaManager) AddPropertyTypeConstraintWithOptions(name, label, property string, expectedType PropertyType, opts PropertyTypeConstraintOptions) error {
+	return sm.addPropertyTypeConstraint(name, label, property, expectedType, opts.EntityType, opts.IfNotExists)
+}
+
+func (sm *SchemaManager) addPropertyTypeConstraint(name, label, property string, expectedType PropertyType, entityType ConstraintEntityType, ifNotExists bool) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, exists := sm.propertyTypeConstraints[name]; exists {
+		if ifNotExists {
+			return nil
+		}
+		return fmt.Errorf("constraint %q already exists", name)
+	}
 
 	ptc := PropertyTypeConstraint{
 		Name:         name,
-		EntityType:   et,
+		EntityType:   entityType,
 		Label:        label,
 		Property:     property,
 		ExpectedType: expectedType,
@@ -1070,23 +1098,55 @@ func constraintSchemaKey(c Constraint) string {
 	return fmt.Sprintf("%s:%s:%s", c.EffectiveEntityType(), c.Label, strings.Join(props, ","))
 }
 
+// allowedValuesEqual checks whether two AllowedValues lists contain the same values (order-insensitive).
+func allowedValuesEqual(a, b []interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Build frequency map using string representation
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[fmt.Sprint(v)]++
+	}
+	for _, v := range b {
+		key := fmt.Sprint(v)
+		counts[key]--
+		if counts[key] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // AddConstraint adds a constraint to the schema.
 // Stores constraint in both the constraints map and uniqueConstraints (for backward compatibility).
 //
 // Conflict rules (matching Neo4j behavior):
-//   - Same name, already exists with identical schema+type: no-op (IF NOT EXISTS semantics)
+//   - Same name, already exists with identical schema+type: error, unless ifNotExists (then no-op)
 //   - Same name, different schema or type: error
-//   - Different name, same schema + same type: error (duplicate schema)
+//   - Different name, same schema + same type: error (duplicate schema), unless ifNotExists
 //   - Uniqueness vs relationship key on same schema: error (conflicting)
-func (sm *SchemaManager) AddConstraint(c Constraint) error {
+//
+// Pass ifNotExists=true when the DDL includes IF NOT EXISTS; duplicate-schema is then a no-op.
+func (sm *SchemaManager) AddConstraint(c Constraint, ifNotExists ...bool) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	silentOnDuplicate := len(ifNotExists) > 0 && ifNotExists[0]
+
 	// Check name conflicts
 	if existing, exists := sm.constraints[c.Name]; exists {
-		// Same name — check if schema + type match (idempotent) or conflict
+		// Same name — check if schema + type match or conflict
 		if constraintSchemaKey(existing) == constraintSchemaKey(c) && existing.Type == c.Type {
-			return nil // IF NOT EXISTS semantics — exact same constraint
+			// For domain constraints, AllowedValues must also match
+			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
+				return fmt.Errorf("constraint %q already exists with different allowed values", c.Name)
+			}
+			// Exact same constraint — only silent with IF NOT EXISTS
+			if silentOnDuplicate {
+				return nil
+			}
+			return fmt.Errorf("constraint %q already exists", c.Name)
 		}
 		return fmt.Errorf("constraint %q already exists with different schema or type", c.Name)
 	}
@@ -1100,9 +1160,15 @@ func (sm *SchemaManager) AddConstraint(c Constraint) error {
 		}
 		// Same schema — check for conflicts
 		if existing.Type == c.Type {
+			// For domain constraints, different AllowedValues means conflict, not equivalence
+			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
+				return fmt.Errorf("conflicting domain constraint %q already exists on same schema with different allowed values", existing.Name)
+			}
 			// Same type, different name — equivalent constraint already exists.
-			// Treat as no-op (IF NOT EXISTS semantics).
-			return nil
+			if silentOnDuplicate {
+				return nil // IF NOT EXISTS — no-op
+			}
+			return fmt.Errorf("equivalent constraint %q already exists on same schema", existing.Name)
 		}
 		// Uniqueness vs relationship key conflict
 		if (c.Type == ConstraintUnique && existing.Type == ConstraintRelationshipKey) ||
@@ -1130,11 +1196,14 @@ func (sm *SchemaManager) AddConstraint(c Constraint) error {
 				prop = c.Properties[0]
 			}
 			sm.rangeIndexes[c.OwnedIndex] = &RangeIndex{
-				Name:      c.OwnedIndex,
-				Label:     c.Label,
-				Property:  prop,
-				entries:   make([]rangeEntry, 0),
-				nodeValue: make(map[NodeID]float64),
+				Name:             c.OwnedIndex,
+				Label:            c.Label,
+				Property:         prop,
+				Properties:       c.Properties,
+				EntityType:       c.EffectiveEntityType(),
+				OwningConstraint: c.Name,
+				entries:          make([]rangeEntry, 0),
+				nodeValue:        make(map[NodeID]float64),
 			}
 		}
 	}
@@ -1394,12 +1463,26 @@ func (sm *SchemaManager) GetIndexes() []interface{} {
 	}
 
 	for _, idx := range sm.rangeIndexes {
-		indexes = append(indexes, map[string]interface{}{
-			"name":     idx.Name,
-			"type":     "RANGE",
-			"label":    idx.Label,
-			"property": idx.Property,
-		})
+		m := map[string]interface{}{
+			"name":  idx.Name,
+			"type":  "RANGE",
+			"label": idx.Label,
+		}
+		// Export entity type (default NODE for backward compat)
+		if idx.EntityType != "" {
+			m["entityType"] = string(idx.EntityType)
+		}
+		// Export owning constraint if present
+		if idx.OwningConstraint != "" {
+			m["owningConstraint"] = idx.OwningConstraint
+		}
+		// Export properties: prefer composite list, fall back to single property
+		if len(idx.Properties) > 0 {
+			m["properties"] = idx.Properties
+		} else if idx.Property != "" {
+			m["property"] = idx.Property
+		}
+		indexes = append(indexes, m)
 	}
 
 	return indexes

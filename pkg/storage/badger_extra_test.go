@@ -450,10 +450,17 @@ func TestSchemaManager_AddUniqueConstraint_Duplicate(t *testing.T) {
 	b := createTestBadgerEngine(t)
 	sm := b.GetSchema()
 
-	_ = sm.AddUniqueConstraint("uc-dup", "User", "username")
 	err := sm.AddUniqueConstraint("uc-dup", "User", "username")
-	// Either no error (idempotent) or an error for duplicate
-	_ = err
+	assert.NoError(t, err)
+
+	// Duplicate without IF NOT EXISTS should error
+	err = sm.AddUniqueConstraint("uc-dup", "User", "username")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	// Duplicate with IF NOT EXISTS should succeed silently
+	err = sm.AddUniqueConstraint("uc-dup", "User", "username", true)
+	assert.NoError(t, err)
 }
 
 func TestSchemaManager_AddPropertyTypeConstraint(t *testing.T) {

@@ -38,9 +38,12 @@ type SchemaCompositeIndexDef struct {
 }
 
 type SchemaRangeIndexDef struct {
-	Name     string `json:"name"`
-	Label    string `json:"label"`
-	Property string `json:"property"`
+	Name             string               `json:"name"`
+	Label            string               `json:"label"`
+	Property         string               `json:"property"`
+	Properties       []string             `json:"properties,omitempty"`
+	EntityType       ConstraintEntityType `json:"entity_type,omitempty"`
+	OwningConstraint string               `json:"owning_constraint,omitempty"`
 }
 
 const schemaDefinitionVersion = 1
@@ -65,13 +68,19 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 			// Copy properties slice to avoid aliasing.
 			props := make([]string, len(c.Properties))
 			copy(props, c.Properties)
+			var allowedVals []interface{}
+			if len(c.AllowedValues) > 0 {
+				allowedVals = make([]interface{}, len(c.AllowedValues))
+				copy(allowedVals, c.AllowedValues)
+			}
 			def.Constraints = append(def.Constraints, Constraint{
-				Name:       c.Name,
-				Type:       c.Type,
-				EntityType: c.EntityType,
-				Label:      c.Label,
-				Properties: props,
-				OwnedIndex: c.OwnedIndex,
+				Name:          c.Name,
+				Type:          c.Type,
+				EntityType:    c.EntityType,
+				Label:         c.Label,
+				Properties:    props,
+				OwnedIndex:    c.OwnedIndex,
+				AllowedValues: allowedVals,
 			})
 		}
 		sort.Slice(def.Constraints, func(i, j int) bool {
@@ -183,9 +192,12 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 		def.RangeIndexes = make([]SchemaRangeIndexDef, 0, len(sm.rangeIndexes))
 		for _, idx := range sm.rangeIndexes {
 			def.RangeIndexes = append(def.RangeIndexes, SchemaRangeIndexDef{
-				Name:     idx.Name,
-				Label:    idx.Label,
-				Property: idx.Property,
+				Name:             idx.Name,
+				Label:            idx.Label,
+				Property:         idx.Property,
+				Properties:       idx.Properties,
+				EntityType:       idx.EntityType,
+				OwningConstraint: idx.OwningConstraint,
 			})
 		}
 		sort.Slice(def.RangeIndexes, func(i, j int) bool {
@@ -222,13 +234,19 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 	for _, c := range def.Constraints {
 		props := make([]string, len(c.Properties))
 		copy(props, c.Properties)
+		var allowedVals []interface{}
+		if len(c.AllowedValues) > 0 {
+			allowedVals = make([]interface{}, len(c.AllowedValues))
+			copy(allowedVals, c.AllowedValues)
+		}
 		cc := Constraint{
-			Name:       c.Name,
-			Type:       c.Type,
-			EntityType: c.EntityType,
-			Label:      c.Label,
-			Properties: props,
-			OwnedIndex: c.OwnedIndex,
+			Name:          c.Name,
+			Type:          c.Type,
+			EntityType:    c.EntityType,
+			Label:         c.Label,
+			Properties:    props,
+			OwnedIndex:    c.OwnedIndex,
+			AllowedValues: allowedVals,
 		}
 		sm.constraints[cc.Name] = cc
 
@@ -313,11 +331,14 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 	// Range indexes.
 	for _, idx := range def.RangeIndexes {
 		sm.rangeIndexes[idx.Name] = &RangeIndex{
-			Name:      idx.Name,
-			Label:     idx.Label,
-			Property:  idx.Property,
-			entries:   make([]rangeEntry, 0),
-			nodeValue: make(map[NodeID]float64),
+			Name:             idx.Name,
+			Label:            idx.Label,
+			Property:         idx.Property,
+			Properties:       idx.Properties,
+			EntityType:       idx.EntityType,
+			OwningConstraint: idx.OwningConstraint,
+			entries:          make([]rangeEntry, 0),
+			nodeValue:        make(map[NodeID]float64),
 		}
 	}
 

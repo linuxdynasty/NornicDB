@@ -116,6 +116,9 @@ func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher strin
 //
 //	CREATE CONSTRAINT IF NOT EXISTS ON (n:Label) ASSERT n.property IS UNIQUE
 func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Detect IF NOT EXISTS to pass through to AddConstraint for duplicate-schema handling.
+	ifNotExists := strings.Contains(strings.ToUpper(cypher), "IF NOT EXISTS")
+
 	// NODE KEY constraints (Neo4j 5.x)
 	if matches := constraintNamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
 		constraintName := normalizeIdentifierToken(matches[1])
@@ -135,7 +138,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -159,7 +162,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -183,7 +186,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -208,7 +211,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -232,7 +235,66 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Node domain/enum constraints (NornicDB extension)
+	if matches := constraintNodeNamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		label := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+		allowedValues, err := parseDomainValueList(matches[6])
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain value list: %w", err)
+		}
+		if len(allowedValues) == 0 {
+			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+		}
+
+		constraint := storage.Constraint{
+			Name:          constraintName,
+			Type:          storage.ConstraintDomain,
+			Label:         label,
+			Properties:    []string{property},
+			AllowedValues: allowedValues,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintNodeUnnamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
+		label := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		allowedValues, err := parseDomainValueList(matches[5])
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain value list: %w", err)
+		}
+		if len(allowedValues) == 0 {
+			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_domain", strings.ToLower(label), strings.ToLower(property))
+
+		constraint := storage.Constraint{
+			Name:          constraintName,
+			Type:          storage.ConstraintDomain,
+			Label:         label,
+			Properties:    []string{property},
+			AllowedValues: allowedValues,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -253,7 +315,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -273,7 +335,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -293,7 +355,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -313,7 +375,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -337,7 +399,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -360,7 +422,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -383,7 +445,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, label, property, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: ifNotExists}); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -406,7 +468,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
+		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -429,7 +491,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
+		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -452,7 +514,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
+		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -461,6 +523,118 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	// =========================================================================
 	// Relationship constraint patterns
 	// =========================================================================
+
+	// Relationship domain/enum constraints (NornicDB extension)
+	if matches := constraintRelNamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+		allowedValues, err := parseDomainValueList(matches[6])
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain value list: %w", err)
+		}
+		if len(allowedValues) == 0 {
+			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+		}
+
+		constraint := storage.Constraint{
+			Name:          constraintName,
+			Type:          storage.ConstraintDomain,
+			EntityType:    storage.ConstraintEntityRelationship,
+			Label:         relType,
+			Properties:    []string{property},
+			AllowedValues: allowedValues,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireDomain.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		allowedValues, err := parseDomainValueList(matches[5])
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain value list: %w", err)
+		}
+		if len(allowedValues) == 0 {
+			return nil, fmt.Errorf("DOMAIN constraint requires at least one allowed value")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_domain", strings.ToLower(relType), strings.ToLower(property))
+
+		constraint := storage.Constraint{
+			Name:          constraintName,
+			Type:          storage.ConstraintDomain,
+			EntityType:    storage.ConstraintEntityRelationship,
+			Label:         relType,
+			Properties:    []string{property},
+			AllowedValues: allowedValues,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship temporal no-overlap constraints (NornicDB extension)
+	if matches := constraintRelNamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		properties := e.parseConstraintProperties(matches[4])
+		if len(properties) < 3 {
+			return nil, fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
+		}
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintTemporal,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) < 3 {
+			return nil, fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintTemporal,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
 
 	// Relationship KEY constraints (composite properties) — must be checked before composite UNIQUE
 	if matches := constraintRelNamedForRequireRelKey.FindStringSubmatch(cypher); matches != nil {
@@ -482,7 +656,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -507,7 +681,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -530,7 +704,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -552,7 +726,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -578,7 +752,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -603,7 +777,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -626,7 +800,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -648,7 +822,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -671,7 +845,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -693,7 +867,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+		if err := e.storage.GetSchema().AddConstraint(constraint, ifNotExists); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -718,7 +892,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, relType, property, expectedType, storage.ConstraintEntityRelationship); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, relType, property, expectedType, storage.PropertyTypeConstraintOptions{EntityType: storage.ConstraintEntityRelationship, IfNotExists: ifNotExists}); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -742,7 +916,7 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, relType, property, expectedType, storage.ConstraintEntityRelationship); err != nil {
+		if err := e.storage.GetSchema().AddPropertyTypeConstraintWithOptions(constraintName, relType, property, expectedType, storage.PropertyTypeConstraintOptions{EntityType: storage.ConstraintEntityRelationship, IfNotExists: ifNotExists}); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -1184,6 +1358,79 @@ func (e *StorageExecutor) executeCreateFulltextIndex(ctx context.Context, cypher
 	}
 
 	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+}
+
+// parseDomainValueList parses a comma-separated list of literal values from a domain constraint.
+// Supports strings ('value' or "value"), integers, and floats.
+func parseDomainValueList(raw string) ([]interface{}, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var values []interface{}
+	// Simple tokenizer: split by comma, handling quoted strings
+	for len(raw) > 0 {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			break
+		}
+
+		var token string
+		if raw[0] == '\'' {
+			// Single-quoted string
+			end := strings.Index(raw[1:], "'")
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated string: %s", raw)
+			}
+			token = raw[1 : end+1]
+			values = append(values, token)
+			raw = raw[end+2:]
+		} else if raw[0] == '"' {
+			// Double-quoted string
+			end := strings.Index(raw[1:], "\"")
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated string: %s", raw)
+			}
+			token = raw[1 : end+1]
+			values = append(values, token)
+			raw = raw[end+2:]
+		} else {
+			// Numeric or boolean literal
+			commaIdx := strings.Index(raw, ",")
+			if commaIdx >= 0 {
+				token = strings.TrimSpace(raw[:commaIdx])
+				raw = raw[commaIdx:]
+			} else {
+				token = strings.TrimSpace(raw)
+				raw = ""
+			}
+			if token == "" {
+				continue
+			}
+			// Try integer
+			if intVal, err := strconv.ParseInt(token, 10, 64); err == nil {
+				values = append(values, intVal)
+			} else if floatVal, err := strconv.ParseFloat(token, 64); err == nil {
+				values = append(values, floatVal)
+			} else if token == "true" {
+				values = append(values, true)
+			} else if token == "false" {
+				values = append(values, false)
+			} else {
+				// Treat as bare string
+				values = append(values, token)
+			}
+		}
+
+		// Skip comma separator
+		raw = strings.TrimSpace(raw)
+		if len(raw) > 0 && raw[0] == ',' {
+			raw = raw[1:]
+		}
+	}
+
+	return values, nil
 }
 
 func normalizeIdentifierToken(v string) string {

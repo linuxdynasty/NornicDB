@@ -1216,7 +1216,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 		if err := storage.ValidateConstraintOnCreationForEngine(storageEngine, constraint); err != nil {
 			return err
 		}
-		if err := schema.AddConstraint(constraint); err != nil {
+		if err := schema.AddConstraint(constraint, true); err != nil {
 			return err
 		}
 	}
@@ -1230,7 +1230,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 	if err := storage.ValidateConstraintOnCreationForEngine(storageEngine, nodeKey); err != nil {
 		return err
 	}
-	if err := schema.AddConstraint(nodeKey); err != nil {
+	if err := schema.AddConstraint(nodeKey, true); err != nil {
 		return err
 	}
 
@@ -1253,7 +1253,7 @@ func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
 		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(storageEngine, ptc); err != nil {
 			return err
 		}
-		if err := schema.AddPropertyTypeConstraint(name, "Memory", prop, expectedType); err != nil {
+		if err := schema.AddPropertyTypeConstraintWithOptions(name, "Memory", prop, expectedType, storage.PropertyTypeConstraintOptions{IfNotExists: true}); err != nil {
 			return err
 		}
 	}

@@ -250,12 +250,11 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 			}
 
 			// Validate relationship constraints
-			if dbName, _, ok := ParseDatabasePrefix(string(edge.ID)); ok {
-				schema := b.GetSchemaForNamespace(dbName)
-				if schema != nil {
-					if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, ""); err != nil {
-						return err
-					}
+			dbName, _, _ := ParseDatabasePrefix(string(edge.ID))
+			schema := b.GetSchemaForNamespace(dbName)
+			if schema != nil {
+				if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, ""); err != nil {
+					return err
 				}
 			}
 		}

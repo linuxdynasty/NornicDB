@@ -79,6 +79,20 @@ var (
 	constraintRelNamedForRequireSingleRelKey   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
 	constraintRelUnnamedForRequireSingleRelKey = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
 
+	// Relationship temporal no-overlap constraints (NornicDB extension)
+	constraintRelNamedForRequireTemporal   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireTemporal = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?` + ddlOptionsTail + `\s*$`)
+
+	// Node domain/enum constraints (NornicDB extension)
+	// CREATE CONSTRAINT name FOR (n:Label) REQUIRE n.prop IN ['val1', 'val2']
+	constraintNodeNamedForRequireDomain   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
+	constraintNodeUnnamedForRequireDomain = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
+
+	// Relationship domain/enum constraints (NornicDB extension)
+	// CREATE CONSTRAINT name FOR ()-[r:TYPE]-() REQUIRE r.prop IN ['val1', 'val2']
+	constraintRelNamedForRequireDomain   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireDomain = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IN\s+\[([^\]]*)\]` + ddlOptionsTail + `\s*$`)
+
 	// DROP CONSTRAINT
 	dropConstraintPattern = regexp.MustCompile(`(?is)^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(` + ddlIdentifierToken + `)(?:\s+IF\s+EXISTS)?\s*$`)
 

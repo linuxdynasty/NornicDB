@@ -1331,6 +1331,19 @@ func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
 			if err := tx.checkTemporalConstraint(node, constraint); err != nil {
 				return err
 			}
+		case ConstraintDomain:
+			if len(constraint.Properties) == 1 && len(constraint.AllowedValues) > 0 {
+				prop := constraint.Properties[0]
+				value := node.Properties[prop]
+				if value != nil && !isValueInAllowedList(value, constraint.AllowedValues) {
+					return &ConstraintViolationError{
+						Type:       ConstraintDomain,
+						Label:      constraint.Label,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Property %s value %v is not in allowed values %v", prop, value, constraint.AllowedValues),
+					}
+				}
+			}
 		}
 	}
 
@@ -1676,10 +1689,7 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 	if edge == nil || edge.Type == "" {
 		return nil
 	}
-	dbName, _, ok := ParseDatabasePrefix(string(edge.ID))
-	if !ok {
-		return nil
-	}
+	dbName, _, _ := ParseDatabasePrefix(string(edge.ID))
 	schema := tx.engine.GetSchemaForNamespace(dbName)
 	if schema == nil {
 		return nil
@@ -1692,7 +1702,7 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 		}
 		switch c.Type {
 		case ConstraintUnique:
-			if err := tx.checkEdgeUniqueness(edge, c); err != nil {
+			if err := tx.checkEdgeUniqueness(edge, c, dbName); err != nil {
 				return err
 			}
 		case ConstraintExists:
@@ -1703,8 +1713,25 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 			if err := checkEdgeExistence(edge, c); err != nil {
 				return err
 			}
-			if err := tx.checkEdgeUniqueness(edge, c); err != nil {
+			if err := tx.checkEdgeUniqueness(edge, c, dbName); err != nil {
 				return err
+			}
+		case ConstraintTemporal:
+			if err := tx.checkEdgeTemporalConstraint(edge, c, dbName); err != nil {
+				return err
+			}
+		case ConstraintDomain:
+			if len(c.Properties) == 1 && len(c.AllowedValues) > 0 {
+				prop := c.Properties[0]
+				value := edge.Properties[prop]
+				if value != nil && !isValueInAllowedList(value, c.AllowedValues) {
+					return &ConstraintViolationError{
+						Type:       ConstraintDomain,
+						Label:      edge.Type,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Property %s value %v is not in allowed values %v", prop, value, c.AllowedValues),
+					}
+				}
 			}
 		}
 	}
@@ -1729,10 +1756,15 @@ func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
 }
 
 // checkEdgeUniqueness checks uniqueness constraints for an edge against pending and committed edges.
-func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint) error {
+// The namespace parameter filters committed edges to the same database namespace.
+func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint, namespace string) error {
 	// Check against other pending edges in this transaction
+	nsPrefix := namespace + ":"
 	for id, otherEdge := range tx.pendingEdges {
 		if id == edge.ID || otherEdge.Type != edge.Type {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if len(c.Properties) == 1 {
@@ -1788,6 +1820,10 @@ func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint) error
 		if existingEdge.ID == edge.ID {
 			continue
 		}
+		// Filter to same namespace to avoid cross-database false positives
+		if namespace != "" && !strings.HasPrefix(string(existingEdge.ID), nsPrefix) {
+			continue
+		}
 		if len(c.Properties) == 1 {
 			prop := c.Properties[0]
 			newVal := edge.Properties[prop]
@@ -1828,6 +1864,106 @@ func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint) error
 					Properties: c.Properties,
 					Message:    fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", existingEdge.ID),
 				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkEdgeTemporalConstraint checks temporal no-overlap constraints for an edge in a transaction.
+// The namespace parameter filters committed edges to the same database namespace.
+// Supports composite key properties: all properties except the last 2 form the key.
+func (tx *BadgerTransaction) checkEdgeTemporalConstraint(edge *Edge, c Constraint, namespace string) error {
+	if len(c.Properties) < 3 {
+		return fmt.Errorf("TEMPORAL constraint requires at least 3 properties (key..., valid_from, valid_to)")
+	}
+
+	keyProps := c.Properties[:len(c.Properties)-2]
+	startProp := c.Properties[len(c.Properties)-2]
+	endProp := c.Properties[len(c.Properties)-1]
+
+	// Validate all key properties are non-null
+	keyVals := make([]interface{}, len(keyProps))
+	for i, prop := range keyProps {
+		keyVals[i] = edge.Properties[prop]
+		if keyVals[i] == nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      edge.Type,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("TEMPORAL key property %s cannot be null", prop),
+			}
+		}
+	}
+
+	start, ok := coerceTemporalTime(edge.Properties[startProp])
+	if !ok {
+		return &ConstraintViolationError{
+			Type:       ConstraintTemporal,
+			Label:      edge.Type,
+			Properties: c.Properties,
+			Message:    fmt.Sprintf("TEMPORAL start property %s must be a datetime", startProp),
+		}
+	}
+	end, hasEnd := coerceTemporalTime(edge.Properties[endProp])
+	newInterval := temporalInterval{start: start, end: end, hasEnd: hasEnd}
+
+	// Check against pending edges in this transaction
+	nsPrefix := namespace + ":"
+	for id, otherEdge := range tx.pendingEdges {
+		if id == edge.ID || otherEdge.Type != edge.Type {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(id), nsPrefix) {
+			continue
+		}
+		if !edgeTemporalCompositeKeyMatch(otherEdge, keyProps, keyVals) {
+			continue
+		}
+		otherStart, ok := coerceTemporalTime(otherEdge.Properties[startProp])
+		if !ok {
+			continue
+		}
+		otherEnd, otherHasEnd := coerceTemporalTime(otherEdge.Properties[endProp])
+		if intervalsOverlap(newInterval, temporalInterval{start: otherStart, end: otherEnd, hasEnd: otherHasEnd}) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      edge.Type,
+				Properties: c.Properties,
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with edge %s for key=%v",
+					id, keyVals),
+			}
+		}
+	}
+
+	// Check against committed edges (filtered by namespace)
+	existingEdges, err := tx.engine.GetEdgesByType(edge.Type)
+	if err != nil {
+		return nil
+	}
+	for _, existingEdge := range existingEdges {
+		if existingEdge.ID == edge.ID {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(existingEdge.ID), nsPrefix) {
+			continue
+		}
+		if !edgeTemporalCompositeKeyMatch(existingEdge, keyProps, keyVals) {
+			continue
+		}
+		existingStart, ok := coerceTemporalTime(existingEdge.Properties[startProp])
+		if !ok {
+			continue
+		}
+		existingEnd, existingHasEnd := coerceTemporalTime(existingEdge.Properties[endProp])
+		if intervalsOverlap(newInterval, temporalInterval{start: existingStart, end: existingEnd, hasEnd: existingHasEnd}) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      edge.Type,
+				Properties: c.Properties,
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with edge %s for key=%v",
+					existingEdge.ID, keyVals),
 			}
 		}
 	}

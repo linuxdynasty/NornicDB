@@ -1005,41 +1005,40 @@ func TestCreateConstraint_DuplicateNamedDefinitionErrors(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name  string
-		query string
+		name         string
+		query        string
+		queryWithINE string // same query with IF NOT EXISTS
 	}{
 		{
-			name:  "unique",
-			query: "CREATE CONSTRAINT uq_dup_name FOR (n:DupUnique) REQUIRE n.id IS UNIQUE",
+			name:         "exists_not_null",
+			query:        "CREATE CONSTRAINT nn_dup_name FOR (n:DupExists) REQUIRE n.email IS NOT NULL",
+			queryWithINE: "CREATE CONSTRAINT nn_dup_name IF NOT EXISTS FOR (n:DupExists) REQUIRE n.email IS NOT NULL",
 		},
 		{
-			name:  "exists_not_null",
-			query: "CREATE CONSTRAINT nn_dup_name FOR (n:DupExists) REQUIRE n.email IS NOT NULL",
+			name:         "node_key",
+			query:        "CREATE CONSTRAINT nk_dup_name FOR (n:DupNodeKey) REQUIRE (n.k1, n.k2) IS NODE KEY",
+			queryWithINE: "CREATE CONSTRAINT nk_dup_name IF NOT EXISTS FOR (n:DupNodeKey) REQUIRE (n.k1, n.k2) IS NODE KEY",
 		},
 		{
-			name:  "node_key",
-			query: "CREATE CONSTRAINT nk_dup_name FOR (n:DupNodeKey) REQUIRE (n.k1, n.k2) IS NODE KEY",
-		},
-		{
-			name:  "temporal",
-			query: "CREATE CONSTRAINT tp_dup_name FOR (n:DupTemporal) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
-		},
-		{
-			name:  "property_type",
-			query: "CREATE CONSTRAINT ty_dup_name FOR (n:DupType) REQUIRE n.age IS :: INTEGER",
+			name:         "temporal",
+			query:        "CREATE CONSTRAINT tp_dup_name FOR (n:DupTemporal) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
+			queryWithINE: "CREATE CONSTRAINT tp_dup_name IF NOT EXISTS FOR (n:DupTemporal) REQUIRE (n.key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := exec.executeCreateConstraint(ctx, tt.query)
-			if err != nil {
-				t.Fatalf("first create constraint should succeed: %v", err)
-			}
+			require.NoError(t, err, "first create should succeed")
+
+			// Duplicate without IF NOT EXISTS should error
 			_, err = exec.executeCreateConstraint(ctx, tt.query)
-			if err != nil {
-				t.Fatalf("duplicate named constraint should be idempotent for %s: %v", tt.name, err)
-			}
+			require.Error(t, err, "duplicate without IF NOT EXISTS should error")
+			require.Contains(t, err.Error(), "already exists")
+
+			// Duplicate with IF NOT EXISTS should be no-op
+			_, err = exec.executeCreateConstraint(ctx, tt.queryWithINE)
+			require.NoError(t, err, "duplicate with IF NOT EXISTS should be no-op")
 		})
 	}
 }
@@ -1422,9 +1421,15 @@ func TestRelationshipConstraint_ConflictDetection(t *testing.T) {
 		require.Contains(t, err.Error(), "already exists")
 	})
 
-	t.Run("same schema same type different name is no-op", func(t *testing.T) {
+	t.Run("same schema same type different name errors without IF NOT EXISTS", func(t *testing.T) {
 		_, err := exec.Execute(ctx, `CREATE CONSTRAINT another_name FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
-		require.NoError(t, err) // no-op, equivalent constraint already exists
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "equivalent constraint")
+	})
+
+	t.Run("same schema same type different name is no-op with IF NOT EXISTS", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT yet_another IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+		require.NoError(t, err) // IF NOT EXISTS — no-op
 	})
 
 	t.Run("uniqueness vs relationship key conflict", func(t *testing.T) {
@@ -1506,4 +1511,429 @@ func TestRelationshipConstraint_ValidationOnCreation(t *testing.T) {
 	_, err = exec.Execute(ctx, `CREATE CONSTRAINT knows_since_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "UNIQUE")
+}
+
+func TestDomainConstraint_DDL(t *testing.T) {
+	t.Run("named node domain constraint", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT person_status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive', 'pending']`, nil)
+		require.NoError(t, err)
+
+		result, err := exec.Execute(ctx, `SHOW CONSTRAINTS`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+
+		nameIdx := -1
+		typeIdx := -1
+		entityIdx := -1
+		for i, col := range result.Columns {
+			switch col {
+			case "name":
+				nameIdx = i
+			case "type":
+				typeIdx = i
+			case "entityType":
+				entityIdx = i
+			}
+		}
+		require.NotEqual(t, -1, nameIdx)
+		require.Equal(t, "person_status_domain", result.Rows[0][nameIdx])
+		require.Equal(t, string(storage.ConstraintDomain), result.Rows[0][typeIdx])
+		require.Equal(t, "NODE", result.Rows[0][entityIdx])
+	})
+
+	t.Run("unnamed node domain constraint", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+
+		result, err := exec.Execute(ctx, `SHOW CONSTRAINTS`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+	})
+
+	t.Run("creation fails when existing data violates domain", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice", status: "active"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Bob", status: "unknown"})`, nil)
+		require.NoError(t, err)
+
+		// Should fail — "unknown" is not in the allowed list
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT person_status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "DOMAIN")
+		require.Contains(t, err.Error(), "unknown")
+	})
+
+	t.Run("creation succeeds on clean data", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice", status: "active"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Bob", status: "inactive"})`, nil)
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT person_status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("enforcement on node create", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		// Create constraint first
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT person_status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+
+		// Valid value should succeed
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Alice", status: "active"})`, nil)
+		require.NoError(t, err)
+
+		// Invalid value should fail
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Bob", status: "unknown"})`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "DOMAIN")
+
+		// NULL value should succeed (NULL is valid for domain constraints)
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Charlie"})`, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("numeric domain values", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT priority_domain FOR (n:Task) REQUIRE n.priority IN [1, 2, 3]`, nil)
+		require.NoError(t, err)
+
+		// Valid priority
+		_, err = exec.Execute(ctx, `CREATE (:Task {name: "fix bug", priority: 1})`, nil)
+		require.NoError(t, err)
+
+		// Invalid priority
+		_, err = exec.Execute(ctx, `CREATE (:Task {name: "nice to have", priority: 5})`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "DOMAIN")
+	})
+
+	t.Run("relationship domain constraint", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		// Create constraint on relationship
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_role_domain FOR ()-[r:WORKS_AT]-() REQUIRE r.role IN ['engineer', 'manager', 'director']`, nil)
+		require.NoError(t, err)
+
+		// Create nodes
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Company {name: "Acme"})`, nil)
+		require.NoError(t, err)
+
+		// Valid role
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {role: "engineer"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Invalid role
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {role: "intern"}]->(c)`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "DOMAIN")
+	})
+
+	t.Run("relationship domain constraint creation fails on violating data", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Company {name: "Acme"})`, nil)
+		require.NoError(t, err)
+
+		// Create edge with a role not in the allowed list
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {role: "intern"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Now try to add the constraint — should fail
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT rel_role_domain FOR ()-[r:WORKS_AT]-() REQUIRE r.role IN ['engineer', 'manager']`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "DOMAIN")
+		require.Contains(t, err.Error(), "intern")
+	})
+
+	t.Run("different allowed values on same property conflict", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+
+		// Different name, same property, different allowed values — should conflict
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT status_domain_v2 FOR (n:Person) REQUIRE n.status IN ['active', 'pending']`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "conflicting domain constraint")
+	})
+
+	t.Run("same name same values errors without IF NOT EXISTS", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+
+		// Same name, same values, no IF NOT EXISTS — should error
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "already exists")
+
+		// Same with IF NOT EXISTS — should be no-op
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT status_domain IF NOT EXISTS FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("same name different values errors", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']`, nil)
+		require.NoError(t, err)
+
+		// Same name but different values — should error
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'pending']`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "different allowed values")
+	})
+}
+
+func TestRelationshipTemporalConstraint_DDL(t *testing.T) {
+	t.Run("named temporal constraint with 4-property endpoint-pair form", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT employment_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.from_id, r.to_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.NoError(t, err)
+
+		// Verify constraint exists via SHOW CONSTRAINTS
+		result, err := exec.Execute(ctx, `SHOW CONSTRAINTS`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+
+		// Find columns
+		nameIdx := -1
+		typeIdx := -1
+		entityIdx := -1
+		propsIdx := -1
+		for i, col := range result.Columns {
+			switch col {
+			case "name":
+				nameIdx = i
+			case "type":
+				typeIdx = i
+			case "entityType":
+				entityIdx = i
+			case "properties":
+				propsIdx = i
+			}
+		}
+		require.NotEqual(t, -1, nameIdx)
+		require.Equal(t, "employment_temporal", result.Rows[0][nameIdx])
+		require.Equal(t, string(storage.ConstraintTemporal), result.Rows[0][typeIdx])
+		require.Equal(t, "RELATIONSHIP", result.Rows[0][entityIdx])
+		require.Equal(t, []string{"from_id", "to_id", "valid_from", "valid_to"}, result.Rows[0][propsIdx])
+	})
+
+	t.Run("3-property single-key form still works", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT employment_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.employee_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.NoError(t, err)
+
+		result, err := exec.Execute(ctx, `SHOW CONSTRAINTS`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+	})
+
+	t.Run("unnamed temporal constraint on relationship", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:WORKS_AT]-() REQUIRE (r.from_id, r.to_id, r.valid_from, r.valid_to) IS TEMPORAL`, nil)
+		require.NoError(t, err)
+
+		result, err := exec.Execute(ctx, `SHOW CONSTRAINTS`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+	})
+
+	t.Run("rejects fewer than 3 properties", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT bad_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "at least 3 properties")
+	})
+
+	t.Run("4-property creation fails on overlapping edges", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		// Create nodes
+		_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Company {name: "Acme"})`, nil)
+		require.NoError(t, err)
+
+		// Create overlapping edges with same composite key (from_id, to_id)
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2020-01-01T00:00:00Z", valid_to: "2022-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2021-06-01T00:00:00Z", valid_to: "2023-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Creating temporal constraint should fail due to overlap on same composite key
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT employment_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.from_id, r.to_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "TEMPORAL")
+		require.Contains(t, err.Error(), "overlap")
+	})
+
+	t.Run("4-property creation succeeds when composite keys differ", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Company {name: "Acme"})`, nil)
+		require.NoError(t, err)
+
+		// Same time range but different to_id — different composite key, no overlap
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2020-01-01T00:00:00Z", valid_to: "2022-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "other_co", valid_from: "2020-01-01T00:00:00Z", valid_to: "2022-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Creating constraint should succeed — different composite keys
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT employment_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.from_id, r.to_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("4-property enforcement on write — overlapping edge rejected", func(t *testing.T) {
+		baseStore := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		// Create constraint first with 4-property form
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT employment_temporal FOR ()-[r:WORKS_AT]-() REQUIRE (r.from_id, r.to_id, r.valid_from, r.valid_to) IS TEMPORAL NO OVERLAP`, nil)
+		require.NoError(t, err)
+
+		// Create nodes
+		_, err = exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+		require.NoError(t, err)
+		_, err = exec.Execute(ctx, `CREATE (:Company {name: "Acme"})`, nil)
+		require.NoError(t, err)
+
+		// Create first employment edge
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2020-01-01T00:00:00Z", valid_to: "2022-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Try to create overlapping edge with same composite key — should fail
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2021-06-01T00:00:00Z", valid_to: "2023-01-01T00:00:00Z"}]->(c)`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "TEMPORAL")
+
+		// Non-overlapping edge with same composite key should succeed
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "acme", valid_from: "2023-01-01T00:00:00Z", valid_to: "2024-01-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+
+		// Different composite key (different to_id) should not conflict even with overlapping time
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_AT {from_id: "alice", to_id: "other_co", valid_from: "2020-06-01T00:00:00Z", valid_to: "2022-06-01T00:00:00Z"}]->(c)`, nil)
+		require.NoError(t, err)
+	})
+}
+
+func TestShowIndexes_RelationshipBackingIndex(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create relationship uniqueness constraint (auto-creates owned backing index)
+	_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_uniq FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+	require.NoError(t, err)
+
+	// Create relationship key constraint with composite properties
+	_, err = exec.Execute(ctx, `CREATE CONSTRAINT rel_comp_key FOR ()-[r:WORKS_AT]-() REQUIRE (r.dept, r.role) IS RELATIONSHIP KEY`, nil)
+	require.NoError(t, err)
+
+	// SHOW INDEXES should include the backing indexes with correct metadata
+	result, err := exec.Execute(ctx, `SHOW INDEXES`, nil)
+	require.NoError(t, err)
+
+	foundUniq := false
+	foundCompKey := false
+	for _, row := range result.Rows {
+		name := row[1].(string)
+		entityType := row[5].(string)
+		owningConstraint := row[9]
+
+		switch name {
+		case "rel_uniq_index":
+			foundUniq = true
+			require.Equal(t, "RELATIONSHIP", entityType, "backing index should have RELATIONSHIP entity type")
+			require.Equal(t, "rel_uniq", owningConstraint, "backing index should reference owning constraint")
+			props := row[7].([]string)
+			require.Equal(t, []string{"since"}, props)
+		case "rel_comp_key_index":
+			foundCompKey = true
+			require.Equal(t, "RELATIONSHIP", entityType)
+			require.Equal(t, "rel_comp_key", owningConstraint)
+			props := row[7].([]string)
+			require.Equal(t, []string{"dept", "role"}, props, "composite key index should have all properties")
+		}
+	}
+	require.True(t, foundUniq, "expected to find rel_uniq_index in SHOW INDEXES")
+	require.True(t, foundCompKey, "expected to find rel_comp_key_index in SHOW INDEXES")
 }

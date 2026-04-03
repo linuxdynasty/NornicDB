@@ -19,10 +19,16 @@ func TestSchemaManager(t *testing.T) {
 			t.Fatalf("Failed to add constraint: %v", err)
 		}
 
-		// Add again - should be idempotent
+		// Add again without IF NOT EXISTS - should error
 		err = sm.AddUniqueConstraint("test_constraint", "User", "email")
+		if err == nil {
+			t.Fatalf("Expected error for duplicate constraint without IF NOT EXISTS")
+		}
+
+		// Add again with IF NOT EXISTS - should be idempotent
+		err = sm.AddUniqueConstraint("test_constraint", "User", "email", true)
 		if err != nil {
-			t.Fatalf("Failed to add constraint again: %v", err)
+			t.Fatalf("Failed with IF NOT EXISTS: %v", err)
 		}
 
 		constraints := sm.GetConstraints()
@@ -1136,13 +1142,18 @@ func TestSchemaManager_PersistenceErrorRollback(t *testing.T) {
 		assert.False(t, exists)
 	})
 
-	t.Run("AddPropertyTypeConstraint duplicate is no-op", func(t *testing.T) {
+	t.Run("AddPropertyTypeConstraint duplicate errors without IF NOT EXISTS", func(t *testing.T) {
 		sm := NewSchemaManager()
 		err := sm.AddPropertyTypeConstraint("ptc1", "Person", "age", PropertyTypeInteger)
 		require.NoError(t, err)
 
-		// Adding same name again should be a no-op (return nil)
+		// Adding same name again without IF NOT EXISTS should error
 		err = sm.AddPropertyTypeConstraint("ptc1", "Person", "age", PropertyTypeInteger)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "already exists")
+
+		// Adding same name with IF NOT EXISTS should be no-op
+		err = sm.AddPropertyTypeConstraintWithOptions("ptc1", "Person", "age", PropertyTypeInteger, PropertyTypeConstraintOptions{IfNotExists: true})
 		assert.NoError(t, err)
 	})
 }
