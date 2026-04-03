@@ -17,6 +17,9 @@ func (b *BadgerEngine) ValidateConstraintOnCreation(c Constraint) error {
 // ValidateConstraintOnCreationForEngine validates constraints using the Engine interface.
 // This allows callers (like Cypher) to validate through wrapper engines (namespaced, WAL, etc.).
 func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
+	if c.EffectiveEntityType() == ConstraintEntityRelationship {
+		return validateRelationshipConstraintOnCreationForEngine(engine, c)
+	}
 	switch c.Type {
 	case ConstraintUnique:
 		return validateUniqueConstraintOnCreationWithEngine(engine, c)
@@ -29,6 +32,121 @@ func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
 	default:
 		return fmt.Errorf("unknown constraint type: %s", c.Type)
 	}
+}
+
+// validateRelationshipConstraintOnCreationForEngine validates relationship constraints
+// using the Engine interface. It scans all edges for violations.
+func validateRelationshipConstraintOnCreationForEngine(engine Engine, c Constraint) error {
+	edges, err := engine.AllEdges()
+	if err != nil {
+		return fmt.Errorf("scanning edges: %w", err)
+	}
+
+	switch c.Type {
+	case ConstraintUnique:
+		return validateRelUniquenessOnEdges(edges, c)
+	case ConstraintExists:
+		return validateRelExistenceOnEdges(edges, c)
+	case ConstraintPropertyType:
+		// Handled separately via PropertyTypeConstraint path
+		return nil
+	case ConstraintRelationshipKey:
+		// Relationship key = existence + uniqueness on all key properties
+		if err := validateRelExistenceOnEdges(edges, c); err != nil {
+			return err
+		}
+		return validateRelCompositeUniquenessOnEdges(edges, c)
+	default:
+		return fmt.Errorf("unsupported relationship constraint type: %s", c.Type)
+	}
+}
+
+// validateRelUniquenessOnEdges checks uniqueness for relationship properties.
+func validateRelUniquenessOnEdges(edges []*Edge, c Constraint) error {
+	if len(c.Properties) == 1 {
+		property := c.Properties[0]
+		seen := make(map[interface{}]EdgeID)
+		for _, edge := range edges {
+			if edge.Type != c.Label {
+				continue
+			}
+			value := edge.Properties[property]
+			if value == nil {
+				continue
+			}
+			if existingID, found := seen[value]; found {
+				return &ConstraintViolationError{
+					Type:       ConstraintUnique,
+					Label:      c.Label,
+					Properties: []string{property},
+					Message: fmt.Sprintf("Cannot create UNIQUE constraint on relationship: edges %s and %s both have %s=%v",
+						existingID, edge.ID, property, value),
+				}
+			}
+			seen[value] = edge.ID
+		}
+		return nil
+	}
+	return validateRelCompositeUniquenessOnEdges(edges, c)
+}
+
+// validateRelCompositeUniquenessOnEdges checks composite uniqueness for relationship properties.
+func validateRelCompositeUniquenessOnEdges(edges []*Edge, c Constraint) error {
+	type compositeKey string
+	seen := make(map[compositeKey]EdgeID)
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		// Build composite key — skip if any property is nil
+		allPresent := true
+		parts := make([]string, len(c.Properties))
+		for i, prop := range c.Properties {
+			val := edge.Properties[prop]
+			if val == nil {
+				allPresent = false
+				break
+			}
+			parts[i] = fmt.Sprintf("%v", val)
+		}
+		if !allPresent {
+			continue
+		}
+		key := compositeKey(strings.Join(parts, "\x00"))
+		if existingID, found := seen[key]; found {
+			return &ConstraintViolationError{
+				Type:       ConstraintUnique,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message: fmt.Sprintf("Cannot create UNIQUE constraint on relationship: edges %s and %s have duplicate composite key %v",
+					existingID, edge.ID, parts),
+			}
+		}
+		seen[key] = edge.ID
+	}
+	return nil
+}
+
+// validateRelExistenceOnEdges checks existence for relationship properties.
+func validateRelExistenceOnEdges(edges []*Edge, c Constraint) error {
+	for _, edge := range edges {
+		if edge.Type != c.Label {
+			continue
+		}
+		for _, prop := range c.Properties {
+			value := edge.Properties[prop]
+			if value == nil {
+				return &ConstraintViolationError{
+					Type:       ConstraintExists,
+					Label:      c.Label,
+					Properties: []string{prop},
+					Message: fmt.Sprintf("Cannot create constraint on relationship: edge %s is missing required property %s",
+						edge.ID, prop),
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // validateUniqueConstraintOnCreation checks all existing nodes for duplicates.
@@ -318,10 +436,19 @@ func (b *BadgerEngine) validateExistenceRelationshipConstraint(rc RelationshipCo
 
 // PropertyTypeConstraint represents a type constraint on properties.
 type PropertyTypeConstraint struct {
-	Name         string       `json:"name"`
-	Label        string       `json:"label"`
-	Property     string       `json:"property"`
-	ExpectedType PropertyType `json:"expected_type"`
+	Name         string               `json:"name"`
+	EntityType   ConstraintEntityType `json:"entity_type,omitempty"` // defaults to NODE when empty
+	Label        string               `json:"label"`                 // label for nodes, relationship type for relationships
+	Property     string               `json:"property"`
+	ExpectedType PropertyType         `json:"expected_type"`
+}
+
+// EffectiveEntityType returns the entity type, defaulting to NODE for backward compatibility.
+func (c PropertyTypeConstraint) EffectiveEntityType() ConstraintEntityType {
+	if c.EntityType == "" {
+		return ConstraintEntityNode
+	}
+	return c.EntityType
 }
 
 // PropertyType represents the expected type of a property.
@@ -458,6 +585,10 @@ func (b *BadgerEngine) ValidatePropertyTypeConstraintOnCreation(ptc PropertyType
 
 // ValidatePropertyTypeConstraintOnCreationForEngine validates type constraints using Engine.
 func ValidatePropertyTypeConstraintOnCreationForEngine(engine Engine, ptc PropertyTypeConstraint) error {
+	if ptc.EffectiveEntityType() == ConstraintEntityRelationship {
+		return validateRelPropertyTypeOnCreationForEngine(engine, ptc)
+	}
+
 	nodes, err := engine.GetNodesByLabel(ptc.Label)
 	if err != nil {
 		return fmt.Errorf("scanning nodes: %w", err)
@@ -467,6 +598,26 @@ func ValidatePropertyTypeConstraintOnCreationForEngine(engine Engine, ptc Proper
 		value := node.Properties[ptc.Property]
 		if err := ValidatePropertyType(value, ptc.ExpectedType); err != nil {
 			return fmt.Errorf("node %s property %s: %w", node.ID, ptc.Property, err)
+		}
+	}
+
+	return nil
+}
+
+// validateRelPropertyTypeOnCreationForEngine validates property type constraints on relationships.
+func validateRelPropertyTypeOnCreationForEngine(engine Engine, ptc PropertyTypeConstraint) error {
+	edges, err := engine.AllEdges()
+	if err != nil {
+		return fmt.Errorf("scanning edges: %w", err)
+	}
+
+	for _, edge := range edges {
+		if edge.Type != ptc.Label {
+			continue
+		}
+		value := edge.Properties[ptc.Property]
+		if err := ValidatePropertyType(value, ptc.ExpectedType); err != nil {
+			return fmt.Errorf("relationship %s property %s: %w", edge.ID, ptc.Property, err)
 		}
 	}
 

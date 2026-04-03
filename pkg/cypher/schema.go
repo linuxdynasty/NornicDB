@@ -458,6 +458,296 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
+	// =========================================================================
+	// Relationship constraint patterns
+	// =========================================================================
+
+	// Relationship KEY constraints (composite properties) — must be checked before composite UNIQUE
+	if matches := constraintRelNamedForRequireRelKey.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		properties := e.parseConstraintProperties(matches[4])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
+		}
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintRelationshipKey,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireRelKey.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("RELATIONSHIP KEY constraint requires properties")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_rel_key", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintRelationshipKey,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship single-property KEY
+	if matches := constraintRelNamedForRequireSingleRelKey.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintRelationshipKey,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireSingleRelKey.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		constraintName := fmt.Sprintf("constraint_%s_%s_rel_key", strings.ToLower(relType), strings.ToLower(property))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintRelationshipKey,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship composite UNIQUE constraints — must be checked before single-property UNIQUE
+	if matches := constraintRelNamedForRequireCompositeUnique.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		properties := e.parseConstraintProperties(matches[4])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("UNIQUE constraint requires properties")
+		}
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireCompositeUnique.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("UNIQUE constraint requires properties")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(relType), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship single-property UNIQUE
+	if matches := constraintRelNamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequire.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		constraintName := fmt.Sprintf("constraint_%s_%s_unique", strings.ToLower(relType), strings.ToLower(property))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship EXISTS / NOT NULL
+	if matches := constraintRelNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(relType), strings.ToLower(property))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			EntityType: storage.ConstraintEntityRelationship,
+			Label:      relType,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Relationship property type constraints
+	if matches := constraintRelNamedForRequireType.FindStringSubmatch(cypher); matches != nil {
+		constraintName := normalizeIdentifierToken(matches[1])
+		relType := normalizeIdentifierToken(matches[3])
+		property := normalizeIdentifierToken(matches[5])
+		expectedType, err := parsePropertyType(matches[6])
+		if err != nil {
+			return nil, err
+		}
+		ptc := storage.PropertyTypeConstraint{
+			Name:         constraintName,
+			EntityType:   storage.ConstraintEntityRelationship,
+			Label:        relType,
+			Property:     property,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, relType, property, expectedType, storage.ConstraintEntityRelationship); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintRelUnnamedForRequireType.FindStringSubmatch(cypher); matches != nil {
+		relType := normalizeIdentifierToken(matches[2])
+		property := normalizeIdentifierToken(matches[4])
+		expectedType, err := parsePropertyType(matches[5])
+		if err != nil {
+			return nil, err
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(relType), strings.ToLower(property))
+		ptc := storage.PropertyTypeConstraint{
+			Name:         constraintName,
+			EntityType:   storage.ConstraintEntityRelationship,
+			Label:        relType,
+			Property:     property,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, relType, property, expectedType, storage.ConstraintEntityRelationship); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	return nil, fmt.Errorf("invalid CREATE CONSTRAINT syntax")
 }
 

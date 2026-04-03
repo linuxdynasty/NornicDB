@@ -248,6 +248,16 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 			if _, err := txn.Get(nodeKey(edge.EndNode)); err == badger.ErrKeyNotFound {
 				return ErrNotFound
 			}
+
+			// Validate relationship constraints
+			if dbName, _, ok := ParseDatabasePrefix(string(edge.ID)); ok {
+				schema := b.GetSchemaForNamespace(dbName)
+				if schema != nil {
+					if err := b.validateEdgeConstraintsInTxn(txn, edge, schema, dbName, ""); err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		// Insert all edges

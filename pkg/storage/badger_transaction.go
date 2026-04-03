@@ -1663,6 +1663,175 @@ func (tx *BadgerTransaction) validateAllConstraints() error {
 			return err
 		}
 	}
+	for _, edge := range tx.pendingEdges {
+		if err := tx.validateEdgeConstraints(edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateEdgeConstraints checks relationship constraints for an edge in a transaction.
+func (tx *BadgerTransaction) validateEdgeConstraints(edge *Edge) error {
+	if edge == nil || edge.Type == "" {
+		return nil
+	}
+	dbName, _, ok := ParseDatabasePrefix(string(edge.ID))
+	if !ok {
+		return nil
+	}
+	schema := tx.engine.GetSchemaForNamespace(dbName)
+	if schema == nil {
+		return nil
+	}
+
+	constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+	for _, c := range constraints {
+		if c.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		switch c.Type {
+		case ConstraintUnique:
+			if err := tx.checkEdgeUniqueness(edge, c); err != nil {
+				return err
+			}
+		case ConstraintExists:
+			if err := checkEdgeExistence(edge, c); err != nil {
+				return err
+			}
+		case ConstraintRelationshipKey:
+			if err := checkEdgeExistence(edge, c); err != nil {
+				return err
+			}
+			if err := tx.checkEdgeUniqueness(edge, c); err != nil {
+				return err
+			}
+		}
+	}
+
+	ptConstraints := schema.GetPropertyTypeConstraintsForLabels([]string{edge.Type})
+	for _, ptc := range ptConstraints {
+		if ptc.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		value := edge.Properties[ptc.Property]
+		if err := ValidatePropertyType(value, ptc.ExpectedType); err != nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintPropertyType,
+				Label:      edge.Type,
+				Properties: []string{ptc.Property},
+				Message:    fmt.Sprintf("Property %s must be %s (%v)", ptc.Property, ptc.ExpectedType, err),
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkEdgeUniqueness checks uniqueness constraints for an edge against pending and committed edges.
+func (tx *BadgerTransaction) checkEdgeUniqueness(edge *Edge, c Constraint) error {
+	// Check against other pending edges in this transaction
+	for id, otherEdge := range tx.pendingEdges {
+		if id == edge.ID || otherEdge.Type != edge.Type {
+			continue
+		}
+		if len(c.Properties) == 1 {
+			prop := c.Properties[0]
+			newVal := edge.Properties[prop]
+			if newVal == nil {
+				return nil
+			}
+			otherVal := otherEdge.Properties[prop]
+			if otherVal != nil && compareValues(otherVal, newVal) {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: []string{prop},
+					Message:    fmt.Sprintf("Relationship with %s=%v already exists (edgeID: %s)", prop, newVal, otherEdge.ID),
+				}
+			}
+		} else {
+			allMatch := true
+			allPresent := true
+			for _, prop := range c.Properties {
+				newVal := edge.Properties[prop]
+				if newVal == nil {
+					allPresent = false
+					break
+				}
+				otherVal := otherEdge.Properties[prop]
+				if otherVal == nil || !compareValues(otherVal, newVal) {
+					allMatch = false
+					break
+				}
+			}
+			if !allPresent {
+				return nil
+			}
+			if allMatch {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: c.Properties,
+					Message:    fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", otherEdge.ID),
+				}
+			}
+		}
+	}
+
+	// Check against committed edges via the engine
+	existingEdges, err := tx.engine.GetEdgesByType(edge.Type)
+	if err != nil {
+		return nil // If we can't read edges, skip check rather than block
+	}
+	for _, existingEdge := range existingEdges {
+		if existingEdge.ID == edge.ID {
+			continue
+		}
+		if len(c.Properties) == 1 {
+			prop := c.Properties[0]
+			newVal := edge.Properties[prop]
+			if newVal == nil {
+				return nil
+			}
+			existVal := existingEdge.Properties[prop]
+			if existVal != nil && compareValues(existVal, newVal) {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: []string{prop},
+					Message:    fmt.Sprintf("Relationship with %s=%v already exists (edgeID: %s)", prop, newVal, existingEdge.ID),
+				}
+			}
+		} else {
+			allMatch := true
+			allPresent := true
+			for _, prop := range c.Properties {
+				newVal := edge.Properties[prop]
+				if newVal == nil {
+					allPresent = false
+					break
+				}
+				existVal := existingEdge.Properties[prop]
+				if existVal == nil || !compareValues(existVal, newVal) {
+					allMatch = false
+					break
+				}
+			}
+			if !allPresent {
+				return nil
+			}
+			if allMatch {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: c.Properties,
+					Message:    fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", existingEdge.ID),
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

@@ -68,8 +68,10 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 			def.Constraints = append(def.Constraints, Constraint{
 				Name:       c.Name,
 				Type:       c.Type,
+				EntityType: c.EntityType,
 				Label:      c.Label,
 				Properties: props,
+				OwnedIndex: c.OwnedIndex,
 			})
 		}
 		sort.Slice(def.Constraints, func(i, j int) bool {
@@ -86,6 +88,7 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 		for _, c := range sm.propertyTypeConstraints {
 			def.PropertyTypeConstraints = append(def.PropertyTypeConstraints, PropertyTypeConstraint{
 				Name:         c.Name,
+				EntityType:   c.EntityType,
 				Label:        c.Label,
 				Property:     c.Property,
 				ExpectedType: c.ExpectedType,
@@ -222,8 +225,10 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 		cc := Constraint{
 			Name:       c.Name,
 			Type:       c.Type,
+			EntityType: c.EntityType,
 			Label:      c.Label,
 			Properties: props,
+			OwnedIndex: c.OwnedIndex,
 		}
 		sm.constraints[cc.Name] = cc
 
@@ -242,6 +247,7 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 	for _, c := range def.PropertyTypeConstraints {
 		sm.propertyTypeConstraints[c.Name] = PropertyTypeConstraint{
 			Name:         c.Name,
+			EntityType:   c.EntityType,
 			Label:        c.Label,
 			Property:     c.Property,
 			ExpectedType: c.ExpectedType,

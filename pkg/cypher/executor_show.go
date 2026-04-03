@@ -97,14 +97,18 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 	if schema != nil {
 		constraints := schema.GetAllConstraints()
 		for i, constraint := range constraints {
+			var ownedIndex interface{}
+			if constraint.OwnedIndex != "" {
+				ownedIndex = constraint.OwnedIndex
+			}
 			rows = append(rows, []interface{}{
 				int64(i + 1),
 				constraint.Name,
 				string(constraint.Type),
-				"NODE",
+				string(constraint.EffectiveEntityType()),
 				[]string{constraint.Label},
 				constraint.Properties,
-				nil,
+				ownedIndex,
 				nil,
 			})
 		}
@@ -115,7 +119,7 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 				int64(offset + i + 1),
 				constraint.Name,
 				string(storage.ConstraintPropertyType),
-				"NODE",
+				string(constraint.EffectiveEntityType()),
 				[]string{constraint.Label},
 				[]string{constraint.Property},
 				nil,

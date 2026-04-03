@@ -51,6 +51,34 @@ var (
 	constraintUnnamedForRequireType = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
 	constraintOnAssertType          = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\(\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\)\s+ASSERT\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
 
+	// =========================================================================
+	// Relationship constraint patterns - CREATE CONSTRAINT ... FOR ()-[r:TYPE]-() REQUIRE ...
+	// =========================================================================
+
+	// Relationship UNIQUE constraints (single property)
+	constraintRelNamedForRequire   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequire = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+
+	// Relationship EXISTS / NOT NULL constraints
+	constraintRelNamedForRequireNotNull   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireNotNull = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+NOT\s+NULL` + ddlOptionsTail + `\s*$`)
+
+	// Relationship property type constraints
+	constraintRelNamedForRequireType   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireType = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)` + ddlOptionsTail + `\s*$`)
+
+	// Relationship KEY constraints (composite properties)
+	constraintRelNamedForRequireRelKey   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireRelKey = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
+
+	// Relationship composite UNIQUE constraints (parenthesized multi-property)
+	constraintRelNamedForRequireCompositeUnique   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireCompositeUnique = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+UNIQUE` + ddlOptionsTail + `\s*$`)
+
+	// Relationship single-property KEY constraint (non-composite form)
+	constraintRelNamedForRequireSingleRelKey   = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT\s+(` + ddlIdentifierToken + `)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
+	constraintRelUnnamedForRequireSingleRelKey = regexp.MustCompile(`(?is)^\s*CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\(\s*\)\s*-\s*\[\s*(` + ddlVariableToken + `)\s*:\s*(` + ddlIdentifierToken + `)\s*\]\s*-\s*\(\s*\)\s+REQUIRE\s+(` + ddlVariableToken + `)\s*\.\s*(` + ddlIdentifierToken + `)\s+IS\s+RELATIONSHIP\s+KEY` + ddlOptionsTail + `\s*$`)
+
 	// DROP CONSTRAINT
 	dropConstraintPattern = regexp.MustCompile(`(?is)^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(` + ddlIdentifierToken + `)(?:\s+IF\s+EXISTS)?\s*$`)
 

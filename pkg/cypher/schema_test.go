@@ -1119,3 +1119,391 @@ func TestCreateVectorIndex_DuplicateErrorBranch(t *testing.T) {
 		t.Fatalf("expected conflicting vector index to be idempotent, got: %v", err)
 	}
 }
+
+// =============================================================================
+// Relationship Constraint DDL Tests
+// =============================================================================
+
+func TestRelationshipUniqueConstraint_DDL(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("named single property", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_unique_order FOR ()-[r:SEQUEL_OF]-() REQUIRE r.order IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Name == "rel_unique_order" {
+				require.Equal(t, storage.ConstraintUnique, c.Type)
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, "SEQUEL_OF", c.Label)
+				require.Equal(t, []string{"order"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "constraint rel_unique_order not found")
+	})
+
+	t.Run("unnamed single property", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:WROTE]-() REQUIRE r.year IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Label == "WROTE" && c.Type == storage.ConstraintUnique {
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, []string{"year"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "unnamed WROTE uniqueness constraint not found")
+	})
+
+	t.Run("named composite UNIQUE", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT prequel_composite FOR ()-[r:PREQUEL_OF]-() REQUIRE (r.order, r.author) IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Name == "prequel_composite" {
+				require.Equal(t, storage.ConstraintUnique, c.Type)
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, "PREQUEL_OF", c.Label)
+				require.Equal(t, []string{"order", "author"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "composite uniqueness constraint not found")
+	})
+
+	t.Run("IF NOT EXISTS is no-op for existing", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_unique_order IF NOT EXISTS FOR ()-[r:SEQUEL_OF]-() REQUIRE r.order IS UNIQUE`, nil)
+		require.NoError(t, err)
+	})
+}
+
+func TestRelationshipExistsConstraint_DDL(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("named", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT wrote_year_exists FOR ()-[r:WROTE]-() REQUIRE r.year IS NOT NULL`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Name == "wrote_year_exists" {
+				require.Equal(t, storage.ConstraintExists, c.Type)
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, "WROTE", c.Label)
+				require.Equal(t, []string{"year"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "constraint wrote_year_exists not found")
+	})
+
+	t.Run("unnamed", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:FOLLOWS]-() REQUIRE r.since IS NOT NULL`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Label == "FOLLOWS" && c.Type == storage.ConstraintExists {
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				found = true
+			}
+		}
+		require.True(t, found, "unnamed FOLLOWS exists constraint not found")
+	})
+}
+
+func TestRelationshipPropertyTypeConstraint_DDL(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("named INTEGER type", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT part_of_order_type FOR ()-[r:PART_OF]-() REQUIRE r.order IS :: INTEGER`, nil)
+		require.NoError(t, err)
+
+		allPtc := store.GetSchema().GetAllPropertyTypeConstraints()
+		found := false
+		for _, ptc := range allPtc {
+			if ptc.Name == "part_of_order_type" {
+				require.Equal(t, "PART_OF", ptc.Label)
+				require.Equal(t, "order", ptc.Property)
+				require.Equal(t, storage.PropertyTypeInteger, ptc.ExpectedType)
+				found = true
+			}
+		}
+		require.True(t, found, "constraint part_of_order_type not found")
+	})
+
+	t.Run("unnamed STRING type", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.how IS :: STRING`, nil)
+		require.NoError(t, err)
+	})
+}
+
+func TestRelationshipKeyConstraint_DDL(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("named single property", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT owns_key FOR ()-[r:OWNS]-() REQUIRE r.ownershipId IS RELATIONSHIP KEY`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Name == "owns_key" {
+				require.Equal(t, storage.ConstraintRelationshipKey, c.Type)
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, "OWNS", c.Label)
+				require.Equal(t, []string{"ownershipId"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "constraint owns_key not found")
+	})
+
+	t.Run("named composite key", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT knows_key FOR ()-[r:KNOWS]-() REQUIRE (r.since, r.how) IS RELATIONSHIP KEY`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		found := false
+		for _, c := range all {
+			if c.Name == "knows_key" {
+				require.Equal(t, storage.ConstraintRelationshipKey, c.Type)
+				require.Equal(t, storage.ConstraintEntityRelationship, c.EntityType)
+				require.Equal(t, "KNOWS", c.Label)
+				require.Equal(t, []string{"since", "how"}, c.Properties)
+				found = true
+			}
+		}
+		require.True(t, found, "constraint knows_key not found")
+	})
+
+	t.Run("unnamed single key", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:MANAGES]-() REQUIRE r.roleId IS RELATIONSHIP KEY`, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("unnamed composite key", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT FOR ()-[r:REPORTS_TO]-() REQUIRE (r.dept, r.level) IS RELATIONSHIP KEY`, nil)
+		require.NoError(t, err)
+	})
+}
+
+func TestRelationshipConstraint_ShowConstraints(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create a node constraint and a relationship constraint
+	_, err := exec.Execute(ctx, `CREATE CONSTRAINT node_unique FOR (n:Person) REQUIRE n.email IS UNIQUE`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `CREATE CONSTRAINT rel_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+	require.NoError(t, err)
+
+	// SHOW CONSTRAINTS should show both with correct entity types
+	result, err := exec.Execute(ctx, "SHOW CONSTRAINTS", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 2)
+
+	entityTypes := map[string]string{}
+	for _, row := range result.Rows {
+		name := row[1].(string)
+		entityType := row[3].(string)
+		entityTypes[name] = entityType
+	}
+
+	require.Equal(t, "NODE", entityTypes["node_unique"])
+	require.Equal(t, "RELATIONSHIP", entityTypes["rel_unique"])
+}
+
+func TestRelationshipConstraint_OwnedBackingIndex(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("uniqueness constraint creates owned index", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_u FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		// Check SHOW CONSTRAINTS returns the owned index
+		result, err := exec.Execute(ctx, "SHOW CONSTRAINTS", nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		require.Equal(t, "rel_u_index", result.Rows[0][6]) // ownedIndex column
+	})
+
+	t.Run("dropping constraint drops owned index", func(t *testing.T) {
+		// Verify index exists
+		result, err := exec.Execute(ctx, "SHOW INDEXES", nil)
+		require.NoError(t, err)
+		indexFound := false
+		for _, row := range result.Rows {
+			if name, ok := row[1].(string); ok && name == "rel_u_index" {
+				indexFound = true
+			}
+		}
+		require.True(t, indexFound, "owned index should exist before drop")
+
+		// Drop the constraint
+		_, err = exec.Execute(ctx, "DROP CONSTRAINT rel_u", nil)
+		require.NoError(t, err)
+
+		// Verify index is gone
+		result, err = exec.Execute(ctx, "SHOW INDEXES", nil)
+		require.NoError(t, err)
+		for _, row := range result.Rows {
+			if name, ok := row[1].(string); ok {
+				require.NotEqual(t, "rel_u_index", name, "owned index should be dropped with constraint")
+			}
+		}
+	})
+
+	t.Run("relationship key creates owned index", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_key FOR ()-[r:OWNS]-() REQUIRE r.ownershipId IS RELATIONSHIP KEY`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		for _, c := range all {
+			if c.Name == "rel_key" {
+				require.Equal(t, "rel_key_index", c.OwnedIndex)
+			}
+		}
+	})
+
+	t.Run("existence constraint does NOT create owned index", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT rel_exists FOR ()-[r:FOLLOWS]-() REQUIRE r.since IS NOT NULL`, nil)
+		require.NoError(t, err)
+
+		all := store.GetSchema().GetAllConstraints()
+		for _, c := range all {
+			if c.Name == "rel_exists" {
+				require.Empty(t, c.OwnedIndex, "existence constraint should not have an owned index")
+			}
+		}
+	})
+}
+
+func TestRelationshipConstraint_ConflictDetection(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("same name different schema errors", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT dup_name FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT dup_name FOR ()-[r:FOLLOWS]-() REQUIRE r.year IS UNIQUE`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "already exists")
+	})
+
+	t.Run("same schema same type different name is no-op", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT another_name FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+		require.NoError(t, err) // no-op, equivalent constraint already exists
+	})
+
+	t.Run("uniqueness vs relationship key conflict", func(t *testing.T) {
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT owns_unique FOR ()-[r:OWNS]-() REQUIRE r.ownershipId IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		_, err = exec.Execute(ctx, `CREATE CONSTRAINT owns_key FOR ()-[r:OWNS]-() REQUIRE r.ownershipId IS RELATIONSHIP KEY`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "conflicting")
+	})
+}
+
+func TestRelationshipConstraint_EnforcementOnWrite(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Set up test data
+	_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:Person {name: "Bob"})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:Person {name: "Charlie"})`, nil)
+	require.NoError(t, err)
+
+	t.Run("uniqueness enforcement on create", func(t *testing.T) {
+		// Create uniqueness constraint
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT knows_since_u FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+		require.NoError(t, err)
+
+		// Create a relationship — should succeed
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS {since: 2020}]->(b)`, nil)
+		require.NoError(t, err)
+
+		// Create another relationship with duplicate 'since' — should fail
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (c:Person {name: "Charlie"}) CREATE (a)-[:KNOWS {since: 2020}]->(c)`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "already exists")
+	})
+
+	t.Run("existence enforcement on create", func(t *testing.T) {
+		// Create existence constraint
+		_, err := exec.Execute(ctx, `CREATE CONSTRAINT follows_reason FOR ()-[r:FOLLOWS]-() REQUIRE r.reason IS NOT NULL`, nil)
+		require.NoError(t, err)
+
+		// Create a relationship without the required property — should fail
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:FOLLOWS]->(b)`, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "Required property")
+
+		// Create with the required property — should succeed
+		_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:FOLLOWS {reason: "friend"}]->(b)`, nil)
+		require.NoError(t, err)
+	})
+}
+
+func TestRelationshipConstraint_ValidationOnCreation(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create nodes and a relationship with a duplicate property value
+	_, err := exec.Execute(ctx, `CREATE (:Person {name: "Alice"})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:Person {name: "Bob"})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (:Person {name: "Charlie"})`, nil)
+	require.NoError(t, err)
+
+	// Create relationships with duplicate 'since' values
+	_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS {since: 2020}]->(b)`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `MATCH (a:Person {name: "Alice"}), (b:Person {name: "Charlie"}) CREATE (a)-[:KNOWS {since: 2020}]->(b)`, nil)
+	require.NoError(t, err)
+
+	// Creating a uniqueness constraint should fail because of duplicate values
+	_, err = exec.Execute(ctx, `CREATE CONSTRAINT knows_since_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE`, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "UNIQUE")
+}

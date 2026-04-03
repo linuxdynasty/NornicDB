@@ -215,3 +215,127 @@ func TestBadgerEngine_RelationshipConstraintValidationErrors(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "exactly 1 property")
 }
+
+// TestConstraintEntityType verifies that the EntityType field defaults correctly
+// and that EffectiveEntityType returns the right value for both node and relationship constraints.
+func TestConstraintEntityType(t *testing.T) {
+	// A constraint with no EntityType set should default to NODE.
+	nodeConstraint := Constraint{
+		Name:       "node_unique",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	}
+	require.Equal(t, ConstraintEntityType(""), nodeConstraint.EntityType, "zero-value EntityType should be empty string")
+	require.Equal(t, ConstraintEntityNode, nodeConstraint.EffectiveEntityType(), "EffectiveEntityType should default to NODE")
+
+	// A constraint explicitly set to NODE.
+	nodeConstraint.EntityType = ConstraintEntityNode
+	require.Equal(t, ConstraintEntityNode, nodeConstraint.EffectiveEntityType())
+
+	// A constraint set to RELATIONSHIP.
+	relConstraint := Constraint{
+		Name:       "rel_unique",
+		Type:       ConstraintUnique,
+		EntityType: ConstraintEntityRelationship,
+		Label:      "KNOWS",
+		Properties: []string{"since"},
+	}
+	require.Equal(t, ConstraintEntityRelationship, relConstraint.EffectiveEntityType())
+
+	// PropertyTypeConstraint follows the same pattern.
+	ptcNode := PropertyTypeConstraint{
+		Name:         "ptc_node",
+		Label:        "Person",
+		Property:     "age",
+		ExpectedType: PropertyTypeInteger,
+	}
+	require.Equal(t, ConstraintEntityNode, ptcNode.EffectiveEntityType(), "PropertyTypeConstraint should default to NODE")
+
+	ptcRel := PropertyTypeConstraint{
+		Name:         "ptc_rel",
+		EntityType:   ConstraintEntityRelationship,
+		Label:        "KNOWS",
+		Property:     "since",
+		ExpectedType: PropertyTypeInteger,
+	}
+	require.Equal(t, ConstraintEntityRelationship, ptcRel.EffectiveEntityType())
+}
+
+// TestConstraintEntityTypeInSchemaManager verifies that constraints stored in SchemaManager
+// preserve their EntityType through AddConstraint and GetAllConstraints.
+func TestConstraintEntityTypeInSchemaManager(t *testing.T) {
+	sm := NewSchemaManager()
+
+	// Add a node constraint (EntityType left empty — should default to NODE).
+	err := sm.AddConstraint(Constraint{
+		Name:       "node_unique_email",
+		Type:       ConstraintUnique,
+		Label:      "Person",
+		Properties: []string{"email"},
+	})
+	require.NoError(t, err)
+
+	// Add a relationship constraint.
+	err = sm.AddConstraint(Constraint{
+		Name:       "rel_unique_since",
+		Type:       ConstraintUnique,
+		EntityType: ConstraintEntityRelationship,
+		Label:      "KNOWS",
+		Properties: []string{"since"},
+	})
+	require.NoError(t, err)
+
+	allConstraints := sm.GetAllConstraints()
+	require.Len(t, allConstraints, 2)
+
+	found := map[string]Constraint{}
+	for _, c := range allConstraints {
+		found[c.Name] = c
+	}
+
+	nodeC := found["node_unique_email"]
+	require.Equal(t, ConstraintEntityNode, nodeC.EffectiveEntityType())
+
+	relC := found["rel_unique_since"]
+	require.Equal(t, ConstraintEntityRelationship, relC.EffectiveEntityType())
+	require.Equal(t, ConstraintEntityRelationship, relC.EntityType)
+}
+
+// TestConstraintEntityTypePersistence verifies that EntityType survives export/import.
+func TestConstraintEntityTypePersistence(t *testing.T) {
+	sm := NewSchemaManager()
+
+	// Add both node and relationship constraints.
+	require.NoError(t, sm.AddConstraint(Constraint{
+		Name:       "node_exists",
+		Type:       ConstraintExists,
+		Label:      "Person",
+		Properties: []string{"name"},
+	}))
+	require.NoError(t, sm.AddConstraint(Constraint{
+		Name:       "rel_unique",
+		Type:       ConstraintUnique,
+		EntityType: ConstraintEntityRelationship,
+		Label:      "KNOWS",
+		Properties: []string{"since"},
+	}))
+
+	// Export and reimport.
+	def := sm.ExportDefinition()
+	require.Len(t, def.Constraints, 2)
+
+	sm2 := NewSchemaManager()
+	require.NoError(t, sm2.ReplaceFromDefinition(def))
+
+	all := sm2.GetAllConstraints()
+	require.Len(t, all, 2)
+
+	found := map[string]Constraint{}
+	for _, c := range all {
+		found[c.Name] = c
+	}
+
+	require.Equal(t, ConstraintEntityNode, found["node_exists"].EffectiveEntityType())
+	require.Equal(t, ConstraintEntityRelationship, found["rel_unique"].EntityType)
+}

@@ -420,3 +420,167 @@ func constraintValueKey(value interface{}) string {
 func constraintCompositeKey(values []interface{}) string {
 	return NewCompositeKey(values...).Hash
 }
+
+// validateEdgeConstraintsInTxn checks all relationship constraints for an edge within a transaction.
+// The excludeEdgeID allows excluding the edge being updated from uniqueness checks.
+func (b *BadgerEngine) validateEdgeConstraintsInTxn(txn *badger.Txn, edge *Edge, schema *SchemaManager, namespace string, excludeEdgeID EdgeID) error {
+	if edge == nil || schema == nil || edge.Type == "" {
+		return nil
+	}
+
+	constraints := schema.GetConstraintsForLabels([]string{edge.Type})
+	for _, c := range constraints {
+		if c.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		switch c.Type {
+		case ConstraintUnique:
+			if err := b.checkEdgeUniquenessInTxn(txn, edge, c, namespace, excludeEdgeID); err != nil {
+				return err
+			}
+		case ConstraintExists:
+			if err := checkEdgeExistence(edge, c); err != nil {
+				return err
+			}
+		case ConstraintRelationshipKey:
+			// Relationship key = existence + uniqueness
+			if err := checkEdgeExistence(edge, c); err != nil {
+				return err
+			}
+			if err := b.checkEdgeUniquenessInTxn(txn, edge, c, namespace, excludeEdgeID); err != nil {
+				return err
+			}
+		}
+	}
+
+	ptConstraints := schema.GetPropertyTypeConstraintsForLabels([]string{edge.Type})
+	for _, ptc := range ptConstraints {
+		if ptc.EffectiveEntityType() != ConstraintEntityRelationship {
+			continue
+		}
+		value := edge.Properties[ptc.Property]
+		if err := ValidatePropertyType(value, ptc.ExpectedType); err != nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintPropertyType,
+				Label:      edge.Type,
+				Properties: []string{ptc.Property},
+				Message:    fmt.Sprintf("Property %s must be %s (%v)", ptc.Property, ptc.ExpectedType, err),
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkEdgeExistence validates that all required properties exist on the edge.
+func checkEdgeExistence(edge *Edge, c Constraint) error {
+	for _, prop := range c.Properties {
+		if edge.Properties == nil {
+			return &ConstraintViolationError{
+				Type:       c.Type,
+				Label:      edge.Type,
+				Properties: []string{prop},
+				Message:    fmt.Sprintf("Required property %s is missing on relationship", prop),
+			}
+		}
+		if val, ok := edge.Properties[prop]; !ok || val == nil {
+			return &ConstraintViolationError{
+				Type:       c.Type,
+				Label:      edge.Type,
+				Properties: []string{prop},
+				Message:    fmt.Sprintf("Required property %s is missing on relationship", prop),
+			}
+		}
+	}
+	return nil
+}
+
+// checkEdgeUniquenessInTxn scans all edges of the same type to check for uniqueness violations.
+func (b *BadgerEngine) checkEdgeUniquenessInTxn(txn *badger.Txn, edge *Edge, c Constraint, namespace string, excludeEdgeID EdgeID) error {
+	// Scan via edge type index
+	prefix := edgeTypeIndexPrefix(edge.Type)
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+
+	iter := txn.NewIterator(opts)
+	defer iter.Close()
+
+	nsPrefix := namespace + ":"
+	prefixLen := len(prefix)
+
+	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
+		key := iter.Item().Key()
+		// Edge type index key format: prefix + edgeType(lowercase) + 0x00 + edgeID
+		// The prefix already includes edgeType + 0x00, so edgeID is everything after prefix
+		edgeID := EdgeID(key[prefixLen:])
+		if edgeID == "" || edgeID == excludeEdgeID {
+			continue
+		}
+		if !strings.HasPrefix(string(edgeID), nsPrefix) {
+			continue
+		}
+
+		item, err := txn.Get(edgeKey(edgeID))
+		if err != nil {
+			continue
+		}
+
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			continue
+		}
+
+		existingEdge, err := decodeEdge(edgeBytes)
+		if err != nil {
+			continue
+		}
+
+		if len(c.Properties) == 1 {
+			prop := c.Properties[0]
+			newVal := edge.Properties[prop]
+			if newVal == nil {
+				return nil // NULL doesn't violate uniqueness
+			}
+			existVal := existingEdge.Properties[prop]
+			if existVal != nil && compareValues(existVal, newVal) {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: []string{prop},
+					Message:    fmt.Sprintf("Relationship with %s=%v already exists (edgeID: %s)", prop, newVal, existingEdge.ID),
+				}
+			}
+		} else {
+			// Composite uniqueness
+			allMatch := true
+			allPresent := true
+			for _, prop := range c.Properties {
+				newVal := edge.Properties[prop]
+				if newVal == nil {
+					allPresent = false
+					break
+				}
+				existVal := existingEdge.Properties[prop]
+				if existVal == nil || !compareValues(existVal, newVal) {
+					allMatch = false
+					break
+				}
+			}
+			if !allPresent {
+				return nil // NULL in composite key doesn't violate uniqueness
+			}
+			if allMatch {
+				return &ConstraintViolationError{
+					Type:       c.Type,
+					Label:      edge.Type,
+					Properties: c.Properties,
+					Message:    fmt.Sprintf("Relationship with duplicate composite key already exists (edgeID: %s)", existingEdge.ID),
+				}
+			}
+		}
+	}
+	return nil
+}
