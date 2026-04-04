@@ -5,7 +5,7 @@
 <h1 align="center">NornicDB</h1>
 
 <p align="center">
-  <strong>The Graph Database That Learns</strong><br/>
+  <strong>The Graph Database That Learns; Achieving Psygnosis for AI</strong><br/>
   Neo4j-compatible • GPU-accelerated • Memory that evolves
 </p>
 
