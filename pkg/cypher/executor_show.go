@@ -103,6 +103,9 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 			"SHOW CONSTRAINTS on composite databases requires a constituent target. " +
 			"Use USE <composite>.<alias> SHOW CONSTRAINTS")
 	}
+	if isShowConstraintContractsCommand(cypher) {
+		return e.executeShowConstraintContracts(ctx)
+	}
 	schema := e.storage.GetSchema()
 	rows := [][]interface{}{}
 
@@ -161,6 +164,38 @@ func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher str
 
 	return &ExecuteResult{
 		Columns: []string{"id", "name", "type", "entityType", "labelsOrTypes", "properties", "ownedIndex", "propertyType", "direction", "maxCount", "sourceLabel", "targetLabel", "policyMode"},
+		Rows:    rows,
+	}, nil
+}
+
+func (e *StorageExecutor) executeShowConstraintContracts(ctx context.Context) (*ExecuteResult, error) {
+	schema := e.storage.GetSchema()
+	rows := [][]interface{}{}
+	if schema != nil {
+		contracts := schema.GetAllConstraintContracts()
+		for _, contract := range contracts {
+			compiledCount := int64(0)
+			runtimeCount := int64(0)
+			for _, entry := range contract.Entries {
+				if strings.HasPrefix(entry.Kind, "primitive-") {
+					compiledCount++
+				} else {
+					runtimeCount++
+				}
+			}
+			rows = append(rows, []interface{}{
+				contract.Name,
+				contract.TargetEntityType,
+				contract.TargetLabelOrType,
+				int64(len(contract.Entries)),
+				compiledCount,
+				runtimeCount,
+				contract.Definition,
+			})
+		}
+	}
+	return &ExecuteResult{
+		Columns: []string{"name", "targetEntityType", "targetLabelOrType", "entryCount", "compiledEntryCount", "runtimeEntryCount", "definition"},
 		Rows:    rows,
 	}, nil
 }

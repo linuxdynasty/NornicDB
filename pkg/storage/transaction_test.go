@@ -275,6 +275,43 @@ func TestTransaction_UpdateNode(t *testing.T) {
 	}
 }
 
+func TestTransaction_CommitRejectsConstraintContractViolation(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	contract := ConstraintContract{
+		Name:              "person_contract",
+		TargetEntityType:  string(ConstraintEntityNode),
+		TargetLabelOrType: "Person",
+		Definition:        "CREATE CONSTRAINT person_contract FOR (n:Person) REQUIRE { n.status IN ['active', 'inactive'] }",
+		Entries: []ConstraintContractEntry{{
+			Kind:       ConstraintContractKindBooleanNode,
+			Expression: "n.status IN ['active', 'inactive']",
+		}},
+	}
+	require.NoError(t, engine.GetSchemaForNamespace("test").AddConstraintContractBundle(contract, nil, nil, false))
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	_, err = tx.CreateNode(&Node{
+		ID:     NodeID("test:contract-violator"),
+		Labels: []string{"Person"},
+		Properties: map[string]any{
+			"status": "paused",
+		},
+	})
+	require.NoError(t, err)
+
+	err = tx.Commit()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "constraint contract person_contract violated")
+	require.Contains(t, err.Error(), "n.status IN ['active', 'inactive']")
+
+	_, err = engine.GetNode(NodeID("test:contract-violator"))
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
 func TestTransaction_CreateEdge(t *testing.T) {
 	engine := NewMemoryEngine()
 

@@ -100,6 +100,7 @@ Uniqueness and key constraints on relationships automatically create owned backi
 
 - ✅ **SHOW INDEXES** - Display indexes
 - ✅ **SHOW CONSTRAINTS** - Display constraints
+- ✅ **SHOW CONSTRAINT CONTRACTS** - Display block-style constraint contract metadata
 - ✅ **SHOW PROCEDURES** - List procedures
 - ✅ **SHOW FUNCTIONS** - List functions
 - ✅ **SHOW DATABASE** - Database info

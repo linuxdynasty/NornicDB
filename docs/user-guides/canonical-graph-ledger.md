@@ -182,6 +182,95 @@ CALL db.constraints();
 SHOW INDEXES;
 ```
 
+### Block-style constraint contracts
+
+NornicDB also supports grouping several related checks into a single contract with `REQUIRE { ... }`. The block can mix primitive constraints that compile into existing schema objects with boolean predicates that are checked at creation time and on every write.
+
+#### Node contract example
+
+```cypher
+CREATE CONSTRAINT person_contract
+FOR (n:Person)
+REQUIRE {
+  n.id IS UNIQUE
+  n.name IS NOT NULL
+  n.age IS :: INTEGER
+  n.status IN ['active', 'inactive']
+  (n.tenant, n.externalId) IS NODE KEY
+  COUNT { (n)-[:PRIMARY_EMPLOYER]->(:Company) } <= 1
+}
+
+SHOW CONSTRAINT CONTRACTS
+```
+
+Expected `SHOW CONSTRAINT CONTRACTS` row:
+
+```text
+name              | targetEntityType | targetLabelOrType | entryCount | compiledEntryCount | runtimeEntryCount | definition
+person_contract   | NODE             | Person            | 6          | 5                  | 1                 | CREATE CONSTRAINT person_contract ...
+```
+
+If the current data already violates the contract, creation fails immediately:
+
+```cypher
+CREATE (:Person {id: 'p-1', name: 'Ada', age: 34, status: 'paused', tenant: 't1', externalId: 'e1'})
+
+CREATE CONSTRAINT person_contract
+FOR (n:Person)
+REQUIRE {
+  n.id IS UNIQUE
+  n.name IS NOT NULL
+  n.age IS :: INTEGER
+  n.status IN ['active', 'inactive']
+  (n.tenant, n.externalId) IS NODE KEY
+}
+```
+
+Expected error:
+
+```text
+constraint contract person_contract violated: predicate `n.status IN ['active', 'inactive']` evaluated to false
+```
+
+#### Relationship contract example
+
+```cypher
+CREATE CONSTRAINT works_at_contract
+FOR ()-[r:WORKS_AT]-()
+REQUIRE {
+  r.id IS UNIQUE
+  r.startedAt IS NOT NULL
+  r.role IS :: STRING
+  (r.tenant, r.externalId) IS RELATIONSHIP KEY
+  startNode(r) <> endNode(r)
+  startNode(r).tenant = endNode(r).tenant
+  r.status IN ['active', 'inactive']
+  r.hoursPerWeek > 0
+}
+
+SHOW CONSTRAINT CONTRACTS
+```
+
+Expected `SHOW CONSTRAINT CONTRACTS` row:
+
+```text
+name               | targetEntityType | targetLabelOrType | entryCount | compiledEntryCount | runtimeEntryCount | definition
+works_at_contract   | RELATIONSHIP     | WORKS_AT          | 8          | 4                  | 4                 | CREATE CONSTRAINT works_at_contract ...
+```
+
+Runtime enforcement rejects invalid writes as soon as they are attempted:
+
+```cypher
+MATCH (a:Person {id: 'p-1'}), (b:Person {id: 'p-2'})
+CREATE (a)-[:WORKS_AT {id: 'w-1', startedAt: '2024-01-01', role: 'Engineer', tenant: 't1', externalId: 'rel-1', status: 'paused', hoursPerWeek: 40}]->(b)
+```
+
+Expected error:
+
+```text
+constraint contract works_at_contract violated: predicate `r.status IN ['active', 'inactive']` evaluated to false
+```
+
 ---
 
 ## Step 3 — Write canonical entities and facts

@@ -118,6 +118,9 @@ func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher strin
 func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	// Detect IF NOT EXISTS to pass through to AddConstraint for duplicate-schema handling.
 	ifNotExists := strings.Contains(strings.ToUpper(cypher), "IF NOT EXISTS")
+	if result, handled, err := e.executeCreateConstraintContract(ctx, cypher, ifNotExists); handled {
+		return result, err
+	}
 
 	// NODE KEY constraints (Neo4j 5.x)
 	if matches := constraintNamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {

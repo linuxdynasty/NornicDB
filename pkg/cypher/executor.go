@@ -2249,6 +2249,10 @@ func isSystemCommandNoGraph(cypher string) bool {
 		findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE") == 0
 }
 
+func isShowConstraintContractsCommand(cypher string) bool {
+	return findMultiWordKeywordIndex(cypher, "SHOW", "CONSTRAINT CONTRACTS") == 0
+}
+
 // executeWithoutTransaction executes query without transaction wrapping (original path).
 func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
 	// FAST PATH: Simple MATCH-return-limit reads should never be routed through

@@ -14,7 +14,8 @@ import "sort"
 type SchemaDefinition struct {
 	Version int `json:"version"`
 
-	Constraints []Constraint `json:"constraints,omitempty"`
+	Constraints         []Constraint         `json:"constraints,omitempty"`
+	ConstraintContracts []ConstraintContract `json:"constraint_contracts,omitempty"`
 
 	PropertyTypeConstraints []PropertyTypeConstraint `json:"property_type_constraints,omitempty"`
 
@@ -93,6 +94,16 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 				return def.Constraints[i].Label < def.Constraints[j].Label
 			}
 			return def.Constraints[i].Name < def.Constraints[j].Name
+		})
+	}
+
+	if len(sm.constraintContracts) > 0 {
+		def.ConstraintContracts = make([]ConstraintContract, 0, len(sm.constraintContracts))
+		for _, contract := range sm.constraintContracts {
+			def.ConstraintContracts = append(def.ConstraintContracts, cloneConstraintContract(contract))
+		}
+		sort.Slice(def.ConstraintContracts, func(i, j int) bool {
+			return def.ConstraintContracts[i].Name < def.ConstraintContracts[j].Name
 		})
 	}
 
@@ -224,10 +235,18 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.replaceFromDefinitionLocked(def)
+}
+
+func (sm *SchemaManager) replaceFromDefinitionLocked(def *SchemaDefinition) error {
+	if def == nil {
+		return nil
+	}
 
 	// Reset all collections.
 	sm.uniqueConstraints = make(map[string]*UniqueConstraint)
 	sm.constraints = make(map[string]Constraint)
+	sm.constraintContracts = make(map[string]ConstraintContract)
 	sm.propertyTypeConstraints = make(map[string]PropertyTypeConstraint)
 	sm.propertyIndexes = make(map[string]*PropertyIndex)
 	sm.compositeIndexes = make(map[string]*CompositeIndex)
@@ -269,6 +288,10 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 				values:   make(map[interface{}]NodeID),
 			}
 		}
+	}
+
+	for _, contract := range def.ConstraintContracts {
+		sm.constraintContracts[contract.Name] = cloneConstraintContract(contract)
 	}
 
 	// Property type constraints.

@@ -75,6 +75,7 @@ type SchemaManager struct {
 	// Constraints
 	uniqueConstraints       map[string]*UniqueConstraint      // key: "Label:property"
 	constraints             map[string]Constraint             // key: constraint name, stores all constraint types
+	constraintContracts     map[string]ConstraintContract     // key: contract name
 	propertyTypeConstraints map[string]PropertyTypeConstraint // key: constraint name
 
 	// Indexes
@@ -178,6 +179,7 @@ func NewSchemaManager() *SchemaManager {
 	return &SchemaManager{
 		uniqueConstraints:       make(map[string]*UniqueConstraint),
 		constraints:             make(map[string]Constraint),
+		constraintContracts:     make(map[string]ConstraintContract),
 		propertyTypeConstraints: make(map[string]PropertyTypeConstraint),
 		propertyIndexes:         make(map[string]*PropertyIndex),
 		compositeIndexes:        make(map[string]*CompositeIndex),
@@ -185,6 +187,100 @@ func NewSchemaManager() *SchemaManager {
 		vectorIndexes:           make(map[string]*VectorIndex),
 		rangeIndexes:            make(map[string]*RangeIndex),
 	}
+}
+
+func (sm *SchemaManager) addConstraintLocked(c Constraint, silentOnDuplicate bool) error {
+	if _, exists := sm.constraintContracts[c.Name]; exists {
+		return fmt.Errorf("constraint %q already exists", c.Name)
+	}
+	if existing, exists := sm.constraints[c.Name]; exists {
+		if constraintSchemaKey(existing) == constraintSchemaKey(c) && existing.Type == c.Type {
+			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
+				return fmt.Errorf("constraint %q already exists with different allowed values", c.Name)
+			}
+			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
+				return fmt.Errorf("constraint %q already exists with different max count (%d vs %d)", c.Name, existing.MaxCount, c.MaxCount)
+			}
+			if silentOnDuplicate {
+				return nil
+			}
+			return fmt.Errorf("constraint %q already exists", c.Name)
+		}
+		return fmt.Errorf("constraint %q already exists with different schema or type", c.Name)
+	}
+
+	newKey := constraintSchemaKey(c)
+	for _, existing := range sm.constraints {
+		existKey := constraintSchemaKey(existing)
+		if existKey != newKey {
+			if c.Type == ConstraintPolicy && existing.Type == ConstraintPolicy &&
+				c.Label == existing.Label &&
+				c.SourceLabel == existing.SourceLabel && c.TargetLabel == existing.TargetLabel &&
+				c.PolicyMode != existing.PolicyMode {
+				return fmt.Errorf("conflicting policy: cannot have both ALLOWED and DISALLOWED for %s-[:%s]->%s (constraint %q)", c.SourceLabel, c.Label, c.TargetLabel, existing.Name)
+			}
+			continue
+		}
+		if existing.Type == c.Type {
+			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
+				return fmt.Errorf("conflicting domain constraint %q already exists on same schema with different allowed values", existing.Name)
+			}
+			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
+				return fmt.Errorf("conflicting cardinality constraint %q already exists on %s %s with max count %d (new: %d)", existing.Name, existing.Direction, existing.Label, existing.MaxCount, c.MaxCount)
+			}
+			if silentOnDuplicate {
+				return nil
+			}
+			return fmt.Errorf("equivalent constraint %q already exists on same schema", existing.Name)
+		}
+		if (c.Type == ConstraintUnique && existing.Type == ConstraintRelationshipKey) ||
+			(c.Type == ConstraintRelationshipKey && existing.Type == ConstraintUnique) ||
+			(c.Type == ConstraintUnique && existing.Type == ConstraintNodeKey) ||
+			(c.Type == ConstraintNodeKey && existing.Type == ConstraintUnique) {
+			return fmt.Errorf("conflicting constraint %q already exists on same schema", existing.Name)
+		}
+	}
+
+	if c.EffectiveEntityType() == ConstraintEntityRelationship &&
+		(c.Type == ConstraintUnique || c.Type == ConstraintRelationshipKey) &&
+		c.OwnedIndex == "" {
+		c.OwnedIndex = c.Name + "_index"
+	}
+
+	sm.constraints[c.Name] = c
+
+	if c.OwnedIndex != "" {
+		if _, exists := sm.rangeIndexes[c.OwnedIndex]; !exists {
+			prop := ""
+			if len(c.Properties) > 0 {
+				prop = c.Properties[0]
+			}
+			sm.rangeIndexes[c.OwnedIndex] = &RangeIndex{
+				Name:             c.OwnedIndex,
+				Label:            c.Label,
+				Property:         prop,
+				Properties:       c.Properties,
+				EntityType:       c.EffectiveEntityType(),
+				OwningConstraint: c.Name,
+				entries:          make([]rangeEntry, 0),
+				nodeValue:        make(map[NodeID]float64),
+			}
+		}
+	}
+
+	if c.Type == ConstraintUnique && len(c.Properties) == 1 {
+		uniqueKey := fmt.Sprintf("%s:%s", c.Label, c.Properties[0])
+		if _, exists := sm.uniqueConstraints[uniqueKey]; !exists {
+			sm.uniqueConstraints[uniqueKey] = &UniqueConstraint{
+				Name:     c.Name,
+				Label:    c.Label,
+				Property: c.Properties[0],
+				values:   make(map[interface{}]NodeID),
+			}
+		}
+	}
+
+	return nil
 }
 
 // SetPersister sets an optional persistence hook for schema changes.
@@ -447,14 +543,7 @@ func (sm *SchemaManager) AddPropertyTypeConstraintWithOptions(name, label, prope
 func (sm *SchemaManager) addPropertyTypeConstraint(name, label, property string, expectedType PropertyType, entityType ConstraintEntityType, ifNotExists bool) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	if _, exists := sm.propertyTypeConstraints[name]; exists {
-		if ifNotExists {
-			return nil
-		}
-		return fmt.Errorf("constraint %q already exists", name)
-	}
-
+	snapshot := sm.exportDefinitionLocked()
 	ptc := PropertyTypeConstraint{
 		Name:         name,
 		EntityType:   entityType,
@@ -462,16 +551,32 @@ func (sm *SchemaManager) addPropertyTypeConstraint(name, label, property string,
 		Property:     property,
 		ExpectedType: expectedType,
 	}
-	sm.propertyTypeConstraints[name] = ptc
+	if err := sm.addPropertyTypeConstraintValueLocked(ptc, ifNotExists); err != nil {
+		return err
+	}
 
 	if sm.persist != nil {
 		def := sm.exportDefinitionLocked()
 		if err := sm.persist(def); err != nil {
-			delete(sm.propertyTypeConstraints, name)
+			sm.replaceFromDefinitionLocked(snapshot)
 			return err
 		}
 	}
 
+	return nil
+}
+
+func (sm *SchemaManager) addPropertyTypeConstraintValueLocked(ptc PropertyTypeConstraint, ifNotExists bool) error {
+	if _, exists := sm.propertyTypeConstraints[ptc.Name]; exists {
+		if ifNotExists {
+			return nil
+		}
+		return fmt.Errorf("constraint %q already exists", ptc.Name)
+	}
+	if _, exists := sm.constraintContracts[ptc.Name]; exists {
+		return fmt.Errorf("constraint %q already exists", ptc.Name)
+	}
+	sm.propertyTypeConstraints[ptc.Name] = ptc
 	return nil
 }
 
@@ -1148,121 +1253,15 @@ func (sm *SchemaManager) AddConstraint(c Constraint, ifNotExists ...bool) error 
 	defer sm.mu.Unlock()
 
 	silentOnDuplicate := len(ifNotExists) > 0 && ifNotExists[0]
-
-	// Check name conflicts
-	if existing, exists := sm.constraints[c.Name]; exists {
-		// Same name — check if schema + type match or conflict
-		if constraintSchemaKey(existing) == constraintSchemaKey(c) && existing.Type == c.Type {
-			// For domain constraints, AllowedValues must also match
-			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
-				return fmt.Errorf("constraint %q already exists with different allowed values", c.Name)
-			}
-			// For cardinality constraints, MaxCount must also match
-			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
-				return fmt.Errorf("constraint %q already exists with different max count (%d vs %d)", c.Name, existing.MaxCount, c.MaxCount)
-			}
-			// Exact same constraint — only silent with IF NOT EXISTS
-			if silentOnDuplicate {
-				return nil
-			}
-			return fmt.Errorf("constraint %q already exists", c.Name)
-		}
-		return fmt.Errorf("constraint %q already exists with different schema or type", c.Name)
-	}
-
-	// Check schema-level conflicts with other constraints
-	newKey := constraintSchemaKey(c)
-	for _, existing := range sm.constraints {
-		existKey := constraintSchemaKey(existing)
-		if existKey != newKey {
-			// For policy constraints, check ALLOWED vs DISALLOWED conflict on same endpoint pair
-			if c.Type == ConstraintPolicy && existing.Type == ConstraintPolicy &&
-				c.Label == existing.Label &&
-				c.SourceLabel == existing.SourceLabel && c.TargetLabel == existing.TargetLabel &&
-				c.PolicyMode != existing.PolicyMode {
-				return fmt.Errorf("conflicting policy: cannot have both ALLOWED and DISALLOWED for %s-[:%s]->%s (constraint %q)", c.SourceLabel, c.Label, c.TargetLabel, existing.Name)
-			}
-			continue
-		}
-		// Same schema — check for conflicts
-		if existing.Type == c.Type {
-			// For domain constraints, different AllowedValues means conflict, not equivalence
-			if c.Type == ConstraintDomain && !allowedValuesEqual(existing.AllowedValues, c.AllowedValues) {
-				return fmt.Errorf("conflicting domain constraint %q already exists on same schema with different allowed values", existing.Name)
-			}
-			// For cardinality, different MaxCount on same type+direction is a conflict
-			if c.Type == ConstraintCardinality && existing.MaxCount != c.MaxCount {
-				return fmt.Errorf("conflicting cardinality constraint %q already exists on %s %s with max count %d (new: %d)", existing.Name, existing.Direction, existing.Label, existing.MaxCount, c.MaxCount)
-			}
-			// Same type, different name — equivalent constraint already exists.
-			if silentOnDuplicate {
-				return nil // IF NOT EXISTS — no-op
-			}
-			return fmt.Errorf("equivalent constraint %q already exists on same schema", existing.Name)
-		}
-		// Uniqueness vs relationship key conflict
-		if (c.Type == ConstraintUnique && existing.Type == ConstraintRelationshipKey) ||
-			(c.Type == ConstraintRelationshipKey && existing.Type == ConstraintUnique) ||
-			(c.Type == ConstraintUnique && existing.Type == ConstraintNodeKey) ||
-			(c.Type == ConstraintNodeKey && existing.Type == ConstraintUnique) {
-			return fmt.Errorf("conflicting constraint %q already exists on same schema", existing.Name)
-		}
-	}
-
-	// Auto-create owned backing index for uniqueness and key constraints on relationships
-	if c.EffectiveEntityType() == ConstraintEntityRelationship &&
-		(c.Type == ConstraintUnique || c.Type == ConstraintRelationshipKey) &&
-		c.OwnedIndex == "" {
-		c.OwnedIndex = c.Name + "_index"
-	}
-
-	sm.constraints[c.Name] = c
-
-	// Create the owned range index if applicable
-	if c.OwnedIndex != "" {
-		if _, exists := sm.rangeIndexes[c.OwnedIndex]; !exists {
-			prop := ""
-			if len(c.Properties) > 0 {
-				prop = c.Properties[0]
-			}
-			sm.rangeIndexes[c.OwnedIndex] = &RangeIndex{
-				Name:             c.OwnedIndex,
-				Label:            c.Label,
-				Property:         prop,
-				Properties:       c.Properties,
-				EntityType:       c.EffectiveEntityType(),
-				OwningConstraint: c.Name,
-				entries:          make([]rangeEntry, 0),
-				nodeValue:        make(map[NodeID]float64),
-			}
-		}
-	}
-
-	// For UNIQUE constraints, also add to legacy uniqueConstraints map
-	var uniqueKey string
-	var uniqueConstraint *UniqueConstraint
-	if c.Type == ConstraintUnique && len(c.Properties) == 1 {
-		uniqueKey = fmt.Sprintf("%s:%s", c.Label, c.Properties[0])
-		if existing, exists := sm.uniqueConstraints[uniqueKey]; !exists {
-			uniqueConstraint = &UniqueConstraint{
-				Name:     c.Name,
-				Label:    c.Label,
-				Property: c.Properties[0],
-				values:   make(map[interface{}]NodeID),
-			}
-			sm.uniqueConstraints[uniqueKey] = uniqueConstraint
-		} else {
-			uniqueConstraint = existing
-		}
+	snapshot := sm.exportDefinitionLocked()
+	if err := sm.addConstraintLocked(c, silentOnDuplicate); err != nil {
+		return err
 	}
 
 	if sm.persist != nil {
 		def := sm.exportDefinitionLocked()
 		if err := sm.persist(def); err != nil {
-			delete(sm.constraints, c.Name)
-			if c.Type == ConstraintUnique && len(c.Properties) == 1 && uniqueConstraint != nil {
-				delete(sm.uniqueConstraints, uniqueKey)
-			}
+			sm.replaceFromDefinitionLocked(snapshot)
 			return err
 		}
 	}

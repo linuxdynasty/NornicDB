@@ -1688,6 +1688,9 @@ func (tx *BadgerTransaction) validateAllConstraints() error {
 			return err
 		}
 	}
+	if err := tx.validateConstraintContracts(); err != nil {
+		return err
+	}
 	return nil
 }
 
