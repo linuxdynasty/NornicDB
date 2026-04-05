@@ -117,6 +117,20 @@ This point is: once vector search plus one-hop traversal stays in low single-dig
 
 See the [hybrid retrieval benchmark write-up](docs/performance/hybrid-query-benchmarks.md) for methodology, caveats, and reproduction queries, and see [Graph-RAG: NornicDB vs Typical](docs/architecture/graph-rag-nornicdb-comparison.md) for the architectural implications.
 
+### 🔬 Academic Validation: UCLouvain Case Study
+
+NornicDB is currently being utilized by researchers at **UCLouvain** to map large-scale **Cyber-Physical Systems** (CPS).
+
+In benchmarks performing **Automata Learning (L\*)**—a high-iteration logic process where an LLM acts as a "Deterministic Teacher" or Oracle—NornicDB outperformed industry-standard graph databases by a significant margin:
+
+- **Efficiency:** **2.2x Faster** than Neo4j in total execution time for formal logic mapping.
+- **Throughput:** Successfully handled **1,443 state-transition queries** in ~32 seconds (Avg 22.69ms per full reasoning loop).
+
+| DATABASE     | CALLS    | AVG TIME (ms) | TOTAL (s) |
+| ------------ | -------- | ------------- | --------- |
+| **NornicDB** | **1443** | **22.69**     | **32.74** |
+| Neo4j        | 1443     | 50.20         | 72.43     |
+
 ### What Recent Deep-Dives Show
 
 - **Hybrid execution model (streaming fast paths + general engine)**: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.
