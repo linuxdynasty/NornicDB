@@ -81,19 +81,6 @@ NornicDB implements Snapshot Isolation at the storage layer. Each transaction is
 
 See [transaction implementation details](docs/user-guides/transactions.md), [historical reads and MVCC retention](docs/user-guides/historical-reads-mvcc-retention.md), and the [canonical graph ledger guide](docs/user-guides/canonical-graph-ledger.md).
 
-### What Recent Deep-Dives Show
-
-- **Hybrid execution model (streaming fast paths + general engine)**: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.
-- **Runtime parser mode switching**: the default `nornic` parser is optimized for low-overhead hot-path routing, while `antlr` mode prioritizes strict parsing and diagnostics when debugging and validation matter more than throughput.
-- **Measured parser-path deltas on benchmark suites**: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why the production default remains the custom parser path.
-- **HNSW build acceleration from insertion-order optimization**: BM25-seeded insertion order reduced a 1M embedding build from ~27 minutes to ~10 minutes (~2.7x) in published tests by reducing traversal waste during construction, without changing core quality knobs.
-- **Shared seed strategy across indexing stages**: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.
-
-Read more:
-
-- [Cypher parser modes and execution trade-offs](docs/architecture/cypher-parser-modes.md)
-- [How we sped up HNSW construction 2.7x](https://dev.to/orneryd/how-i-sped-up-hnsw-construction-27x-2jhn)
-
 ## Performance Snapshot
 
 **LDBC Social Network Benchmark** (M3 Max, 64GB):
@@ -129,6 +116,19 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 This point is: once vector search plus one-hop traversal stays in low single-digit milliseconds locally, the bottleneck shifts from retrieval logic to deployment topology.
 
 See the [hybrid retrieval benchmark write-up](docs/performance/hybrid-query-benchmarks.md) for methodology, caveats, and reproduction queries, and see [Graph-RAG: NornicDB vs Typical](docs/architecture/graph-rag-nornicdb-comparison.md) for the architectural implications.
+
+### What Recent Deep-Dives Show
+
+- **Hybrid execution model (streaming fast paths + general engine)**: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.
+- **Runtime parser mode switching**: the default `nornic` parser is optimized for low-overhead hot-path routing, while `antlr` mode prioritizes strict parsing and diagnostics when debugging and validation matter more than throughput.
+- **Measured parser-path deltas on benchmark suites**: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why the production default remains the custom parser path.
+- **HNSW build acceleration from insertion-order optimization**: BM25-seeded insertion order reduced a 1M embedding build from ~27 minutes to ~10 minutes (~2.7x) in published tests by reducing traversal waste during construction, without changing core quality knobs.
+- **Shared seed strategy across indexing stages**: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.
+
+Read more:
+
+- [Cypher parser modes and execution trade-offs](docs/architecture/cypher-parser-modes.md)
+- [How we sped up HNSW construction 2.7x](https://dev.to/orneryd/how-i-sped-up-hnsw-construction-27x-2jhn)
 
 ## Quick Start
 
