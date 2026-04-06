@@ -1011,64 +1011,6 @@ LIMIT 30`
 	require.Equal(t, "trk-list-1", res.Rows[0][11], "trackingId must be preserved in projection")
 }
 
-func TestRewriteListReviewPageFilterHotPath(t *testing.T) {
-	in := `
-MATCH (o:OriginalText)
-WHERE o.pagePath STARTS WITH $pagePath
-MATCH (o)-[:TRANSLATES_TO]->(t:TranslatedText)
-WHERE t.language = $language
-  AND coalesce(t.isReviewed, false) = false
-RETURN elementId(t) AS translationId,
-       coalesce(o.textKey, o.textKey128, 'unknown') AS textKey,
-       coalesce(t.isReviewed, false) AS isReviewed,
-       t.translatedText AS translatedText,
-       coalesce(o.originalText, '') AS originalText,
-       t.translatedText AS originalTranslatedText,
-       t.auditedText AS auditedTranslatedText,
-       t.reviewResult AS reviewResult,
-       t.reviewedAt AS reviewedAt,
-       t.createdAt AS createdAt,
-       o.page AS page,
-       o.trackingId AS trackingId
-ORDER BY t.createdAt DESC
-LIMIT 30`
-
-	out := rewriteListReviewPageFilterHotPath(in)
-	upper := strings.ToUpper(strings.Join(strings.Fields(out), " "))
-	require.True(t, strings.Contains(upper, "MATCH (T:TRANSLATEDTEXT) WHERE T.LANGUAGE = $LANGUAGE AND (T.ISREVIEWED = FALSE OR T.ISREVIEWED IS NULL)"))
-	require.True(t, strings.Contains(upper, "MATCH (O:ORIGINALTEXT)-[:TRANSLATES_TO]->(T) WHERE O.PAGEPATH STARTS WITH $PAGEPATH"))
-	require.True(t, strings.Contains(upper, "RETURN ELEMENTID(T) AS TRANSLATIONID"))
-	require.True(t, strings.Contains(upper, "ORDER BY T.CREATEDAT DESC LIMIT 30"))
-}
-
-func TestRewriteListReviewTraversalHotPath_CurrentShape(t *testing.T) {
-	in := `
-MATCH (t:TranslatedText {language: $language, isReviewed: false})<-[:TRANSLATES_TO]-(o:OriginalText)
-WHERE o.pagePath STARTS WITH $pagePath
-RETURN elementId(t) AS translationId,
-       o.textKey AS textKey,
-       o.textKey128 AS textKey128,
-       t.isReviewed AS isReviewed,
-       t.translatedText AS translatedText,
-       o.originalText AS originalText,
-       t.translatedText AS originalTranslatedText,
-       t.auditedText AS auditedTranslatedText,
-       t.reviewResult AS reviewResult,
-       t.reviewedAt AS reviewedAt,
-       t.createdAt AS createdAt,
-       o.page AS page,
-       o.trackingId AS trackingId
-ORDER BY t.createdAt DESC
-LIMIT 30`
-
-	out := rewriteListReviewTraversalHotPath(in)
-	upper := strings.ToUpper(strings.Join(strings.Fields(out), " "))
-	require.True(t, strings.Contains(upper, "MATCH (O:ORIGINALTEXT)-[:TRANSLATES_TO]->(T:TRANSLATEDTEXT {LANGUAGE: $LANGUAGE, ISREVIEWED: FALSE})"))
-	require.True(t, strings.Contains(upper, "WHERE O.PAGEPATH STARTS WITH $PAGEPATH"))
-	require.True(t, strings.Contains(upper, "RETURN ELEMENTID(T) AS TRANSLATIONID"))
-	require.True(t, strings.Contains(upper, "ORDER BY T.CREATEDAT DESC LIMIT 30"))
-}
-
 func TestExactShape_CreateOrUpdateTranslation_MergeOptionalCallUnion_ReturnsRow(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

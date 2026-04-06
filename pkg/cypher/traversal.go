@@ -429,15 +429,20 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 	}
 
 	// Build result rows (non-aggregation)
+	e.appendTraversalRows(result, paths, matches, returnItems, earlyLimit)
+
+	return result, nil
+}
+
+func (e *StorageExecutor) appendTraversalRows(result *ExecuteResult, paths []PathResult, matches *TraversalMatch, returnItems []returnItem, rowLimit int) {
 	for _, path := range paths {
-		if earlyLimit >= 0 && len(result.Rows) >= earlyLimit {
+		if rowLimit >= 0 && len(result.Rows) >= rowLimit {
 			break
 		}
 		row := make([]interface{}, len(returnItems))
 		context := e.buildPathContext(path, matches)
 
 		for i, item := range returnItems {
-			// Special handling for length(path) expressions
 			if isLengthPathExpr(item.expr) {
 				row[i] = int64(context.pathLength)
 			} else {
@@ -446,8 +451,173 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 		}
 		result.Rows = append(result.Rows, row)
 	}
+}
 
-	return result, nil
+func (e *StorageExecutor) tryExecuteTraversalEndSeedOrderLimit(pattern string, whereClause string, returnItems []returnItem, pathVariable string, orderExpr string, limit int) (*ExecuteResult, bool, error) {
+	if limit <= 0 || strings.TrimSpace(orderExpr) == "" {
+		return nil, false, nil
+	}
+
+	matches := e.parseTraversalPattern(pattern)
+	if matches == nil || matches.IsChained {
+		return nil, false, nil
+	}
+	if pathVariable != "" {
+		matches.PathVariable = pathVariable
+	}
+	if strings.TrimSpace(matches.EndNode.variable) == "" || len(matches.EndNode.labels) == 0 {
+		return nil, false, nil
+	}
+
+	orderSpecs := e.parseNodeOrderSpecs(orderExpr, matches.EndNode.variable)
+	if len(orderSpecs) != 1 {
+		return nil, false, nil
+	}
+
+	seedWhere := e.extractTraversalSeedWhereClause(whereClause, matches.EndNode.variable, matches.StartNode.variable)
+	if strings.TrimSpace(seedWhere) == "" && strings.TrimSpace(whereClause) != "" {
+		return nil, false, nil
+	}
+
+	seedLimit := topKSeedLimit(limit)
+	seedNodes, used, err := e.tryCollectNodesFromPropertyIndexOrderLimit(matches.EndNode, seedWhere, orderExpr, seedLimit)
+	if err != nil {
+		return nil, true, err
+	}
+	if !used {
+		if seedNodes, used, err = e.tryCollectNodesFromPropertyIndexNotNullOrderLimit(matches.EndNode, seedWhere, orderExpr, seedLimit); err != nil {
+			return nil, true, err
+		}
+		if !used {
+			return nil, false, nil
+		}
+	}
+
+	result := &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}, Stats: &QueryStats{}}
+	for _, item := range returnItems {
+		if item.alias != "" {
+			result.Columns = append(result.Columns, item.alias)
+		} else {
+			result.Columns = append(result.Columns, item.expr)
+		}
+	}
+	if len(seedNodes) == 0 {
+		e.markTraversalEndSeedTopKUsed()
+		return result, true, nil
+	}
+
+	reversed := reverseTraversalMatch(matches)
+	if reversed == nil {
+		return nil, false, nil
+	}
+
+	paths := make([]PathResult, 0, limit)
+	for _, endNode := range seedNodes {
+		reversedPaths := e.traverseFromNode(endNode, reversed)
+		for _, reversedPath := range reversedPaths {
+			path := reversePathResult(reversedPath)
+			if whereClause != "" && !e.evaluateWhereOnPath(whereClause, e.buildPathContext(path, matches)) {
+				continue
+			}
+			paths = append(paths, path)
+			if len(paths) >= limit {
+				e.appendTraversalRows(result, paths, matches, returnItems, limit)
+				e.markTraversalEndSeedTopKUsed()
+				return result, true, nil
+			}
+		}
+	}
+
+	if len(paths) < limit && len(seedNodes) >= seedLimit {
+		return nil, false, nil
+	}
+
+	e.appendTraversalRows(result, paths, matches, returnItems, limit)
+	e.markTraversalEndSeedTopKUsed()
+	return result, true, nil
+}
+
+func (e *StorageExecutor) extractTraversalSeedWhereClause(whereClause string, seedVar string, blockedVars ...string) string {
+	clause := unwrapOuterParens(strings.TrimSpace(whereClause))
+	if clause == "" {
+		return ""
+	}
+	parts := splitTopLevelAndConjuncts(clause)
+	selected := make([]string, 0, len(parts))
+	for _, part := range parts {
+		term := unwrapOuterParens(strings.TrimSpace(part))
+		if term == "" {
+			continue
+		}
+		if !referencesTraversalVariable(term, seedVar) {
+			continue
+		}
+		blocked := false
+		for _, blockedVar := range blockedVars {
+			if blockedVar == "" {
+				continue
+			}
+			if referencesTraversalVariable(term, blockedVar) {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
+		selected = append(selected, term)
+	}
+	return strings.Join(selected, " AND ")
+}
+
+func referencesTraversalVariable(expr string, variable string) bool {
+	if variable == "" {
+		return false
+	}
+	trimmed := strings.TrimSpace(expr)
+	if strings.Contains(trimmed, variable+".") || strings.Contains(strings.ToLower(trimmed), "id("+strings.ToLower(variable)+")") || strings.Contains(strings.ToLower(trimmed), "elementid("+strings.ToLower(variable)+")") {
+		return true
+	}
+	return false
+}
+
+func reverseTraversalMatch(match *TraversalMatch) *TraversalMatch {
+	if match == nil || match.IsChained {
+		return nil
+	}
+	reversed := *match
+	reversed.StartNode = match.EndNode
+	reversed.EndNode = match.StartNode
+	reversed.Relationship = match.Relationship
+	switch match.Relationship.Direction {
+	case "outgoing":
+		reversed.Relationship.Direction = "incoming"
+	case "incoming":
+		reversed.Relationship.Direction = "outgoing"
+	default:
+		reversed.Relationship.Direction = match.Relationship.Direction
+	}
+	return &reversed
+}
+
+func reversePathResult(path PathResult) PathResult {
+	reversedNodes := make([]*storage.Node, len(path.Nodes))
+	for i := range path.Nodes {
+		reversedNodes[len(path.Nodes)-1-i] = path.Nodes[i]
+	}
+	reversedEdges := make([]*storage.Edge, len(path.Relationships))
+	for i := range path.Relationships {
+		reversedEdges[len(path.Relationships)-1-i] = path.Relationships[i]
+	}
+	return PathResult{Nodes: reversedNodes, Relationships: reversedEdges, Length: path.Length}
+}
+
+func topKSeedLimit(limit int) int {
+	seedLimit := limit * 4
+	if seedLimit < 200 {
+		seedLimit = 200
+	}
+	return seedLimit
 }
 
 // tryCollectNodesFromStartPropertyScan applies start-node predicate pruning for

@@ -234,13 +234,30 @@ func (e *StorageExecutor) orderResultRows(rows [][]interface{}, columns []string
 		return rows
 	}
 
-	// Parse multiple ORDER BY columns separated by comma
-	orderSpecs := e.parseOrderBySpecs(orderExpr, columns)
+	return e.orderRowsBySpecs(rows, e.parseOrderBySpecs(orderExpr, columns))
+}
+
+func (e *StorageExecutor) orderResultRowsForReturnItems(rows [][]interface{}, columns []string, returnItems []returnItem, orderExpr string) [][]interface{} {
+	if len(rows) <= 1 {
+		return rows
+	}
+
+	return e.orderRowsBySpecs(rows, e.parseOrderBySpecsWithResolver(orderExpr, columns, func(colName string) int {
+		for _, item := range returnItems {
+			if item.alias == "" || !strings.EqualFold(strings.TrimSpace(item.expr), colName) {
+				continue
+			}
+			return findOrderByColumnIndex(columns, item.alias)
+		}
+		return -1
+	}))
+}
+
+func (e *StorageExecutor) orderRowsBySpecs(rows [][]interface{}, orderSpecs []orderSpec) [][]interface{} {
 	if len(orderSpecs) == 0 {
 		return rows
 	}
 
-	// Sort rows using all order specifications
 	sort.Slice(rows, func(i, j int) bool {
 		for _, spec := range orderSpecs {
 			left := rows[i][spec.colIdx]
@@ -256,9 +273,8 @@ func (e *StorageExecutor) orderResultRows(rows [][]interface{}, columns []string
 				}
 				return cmp < 0
 			}
-			// Values are equal, try next ORDER BY column
 		}
-		return false // All columns equal, maintain order
+		return false
 	})
 
 	return rows
@@ -266,9 +282,12 @@ func (e *StorageExecutor) orderResultRows(rows [][]interface{}, columns []string
 
 // parseOrderBySpecs parses "col1 ASC, col2 DESC" into orderSpec slice
 func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) []orderSpec {
+	return e.parseOrderBySpecsWithResolver(orderExpr, columns, nil)
+}
+
+func (e *StorageExecutor) parseOrderBySpecsWithResolver(orderExpr string, columns []string, resolveExpression func(colName string) int) []orderSpec {
 	var specs []orderSpec
 
-	// Split by comma (but not inside parentheses)
 	parts := splitOutsideParens(orderExpr, ',')
 
 	for _, part := range parts {
@@ -277,7 +296,6 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 			continue
 		}
 
-		// Parse: "column [ASC|DESC]"
 		tokens := strings.Fields(part)
 		if len(tokens) == 0 {
 			continue
@@ -286,20 +304,17 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 		colName := tokens[0]
 		descending := len(tokens) > 1 && strings.ToUpper(tokens[1]) == "DESC"
 
-		// Find direct column index first.
-		colIdx := -1
-		for i, col := range columns {
-			if strings.EqualFold(col, colName) {
-				colIdx = i
-				break
-			}
+		colIdx := findOrderByColumnIndex(columns, colName)
+
+		if colIdx == -1 && resolveExpression != nil {
+			colIdx = resolveExpression(colName)
 		}
+
 		propPath := make([]string, 0)
 		if colIdx == -1 {
-			// Support ORDER BY var.prop when RETURN contains var.
 			dot := strings.Index(colName, ".")
 			if dot <= 0 || dot >= len(colName)-1 {
-				continue // Unsupported ORDER BY expression for row-level sorting
+				continue
 			}
 			varName := strings.TrimSpace(colName[:dot])
 			propExpr := strings.TrimSpace(colName[dot+1:])
@@ -313,7 +328,7 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 				}
 			}
 			if colIdx == -1 {
-				continue // Variable column not found
+				continue
 			}
 			for _, segment := range strings.Split(propExpr, ".") {
 				segment = strings.TrimSpace(segment)
@@ -332,6 +347,15 @@ func (e *StorageExecutor) parseOrderBySpecs(orderExpr string, columns []string) 
 	}
 
 	return specs
+}
+
+func findOrderByColumnIndex(columns []string, colName string) int {
+	for i, col := range columns {
+		if strings.EqualFold(col, colName) {
+			return i
+		}
+	}
+	return -1
 }
 
 func extractOrderByPropertyValue(value interface{}, propPath []string) interface{} {

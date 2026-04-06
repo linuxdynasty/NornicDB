@@ -315,11 +315,6 @@ func countKeywordOccurrences(upper, keyword string) int {
 // executeMultiMatch handles queries with multiple MATCH clauses
 // Example: MATCH (p1:Person)-[:WORKS_AT]->(c:Company) MATCH (p2:Person)-[:WORKS_AT]->(c) WHERE p1 <> p2 RETURN p1, p2, c
 func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Hot-path rewrite: list-review page filter shape.
-	// Reorder to start from TranslatedText (language/isReviewed selective predicate),
-	// then join back to OriginalText for pagePath prefix filtering.
-	cypher = rewriteListReviewPageFilterHotPath(cypher)
-
 	// Normalize two-MATCH forms where WHERE appears between MATCH clauses:
 	// MATCH A WHERE wa MATCH B RETURN ...
 	// -> MATCH A MATCH B WHERE wa RETURN ...
@@ -537,41 +532,6 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 	}
 
 	return result, nil
-}
-
-func rewriteListReviewPageFilterHotPath(cypher string) string {
-	trimmed := strings.TrimSpace(cypher)
-	returnIdx := findKeywordIndex(trimmed, "RETURN")
-	if returnIdx <= 0 {
-		return cypher
-	}
-
-	// Check for the exact high-latency query family using whitespace-insensitive matching.
-	upperCollapsed := strings.ToUpper(strings.Join(strings.Fields(trimmed), " "))
-	required := []string{
-		"MATCH (O:ORIGINALTEXT)",
-		"WHERE O.PAGEPATH STARTS WITH $PAGEPATH",
-		"MATCH (O)-[:TRANSLATES_TO]->(T:TRANSLATEDTEXT)",
-		"WHERE T.LANGUAGE = $LANGUAGE",
-		"COALESCE(T.ISREVIEWED, FALSE) = FALSE",
-		"ORDER BY T.CREATEDAT DESC",
-	}
-	for _, token := range required {
-		if !strings.Contains(upperCollapsed, token) {
-			return cypher
-		}
-	}
-
-	// Preserve projection/order/limit exactly as requested by caller.
-	returnTail := strings.TrimSpace(trimmed[returnIdx:])
-	rewritten := strings.Join([]string{
-		"MATCH (t:TranslatedText)",
-		"WHERE t.language = $language AND (t.isReviewed = false OR t.isReviewed IS NULL)",
-		"MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t)",
-		"WHERE o.pagePath STARTS WITH $pagePath",
-		returnTail,
-	}, " ")
-	return rewritten
 }
 
 // lastKeywordIndexBefore returns the last occurrence of keyword before endIdx.

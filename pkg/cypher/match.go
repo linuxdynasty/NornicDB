@@ -173,10 +173,6 @@ func hasStandaloneWithClause(cypher string) bool {
 
 func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	originalCypher := cypher
-	// Hot-path rewrite: list-review traversal shape that starts from TranslatedText
-	// and filters pagePath on OriginalText in WHERE. Reordering the traversal to start
-	// from OriginalText enables start-node pruning before relationship expansion.
-	cypher = rewriteListReviewTraversalHotPath(cypher)
 	// Substitute parameters AFTER routing to avoid keyword detection issues
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -369,7 +365,8 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			whereClause = extractMatchWhereClause(cypher, whereIdx, returnIdx)
 		}
 		// Parse ORDER/SKIP/LIMIT once so traversal can short-circuit when safe.
-		orderByIdx := findKeywordIndex(cypher, "ORDER")
+		orderExpr := extractMatchOrderByClause(cypher, returnIdx)
+		hasOrderBy := orderExpr != ""
 		skipIdx := findKeywordIndex(cypher, "SKIP")
 		skip := 0
 		if skipIdx > 0 {
@@ -406,8 +403,16 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 
 		earlyLimit := -1
-		if !hasAggregation && !distinct && orderByIdx < 0 && skip == 0 && limit >= 0 {
+		if !hasAggregation && !distinct && !hasOrderBy && skip == 0 && limit >= 0 {
 			earlyLimit = limit
+		}
+		if !hasAggregation && !distinct && skip == 0 && limit > 0 && hasOrderBy {
+			if fastResult, handled, fastErr := e.tryExecuteTraversalEndSeedOrderLimit(patternForParsing, whereClause, returnItems, pathVariable, orderExpr, limit); handled || fastErr != nil {
+				if fastErr != nil {
+					return nil, fastErr
+				}
+				return fastResult, nil
+			}
 		}
 		result, err := e.executeMatchWithRelationshipsWithPath(patternForParsing, whereClause, returnItems, pathVariable, earlyLimit)
 		if err != nil {
@@ -429,33 +434,8 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		}
 
 		// Apply ORDER BY (whitespace-tolerant) - ORDER BY is NOT handled inside executeMatchWithRelationships
-		if orderByIdx > 0 {
-			orderStart := orderByIdx + 5 // skip "ORDER"
-			// Skip whitespace
-			for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
-				orderStart++
-			}
-			// Skip "BY"
-			if orderStart+2 <= len(cypher) && strings.ToUpper(cypher[orderStart:orderStart+2]) == "BY" {
-				orderStart += 2
-				// Skip whitespace after BY
-				for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
-					orderStart++
-				}
-			}
-			// Find end of ORDER BY clause (before SKIP/LIMIT or end)
-			orderEnd := len(cypher)
-			for _, kw := range []string{"SKIP", "LIMIT"} {
-				if idx := findKeywordIndex(cypher[orderStart:], kw); idx >= 0 {
-					if orderStart+idx < orderEnd {
-						orderEnd = orderStart + idx
-					}
-				}
-			}
-			orderExpr := strings.TrimSpace(cypher[orderStart:orderEnd])
-			if orderExpr != "" {
-				result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
-			}
+		if hasOrderBy {
+			result.Rows = e.orderResultRowsForReturnItems(result.Rows, result.Columns, returnItems, orderExpr)
 		}
 
 		// Apply SKIP
@@ -862,35 +842,30 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	return result, nil
 }
 
-func rewriteListReviewTraversalHotPath(cypher string) string {
-	trimmed := strings.TrimSpace(cypher)
-	upperCollapsed := strings.ToUpper(strings.Join(strings.Fields(trimmed), " "))
-
-	required := []string{
-		"MATCH (T:TRANSLATEDTEXT",
-		"<-[:TRANSLATES_TO]-(O:ORIGINALTEXT)",
-		"ISREVIEWED: FALSE",
-		"WHERE O.PAGEPATH STARTS WITH",
-		"ORDER BY T.CREATEDAT DESC",
-		"LIMIT 30",
+func extractMatchOrderByClause(cypher string, returnIdx int) string {
+	if returnIdx < 0 || returnIdx+6 > len(cypher) {
+		return ""
 	}
-	for _, token := range required {
-		if !strings.Contains(upperCollapsed, token) {
-			return cypher
+	returnScope := strings.TrimSpace(cypher[returnIdx+6:])
+	orderIdx := findKeywordIndexInContext(returnScope, "ORDER")
+	if orderIdx == -1 {
+		return ""
+	}
+	orderPart := strings.TrimSpace(returnScope[orderIdx:])
+	if !strings.HasPrefix(strings.ToUpper(orderPart), "ORDER BY") {
+		return ""
+	}
+	orderExpr := strings.TrimSpace(orderPart[len("ORDER BY"):])
+	if orderExpr == "" {
+		return ""
+	}
+	end := len(orderExpr)
+	for _, kw := range []string{"SKIP", "LIMIT"} {
+		if idx := findKeywordIndexInContext(orderExpr, kw); idx != -1 && idx < end {
+			end = idx
 		}
 	}
-
-	matchIdx := findKeywordIndex(trimmed, "MATCH")
-	whereIdx := findKeywordIndex(trimmed, "WHERE")
-	if matchIdx != 0 || whereIdx <= 0 {
-		return cypher
-	}
-
-	// Keep WHERE/RETURN tail exactly as requested by caller; only rewrite the
-	// traversal pattern orientation to improve pruning in traversal execution.
-	tail := strings.TrimSpace(trimmed[whereIdx:])
-	rewrittenHead := "MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText {language: $language, isReviewed: false})"
-	return rewrittenHead + " " + tail
+	return strings.TrimSpace(orderExpr[:end])
 }
 
 // selectTopKNodesByOrder returns the first k nodes for simple ORDER BY expressions

@@ -1784,6 +1784,23 @@ func TestCypherHelpers_QueryPatternAndFastPathHelpers(t *testing.T) {
 	assert.Contains(t, err.Error(), "edges fail")
 }
 
+func TestExtractMatchOrderByClause_IgnoresOrderLabelsAndRelationshipTypes(t *testing.T) {
+	query := `
+		MATCH (c:Customer)-[:PURCHASED]->(o:Order)-[:ORDERS]->(p:Product)<-[:SUPPLIES]-(s:Supplier)
+		RETURN c.companyName, s.companyName, count(DISTINCT o) as orders
+		ORDER BY orders DESC
+		LIMIT 10
+	`
+	returnIdx := findKeywordNotInBrackets(strings.ToUpper(query), " RETURN ")
+	if returnIdx < 0 {
+		returnIdx = findKeywordIndex(query, "RETURN")
+	}
+	require.Equal(t, "orders DESC", extractMatchOrderByClause(query, returnIdx))
+	queryNoOrder := `MATCH (o:Order)-[:ORDERS]->(p:Product) RETURN p`
+	returnIdx = findKeywordIndex(queryNoOrder, "RETURN")
+	require.Equal(t, "", extractMatchOrderByClause(queryNoOrder, returnIdx))
+}
+
 func TestCypherHelpers_ExecuteCreateConstraint_TypeAndErrorBranches(t *testing.T) {
 	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
 	ctx := context.Background()

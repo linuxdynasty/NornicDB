@@ -180,6 +180,28 @@ func TestParseExactTranslationQuery(t *testing.T) {
 	}
 }
 
+func TestParseTranslationQueryFamilyVariants(t *testing.T) {
+	parser := NewParser()
+	queries := []string{
+		"MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText) WHERE t.language = 'fr' RETURN o, t, t.createdAt ORDER BY t.createdAt DESC LIMIT 10",
+		"MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText) WHERE t.language = 'fr' RETURN o, t ORDER BY t.createdAt DESC LIMIT 10",
+		"MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText) WHERE t.language = 'fr' RETURN o.textKey AS textKey, t.createdAt AS createdAt ORDER BY t.createdAt DESC LIMIT 5",
+	}
+
+	for _, cypher := range queries {
+		query, err := parser.Parse(cypher)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", cypher, err)
+		}
+		if query == nil {
+			t.Fatalf("Parse(%q) returned nil query", cypher)
+		}
+		if query.Type != QueryMatch {
+			t.Fatalf("Parse(%q) expected QueryMatch, got %v", cypher, query.Type)
+		}
+	}
+}
+
 func TestParseSet(t *testing.T) {
 	parser := NewParser()
 
