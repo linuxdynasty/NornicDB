@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.0.39] "PunkRocker" - 2026-04-06
+## [v1.0.39] "Punkrocker" - 2026-04-06
 
 ### Added
 
