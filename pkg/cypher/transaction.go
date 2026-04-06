@@ -99,6 +99,10 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
+	if err := tx.SetDeferredConstraintValidation(true); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("failed to configure transaction: %w", err)
+	}
 	txCtx := &TransactionContext{
 		tx:     tx,
 		engine: engine,
@@ -293,14 +297,15 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 	// Pass the wrapper through context (same pattern as implicit transactions)
 	// This is thread-safe and allows getStorage() to automatically use the transaction
 	txCtx := context.WithValue(ctx, ctxKeyTxStorage, txWrapper)
+	txExec := e.cloneWithStorage(txWrapper)
 
 	// Execute the query - getStorage() will automatically use the transaction wrapper
-	result, err := e.executeQueryAgainstStorage(txCtx, cypher, upperQuery)
+	result, err := txExec.executeQueryAgainstStorage(txCtx, cypher, upperQuery)
 	if err != nil {
 		return nil, err
 	}
 	if inlineEmbeddingEnabled {
-		if err := e.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
+		if err := txExec.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
 			return nil, err
 		}
 	}

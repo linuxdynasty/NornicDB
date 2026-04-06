@@ -335,6 +335,37 @@ type StorageExecutor struct {
 	unwindSimpleMergePlanMu    sync.RWMutex
 }
 
+func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExecutor {
+	return &StorageExecutor{
+		parser:                      e.parser,
+		storage:                     override,
+		txContext:                   e.txContext,
+		cache:                       e.cache,
+		planCache:                   e.planCache,
+		fabricPlanCache:             e.fabricPlanCache,
+		analyzer:                    e.analyzer,
+		nodeLookupCache:             e.nodeLookupCache,
+		deferFlush:                  e.deferFlush,
+		embedder:                    e.embedder,
+		searchService:               e.searchService,
+		inferenceManager:            e.inferenceManager,
+		onNodeMutated:               e.onNodeMutated,
+		inlineEmbeddingTextOptions:  e.inlineEmbeddingTextOptions,
+		inlineEmbeddingChunkSize:    e.inlineEmbeddingChunkSize,
+		inlineEmbeddingChunkOverlap: e.inlineEmbeddingChunkOverlap,
+		defaultEmbeddingDimensions:  e.defaultEmbeddingDimensions,
+		dbManager:                   e.dbManager,
+		shellParams:                 e.shellParams,
+		vectorRegistry:              e.vectorRegistry,
+		vectorIndexSpaces:           e.vectorIndexSpaces,
+		fabricRecordBindings:        e.fabricRecordBindings,
+		hotPathTraceState:           e.hotPathTraceState,
+		vectorQueryEmbedCache:       e.vectorQueryEmbedCache,
+		vectorQueryEmbedInflight:    e.vectorQueryEmbedInflight,
+		unwindSimpleMergePlanCache:  e.unwindSimpleMergePlanCache,
+	}
+}
+
 type vectorEmbedInflight struct {
 	done chan struct{}
 	vec  []float32
@@ -1524,9 +1555,10 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 
 	// Execute with transaction wrapper via context
 	txCtx := context.WithValue(ctx, ctxKeyTxStorage, txWrapper)
+	txExec := e.cloneWithStorage(txWrapper)
 
 	// Execute the query
-	result, execErr := e.executeWithoutTransaction(txCtx, cypher, upperQuery)
+	result, execErr := txExec.executeWithoutTransaction(txCtx, cypher, upperQuery)
 
 	// Handle result
 	if execErr != nil {
@@ -1539,7 +1571,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	}
 
 	if inlineEmbeddingEnabled {
-		if err := e.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
+		if err := txExec.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
 			tx.Rollback()
 			if wal != nil && walSeqStart > 0 {
 				_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
@@ -1841,7 +1873,14 @@ func (w *transactionStorageWrapper) GetNode(id storage.NodeID) (*storage.Node, e
 }
 
 func (w *transactionStorageWrapper) GetEdge(id storage.EdgeID) (*storage.Edge, error) {
-	return w.underlying.GetEdge(id)
+	if w.namespace == "" {
+		return w.tx.GetEdge(id)
+	}
+	edge, err := w.tx.GetEdge(w.prefixEdgeID(id))
+	if err != nil {
+		return nil, err
+	}
+	return w.toUserEdge(edge), nil
 }
 
 func (w *transactionStorageWrapper) UpdateEdge(edge *storage.Edge) error {
@@ -1864,23 +1903,58 @@ func (w *transactionStorageWrapper) GetFirstNodeByLabel(label string) (*storage.
 }
 
 func (w *transactionStorageWrapper) GetOutgoingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
-	return w.underlying.GetOutgoingEdges(nodeID)
+	if w.namespace == "" {
+		return w.tx.GetOutgoingEdges(nodeID)
+	}
+	edges, err := w.tx.GetOutgoingEdges(w.prefixNodeID(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	return w.toUserEdges(edges), nil
 }
 
 func (w *transactionStorageWrapper) GetIncomingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
-	return w.underlying.GetIncomingEdges(nodeID)
+	if w.namespace == "" {
+		return w.tx.GetIncomingEdges(nodeID)
+	}
+	edges, err := w.tx.GetIncomingEdges(w.prefixNodeID(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	return w.toUserEdges(edges), nil
 }
 
 func (w *transactionStorageWrapper) GetEdgesBetween(startID, endID storage.NodeID) ([]*storage.Edge, error) {
-	return w.underlying.GetEdgesBetween(startID, endID)
+	if w.namespace == "" {
+		return w.tx.GetEdgesBetween(startID, endID)
+	}
+	edges, err := w.tx.GetEdgesBetween(w.prefixNodeID(startID), w.prefixNodeID(endID))
+	if err != nil {
+		return nil, err
+	}
+	return w.toUserEdges(edges), nil
 }
 
 func (w *transactionStorageWrapper) GetEdgeBetween(startID, endID storage.NodeID, edgeType string) *storage.Edge {
-	return w.underlying.GetEdgeBetween(startID, endID, edgeType)
+	if w.namespace == "" {
+		return w.tx.GetEdgeBetween(startID, endID, edgeType)
+	}
+	edge := w.tx.GetEdgeBetween(w.prefixNodeID(startID), w.prefixNodeID(endID), edgeType)
+	if edge == nil {
+		return nil
+	}
+	return w.toUserEdge(edge)
 }
 
 func (w *transactionStorageWrapper) GetEdgesByType(edgeType string) ([]*storage.Edge, error) {
-	return w.underlying.GetEdgesByType(edgeType)
+	if w.namespace == "" {
+		return w.tx.GetEdgesByType(edgeType)
+	}
+	edges, err := w.tx.GetEdgesByType(edgeType)
+	if err != nil {
+		return nil, err
+	}
+	return w.toUserEdges(edges), nil
 }
 
 func (w *transactionStorageWrapper) GetNodesByLabelVisibleAt(label string, version storage.MVCCVersion) ([]*storage.Node, error) {
@@ -2035,6 +2109,25 @@ func (w *transactionStorageWrapper) toUserNode(node *storage.Node) *storage.Node
 	}
 	out := storage.CopyNode(node)
 	out.ID = w.unprefixNodeID(out.ID)
+	return out
+}
+
+func (w *transactionStorageWrapper) toUserEdge(edge *storage.Edge) *storage.Edge {
+	if edge == nil {
+		return nil
+	}
+	out := storage.CopyEdge(edge)
+	out.ID = w.unprefixEdgeID(out.ID)
+	out.StartNode = w.unprefixNodeID(out.StartNode)
+	out.EndNode = w.unprefixNodeID(out.EndNode)
+	return out
+}
+
+func (w *transactionStorageWrapper) toUserEdges(edges []*storage.Edge) []*storage.Edge {
+	out := make([]*storage.Edge, 0, len(edges))
+	for _, edge := range edges {
+		out = append(out, w.toUserEdge(edge))
+	}
 	return out
 }
 

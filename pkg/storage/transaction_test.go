@@ -1635,3 +1635,84 @@ func TestTransaction_ValidateAllConstraints(t *testing.T) {
 	err = tx.Commit()
 	assert.Error(t, err) // unique constraint violation
 }
+
+func TestTransaction_RelationshipConstraintUsesFinalEdgeStateAtCommit(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	schema := engine.GetSchemaForNamespace("test")
+	err := schema.AddConstraint(Constraint{
+		Name:       "knows_since_exists",
+		Type:       ConstraintExists,
+		EntityType: ConstraintEntityRelationship,
+		Label:      "KNOWS",
+		Properties: []string{"since"},
+	})
+	require.NoError(t, err)
+
+	_, err = engine.CreateNode(&Node{ID: NodeID(prefixTestID("edge-final-state-a")), Labels: []string{"Person"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: NodeID(prefixTestID("edge-final-state-b")), Labels: []string{"Person"}})
+	require.NoError(t, err)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	require.NoError(t, tx.CreateEdge(&Edge{
+		ID:        EdgeID(prefixTestID("edge-final-state-rel")),
+		StartNode: NodeID(prefixTestID("edge-final-state-a")),
+		EndNode:   NodeID(prefixTestID("edge-final-state-b")),
+		Type:      "KNOWS",
+		Properties: map[string]interface{}{
+			"note": "created before required property is set",
+		},
+	}))
+
+	require.NoError(t, tx.UpdateEdge(&Edge{
+		ID:        EdgeID(prefixTestID("edge-final-state-rel")),
+		StartNode: NodeID(prefixTestID("edge-final-state-a")),
+		EndNode:   NodeID(prefixTestID("edge-final-state-b")),
+		Type:      "KNOWS",
+		Properties: map[string]interface{}{
+			"note":  "created before required property is set",
+			"since": int64(2026),
+		},
+	}))
+
+	require.NoError(t, tx.Commit())
+
+	edge, err := engine.GetEdge(EdgeID(prefixTestID("edge-final-state-rel")))
+	require.NoError(t, err)
+	require.Equal(t, int64(2026), edge.Properties["since"])
+	assert.Equal(t, "created before required property is set", edge.Properties["note"])
+}
+
+func TestTransaction_CreateThenUpdateNodeCollapsesToSingleCreateOperation(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	tx, err := engine.BeginTransaction()
+	require.NoError(t, err)
+
+	nodeID := NodeID(prefixTestID("create-then-update"))
+	_, err = tx.CreateNode(&Node{ID: nodeID, Labels: []string{"MongoRecord"}})
+	require.NoError(t, err)
+
+	err = tx.UpdateNode(&Node{
+		ID:     nodeID,
+		Labels: []string{"MongoRecord"},
+		Properties: map[string]interface{}{
+			"mongo_id":    "bulk-1",
+			"source":      "nornic_translation",
+			"code":        1,
+			"description": "entry-1",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, tx.OperationCount(), "create+update in the same transaction should collapse into a single create operation")
+
+	require.NoError(t, tx.Commit())
+
+	stored, err := engine.GetNode(nodeID)
+	require.NoError(t, err)
+	require.Equal(t, "bulk-1", stored.Properties["mongo_id"])
+	require.Equal(t, "entry-1", stored.Properties["description"])
+}

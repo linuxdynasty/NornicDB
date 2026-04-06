@@ -78,6 +78,47 @@ func TestExplicitTransaction_NamespacedCreateRollback(t *testing.T) {
 	}
 }
 
+func TestExplicitTransaction_RelationshipConstraintUsesFinalStateAtCommit(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE CONSTRAINT follows_since_exists FOR ()-[r:FOLLOWS]-() REQUIRE r.since IS NOT NULL`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `CREATE (:Person {id: 'tx-rel-a'}), (:Person {id: 'tx-rel-b'})`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		MATCH (a:Person {id: 'tx-rel-a'}), (b:Person {id: 'tx-rel-b'})
+		CREATE (a)-[:FOLLOWS {note: 'set later in tx'}]->(b)
+	`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+		MATCH (:Person {id: 'tx-rel-a'})-[r:FOLLOWS]->(:Person {id: 'tx-rel-b'})
+		SET r.since = 2026
+		RETURN r.since
+	`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, `
+		MATCH (:Person {id: 'tx-rel-a'})-[r:FOLLOWS]->(:Person {id: 'tx-rel-b'})
+		RETURN r.since, r.note
+	`, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, int64(2026), result.Rows[0][0])
+	assert.Equal(t, "set later in tx", result.Rows[0][1])
+}
+
 func TestTransactionStatementRoutingAndErrors(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

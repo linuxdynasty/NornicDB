@@ -355,8 +355,10 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 
 	// Check if node exists
 	var oldNode *Node
+	createOpIdx := -1
 	if pending, exists := tx.pendingNodes[node.ID]; exists {
 		oldNode = copyNode(pending)
+		createOpIdx = tx.pendingCreateNodeOperationIndexLocked(node.ID)
 	} else {
 		var err error
 		oldNode, err = tx.getCommittedNodeLocked(node.ID)
@@ -411,6 +413,19 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	// Track for read-your-writes
 	nodeCopy := copyNode(node)
 	tx.pendingNodes[node.ID] = nodeCopy
+	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+		tx.bufferDelete(pendingEmbedKey(node.ID))
+	} else if !isSystemNamespaceID(string(node.ID)) && NodeNeedsEmbedding(node) {
+		tx.bufferSet(pendingEmbedKey(node.ID), []byte{})
+	} else {
+		tx.bufferDelete(pendingEmbedKey(node.ID))
+	}
+
+	if createOpIdx >= 0 {
+		tx.operations[createOpIdx].Node = nodeCopy
+		tx.operations[createOpIdx].Timestamp = time.Now()
+		return nil
+	}
 
 	tx.operations = append(tx.operations, Operation{
 		Type:      OpUpdateNode,
@@ -421,6 +436,22 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	})
 
 	return nil
+}
+
+func (tx *BadgerTransaction) pendingCreateNodeOperationIndexLocked(nodeID NodeID) int {
+	for i := len(tx.operations) - 1; i >= 0; i-- {
+		op := tx.operations[i]
+		if op.NodeID != nodeID {
+			continue
+		}
+		switch op.Type {
+		case OpDeleteNode:
+			return -1
+		case OpCreateNode:
+			return i
+		}
+	}
+	return -1
 }
 
 // deleteNodeBuffered deletes a node and all its edges/embeddings, buffering all writes.
@@ -807,6 +838,143 @@ func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 	}
 
 	return tx.getCommittedNodeLocked(nodeID)
+}
+
+// GetEdge retrieves an edge with read-your-writes semantics.
+func (tx *BadgerTransaction) GetEdge(edgeID EdgeID) (*Edge, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	if _, deleted := tx.deletedEdges[edgeID]; deleted {
+		return nil, ErrNotFound
+	}
+
+	if edge, exists := tx.pendingEdges[edgeID]; exists {
+		return copyEdge(edge), nil
+	}
+
+	return tx.getCommittedEdgeLocked(edgeID)
+}
+
+// GetOutgoingEdges returns outgoing edges including pending transaction writes.
+func (tx *BadgerTransaction) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.engine.GetOutgoingEdges(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingEdgesLocked(committed, func(edge *Edge) bool {
+		return edge.StartNode == nodeID
+	}), nil
+}
+
+// GetIncomingEdges returns incoming edges including pending transaction writes.
+func (tx *BadgerTransaction) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.engine.GetIncomingEdges(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingEdgesLocked(committed, func(edge *Edge) bool {
+		return edge.EndNode == nodeID
+	}), nil
+}
+
+// GetEdgesBetween returns edges between two nodes including pending transaction writes.
+func (tx *BadgerTransaction) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.engine.GetEdgesBetween(startID, endID)
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingEdgesLocked(committed, func(edge *Edge) bool {
+		return edge.StartNode == startID && edge.EndNode == endID
+	}), nil
+}
+
+// GetEdgeBetween returns a matching edge including pending transaction writes.
+func (tx *BadgerTransaction) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
+	edges, err := tx.GetEdgesBetween(startID, endID)
+	if err != nil {
+		return nil
+	}
+	for _, edge := range edges {
+		if edgeType == "" || edge.Type == edgeType {
+			return edge
+		}
+	}
+	return nil
+}
+
+// GetEdgesByType returns edges of a given type including pending transaction writes.
+func (tx *BadgerTransaction) GetEdgesByType(edgeType string) ([]*Edge, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.engine.GetEdgesByType(edgeType)
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingEdgesLocked(committed, func(edge *Edge) bool {
+		return edge.Type == edgeType
+	}), nil
+}
+
+func (tx *BadgerTransaction) mergePendingEdgesLocked(committed []*Edge, includePending func(*Edge) bool) []*Edge {
+	merged := make([]*Edge, 0, len(committed)+len(tx.pendingEdges))
+	seen := make(map[EdgeID]struct{}, len(committed)+len(tx.pendingEdges))
+
+	for _, edge := range committed {
+		if edge == nil {
+			continue
+		}
+		if _, deleted := tx.deletedEdges[edge.ID]; deleted {
+			continue
+		}
+		if pending, exists := tx.pendingEdges[edge.ID]; exists {
+			if includePending(pending) {
+				merged = append(merged, copyEdge(pending))
+				seen[edge.ID] = struct{}{}
+			}
+			continue
+		}
+		if includePending(edge) {
+			merged = append(merged, copyEdge(edge))
+			seen[edge.ID] = struct{}{}
+		}
+	}
+
+	for id, edge := range tx.pendingEdges {
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		if includePending(edge) {
+			merged = append(merged, copyEdge(edge))
+		}
+	}
+
+	return merged
 }
 
 // Commit applies all changes atomically with full constraint validation.

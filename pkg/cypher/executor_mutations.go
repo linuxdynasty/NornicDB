@@ -755,6 +755,34 @@ func (e *StorageExecutor) normalizeSetMatchRowsToNodes(matchResult *ExecuteResul
 	}
 }
 
+func (e *StorageExecutor) normalizeSetMatchRowsToEdges(matchResult *ExecuteResult, store storage.Engine) {
+	if matchResult == nil {
+		return
+	}
+	for rowIdx := range matchResult.Rows {
+		row := matchResult.Rows[rowIdx]
+		for colIdx, val := range row {
+			m, ok := val.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			rawID, ok := m["_edgeId"]
+			if !ok {
+				continue
+			}
+			edgeID, ok := rawID.(string)
+			if !ok || edgeID == "" {
+				continue
+			}
+			edge, err := store.GetEdge(storage.EdgeID(edgeID))
+			if err != nil || edge == nil {
+				continue
+			}
+			row[colIdx] = edge
+		}
+	}
+}
+
 // executeSet handles MATCH ... SET queries.
 func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	result := &ExecuteResult{
@@ -814,6 +842,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	// MATCH ... RETURN can surface nodes as maps (e.g. via nodeToMap). SET/RETURN
 	// pipelines need live node pointers to preserve Cypher property semantics.
 	e.normalizeSetMatchRowsToNodes(matchResult, store)
+	e.normalizeSetMatchRowsToEdges(matchResult, store)
 
 	// Parse SET clause: SET n.property = value or SET n += $properties.
 	// If additional clauses follow SET (e.g., UNWIND/WITH/RETURN), split them out
@@ -1048,6 +1077,19 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			return evalNodes
 		}
 
+		buildEvalEdges := func(row []interface{}) map[string]*storage.Edge {
+			evalEdges := make(map[string]*storage.Edge, len(matchResult.Columns))
+			for i, col := range matchResult.Columns {
+				if i >= len(row) {
+					continue
+				}
+				if edge, ok := row[i].(*storage.Edge); ok && edge != nil {
+					evalEdges[col] = edge
+				}
+			}
+			return evalEdges
+		}
+
 		resolvePropValue := func(row []interface{}) (interface{}, error) {
 			if strings.HasPrefix(right, "$") {
 				paramName := strings.TrimSpace(right[1:])
@@ -1064,7 +1106,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				}
 				return normalizePropValue(paramValue), nil
 			}
-			return e.evaluateExpressionWithContext(right, buildEvalNodes(row), make(map[string]*storage.Edge)), nil
+			return e.evaluateExpressionWithContext(right, buildEvalNodes(row), buildEvalEdges(row)), nil
 		}
 
 		// Extract variable and property (or whole-variable map replacement)
@@ -1083,14 +1125,24 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 					return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property = value or variable = {property: value}): %w", assignment, err)
 				}
 				for _, val := range row {
-					node, ok := val.(*storage.Node)
-					if !ok || node == nil {
-						continue
-					}
-					node.Properties = cloneStringAnyMap(props)
-					if err := store.UpdateNode(node); err == nil {
-						result.Stats.PropertiesSet++
-						e.notifyNodeMutated(string(node.ID))
+					switch entity := val.(type) {
+					case *storage.Node:
+						if entity == nil {
+							continue
+						}
+						entity.Properties = cloneStringAnyMap(props)
+						if err := store.UpdateNode(entity); err == nil {
+							result.Stats.PropertiesSet++
+							e.notifyNodeMutated(string(entity.ID))
+						}
+					case *storage.Edge:
+						if entity == nil {
+							continue
+						}
+						entity.Properties = cloneStringAnyMap(props)
+						if err := store.UpdateEdge(entity); err == nil {
+							result.Stats.PropertiesSet++
+						}
 					}
 				}
 			}
@@ -1106,15 +1158,27 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				return nil, err
 			}
 			for _, val := range row {
-				node, ok := val.(*storage.Node)
-				if !ok || node == nil {
-					continue
-				}
-				// Use setNodeProperty to properly route "embedding" to node.ChunkEmbeddings (always stored as array of arrays)
-				setNodeProperty(node, propName, propValue)
-				if err := store.UpdateNode(node); err == nil {
-					result.Stats.PropertiesSet++
-					e.notifyNodeMutated(string(node.ID))
+				switch entity := val.(type) {
+				case *storage.Node:
+					if entity == nil {
+						continue
+					}
+					setNodeProperty(entity, propName, propValue)
+					if err := store.UpdateNode(entity); err == nil {
+						result.Stats.PropertiesSet++
+						e.notifyNodeMutated(string(entity.ID))
+					}
+				case *storage.Edge:
+					if entity == nil {
+						continue
+					}
+					if entity.Properties == nil {
+						entity.Properties = make(map[string]interface{})
+					}
+					entity.Properties[propName] = propValue
+					if err := store.UpdateEdge(entity); err == nil {
+						result.Stats.PropertiesSet++
+					}
 				}
 			}
 		}
