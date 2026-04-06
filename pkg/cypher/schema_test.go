@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -930,6 +931,28 @@ func TestSchemaDDL_AllowsTrailingOptionsAndBacktickIdentifiers(t *testing.T) {
 	require.NoError(t, err)
 	_, err = exec.Execute(ctx, "DROP CONSTRAINT `uq order id` IF EXISTS", nil)
 	require.NoError(t, err)
+}
+
+func TestCreateConstraintRequireVariants_ANTLRMode(t *testing.T) {
+	cleanup := config.WithANTLRParser()
+	defer cleanup()
+
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	queries := []string{
+		"CREATE CONSTRAINT `uq order id antlr` IF NOT EXISTS FOR (`n`:`OrderANTLR`) REQUIRE `n`.`id` IS UNIQUE OPTIONS {indexProvider: 'range-1.0'}",
+		"CREATE CONSTRAINT nk_antlr IF NOT EXISTS FOR (n:NKANTLR) REQUIRE (n.k1, n.k2) IS NODE KEY",
+		"CREATE CONSTRAINT nn_antlr IF NOT EXISTS FOR (n:NNANTLR) REQUIRE n.email IS NOT NULL",
+		"CREATE CONSTRAINT tp_antlr IF NOT EXISTS FOR (n:TPANTLR) REQUIRE n.ts IS TYPED ZONED DATETIME",
+	}
+
+	for _, query := range queries {
+		_, err := exec.Execute(ctx, query, nil)
+		require.NoError(t, err, "expected REQUIRE variant to execute via ANTLR parser: %s", query)
+	}
 }
 
 func TestCreateIndex_RebuildsUsableEntriesAfterRestart(t *testing.T) {

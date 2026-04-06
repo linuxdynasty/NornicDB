@@ -128,6 +128,12 @@ func (s *BaseCypherParserListener) EnterWithSt(ctx *WithStContext) {}
 // ExitWithSt is called when production withSt is exited.
 func (s *BaseCypherParserListener) ExitWithSt(ctx *WithStContext) {}
 
+// EnterEmbeddingSt is called when production embeddingSt is entered.
+func (s *BaseCypherParserListener) EnterEmbeddingSt(ctx *EmbeddingStContext) {}
+
+// ExitEmbeddingSt is called when production embeddingSt is exited.
+func (s *BaseCypherParserListener) ExitEmbeddingSt(ctx *EmbeddingStContext) {}
+
 // EnterSkipSt is called when production skipSt is entered.
 func (s *BaseCypherParserListener) EnterSkipSt(ctx *SkipStContext) {}
 

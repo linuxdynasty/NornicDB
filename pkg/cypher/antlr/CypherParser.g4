@@ -82,8 +82,8 @@ schemaCommand
     | CREATE FULLTEXT INDEX name? (IF NOT EXISTS)? (FOR nodePattern)? ON? EACH? LBRACK expressionChain RBRACK
     | CREATE VECTOR INDEX name? (IF NOT EXISTS)? (FOR nodePattern)? ON? parenExpressionChain? (OPTIONS mapLit)?
     | DROP CONSTRAINT name? (IF EXISTS)?
-    | CREATE CONSTRAINT name? (IF NOT EXISTS)? (FOR nodePattern)? REQUIRE expression (IS UNIQUE | IS NOT NULL_W | IS COLON COLON propertyTypeName | IS TYPED propertyTypeName)
-    | CREATE CONSTRAINT name? (IF NOT EXISTS)? ON? nodePattern? ASSERT (expression | parenExpressionChain) IS (UNIQUE | NOT NULL_W | NODE KEY | COLON COLON propertyTypeName | TYPED propertyTypeName)
+    | CREATE CONSTRAINT name? (IF NOT EXISTS)? (FOR nodePattern)? REQUIRE (expression | parenExpressionChain) (IS UNIQUE | IS NOT NULL_W | IS NODE KEY | IS COLON COLON propertyTypeName | IS TYPED propertyTypeName) (OPTIONS mapLit)?
+    | CREATE CONSTRAINT name? (IF NOT EXISTS)? ON? nodePattern? ASSERT (expression | parenExpressionChain) IS (UNIQUE | NOT NULL_W | NODE KEY | COLON COLON propertyTypeName | TYPED propertyTypeName) (OPTIONS mapLit)?
     ;
 
 propertyTypeName
@@ -129,6 +129,10 @@ withSt
     : WITH projectionBody where?
     ;
 
+embeddingSt
+    : WITH EMBEDDING
+    ;
+
 skipSt
     : SKIP_W expression
     ;
@@ -158,7 +162,7 @@ orderSt
     ;
 
 singlePartQ
-    : readingStatement* (returnSt | updatingStatement+ returnSt?)?
+    : readingStatement* (returnSt | updatingStatement+ embeddingSt? returnSt?)?
     | callSubquery orderSt?
     ;
 
@@ -572,6 +576,7 @@ symbol
     | UNIQUE
     | REQUIRE
     | TYPED
+    | EMBEDDING
     | IF
     | EACH
     | ALL
@@ -623,6 +628,7 @@ reservedWord
     | FOR
     | REQUIRE
     | TYPED
+    | EMBEDDING
     | UNIQUE
     | CASE
     | WHEN

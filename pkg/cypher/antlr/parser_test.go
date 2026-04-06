@@ -126,6 +126,10 @@ func TestANTLRParserBasicQueries(t *testing.T) {
 		// Schema type constraints (Neo4j 5)
 		{"constraint typed zoned datetime", "CREATE CONSTRAINT event_ts_type IF NOT EXISTS FOR (e:Event) REQUIRE e.ts IS :: ZONED DATETIME"},
 		{"constraint typed local datetime", "CREATE CONSTRAINT meeting_start_type IF NOT EXISTS FOR (m:Meeting) REQUIRE m.start IS TYPED LOCAL DATETIME"},
+		{"constraint node key", "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (u:User) REQUIRE (u.username, u.domain) IS NODE KEY"},
+		{"constraint require options backticks", "CREATE CONSTRAINT `uq order id` IF NOT EXISTS FOR (`n`:`Order`) REQUIRE `n`.`id` IS UNIQUE OPTIONS {indexProvider: 'range-1.0'}"},
+		{"create with embedding return", "CREATE (n:Doc {id:'d1', content:'hello world'}) WITH EMBEDDING RETURN count(n) AS c"},
+		{"create with embedding no return", "CREATE (n:Doc {id:'d2', content:'hello world'}) WITH EMBEDDING"},
 	}
 
 	for _, tt := range queries {
@@ -480,7 +484,11 @@ func TestANTLRParserAdvancedQueries(t *testing.T) {
 		{"drop index", "DROP INDEX person_name IF EXISTS"},
 		{"create fulltext index", "CREATE FULLTEXT INDEX doc_search IF NOT EXISTS FOR (n:Doc) ON EACH [n.title, n.content]"},
 		{"create vector index", "CREATE VECTOR INDEX doc_embedding IF NOT EXISTS FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {dimensions: 3}}"},
+		{"create constraint node key", "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (u:User) REQUIRE (u.username, u.domain) IS NODE KEY"},
+		{"create constraint options backticks", "CREATE CONSTRAINT `uq order id` IF NOT EXISTS FOR (`n`:`Order`) REQUIRE `n`.`id` IS UNIQUE OPTIONS {indexProvider: 'range-1.0'}"},
 		{"drop constraint", "DROP CONSTRAINT person_id IF EXISTS"},
+		{"create with embedding return", "CREATE (n:Doc {id:'d1', content:'hello world'}) WITH EMBEDDING RETURN count(n) AS c"},
+		{"create with embedding no return", "CREATE (n:Doc {id:'d2', content:'hello world'}) WITH EMBEDDING"},
 		{"call subquery", "CALL { MATCH (n:Person) RETURN n LIMIT 1 } RETURN n"},
 		{"exists subquery", "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age > 18 } RETURN n"},
 		{"count subquery", "MATCH (n:Person) RETURN COUNT { MATCH (n)-[:KNOWS]->(m:Person) } AS cnt"},

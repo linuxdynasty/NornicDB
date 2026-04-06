@@ -61,6 +61,9 @@ type CypherParserListener interface {
 	// EnterWithSt is called when entering the withSt production.
 	EnterWithSt(c *WithStContext)
 
+	// EnterEmbeddingSt is called when entering the embeddingSt production.
+	EnterEmbeddingSt(c *EmbeddingStContext)
+
 	// EnterSkipSt is called when entering the skipSt production.
 	EnterSkipSt(c *SkipStContext)
 
@@ -372,6 +375,9 @@ type CypherParserListener interface {
 
 	// ExitWithSt is called when exiting the withSt production.
 	ExitWithSt(c *WithStContext)
+
+	// ExitEmbeddingSt is called when exiting the embeddingSt production.
+	ExitEmbeddingSt(c *EmbeddingStContext)
 
 	// ExitSkipSt is called when exiting the skipSt production.
 	ExitSkipSt(c *SkipStContext)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -157,4 +158,43 @@ func TestWithEmbedding_ExplicitTransaction(t *testing.T) {
 	require.Len(t, nodes, 1)
 	require.NotEmpty(t, nodes[0].ChunkEmbeddings)
 	require.NotNil(t, nodes[0].EmbedMeta)
+}
+
+func TestWithEmbedding_ANTLRMode(t *testing.T) {
+	cleanup := config.WithANTLRParser()
+	defer cleanup()
+
+	t.Run("create_return", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+		exec.SetEmbedder(&inlineEmbeddingTestEmbedder{model: "test-inline", dims: 3})
+
+		ctx := context.Background()
+		_, err := exec.Execute(ctx, "CREATE (n:Doc {id:'antlr-create', content:'hello world'}) WITH EMBEDDING RETURN count(n) AS c", nil)
+		require.NoError(t, err)
+
+		nodes, err := store.GetNodesByLabel("Doc")
+		require.NoError(t, err)
+		require.Len(t, nodes, 1)
+		require.NotEmpty(t, nodes[0].ChunkEmbeddings)
+		require.NotNil(t, nodes[0].EmbedMeta)
+	})
+
+	t.Run("create_without_return", func(t *testing.T) {
+		base := newTestMemoryEngine(t)
+		store := storage.NewNamespacedEngine(base, "test")
+		exec := NewStorageExecutor(store)
+		exec.SetEmbedder(&inlineEmbeddingTestEmbedder{model: "test-inline", dims: 2})
+
+		ctx := context.Background()
+		_, err := exec.Execute(ctx, "CREATE (n:Doc {id:'antlr-no-return', content:'standalone'}) WITH EMBEDDING", nil)
+		require.NoError(t, err)
+
+		nodes, err := store.GetNodesByLabel("Doc")
+		require.NoError(t, err)
+		require.Len(t, nodes, 1)
+		require.NotEmpty(t, nodes[0].ChunkEmbeddings)
+		require.NotNil(t, nodes[0].EmbedMeta)
+	})
 }
