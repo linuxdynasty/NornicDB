@@ -146,6 +146,40 @@ func TestParseWhere(t *testing.T) {
 	}
 }
 
+func TestParseExactTranslationQuery(t *testing.T) {
+	parser := NewParser()
+	cypher := "MATCH (o:OriginalText)-[:TRANSLATES_TO]->(t:TranslatedText) WHERE t.language = 'fr' RETURN o, t, t.createdAt ORDER BY t.createdAt DESC LIMIT 10"
+
+	query, err := parser.Parse(cypher)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if query == nil {
+		t.Fatal("expected parsed query")
+	}
+	if query.Type != QueryMatch {
+		t.Fatalf("expected QueryMatch, got %v", query.Type)
+	}
+
+	hasWhere := false
+	hasReturn := false
+	for _, clause := range query.Clauses {
+		switch clause.(type) {
+		case *WhereClause:
+			hasWhere = true
+		case *ReturnClause:
+			hasReturn = true
+		}
+	}
+
+	if !hasWhere {
+		t.Error("expected WHERE clause")
+	}
+	if !hasReturn {
+		t.Error("expected RETURN clause")
+	}
+}
+
 func TestParseSet(t *testing.T) {
 	parser := NewParser()
 
