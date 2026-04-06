@@ -9,7 +9,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.0.38] - 2026-04-02
+## [v1.0.39] "PunkRocker" - 2026-04-06
+
+### Added
+
+- **Block-style constraint contracts (`REQUIRE { ... }`)**:
+  - added grouped schema contracts so multiple rules can be declared together on a node or relationship target.
+  - block entries can mix primitive constraints already supported by the engine with runtime boolean validations.
+  - added `SHOW CONSTRAINT CONTRACTS` to inspect stored contracts separately from the compiled primitive constraints they generate.
+
+Example - node contract:
+
+```cypher
+CREATE CONSTRAINT person_contract
+FOR (n:Person)
+REQUIRE {
+  n.id IS UNIQUE
+  n.name IS NOT NULL
+  n.status IN ['active', 'inactive']
+  (n.tenant, n.externalId) IS NODE KEY
+  COUNT { (n)-[:PRIMARY_EMPLOYER]->(:Company) } <= 1
+}
+```
+
+Example - relationship contract:
+
+```cypher
+CREATE CONSTRAINT works_at_contract
+FOR ()-[r:WORKS_AT]-()
+REQUIRE {
+  r.id IS UNIQUE
+  r.startedAt IS NOT NULL
+  startNode(r) <> endNode(r)
+  startNode(r).tenant = endNode(r).tenant
+  r.hoursPerWeek > 0
+}
+```
+
+- **Relationship cardinality and endpoint policy constraints (NornicDB extensions)**:
+  - added directional relationship cardinality limits using `REQUIRE MAX COUNT <n>`.
+  - added endpoint policy constraints so allowed start-label/end-label combinations can be enforced for a relationship type.
+
+Example - directional cardinality:
+
+```cypher
+CREATE CONSTRAINT max_employers
+FOR ()-[r:WORKS_AT]->()
+REQUIRE MAX COUNT 3
+```
+
+### Changed
+
+- **Cypher parser compatibility and DDL coverage**:
+  - expanded ANTLR parser support for Neo4j 5-style `REQUIRE` forms, parenthesized property chains in key constraints, trailing `OPTIONS`, and `WITH EMBEDDING` syntax.
+  - aligned parser-mode behavior so the same user-facing query shapes work consistently in both parser paths.
+
+- **Traversal planning and query execution**:
+  - added a generic relationship `ORDER BY ... LIMIT` planner that can seed traversal from the filtered end-node side using index top-k lookups.
+  - added dedicated hot-path tracing for the new traversal planner and broadened routing/coverage for the translation-query family and adjacent query shapes.
+
+- **Release and dependency maintenance**:
+  - refreshed Go, UI, and workflow dependencies.
+  - updated release/readme/docs content to reflect the current feature set and release flow.
+
+### Fixed
+
+- **Explicit transaction final-state semantics**:
+  - fixed explicit transaction handling so relationship constraints are validated against the final committed state rather than intermediate statement state.
+  - fixed transaction read-your-own-write behavior for relationship reads and relationship property updates in explicit transactions.
+
+- **Large batch write amplification**:
+  - fixed `UNWIND`/bulk write paths that could fail with oversized transactions when a node was created and then updated again in the same transaction.
+  - create-then-update mutations now collapse into a single pending create operation where possible.
+
+- **Relationship query ordering and stability**:
+  - fixed `ORDER BY` handling for relationship query results when ordering by aliased return expressions or node properties.
+  - fixed MATCH-clause `ORDER BY` extraction so labels and relationship types such as `:Order` and `:ORDERS` no longer interfere with sorting.
+  - restored deterministic ordering for Northwind-style relationship aggregation fast paths.
+
+### Tests
+
+- Added and expanded regression coverage for:
+  - block-style constraint contracts and `SHOW CONSTRAINT CONTRACTS`
+  - relationship cardinality and endpoint policy constraints
+  - explicit transaction relationship final-state validation
+  - batch `UNWIND` create/update collapse behavior
+  - exact translation query-family parsing, routing, e2e behavior, and traversal hot-path assertions
+  - relationship aggregation ordering and `ORDER BY` clause parsing around `Order`/`ORDERS` tokens
+
+### Technical Details
+
+- **Range covered**: `v1.0.38..HEAD`
+- **Commits in range**: 19 (non-merge)
+- **Repository delta**: 85 files changed, +7,997 / -2,854 lines
+- **Primary focus areas**: schema contracts and relationship policy constraints, parser compatibility, explicit transaction correctness, bulk-write stability, and generic relationship traversal/query hot paths.
+
+## [v1.0.38] "Phantom" - 2026-04-02
 
 ### Added
 
@@ -158,7 +253,7 @@ REQUIRE r.role IN ['engineer', 'manager', 'director']
 - **Repository delta**: 180 files changed, +15,077 / -2,619 lines
 - **Primary focus areas**: Neo4j relationship constraint parity, NornicDB constraint extensions (temporal no-overlap, domain/enum), CMEK encryption, embedding property namespace cleanup, ORDER BY stability, and macOS packaging.
 
-## [v1.0.37] - 2026-04-01
+## [v1.0.37] "The Walker" - 2026-04-01
 
 ### Added
 
