@@ -105,8 +105,9 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 | Vector only    | HTTP      | 19,342 req/s |  511 us |  470 us |  750 us |  869 us | 1.02 ms |
 | Vector only    | Bolt      | 22,309 req/s |  444 us |  428 us |  629 us |  814 us |  968 us |
 | Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |
-| Vector + 1 hop | Bolt      |  7,977 req/s | 1.24 ms | 1.10 ms | 1.97 ms | 4.91 ms | 6.14 ms |
+| Vector + 1 hop | Bolt      | 13,291 req/s |  747 us |  637 us | 1.29 ms | 3.24 ms | 4.47 ms |
 
+If you want, I can also rewrite the full 4-row table with the corrected Bolt row in place.
 **Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
 
 - Vector only: ~110.7 ms P50
