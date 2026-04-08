@@ -122,3 +122,268 @@ RETURN count(h) AS prepared
 		}
 	}
 }
+
+func TestUnwindMergeBatch_MultiPropertyMerge_UsesHotPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddCompositeIndex("idx_translated_key_lang", "TranslatedText", []string{"translationId", "language"}))
+
+	rows := []map[string]interface{}{
+		{"translationId": "src-1", "language": "es", "translatedText": "hola"},
+		{"translationId": "src-2", "language": "fr", "translatedText": "bonjour"},
+		{"translationId": "src-1", "language": "es", "translatedText": "hola-2"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (t:TranslatedText {translationId: row.translationId, language: row.language})
+ON CREATE SET t.translatedText = row.translatedText
+ON MATCH SET t.translatedText = row.translatedText
+RETURN count(t) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"prepared"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(3), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch, "expected unwind simple merge batch hot path")
+
+	nodes, err := store.GetNodesByLabel("TranslatedText")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	for _, n := range nodes {
+		if n.Properties["translationId"] == "src-1" && n.Properties["language"] == "es" {
+			require.Equal(t, "hola-2", n.Properties["translatedText"])
+		}
+	}
+}
+
+func TestUnwindMergeBatch_MultiPropertyMerge_DistinctTypesDoNotCollapse(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddCompositeIndex("idx_type_safe_translation_key_lang", "TranslatedText", []string{"translationId", "language"}))
+
+	rows := []map[string]interface{}{
+		{"translationId": 1, "language": "es", "translatedText": "numeric-one"},
+		{"translationId": "1", "language": "es", "translatedText": "string-one"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (t:TranslatedText {translationId: row.translationId, language: row.language})
+ON CREATE SET t.translatedText = row.translatedText
+ON MATCH SET t.translatedText = row.translatedText
+RETURN count(t) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"prepared"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch, "expected unwind simple merge batch hot path")
+
+	nodes, err := store.GetNodesByLabel("TranslatedText")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	seenNumeric := false
+	seenString := false
+	for _, n := range nodes {
+		if n.Properties["language"] != "es" {
+			continue
+		}
+		switch v := n.Properties["translationId"].(type) {
+		case int:
+			if v == 1 {
+				seenNumeric = true
+				require.Equal(t, "numeric-one", n.Properties["translatedText"])
+			}
+		case int64:
+			if v == 1 {
+				seenNumeric = true
+				require.Equal(t, "numeric-one", n.Properties["translatedText"])
+			}
+		case string:
+			if v == "1" {
+				seenString = true
+				require.Equal(t, "string-one", n.Properties["translatedText"])
+			}
+		}
+	}
+	require.True(t, seenNumeric, "expected numeric translationId row to remain distinct")
+	require.True(t, seenString, "expected string translationId row to remain distinct")
+}
+
+func TestUnwindMergeBatch_MultiPropertyMerge_NestedMapValuesDoNotCollapse(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddCompositeIndex("idx_nested_map_translation_key_lang", "TranslatedText", []string{"translationId", "language"}))
+
+	rows := []map[string]interface{}{
+		{
+			"translationId":  map[string]interface{}{"id": 1, "meta": map[string]interface{}{"kind": "n"}},
+			"language":       "es",
+			"translatedText": "nested-numeric",
+		},
+		{
+			"translationId":  map[string]interface{}{"id": "1", "meta": map[string]interface{}{"kind": "n"}},
+			"language":       "es",
+			"translatedText": "nested-string",
+		},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (t:TranslatedText {translationId: row.translationId, language: row.language})
+ON CREATE SET t.translatedText = row.translatedText
+ON MATCH SET t.translatedText = row.translatedText
+RETURN count(t) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch)
+
+	nodes, err := store.GetNodesByLabel("TranslatedText")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	seenNumeric := false
+	seenString := false
+	for _, n := range nodes {
+		m, ok := n.Properties["translationId"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if inner, ok := m["id"]; ok {
+			switch v := inner.(type) {
+			case int:
+				if v == 1 {
+					seenNumeric = true
+					require.Equal(t, "nested-numeric", n.Properties["translatedText"])
+				}
+			case int64:
+				if v == 1 {
+					seenNumeric = true
+					require.Equal(t, "nested-numeric", n.Properties["translatedText"])
+				}
+			case string:
+				if v == "1" {
+					seenString = true
+					require.Equal(t, "nested-string", n.Properties["translatedText"])
+				}
+			}
+		}
+	}
+	require.True(t, seenNumeric, "expected nested numeric map key to remain distinct")
+	require.True(t, seenString, "expected nested string map key to remain distinct")
+}
+
+func TestUnwindMergeBatch_MultiPropertyMerge_NestedSliceAndNilValuesDoNotCollapse(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddCompositeIndex("idx_nested_slice_translation_key_lang", "TranslatedText", []string{"translationId", "language"}))
+
+	rows := []map[string]interface{}{
+		{
+			"translationId":  []interface{}{1, "alpha", nil, map[string]interface{}{"flag": true}},
+			"language":       "es",
+			"translatedText": "slice-numeric",
+		},
+		{
+			"translationId":  []interface{}{"1", "alpha", nil, map[string]interface{}{"flag": true}},
+			"language":       "es",
+			"translatedText": "slice-string",
+		},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (t:TranslatedText {translationId: row.translationId, language: row.language})
+ON CREATE SET t.translatedText = row.translatedText
+ON MATCH SET t.translatedText = row.translatedText
+RETURN count(t) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindSimpleMergeBatch)
+
+	nodes, err := store.GetNodesByLabel("TranslatedText")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	seenNumeric := false
+	seenString := false
+	for _, n := range nodes {
+		list, ok := n.Properties["translationId"].([]interface{})
+		if !ok || len(list) != 4 {
+			continue
+		}
+		switch v := list[0].(type) {
+		case int:
+			if v == 1 {
+				seenNumeric = true
+				require.Nil(t, list[2])
+				require.Equal(t, "slice-numeric", n.Properties["translatedText"])
+			}
+		case int64:
+			if v == 1 {
+				seenNumeric = true
+				require.Nil(t, list[2])
+				require.Equal(t, "slice-numeric", n.Properties["translatedText"])
+			}
+		case string:
+			if v == "1" {
+				seenString = true
+				require.Nil(t, list[2])
+				require.Equal(t, "slice-string", n.Properties["translatedText"])
+			}
+		}
+	}
+	require.True(t, seenNumeric, "expected nested slice numeric key to remain distinct")
+	require.True(t, seenString, "expected nested slice string key to remain distinct")
+}
+
+func TestGenericMerge_MultiPropertyLookup_UsesCompositeSchemaPath(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	eng := &allNodesForbiddenEngine{MemoryEngine: base}
+
+	_, err := eng.CreateNode(&storage.Node{
+		ID:     "nornic:translated-1",
+		Labels: []string{"TranslatedText"},
+		Properties: map[string]interface{}{
+			"translationId":  "src-1",
+			"language":       "es",
+			"translatedText": "hola",
+		},
+	})
+	require.NoError(t, err)
+
+	exec := NewStorageExecutor(eng)
+	_, err = exec.Execute(context.Background(), "CREATE INDEX idx_tt_translation_id FOR (n:TranslatedText) ON (n.translationId)", nil)
+	require.NoError(t, err)
+	require.NoError(t, eng.GetSchema().AddCompositeIndex("idx_tt_translation_lang", "TranslatedText", []string{"translationId", "language"}))
+	eng.forbidScan = true
+
+	res, err := exec.Execute(context.Background(), `
+MERGE (t:TranslatedText {translationId: 'src-1', language: 'es'})
+ON MATCH SET t.translatedText = 'hola-2'
+RETURN t.translatedText AS translatedText
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"translatedText"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, "hola-2", res.Rows[0][0])
+}

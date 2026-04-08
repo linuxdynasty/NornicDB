@@ -6,9 +6,11 @@ package cypher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -831,14 +833,42 @@ type unwindSimpleMergePlan struct {
 	supported           bool
 	mergeVar            string
 	label               string
-	matchProp           string
-	matchExpr           string
+	matchAssignments    []unwindSimpleSetAssignment
 	setAssignments      []unwindSimpleSetAssignment
 	onCreateAssignments []unwindSimpleSetAssignment
 	onMatchAssignments  []unwindSimpleSetAssignment
 }
 
-var unwindSimpleMergePatternRE = regexp.MustCompile(`(?is)^MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*\}\s*\)\s*$`)
+var unwindSimpleMergePatternRE = regexp.MustCompile(`(?is)^MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*(.+?)\s*\}\s*\)\s*$`)
+
+func parseUnwindSimpleMergeMatchAssignments(raw string) ([]unwindSimpleSetAssignment, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	parts := splitTopLevelComma(trimmed)
+	out := make([]unwindSimpleSetAssignment, 0, len(parts))
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			continue
+		}
+		colonIdx := strings.Index(entry, ":")
+		if colonIdx <= 0 || colonIdx == len(entry)-1 {
+			return nil, false
+		}
+		prop := strings.TrimSpace(entry[:colonIdx])
+		expr := strings.TrimSpace(entry[colonIdx+1:])
+		if prop == "" || expr == "" {
+			return nil, false
+		}
+		out = append(out, unwindSimpleSetAssignment{prop: prop, expr: expr})
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
 
 func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAssignment, bool) {
 	trimmed := strings.TrimSpace(raw)
@@ -922,13 +952,16 @@ func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 	}
 
 	m := unwindSimpleMergePatternRE.FindStringSubmatch(mergePart)
-	if len(m) != 5 {
+	if len(m) != 4 {
 		return plan
 	}
 	plan.mergeVar = strings.TrimSpace(m[1])
 	plan.label = strings.TrimSpace(m[2])
-	plan.matchProp = strings.TrimSpace(m[3])
-	plan.matchExpr = strings.TrimSpace(m[4])
+	assignments, ok := parseUnwindSimpleMergeMatchAssignments(strings.TrimSpace(m[3]))
+	if !ok {
+		return plan
+	}
+	plan.matchAssignments = assignments
 
 	if setPart != "" {
 		assignments, ok := parseUnwindSimpleSetAssignments(setPart, plan.mergeVar)
@@ -1032,6 +1065,84 @@ func parseSimpleCountReturn(returnPart, mergeVar string) (alias string, ok bool)
 	return alias, true
 }
 
+func canonicalUnwindMergeValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make([]interface{}, 0, len(keys))
+		for _, k := range keys {
+			out = append(out, []interface{}{k, canonicalUnwindMergeValue(val[k])})
+		}
+		return map[string]interface{}{"type": "map", "entries": out}
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, item := range val {
+			out[i] = canonicalUnwindMergeValue(item)
+		}
+		return map[string]interface{}{"type": "list", "items": out}
+	case string:
+		return map[string]interface{}{"type": "string", "value": val}
+	case bool:
+		return map[string]interface{}{"type": "bool", "value": val}
+	case int:
+		return map[string]interface{}{"type": "int", "value": strconv.FormatInt(int64(val), 10)}
+	case int8:
+		return map[string]interface{}{"type": "int8", "value": strconv.FormatInt(int64(val), 10)}
+	case int16:
+		return map[string]interface{}{"type": "int16", "value": strconv.FormatInt(int64(val), 10)}
+	case int32:
+		return map[string]interface{}{"type": "int32", "value": strconv.FormatInt(int64(val), 10)}
+	case int64:
+		return map[string]interface{}{"type": "int64", "value": strconv.FormatInt(val, 10)}
+	case uint:
+		return map[string]interface{}{"type": "uint", "value": strconv.FormatUint(uint64(val), 10)}
+	case uint8:
+		return map[string]interface{}{"type": "uint8", "value": strconv.FormatUint(uint64(val), 10)}
+	case uint16:
+		return map[string]interface{}{"type": "uint16", "value": strconv.FormatUint(uint64(val), 10)}
+	case uint32:
+		return map[string]interface{}{"type": "uint32", "value": strconv.FormatUint(uint64(val), 10)}
+	case uint64:
+		return map[string]interface{}{"type": "uint64", "value": strconv.FormatUint(val, 10)}
+	case float32:
+		return map[string]interface{}{"type": "float32", "value": strconv.FormatFloat(float64(val), 'g', -1, 32)}
+	case float64:
+		return map[string]interface{}{"type": "float64", "value": strconv.FormatFloat(val, 'g', -1, 64)}
+	case nil:
+		return map[string]interface{}{"type": "nil"}
+	default:
+		rv := reflect.ValueOf(v)
+		if rv.IsValid() && rv.Kind() == reflect.Slice {
+			out := make([]interface{}, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				out[i] = canonicalUnwindMergeValue(rv.Index(i).Interface())
+			}
+			return map[string]interface{}{"type": rv.Type().String(), "items": out}
+		}
+		return map[string]interface{}{"type": fmt.Sprintf("%T", v), "value": fmt.Sprintf("%#v", v)}
+	}
+}
+
+func unwindMergeKey(label string, props map[string]interface{}) string {
+	propNames := mergePropertyNamesSorted(props)
+	entries := make([]interface{}, 0, len(propNames))
+	for _, prop := range propNames {
+		entries = append(entries, []interface{}{prop, canonicalUnwindMergeValue(props[prop])})
+	}
+	encoded, err := json.Marshal(map[string]interface{}{
+		"label":   label,
+		"entries": entries,
+	})
+	if err != nil {
+		return fmt.Sprintf("%s|%v", label, propNames)
+	}
+	return string(encoded)
+}
+
 func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
 	plan := e.cachedUnwindSimpleMergePlan(mutationPart)
 	if !plan.supported {
@@ -1045,102 +1156,43 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 	e.markUnwindSimpleMergeBatchUsed()
 
 	type mergeBatchEntry struct {
-		matchVal     interface{}
-		item         interface{}
-		isComparable bool
-		compKey      interface{}
-		fallbackKey  string
-		node         *storage.Node
+		item       interface{}
+		matchProps map[string]interface{}
+		lookupKey  string
+		node       *storage.Node
 	}
 
 	store := e.getStorage(ctx)
 	inputRowCount := int64(len(items))
 	rowValues := map[string]interface{}{unwindVar: nil}
 	ordered := make([]*mergeBatchEntry, 0, len(items))
-	byComparable := make(map[interface{}]*mergeBatchEntry, len(items))
-	byFallback := make(map[string]*mergeBatchEntry)
+	byLookupKey := make(map[string]*mergeBatchEntry, len(items))
 	for _, item := range items {
 		rowValues[unwindVar] = item
-		matchVal := e.evaluateExpressionFromValues(plan.matchExpr, rowValues)
-		if isComparableInterfaceValue(matchVal) {
-			if existing, exists := byComparable[matchVal]; exists {
-				existing.item = item
-				continue
-			}
-			entry := &mergeBatchEntry{
-				matchVal:     matchVal,
-				item:         item,
-				isComparable: true,
-				compKey:      matchVal,
-			}
-			byComparable[matchVal] = entry
-			ordered = append(ordered, entry)
-			continue
+		matchProps := make(map[string]interface{}, len(plan.matchAssignments))
+		for _, assignment := range plan.matchAssignments {
+			matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
 		}
-		fallbackKey := mergeLookupCacheKey(plan.label, plan.matchProp, matchVal)
-		if existing, exists := byFallback[fallbackKey]; exists {
+		lookupKey := unwindMergeKey(plan.label, matchProps)
+		if existing, exists := byLookupKey[lookupKey]; exists {
 			existing.item = item
 			continue
 		}
 		entry := &mergeBatchEntry{
-			matchVal:     matchVal,
-			item:         item,
-			isComparable: false,
-			fallbackKey:  fallbackKey,
+			item:       item,
+			matchProps: matchProps,
+			lookupKey:  lookupKey,
 		}
-		byFallback[fallbackKey] = entry
+		byLookupKey[lookupKey] = entry
 		ordered = append(ordered, entry)
 	}
 
-	schema := store.GetSchema()
-	unresolved := len(ordered)
-	if schema != nil {
-		if _, indexed := schema.GetPropertyIndex(plan.label, plan.matchProp); indexed {
-			for _, entry := range ordered {
-				candidateIDs := schema.PropertyIndexLookup(plan.label, plan.matchProp, entry.matchVal)
-				for _, id := range candidateIDs {
-					n, getErr := store.GetNode(id)
-					if getErr != nil || n == nil {
-						continue
-					}
-					entry.node = n
-					unresolved--
-					break
-				}
-			}
-		}
-	}
-	if unresolved > 0 {
-		existing, err := store.GetNodesByLabel(plan.label)
+	for _, entry := range ordered {
+		node, err := e.findMergeNode(store, []string{plan.label}, entry.matchProps)
 		if err != nil {
 			return nil, true, err
 		}
-		existingComparable := make(map[interface{}]*storage.Node, len(existing))
-		existingFallback := make(map[string]*storage.Node)
-		for _, n := range existing {
-			if n == nil {
-				continue
-			}
-			v, exists := n.Properties[plan.matchProp]
-			if !exists {
-				continue
-			}
-			if isComparableInterfaceValue(v) {
-				existingComparable[v] = n
-				continue
-			}
-			existingFallback[mergeLookupCacheKey(plan.label, plan.matchProp, v)] = n
-		}
-		for _, entry := range ordered {
-			if entry.node != nil {
-				continue
-			}
-			if entry.isComparable {
-				entry.node = existingComparable[entry.compKey]
-			} else {
-				entry.node = existingFallback[entry.fallbackKey]
-			}
-		}
+		entry.node = node
 	}
 
 	result := &ExecuteResult{
@@ -1171,7 +1223,7 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 			node = &storage.Node{
 				ID:         storage.NodeID(e.generateID()),
 				Labels:     []string{plan.label},
-				Properties: map[string]interface{}{plan.matchProp: entry.matchVal},
+				Properties: cloneNodePropertiesMap(entry.matchProps),
 			}
 			for _, assignment := range plan.setAssignments {
 				node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
@@ -1186,11 +1238,7 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 			node.ID = actualID
 			entry.node = node
 			result.Stats.NodesCreated++
-			if entry.isComparable {
-				byComparable[entry.compKey] = entry
-			} else {
-				byFallback[entry.fallbackKey] = entry
-			}
+			e.cacheMergeNode([]string{plan.label}, entry.matchProps, node)
 			notifyOnce(string(node.ID))
 			continue
 		}
@@ -1214,6 +1262,7 @@ func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unw
 			if updateErr := store.UpdateNode(node); updateErr != nil {
 				return nil, true, fmt.Errorf("UNWIND MERGE batch update failed: %w", updateErr)
 			}
+			e.cacheMergeNode([]string{plan.label}, entry.matchProps, node)
 			notifyOnce(string(node.ID))
 		}
 	}

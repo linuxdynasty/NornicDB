@@ -96,37 +96,117 @@ func (e *StorageExecutor) cacheMergeNode(labels []string, props map[string]inter
 	}
 }
 
+func (e *StorageExecutor) loadMergeCandidateNodes(store storage.Engine, ids []storage.NodeID) []*storage.Node {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]*storage.Node, 0, len(ids))
+	seen := make(map[storage.NodeID]struct{}, len(ids))
+	for _, id := range ids {
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		n, err := store.GetNode(id)
+		if err != nil || n == nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func mergePropertyNamesSorted(props map[string]interface{}) []string {
+	names := make([]string, 0, len(props))
+	for prop := range props {
+		names = append(names, prop)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func mergeIndexMatchesAllProperties(idx *storage.CompositeIndex, props map[string]interface{}) bool {
+	if idx == nil || len(idx.Properties) != len(props) {
+		return false
+	}
+	for _, prop := range idx.Properties {
+		if _, ok := props[prop]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func compositeLookupValues(idx *storage.CompositeIndex, props map[string]interface{}) []interface{} {
+	values := make([]interface{}, 0, len(idx.Properties))
+	for _, prop := range idx.Properties {
+		values = append(values, props[prop])
+	}
+	return values
+}
+
 func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, props map[string]interface{}) (*storage.Node, error) {
 	if len(labels) == 0 || len(props) == 0 {
 		return nil, nil
 	}
 
 	if cached := e.findMergeNodeInCache(labels, props); cached != nil {
+		e.markMergeSchemaLookupUsed()
 		return cached, nil
 	}
 
-	// Index hot path: if a property index exists for any MERGE key, look up
-	// candidate node IDs directly instead of label/full scans.
+	// Schema hot path: prefer exact composite lookups for full-key MERGE patterns,
+	// then fall back to the smallest single-property candidate set.
 	schema := store.GetSchema()
+	schemaLookupUsed := false
 	if schema != nil {
 		label := labels[0]
-		for prop, val := range props {
-			if _, ok := schema.GetPropertyIndex(label, prop); !ok {
+
+		for _, idx := range schema.GetCompositeIndexesForLabel(label) {
+			if !mergeIndexMatchesAllProperties(idx, props) {
 				continue
 			}
-			ids := schema.PropertyIndexLookup(label, prop, val)
-			for _, id := range ids {
-				n, err := store.GetNode(id)
-				if err != nil || n == nil {
-					continue
-				}
+			schemaLookupUsed = true
+			e.markMergeSchemaLookupUsed()
+			candidateNodes := e.loadMergeCandidateNodes(store, idx.LookupFull(compositeLookupValues(idx, props)...))
+			for _, n := range candidateNodes {
 				if mergeNodeMatches(n, labels, props) {
 					e.cacheMergeNode(labels, props, n)
 					return n, nil
 				}
 			}
 		}
+
+		bestIDs := []storage.NodeID(nil)
+		bestCount := -1
+		for _, prop := range mergePropertyNamesSorted(props) {
+			val := props[prop]
+			if _, ok := schema.GetPropertyIndex(label, prop); !ok {
+				continue
+			}
+			schemaLookupUsed = true
+			e.markMergeSchemaLookupUsed()
+			ids := schema.PropertyIndexLookup(label, prop, val)
+			count := len(ids)
+			if bestCount == -1 || count < bestCount {
+				bestIDs = ids
+				bestCount = count
+				if count <= 1 {
+					break
+				}
+			}
+		}
+		for _, n := range e.loadMergeCandidateNodes(store, bestIDs) {
+			if mergeNodeMatches(n, labels, props) {
+				e.cacheMergeNode(labels, props, n)
+				return n, nil
+			}
+		}
 	}
+	if schemaLookupUsed {
+		return nil, nil
+	}
+	e.markMergeScanFallbackUsed()
 
 	nodes, err := store.GetNodesByLabel(labels[0])
 	if err != nil {
