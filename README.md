@@ -569,5 +569,5 @@ See [NOTICES.md](NOTICES.md) for third-party license information, including bund
 ---
 
 <p align="center">
-  <em>Weaving your data's destiny</em>
+  <em>Psygnosis is a play on words or portmanteau meaning “mind" + "knowledge” in greek</em>
 </p>
