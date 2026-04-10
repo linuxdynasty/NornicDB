@@ -47,6 +47,7 @@ docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data t
 Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA CUDA hosts, use `timothyswt/nornicdb-amd64-cuda-bge:latest`. For Vulkan hosts, use `timothyswt/nornicdb-amd64-vulkan-bge:latest`.
 
 ---
+> Note: I know that metal is not supported in docker at this time. There is a macOS Installer that you can either build yourself or download from the [release](https://github.com/orneryd/NornicDB/releases) page for native macOS installations.
 
 ## What NornicDB Is
 
@@ -65,7 +66,7 @@ It is built for knowledge systems, agent memory, Graph-RAG, and canonical truth 
 
 ## Production Deployment Patterns
 
-NornicDB is currently in production at a Fortune 100 company (awaiting legal approval to say who). The current deployment patterns are not theoretical migration slides; they are active stack consolidation projects.
+NornicDB is currently internally at CVS. The current deployment patterns are not theoretical migration slides; they are active stack consolidation projects.
 
 - **Parallel workload systems**: replacing a Neo4j + Qdrant + OpenAI stack with a single Docker deployment to manage and track tasks and dependencies of LLM swarms and automated graph-rag retreival pipleines and the pipelines themselves. Performance timing varies on application structure and load. However, distribution is broad enough that I am actively and reliably hitting edge cases in production to cover those cases and hit a broad bradth of queries-in-production.
 - **LLM translation quality systems**: replacing a Mongo Atlas plus Azure embeddings pipeline stack with a single Docker deployment to improve the quality and speed of LLM-generated translations. (Mongo Atlas aggregation queries replaced with node labels + edges dropping vector search + aggregation query time from ~1s to ~1.6ms)
