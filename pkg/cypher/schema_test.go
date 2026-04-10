@@ -865,6 +865,21 @@ func TestCreateIndex_BranchCoverage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid CREATE INDEX syntax error")
 	}
+
+	rejected := []string{
+		"CREATE INDEX fact_namespace_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.namespace)",
+		"CREATE INDEX fact_predicate_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.predicate)",
+		"CREATE INDEX fact_namespace_predicate_idx IF NOT EXISTS FOR ()-[f:FACT]-() ON (f.namespace, f.predicate)",
+	}
+	for _, q := range rejected {
+		_, err = exec.executeCreateIndex(ctx, q)
+		if err == nil {
+			t.Fatalf("expected invalid CREATE INDEX syntax error for %s", q)
+		}
+		if !strings.Contains(err.Error(), "invalid CREATE INDEX syntax") {
+			t.Fatalf("expected invalid CREATE INDEX syntax for %s; got %v", q, err)
+		}
+	}
 }
 
 func TestCreateIndex_Neo4jCompatibilitySyntax(t *testing.T) {

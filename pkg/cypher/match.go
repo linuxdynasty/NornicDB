@@ -407,6 +407,12 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			earlyLimit = limit
 		}
 		if !hasAggregation && !distinct && skip == 0 && limit > 0 && hasOrderBy {
+			if fastResult, handled, fastErr := e.tryExecuteTraversalStartSeedOrderLimit(ctx, patternForParsing, whereClause, returnItems, pathVariable, orderExpr, limit); handled || fastErr != nil {
+				if fastErr != nil {
+					return nil, fastErr
+				}
+				return fastResult, nil
+			}
 			if fastResult, handled, fastErr := e.tryExecuteTraversalEndSeedOrderLimit(ctx, patternForParsing, whereClause, returnItems, pathVariable, orderExpr, limit); handled || fastErr != nil {
 				if fastErr != nil {
 					return nil, fastErr
@@ -414,7 +420,7 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 				return fastResult, nil
 			}
 		}
-		result, err := e.executeMatchWithRelationshipsWithPath(ctx, patternForParsing, whereClause, returnItems, pathVariable, earlyLimit)
+		result, err := e.executeMatchWithRelationshipsWithPath(ctx, patternForParsing, whereClause, returnItems, nil, pathVariable, earlyLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -876,36 +882,39 @@ func extractMatchOrderByClause(cypher string, returnIdx int) string {
 	return strings.TrimSpace(orderExpr[:end])
 }
 
+func (e *StorageExecutor) compareNodeOrderSpecs(a, b *storage.Node, specs []nodeOrderSpec) int {
+	for _, spec := range specs {
+		av, _ := a.Properties[spec.propName]
+		bv, _ := b.Properties[spec.propName]
+		cmp := e.compareOrderValues(av, bv)
+		if cmp == 0 {
+			continue
+		}
+		if spec.descending {
+			cmp = -cmp
+		}
+		return cmp
+	}
+	return 0
+}
+
 // selectTopKNodesByOrder returns the first k nodes for simple ORDER BY expressions
-// without sorting the full node set. It currently supports one ORDER BY term.
+// without sorting the full node set. It supports any number of ORDER BY terms.
 func (e *StorageExecutor) selectTopKNodesByOrder(nodes []*storage.Node, variable, orderExpr string, k int) ([]*storage.Node, bool) {
 	if k <= 0 || len(nodes) <= k {
 		return nodes, false
 	}
 	specs := e.parseNodeOrderSpecs(orderExpr, variable)
-	if len(specs) != 1 {
+	if len(specs) == 0 {
 		return nil, false
 	}
-	spec := specs[0]
 
 	top := make([]*storage.Node, 0, k)
 	less := func(a, b *storage.Node) bool {
-		av, _ := a.Properties[spec.propName]
-		bv, _ := b.Properties[spec.propName]
-		cmp := e.compareOrderValues(av, bv)
-		if spec.descending {
-			return cmp > 0
-		}
-		return cmp < 0
+		return e.compareNodeOrderSpecs(a, b, specs) < 0
 	}
 	worse := func(a, b *storage.Node) bool {
-		av, _ := a.Properties[spec.propName]
-		bv, _ := b.Properties[spec.propName]
-		cmp := e.compareOrderValues(av, bv)
-		if spec.descending {
-			return cmp < 0
-		}
-		return cmp > 0
+		return e.compareNodeOrderSpecs(a, b, specs) > 0
 	}
 
 	for _, n := range nodes {

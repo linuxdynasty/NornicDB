@@ -145,11 +145,11 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 
 // executeMatchWithRelationships handles MATCH queries with relationship patterns
 func (e *StorageExecutor) executeMatchWithRelationships(ctx context.Context, pattern string, whereClause string, returnItems []returnItem) (*ExecuteResult, error) {
-	return e.executeMatchWithRelationshipsWithPath(ctx, pattern, whereClause, returnItems, "", -1)
+	return e.executeMatchWithRelationshipsWithPath(ctx, pattern, whereClause, returnItems, nil, "", -1)
 }
 
 // executeMatchWithRelationshipsWithPath handles MATCH queries with relationship patterns and optional path variable
-func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(ctx context.Context, pattern string, whereClause string, returnItems []returnItem, pathVariable string, earlyLimit int) (*ExecuteResult, error) {
+func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(ctx context.Context, pattern string, whereClause string, returnItems []returnItem, seedNodes []*storage.Node, pathVariable string, earlyLimit int) (*ExecuteResult, error) {
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -220,7 +220,10 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(ctx context.Cont
 	// This avoids traversing from all nodes when we only need one specific node
 	var optimizedStartNodes []*storage.Node
 	usedPropertyIndex := false
-	if whereClause != "" {
+	if len(seedNodes) > 0 {
+		optimizedStartNodes = seedNodes
+		usedPropertyIndex = true
+	} else if whereClause != "" {
 		// Direct element/id equality seek on start variable:
 		// MATCH (o)-[:R]->(t) WHERE elementId(o) = '...'
 		// This avoids traversing from all start nodes for single-node lookups.
@@ -264,7 +267,7 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(ctx context.Cont
 		// segment-aware expansion; feeding it through traverseGraphSequential can break
 		// semantics because it ignores segment topology.
 		if matches.IsChained && len(matches.Segments) > 1 {
-			paths = e.traverseChainedGraph(ctx, matches)
+			paths = e.traverseChainedGraph(ctx, matches, optimizedStartNodes)
 		} else {
 			viewport, _ := TemporalViewportFromContext(ctx)
 			checker, _ := e.getStorage(ctx).(temporalCurrentNodeChecker)
@@ -623,6 +626,60 @@ func topKSeedLimit(limit int) int {
 		seedLimit = 200
 	}
 	return seedLimit
+}
+
+func (e *StorageExecutor) tryCollectTraversalStartSeedOrderNodes(
+	ctx context.Context,
+	nodePattern nodePatternInfo,
+	whereClause string,
+	orderExpr string,
+	limit int,
+) ([]*storage.Node, bool, error) {
+	if limit <= 0 || strings.TrimSpace(orderExpr) == "" || strings.TrimSpace(nodePattern.variable) == "" || len(nodePattern.labels) == 0 {
+		return nil, false, nil
+	}
+
+	seedNodes, used, err := e.tryCollectNodesFromPropertyIndexOrderLimit(nodePattern, whereClause, orderExpr, topKSeedLimit(limit))
+	if err != nil || !used {
+		return nil, used, err
+	}
+
+	if len(seedNodes) > limit {
+		if topK, ok := e.selectTopKNodesByOrder(seedNodes, nodePattern.variable, orderExpr, limit); ok {
+			seedNodes = topK
+		}
+	}
+
+	return seedNodes, true, nil
+}
+
+func (e *StorageExecutor) tryExecuteTraversalStartSeedOrderLimit(ctx context.Context, pattern string, whereClause string, returnItems []returnItem, pathVariable string, orderExpr string, limit int) (*ExecuteResult, bool, error) {
+	if limit <= 0 || strings.TrimSpace(orderExpr) == "" {
+		return nil, false, nil
+	}
+
+	matches := e.parseTraversalPattern(pattern)
+	if matches == nil || matches.IsChained == false && strings.TrimSpace(matches.StartNode.variable) == "" {
+		return nil, false, nil
+	}
+	if pathVariable != "" {
+		matches.PathVariable = pathVariable
+	}
+
+	seedNodes, used, err := e.tryCollectTraversalStartSeedOrderNodes(ctx, matches.StartNode, whereClause, orderExpr, limit)
+	if err != nil {
+		return nil, true, err
+	}
+	if !used {
+		return nil, false, nil
+	}
+
+	result, err := e.executeMatchWithRelationshipsWithPath(ctx, pattern, whereClause, returnItems, seedNodes, pathVariable, -1)
+	if err != nil {
+		return nil, true, err
+	}
+	e.markTraversalStartSeedTopKUsed()
+	return result, true, nil
 }
 
 // tryCollectNodesFromStartPropertyScan applies start-node predicate pruning for
@@ -1263,7 +1320,7 @@ func (e *StorageExecutor) traverseGraph(ctx context.Context, match *TraversalMat
 	checker, _ := e.getStorage(ctx).(temporalCurrentNodeChecker)
 	// Handle chained patterns differently (multi-segment traversal)
 	if match.IsChained && len(match.Segments) > 1 {
-		return e.traverseChainedGraph(ctx, match)
+		return e.traverseChainedGraph(ctx, match, nil)
 	}
 
 	// Get starting nodes
@@ -1443,7 +1500,7 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 
 // traverseChainedGraph handles multi-segment patterns like (a)<-[:R1]-(b)-[:R2]->(c)
 // It traverses each segment sequentially, joining results where intermediate nodes match
-func (e *StorageExecutor) traverseChainedGraph(ctx context.Context, match *TraversalMatch) []PathResult {
+func (e *StorageExecutor) traverseChainedGraph(ctx context.Context, match *TraversalMatch, seedNodes []*storage.Node) []PathResult {
 	if len(match.Segments) == 0 {
 		return nil
 	}
@@ -1456,7 +1513,14 @@ func (e *StorageExecutor) traverseChainedGraph(ctx context.Context, match *Trave
 		Relationship: firstSeg.Relationship,
 	}
 	// Get initial paths from first segment
-	currentPaths := e.traverseGraph(ctx, simpleMatch)
+	var currentPaths []PathResult
+	if len(seedNodes) > 0 {
+		for _, startNode := range seedNodes {
+			currentPaths = append(currentPaths, e.traverseFromNode(ctx, startNode, simpleMatch)...)
+		}
+	} else {
+		currentPaths = e.traverseGraph(ctx, simpleMatch)
+	}
 
 	// For each subsequent segment, extend paths
 	for segIdx := 1; segIdx < len(match.Segments); segIdx++ {

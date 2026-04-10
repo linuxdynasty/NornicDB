@@ -790,7 +790,7 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
 	}
 
 	orderSpecs := e.parseNodeOrderSpecs(orderExpr, nodePattern.variable)
-	if len(orderSpecs) != 1 {
+	if len(orderSpecs) == 0 {
 		return nil, false, nil
 	}
 	spec := orderSpecs[0]
@@ -872,7 +872,7 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNullOrderLimit(
 	}
 
 	orderSpecs := e.parseNodeOrderSpecs(orderExpr, nodePattern.variable)
-	if len(orderSpecs) != 1 {
+	if len(orderSpecs) == 0 {
 		return nil, false, nil
 	}
 	spec := orderSpecs[0]
