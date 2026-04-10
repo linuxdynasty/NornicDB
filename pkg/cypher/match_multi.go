@@ -354,11 +354,11 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 	}
 
 	// Execute first MATCH and get initial bindings
-	bindings := e.executeFirstMatch(matchClauses[0])
+	bindings := e.executeFirstMatch(ctx, matchClauses[0])
 
 	// Execute subsequent MATCH clauses with bindings
 	for i := 1; i < len(matchClauses); i++ {
-		bindings = e.executeChainedMatch(matchClauses[i], bindings)
+		bindings = e.executeChainedMatch(ctx, matchClauses[i], bindings)
 	}
 
 	// Apply WHERE filter if present
@@ -611,7 +611,7 @@ func splitMatchClauses(cypher string, whereIdx, returnIdx int) []string {
 type binding map[string]*storage.Node
 
 // executeFirstMatch executes the first MATCH and returns initial bindings
-func (e *StorageExecutor) executeFirstMatch(pattern string) []binding {
+func (e *StorageExecutor) executeFirstMatch(ctx context.Context, pattern string) []binding {
 	var bindings []binding
 
 	// Check for relationship pattern
@@ -621,7 +621,7 @@ func (e *StorageExecutor) executeFirstMatch(pattern string) []binding {
 			return bindings
 		}
 
-		paths := e.traverseGraph(matches)
+		paths := e.traverseGraph(ctx, matches)
 		for _, path := range paths {
 			if len(path.Nodes) < 2 {
 				continue
@@ -640,9 +640,9 @@ func (e *StorageExecutor) executeFirstMatch(pattern string) []binding {
 		nodePattern := e.parseNodePattern(pattern)
 		var nodes []*storage.Node
 		if len(nodePattern.labels) > 0 {
-			nodes, _ = e.storage.GetNodesByLabel(nodePattern.labels[0])
+			nodes, _ = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 		} else {
-			nodes, _ = e.storage.AllNodes()
+			nodes, _ = e.loadNodesWithTemporalViewport(ctx, nil)
 		}
 
 		if len(nodePattern.properties) > 0 {
@@ -660,7 +660,7 @@ func (e *StorageExecutor) executeFirstMatch(pattern string) []binding {
 }
 
 // executeChainedMatch executes a subsequent MATCH against existing bindings
-func (e *StorageExecutor) executeChainedMatch(pattern string, existingBindings []binding) []binding {
+func (e *StorageExecutor) executeChainedMatch(ctx context.Context, pattern string, existingBindings []binding) []binding {
 	var newBindings []binding
 
 	for _, existing := range existingBindings {
@@ -675,7 +675,7 @@ func (e *StorageExecutor) executeChainedMatch(pattern string, existingBindings [
 			boundStartNode := existing[matches.StartNode.variable]
 			boundEndNode := existing[matches.EndNode.variable]
 
-			paths := e.traverseGraph(matches)
+			paths := e.traverseGraph(ctx, matches)
 			for _, path := range paths {
 				if len(path.Nodes) < 2 {
 					continue
@@ -740,10 +740,11 @@ func (e *StorageExecutor) executeChainedMatch(pattern string, existingBindings [
 
 // filterBindingsByWhere filters bindings based on WHERE clause
 func (e *StorageExecutor) filterBindingsByWhere(bindings []binding, whereClause string, params map[string]interface{}) []binding {
+	compiled := e.getCompiledBindingWhere(whereClause)
 	var result []binding
 
 	for _, b := range bindings {
-		if e.evaluateBindingWhere(b, whereClause, params) {
+		if compiled(b, params) {
 			result = append(result, b)
 		}
 	}
@@ -753,116 +754,7 @@ func (e *StorageExecutor) filterBindingsByWhere(bindings []binding, whereClause 
 
 // evaluateBindingWhere evaluates WHERE clause against a binding
 func (e *StorageExecutor) evaluateBindingWhere(b binding, whereClause string, params map[string]interface{}) bool {
-	whereClause = strings.TrimSpace(whereClause)
-	// Logical operators may span lines in formatted queries; normalize control
-	// whitespace so top-level AND/OR detection remains stable.
-	whereClause = strings.ReplaceAll(whereClause, "\n", " ")
-	whereClause = strings.ReplaceAll(whereClause, "\r", " ")
-	whereClause = strings.ReplaceAll(whereClause, "\t", " ")
-	upper := strings.ToUpper(whereClause)
-
-	// Handle AND
-	if andIdx := findTopLevelKeyword(whereClause, " AND "); andIdx > 0 {
-		left := strings.TrimSpace(whereClause[:andIdx])
-		right := strings.TrimSpace(whereClause[andIdx+5:])
-		return e.evaluateBindingWhere(b, left, params) && e.evaluateBindingWhere(b, right, params)
-	}
-
-	// Handle OR
-	if orIdx := findTopLevelKeyword(whereClause, " OR "); orIdx > 0 {
-		left := strings.TrimSpace(whereClause[:orIdx])
-		right := strings.TrimSpace(whereClause[orIdx+4:])
-		return e.evaluateBindingWhere(b, left, params) || e.evaluateBindingWhere(b, right, params)
-	}
-
-	// Handle NOT
-	if strings.HasPrefix(upper, "NOT ") {
-		return !e.evaluateBindingWhere(b, whereClause[4:], params)
-	}
-
-	// Handle string predicates: n.prop STARTS WITH/ENDS WITH/CONTAINS value
-	for _, pred := range []string{" STARTS WITH ", " ENDS WITH ", " CONTAINS "} {
-		if idx := findTopLevelKeyword(whereClause, pred); idx > 0 {
-			left := strings.TrimSpace(whereClause[:idx])
-			right := strings.TrimSpace(whereClause[idx+len(pred):])
-			if dotIdx := strings.Index(left, "."); dotIdx > 0 {
-				varName := left[:dotIdx]
-				propName := left[dotIdx+1:]
-				if node := b[varName]; node != nil {
-					actual, _ := node.Properties[propName].(string)
-					expectedRaw := e.resolveWhereValue(right, params)
-					expected, _ := expectedRaw.(string)
-					switch strings.TrimSpace(strings.ToUpper(pred)) {
-					case "STARTS WITH":
-						return strings.HasPrefix(actual, expected)
-					case "ENDS WITH":
-						return strings.HasSuffix(actual, expected)
-					case "CONTAINS":
-						return strings.Contains(actual, expected)
-					}
-				}
-			}
-			return false
-		}
-	}
-
-	// Handle variable comparison: p1 <> p2 (comparing node IDs)
-	if strings.Contains(whereClause, "<>") || strings.Contains(whereClause, "!=") {
-		op := "<>"
-		opIdx := strings.Index(whereClause, "<>")
-		if opIdx == -1 {
-			op = "!="
-			opIdx = strings.Index(whereClause, "!=")
-		}
-
-		left := strings.TrimSpace(whereClause[:opIdx])
-		right := strings.TrimSpace(whereClause[opIdx+len(op):])
-
-		// Check if comparing node variables (not properties)
-		if !strings.Contains(left, ".") && !strings.Contains(right, ".") {
-			leftNode := b[left]
-			rightNode := b[right]
-			if leftNode != nil && rightNode != nil {
-				return leftNode.ID != rightNode.ID
-			}
-		}
-	}
-
-	// Handle property comparison: n.prop = value
-	for _, op := range []string{"<>", "!=", ">=", "<=", "=", ">", "<"} {
-		if idx := strings.Index(whereClause, op); idx > 0 {
-			left := strings.TrimSpace(whereClause[:idx])
-			right := strings.TrimSpace(whereClause[idx+len(op):])
-
-			if dotIdx := strings.Index(left, "."); dotIdx > 0 {
-				varName := left[:dotIdx]
-				propName := left[dotIdx+1:]
-
-				if node := b[varName]; node != nil {
-					actualVal := node.Properties[propName]
-					expectedVal := e.resolveWhereValue(right, params)
-
-					switch op {
-					case "=":
-						return e.compareEqual(actualVal, expectedVal)
-					case "<>", "!=":
-						return !e.compareEqual(actualVal, expectedVal)
-					case ">":
-						return e.compareGreater(actualVal, expectedVal)
-					case ">=":
-						return e.compareGreater(actualVal, expectedVal) || e.compareEqual(actualVal, expectedVal)
-					case "<":
-						return e.compareLess(actualVal, expectedVal)
-					case "<=":
-						return e.compareLess(actualVal, expectedVal) || e.compareEqual(actualVal, expectedVal)
-					}
-				}
-			}
-			break
-		}
-	}
-
-	return true
+	return e.evaluateBindingWhereGeneric(b, whereClause, params)
 }
 
 func (e *StorageExecutor) resolveWhereValue(raw string, params map[string]interface{}) interface{} {
@@ -919,7 +811,10 @@ func (e *StorageExecutor) resolveBindingExpr(expr string, b binding) interface{}
 		varName := expr[:dotIdx]
 		propName := expr[dotIdx+1:]
 		if node := b[varName]; node != nil {
-			return node.Properties[propName]
+			if val, ok := getBindingNodeValue(node, propName); ok {
+				return val
+			}
+			return nil
 		}
 		return nil
 	}
@@ -964,6 +859,8 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	limit int,
 ) ([]*storage.Node, error) {
 	store := e.getStorage(ctx)
+	viewport, hasViewport := TemporalViewportFromContext(ctx)
+	checker, canCheckViewport := store.(temporalCurrentNodeChecker)
 
 	// For label-constrained LIMIT queries, prefer direct label lookup over full
 	// graph streaming. This avoids scanning unrelated labels until LIMIT is met
@@ -982,6 +879,15 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 			}
 			if hideSystemNodes && isSystemNode(node) {
 				continue
+			}
+			if hasViewport && canCheckViewport {
+				visible, err := checker.IsCurrentTemporalNode(node, viewport.AsOf)
+				if err != nil {
+					return nil, err
+				}
+				if !visible {
+					continue
+				}
 			}
 			filtered = append(filtered, node)
 			if len(filtered) >= limit {
@@ -1032,6 +938,15 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 				if whereFilter != nil && !whereFilter(node) {
 					return nil
 				}
+				if hasViewport && canCheckViewport {
+					visible, err := checker.IsCurrentTemporalNode(node, viewport.AsOf)
+					if err != nil {
+						return err
+					}
+					if !visible {
+						return nil
+					}
+				}
 
 				nodes = append(nodes, node)
 				if len(nodes) >= limit {
@@ -1070,6 +985,12 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 		}
 	}
 	nodes = filteredNodes
+	if hasViewport && canCheckViewport {
+		nodes, err = filterNodesByTemporalViewport(nodes, viewport, checker)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Apply property filters
 	if len(properties) > 0 {
@@ -1141,6 +1062,14 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 			nodes, err = e.storage.GetNodesByLabel(nodeInfo.labels[0])
 			if err != nil {
 				return nil, fmt.Errorf("storage error: %w", err)
+			}
+			if viewport, ok := TemporalViewportFromContext(ctx); ok {
+				if checker, canCheck := e.storage.(temporalCurrentNodeChecker); canCheck {
+					nodes, err = filterNodesByTemporalViewport(nodes, viewport, checker)
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
 			// Filter by additional labels if present
 			if len(nodeInfo.labels) > 1 {
@@ -1331,6 +1260,7 @@ func (e *StorageExecutor) applyCartesianWherePushdown(
 	}
 
 	inConstraints := map[string]cartesianInConstraint{}
+	nullConstraints := map[string]cartesianNullConstraint{}
 	eqConstraints := make([]cartesianEqConstraint, 0, 2)
 	for _, term := range splitTopLevelAndCartesian(whereClause) {
 		term = strings.TrimSpace(term)
@@ -1350,6 +1280,18 @@ func (e *StorageExecutor) applyCartesianWherePushdown(
 			inConstraints[v] = c
 			continue
 		}
+		if v, p, expectNotNull, ok := parseCartesianNullTerm(term); ok {
+			key := v + "|" + p
+			c := nullConstraints[key]
+			if c.hasValue && c.expectNotNull != expectNotNull {
+				c.conflict = true
+			} else {
+				c.expectNotNull = expectNotNull
+				c.hasValue = true
+			}
+			nullConstraints[key] = c
+			continue
+		}
 		if lv, lp, rv, rp, ok := parseCartesianVarPropEqualityTerm(term); ok {
 			eqConstraints = append(eqConstraints, cartesianEqConstraint{
 				leftVar:   lv,
@@ -1357,8 +1299,11 @@ func (e *StorageExecutor) applyCartesianWherePushdown(
 				rightVar:  rv,
 				rightProp: rp,
 			})
+			continue
 		}
 	}
+
+	applyCartesianNullConstraints(patternMatches, varIndex, nullConstraints)
 
 	// Apply direct IN constraints.
 	for v, c := range inConstraints {
@@ -1397,6 +1342,52 @@ func (e *StorageExecutor) applyCartesianWherePushdown(
 		}
 	}
 	return patternMatches
+}
+
+func applyCartesianNullConstraints(
+	patternMatches []struct {
+		variable string
+		nodes    []*storage.Node
+	},
+	varIndex map[string]int,
+	nullConstraints map[string]cartesianNullConstraint,
+) {
+	for key, constraint := range nullConstraints {
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		idx, ok := varIndex[parts[0]]
+		if !ok {
+			continue
+		}
+		if constraint.conflict {
+			patternMatches[idx].nodes = patternMatches[idx].nodes[:0]
+			continue
+		}
+		patternMatches[idx].nodes = filterNodesByNullConstraint(patternMatches[idx].nodes, parts[1], constraint.expectNotNull)
+	}
+}
+
+func parseCartesianNullTerm(term string) (string, string, bool, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(term))
+	if strings.HasSuffix(upper, " IS NOT NULL") {
+		expr := strings.TrimSpace(term[:len(term)-len(" IS NOT NULL")])
+		v, p, ok := parseCartesianVarProp(expr)
+		if !ok {
+			return "", "", false, false
+		}
+		return v, p, true, true
+	}
+	if strings.HasSuffix(upper, " IS NULL") {
+		expr := strings.TrimSpace(term[:len(term)-len(" IS NULL")])
+		v, p, ok := parseCartesianVarProp(expr)
+		if !ok {
+			return "", "", false, false
+		}
+		return v, p, false, true
+	}
+	return "", "", false, false
 }
 
 func splitTopLevelAndCartesian(whereClause string) []string {
@@ -1590,6 +1581,36 @@ func filterNodesByAllowedPropSet(nodes []*storage.Node, prop string, allowed map
 			continue
 		}
 		if _, keep := allowed[cartesianValueKey(val)]; keep {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+type cartesianNullConstraint struct {
+	expectNotNull bool
+	hasValue      bool
+	conflict      bool
+}
+
+func filterNodesByNullConstraint(nodes []*storage.Node, prop string, expectNotNull bool) []*storage.Node {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	out := make([]*storage.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		val, exists := n.Properties[prop]
+		isNull := !exists || val == nil
+		if expectNotNull {
+			if !isNull {
+				out = append(out, n)
+			}
+			continue
+		}
+		if isNull {
 			out = append(out, n)
 		}
 	}

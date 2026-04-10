@@ -70,6 +70,57 @@ ORDER BY k
 	require.Equal(t, int64(1), got["k2"])
 }
 
+func TestCartesianWherePushdown_NullConstraint(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	patternMatches := []struct {
+		variable string
+		nodes    []*storage.Node
+	}{
+		{variable: "o", nodes: []*storage.Node{
+			{ID: "o-1", Properties: map[string]interface{}{"joinKey": "k1"}},
+			{ID: "o-2", Properties: map[string]interface{}{}},
+			{ID: "o-3", Properties: map[string]interface{}{"joinKey": nil}},
+		}},
+		{variable: "t", nodes: []*storage.Node{
+			{ID: "t-1", Properties: map[string]interface{}{"joinKey": "k1"}},
+			{ID: "t-2", Properties: map[string]interface{}{"joinKey": "k2"}},
+		}},
+	}
+
+	filtered := exec.applyCartesianWherePushdown(patternMatches, "o.joinKey IS NOT NULL AND t.joinKey = o.joinKey")
+	require.Len(t, filtered, 2)
+	require.Len(t, filtered[0].nodes, 1)
+	require.Equal(t, "o-1", string(filtered[0].nodes[0].ID))
+	require.Len(t, filtered[1].nodes, 1)
+	require.Equal(t, "t-1", string(filtered[1].nodes[0].ID))
+	joined, ok := exec.buildCombinationsUsingWhereJoin(filtered, "o.joinKey IS NOT NULL AND t.joinKey = o.joinKey")
+	require.True(t, ok)
+	require.Len(t, joined, 1)
+	require.Equal(t, "o-1", string(joined[0]["o"].ID))
+	require.Equal(t, "t-1", string(joined[0]["t"].ID))
+}
+
+func TestCartesianWherePushdown_ContradictoryNullConstraint(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	patternMatches := []struct {
+		variable string
+		nodes    []*storage.Node
+	}{
+		{variable: "o", nodes: []*storage.Node{
+			{ID: "o-1", Properties: map[string]interface{}{"joinKey": "k1"}},
+			{ID: "o-2", Properties: map[string]interface{}{}},
+		}},
+		{variable: "t", nodes: []*storage.Node{
+			{ID: "t-1", Properties: map[string]interface{}{"joinKey": "k1"}},
+		}},
+	}
+
+	filtered := exec.applyCartesianWherePushdown(patternMatches, "o.joinKey IS NULL AND o.joinKey IS NOT NULL AND t.joinKey = o.joinKey")
+	require.Len(t, filtered, 2)
+	require.Len(t, filtered[0].nodes, 0)
+	require.Len(t, filtered[1].nodes, 1)
+}
+
 func TestMatchCreate_BatchJoinWithDualInFilters(t *testing.T) {
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)

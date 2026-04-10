@@ -63,9 +63,9 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 	var err error
 
 	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage error: %w", err)
@@ -807,7 +807,7 @@ func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cyp
 	nodePattern := e.parseNodePattern(nodePatternPart)
 
 	// Get matching nodes (index-backed when possible)
-	nodes, err := e.collectOptionalMatchInitialNodes(nodePattern, matchWhereClause, matchPartRaw, params)
+	nodes, err := e.collectOptionalMatchInitialNodes(ctx, nodePattern, matchWhereClause, matchPartRaw, params)
 	if err != nil {
 		return nil, fmt.Errorf("storage error: %w", err)
 	}
@@ -928,7 +928,7 @@ func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cyp
 		}
 
 		// Try to find related nodes via the relationship
-		relatedNodes := e.findOptionalRelatedNodes(sourceNode, optMatchPattern, relPattern)
+		relatedNodes := e.findOptionalRelatedNodes(ctx, sourceNode, optMatchPattern, relPattern)
 
 		if len(relatedNodes) == 0 {
 			// No match - add row with null for the optional part (left outer join)

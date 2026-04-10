@@ -2236,7 +2236,7 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 	}
 
 	// Collect initial MATCH nodes with index-backed candidates when possible.
-	initialNodes, err := e.collectOptionalMatchInitialNodes(nodePattern, whereClause, rawWhereClause, params)
+	initialNodes, err := e.collectOptionalMatchInitialNodes(ctx, nodePattern, whereClause, rawWhereClause, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get initial nodes: %w", err)
 	}
@@ -2258,7 +2258,7 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 
 	for _, node := range initialNodes {
 		// Try to find related nodes via the relationship
-		relatedNodes := e.findOptionalRelatedNodes(node, optMatchPattern, relPattern)
+		relatedNodes := e.findOptionalRelatedNodes(ctx, node, optMatchPattern, relPattern)
 
 		if len(relatedNodes) == 0 {
 			// No match - add row with null for the optional part (left outer join)
@@ -2284,7 +2284,7 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 		optMatchAfterWith := findKeywordIndex(restOfQuery, "OPTIONAL MATCH")
 		returnAfterWith := findKeywordIndex(restOfQuery, "RETURN")
 		if optMatchAfterWith > 0 && (returnAfterWith == -1 || optMatchAfterWith < returnAfterWith) {
-			return e.executeJoinedRowsWithOptionalMatch(joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
+			return e.executeJoinedRowsWithOptionalMatch(ctx, joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
 		}
 		return e.processWithAggregation(joinedRows, nodePattern.variable, relPattern.targetVar, relPattern.relVar, restOfQuery)
 	}
@@ -2301,6 +2301,7 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 }
 
 func (e *StorageExecutor) collectOptionalMatchInitialNodes(
+	ctx context.Context,
 	nodePattern nodePatternInfo,
 	whereClause string,
 	rawWhereClause string,
@@ -2370,22 +2371,14 @@ func (e *StorageExecutor) collectOptionalMatchInitialNodes(
 	}
 
 	if !usedPropertyIndex {
-		if len(nodePattern.labels) > 0 {
-			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-		} else {
-			nodes, err = e.storage.AllNodes()
-		}
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if usedPropertyIndex && len(nodes) == 0 && whereClause != "" {
 		// Fail-open on possible stale index metadata/candidates.
-		if len(nodePattern.labels) > 0 {
-			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-		} else {
-			nodes, err = e.storage.AllNodes()
-		}
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 		if err != nil {
 			return nil, err
 		}
@@ -2565,13 +2558,13 @@ func (e *StorageExecutor) findRelatedNodes(sourceNode *storage.Node, pattern opt
 	return results
 }
 
-func (e *StorageExecutor) findOptionalRelatedNodes(sourceNode *storage.Node, patternText string, pattern optionalRelPattern) []optionalRelResult {
+func (e *StorageExecutor) findOptionalRelatedNodes(ctx context.Context, sourceNode *storage.Node, patternText string, pattern optionalRelPattern) []optionalRelResult {
 	if strings.Contains(patternText, "*") {
 		traversal := e.parseTraversalPattern(patternText)
 		if traversal == nil {
 			return nil
 		}
-		paths := e.traverseFromNode(sourceNode, traversal)
+		paths := e.traverseFromNode(ctx, sourceNode, traversal)
 		results := make([]optionalRelResult, 0, len(paths))
 		seen := make(map[string]bool)
 		for _, path := range paths {
@@ -2643,7 +2636,7 @@ func joinedValueKey(val interface{}) string {
 	}
 }
 
-func (e *StorageExecutor) executeJoinedRowsWithOptionalMatch(rows []joinedRow, sourceVar, targetVar, relVar, query string) (*ExecuteResult, error) {
+func (e *StorageExecutor) executeJoinedRowsWithOptionalMatch(ctx context.Context, rows []joinedRow, sourceVar, targetVar, relVar, query string) (*ExecuteResult, error) {
 	withIdx := findKeywordIndex(query, "WITH")
 	optMatchIdx := findKeywordIndex(query, "OPTIONAL MATCH")
 	returnIdx := findKeywordIndex(query, "RETURN")
@@ -2742,7 +2735,7 @@ func (e *StorageExecutor) executeJoinedRowsWithOptionalMatch(rows []joinedRow, s
 			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values})
 			continue
 		}
-		relatedNodes := e.findOptionalRelatedNodes(sourceNode, optMatchPattern, relPattern)
+		relatedNodes := e.findOptionalRelatedNodes(ctx, sourceNode, optMatchPattern, relPattern)
 		if len(relatedNodes) == 0 {
 			joinedOptionalRows = append(joinedOptionalRows, optionalRow{computedValues: row.values})
 			continue

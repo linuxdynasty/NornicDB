@@ -86,11 +86,7 @@ func (e *StorageExecutor) executeMatchWithCallProcedure(ctx context.Context, cyp
 		// For pre-CALL WITH/ORDER/LIMIT query shapes, keep manual node correlation.
 		// seedNodesFromOuterMatch appends RETURN <seedVar> and is not equivalent for
 		// WITH-aliased pre-call pipelines.
-		if len(nodePattern.labels) > 0 {
-			nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
-		} else {
-			nodes, err = e.storage.AllNodes()
-		}
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get nodes: %w", err)
 		}
@@ -1140,14 +1136,17 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 
 			// Label/property-only fast path.
 			var nodes []*storage.Node
+			var err error
 			if len(np.labels) > 0 {
-				var err error
-				nodes, err = e.storage.GetNodesByLabel(np.labels[0])
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, np.labels)
 				if err != nil {
 					return nil, err
 				}
 			} else {
-				nodes = e.storage.GetAllNodes()
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if len(np.properties) == 0 {
 				// If a non-indexable WHERE exists, defer to generic executor to preserve semantics.
@@ -1195,14 +1194,17 @@ func (e *StorageExecutor) seedNodesFromOuterMatch(ctx context.Context, outerPart
 		np := e.parseNodePattern(matchBody)
 		if strings.EqualFold(strings.TrimSpace(np.variable), variable) {
 			var nodes []*storage.Node
+			var err error
 			if len(np.labels) > 0 {
-				var err error
-				nodes, err = e.storage.GetNodesByLabel(np.labels[0])
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, np.labels)
 				if err != nil {
 					return nil, err
 				}
 			} else {
-				nodes = e.storage.GetAllNodes()
+				nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if len(np.properties) == 0 {
 				return nodes, nil

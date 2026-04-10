@@ -562,9 +562,9 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 	var err error
 
 	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage error: %w", err)

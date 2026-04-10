@@ -2186,7 +2186,8 @@ func TestMatchMultiAndUnwindBranchCoverage(t *testing.T) {
 	}
 	assert.True(t, exec.evaluateBindingWhere(b, "a <> b AND a.age < b.age", nil))
 	assert.True(t, exec.evaluateBindingWhere(b, "NOT a.age > b.age", nil))
-	assert.True(t, exec.evaluateBindingWhere(b, "a.age > b.age OR a = b", nil))
+	assert.False(t, exec.evaluateBindingWhere(b, "a.age > b.age OR a = b", nil))
+	assert.False(t, exec.evaluateBindingWhere(b, "a.name", nil))
 	assert.True(t, exec.evaluateWhereForContext("a.age < b.age", map[string]*storage.Node{"a": b["a"], "b": b["b"]}))
 	assert.False(t, exec.evaluateWhereForContext("a.name", map[string]*storage.Node{"a": b["a"]}))
 	assert.False(t, isSystemNode(nil))

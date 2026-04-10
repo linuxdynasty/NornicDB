@@ -259,7 +259,7 @@ func TestTraverseChainedGraph(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 
 		// Should find 3 paths: Person1->POC1->Area1, Person2->POC2->Area1, Person3->POC3->Area2
 		assert.Len(t, paths, 3)
@@ -277,7 +277,7 @@ func TestTraverseChainedGraph(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 
 		// Should find 2 paths: Person1->POC1->Area1, Person2->POC2->Area1
 		assert.Len(t, paths, 2)
@@ -289,7 +289,7 @@ func TestTraverseChainedGraph(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 		assert.Len(t, paths, 0)
 	})
 }
@@ -304,7 +304,7 @@ func TestBuildPathContextChained(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 		require.NotEmpty(t, paths)
 
 		// Build context for first path
@@ -331,7 +331,7 @@ func TestBuildPathContextChained(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 		require.NotEmpty(t, paths)
 
 		ctx := exec.buildPathContext(paths[0], match)
@@ -382,7 +382,7 @@ func TestTraverseFromNode(t *testing.T) {
 			},
 		}
 
-		paths := exec.traverseFromNode(poc1, match)
+		paths := exec.traverseFromNode(context.Background(), poc1, match)
 
 		// POC1 should connect to Area1
 		assert.Len(t, paths, 1)
@@ -414,7 +414,7 @@ func TestTraverseFromNode(t *testing.T) {
 			},
 		}
 
-		paths := exec.traverseFromNode(persons[0], match)
+		paths := exec.traverseFromNode(context.Background(), persons[0], match)
 		assert.Nil(t, paths)
 	})
 }
@@ -517,7 +517,7 @@ func TestChainedPatternEdgeCases(t *testing.T) {
 		match := exec.parseTraversalPattern(pattern)
 		require.NotNil(t, match)
 
-		paths := exec.traverseGraph(match)
+		paths := exec.traverseGraph(context.Background(), match)
 		assert.Len(t, paths, 0)
 	})
 
@@ -625,7 +625,7 @@ func BenchmarkChainedTraversal(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = exec.traverseGraph(match)
+		_ = exec.traverseGraph(context.Background(), match)
 	}
 }
 

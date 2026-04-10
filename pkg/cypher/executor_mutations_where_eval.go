@@ -1,7 +1,6 @@
 package cypher
 
 import (
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,43 +73,14 @@ func (e *StorageExecutor) buildBoundInFastFilter(variable, whereClause string) (
 		return nil, false
 	}
 
-	comparableSet := make(map[interface{}]struct{}, len(items))
-	nonComparable := make([]interface{}, 0)
-	for _, item := range items {
-		if item == nil {
-			continue
-		}
-		if isComparableValue(item) {
-			comparableSet[item] = struct{}{}
-		} else {
-			nonComparable = append(nonComparable, item)
-		}
-	}
-
+	comparableSet, nonComparable := buildComparableMembershipIndex(items)
 	return func(node *storage.Node) bool {
 		actual, exists := node.Properties[propName]
 		if !exists || actual == nil {
 			return false
 		}
-		if isComparableValue(actual) {
-			if _, hit := comparableSet[actual]; hit {
-				return true
-			}
-		}
-		for _, item := range nonComparable {
-			if e.compareEqual(actual, item) {
-				return true
-			}
-		}
-		return false
+		return evaluateComparableMembership(actual, comparableSet, nonComparable, e.compareEqual)
 	}, true
-}
-
-func isComparableValue(v interface{}) bool {
-	if v == nil {
-		return false
-	}
-	return reflect.TypeOf(v).Comparable()
 }
 
 func (e *StorageExecutor) getCompiledSimpleWhere(variable, whereClause string) (func(*storage.Node) bool, bool) {
@@ -143,16 +113,7 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 	}
 
 	getProp := func(node *storage.Node, propName string) (any, bool) {
-		if propName == "has_embedding" {
-			if node.EmbedMeta != nil {
-				if val, ok := node.EmbedMeta["has_embedding"]; ok {
-					return val, true
-				}
-			}
-			return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0, true
-		}
-		val, ok := node.Properties[propName]
-		return val, ok
+		return getNodePropertyValue(node, propName)
 	}
 
 	const prefixSep = "."
@@ -174,34 +135,13 @@ func (e *StorageExecutor) compileSimpleWhere(variable, whereClause string) (func
 					listVal = e.parseValue(right)
 				}
 				if items, ok := toInterfaceSlice(listVal); ok {
-					comparableSet := make(map[interface{}]struct{}, len(items))
-					nonComparable := make([]interface{}, 0)
-					for _, item := range items {
-						if item == nil {
-							continue
-						}
-						if isComparableValue(item) {
-							comparableSet[item] = struct{}{}
-						} else {
-							nonComparable = append(nonComparable, item)
-						}
-					}
+					comparableSet, nonComparable := buildComparableMembershipIndex(items)
 					return func(node *storage.Node) bool {
 						actual, exists := getProp(node, prop)
 						if !exists || actual == nil {
 							return false
 						}
-						if isComparableValue(actual) {
-							if _, hit := comparableSet[actual]; hit {
-								return true
-							}
-						}
-						for _, item := range nonComparable {
-							if e.compareEqual(actual, item) {
-								return true
-							}
-						}
-						return false
+						return evaluateComparableMembership(actual, comparableSet, nonComparable, e.compareEqual)
 					}, true
 				}
 			}

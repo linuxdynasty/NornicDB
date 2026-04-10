@@ -407,14 +407,14 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			earlyLimit = limit
 		}
 		if !hasAggregation && !distinct && skip == 0 && limit > 0 && hasOrderBy {
-			if fastResult, handled, fastErr := e.tryExecuteTraversalEndSeedOrderLimit(patternForParsing, whereClause, returnItems, pathVariable, orderExpr, limit); handled || fastErr != nil {
+			if fastResult, handled, fastErr := e.tryExecuteTraversalEndSeedOrderLimit(ctx, patternForParsing, whereClause, returnItems, pathVariable, orderExpr, limit); handled || fastErr != nil {
 				if fastErr != nil {
 					return nil, fastErr
 				}
 				return fastResult, nil
 			}
 		}
-		result, err := e.executeMatchWithRelationshipsWithPath(patternForParsing, whereClause, returnItems, pathVariable, earlyLimit)
+		result, err := e.executeMatchWithRelationshipsWithPath(ctx, patternForParsing, whereClause, returnItems, pathVariable, earlyLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -493,16 +493,24 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 				var err error
 				if len(nodePattern.labels) > 0 {
 					// Count nodes with specific label
-					nodes, err := e.storage.GetNodesByLabel(nodePattern.labels[0])
+					nodes, err := e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 					if err != nil {
 						return nil, fmt.Errorf("storage error: %w", err)
 					}
 					count = int64(len(nodes))
 				} else {
-					// Count all nodes - use O(1) NodeCount()
-					count, err = e.storage.NodeCount()
-					if err != nil {
-						return nil, fmt.Errorf("storage error: %w", err)
+					if viewport, ok := TemporalViewportFromContext(ctx); ok && viewport.Enabled() {
+						nodes, err := e.loadNodesWithTemporalViewport(ctx, nil)
+						if err != nil {
+							return nil, fmt.Errorf("storage error: %w", err)
+						}
+						count = int64(len(nodes))
+					} else {
+						// Count all nodes - use O(1) NodeCount()
+						count, err = e.storage.NodeCount()
+						if err != nil {
+							return nil, fmt.Errorf("storage error: %w", err)
+						}
 					}
 				}
 

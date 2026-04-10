@@ -229,7 +229,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 	}
 
 	// Execute traversal to get all paths (generic path).
-	paths := e.traverseGraph(matches)
+	paths := e.traverseGraph(ctx, matches)
 
 	// Apply pre-WITH WHERE clause filter if present
 	if preWithWhere != "" {

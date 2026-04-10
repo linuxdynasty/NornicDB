@@ -106,6 +106,7 @@ func TestTraversalStartPropertyScanPushdown_Equality(t *testing.T) {
 	require.NoError(t, err)
 
 	nodes, used, err := exec.tryCollectNodesFromStartPropertyScan(
+		context.Background(),
 		nodePatternInfo{variable: "node", labels: []string{"OriginalText"}},
 		"node.originalText = 'Get it delivered'",
 	)
@@ -136,6 +137,7 @@ func TestTraversalStartPropertyScanPushdown_IsNotNull(t *testing.T) {
 	require.NoError(t, err)
 
 	nodes, used, err := exec.tryCollectNodesFromStartPropertyScan(
+		context.Background(),
 		nodePatternInfo{variable: "node", labels: []string{"OriginalText"}},
 		"node.sourceId IS NOT NULL",
 	)
