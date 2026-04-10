@@ -47,6 +47,7 @@ docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data t
 Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA CUDA hosts, use `timothyswt/nornicdb-amd64-cuda-bge:latest`. For Vulkan hosts, use `timothyswt/nornicdb-amd64-vulkan-bge:latest`.
 
 ---
+
 > Note: I know that metal is not supported in docker at this time. There is a macOS Installer that you can either build yourself or download from the [release](https://github.com/orneryd/NornicDB/releases) page for native macOS installations.
 
 ## What NornicDB Is
@@ -101,14 +102,13 @@ Hybrid retrieval is where NornicDB is materially different from vector-only stac
 
 **Local benchmark** (67,280 nodes, 40,921 edges, 67,298 embeddings, HNSW CPU-only index):
 
-| Workload       | Transport |   Throughput |    Mean |     P50 |     P95 |     P99 |     Max |
-| -------------- | --------- | -----------: | ------: | ------: | ------: | ------: | ------: |
-| Vector only    | HTTP      | 19,342 req/s |  511 us |  470 us |  750 us |  869 us | 1.02 ms |
-| Vector only    | Bolt      | 22,309 req/s |  444 us |  428 us |  629 us |  814 us |  968 us |
-| Vector + 1 hop | HTTP      | 11,523 req/s |  859 us |  699 us | 1.54 ms | 3.46 ms | 4.71 ms |
-| Vector + 1 hop | Bolt      | 13,291 req/s |  747 us |  637 us | 1.29 ms | 3.24 ms | 4.47 ms |
+| Workload       | Transport |   Throughput |   Mean |    P50 |     P95 |     P99 |     Max |
+| -------------- | --------- | -----------: | -----: | -----: | ------: | ------: | ------: |
+| Vector only    | HTTP      | 19,342 req/s | 511 us | 470 us |  750 us |  869 us | 1.02 ms |
+| Vector only    | Bolt      | 22,309 req/s | 444 us | 428 us |  629 us |  814 us |  968 us |
+| Vector + 1 hop | HTTP      | 11,523 req/s | 859 us | 699 us | 1.54 ms | 3.46 ms | 4.71 ms |
+| Vector + 1 hop | Bolt      | 13,291 req/s | 747 us | 637 us | 1.29 ms | 3.24 ms | 4.47 ms |
 
-If you want, I can also rewrite the full 4-row table with the corrected Bolt row in place.
 **Remote benchmark** (GCP, 8 vCPU, 32 GB RAM):
 
 - Vector only: ~110.7 ms P50
