@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/config"
+	antlrparser "github.com/orneryd/nornicdb/pkg/cypher/antlr"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,6 +124,41 @@ var testQueries = []struct {
 
 	// CALL procedures
 	{"call_procedure", "CALL db.labels()"},
+}
+
+func benchmarkParserValidationIsolation(b *testing.B, parserName string, validate func(string) error) {
+	b.Helper()
+	exec := &StorageExecutor{}
+
+	for _, tc := range testQueries {
+		b.Run(parserName+"/"+tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.query)))
+			if parserName == "Nornic" {
+				if err := exec.validateSyntaxNornic(tc.query); err != nil {
+					b.Fatalf("preflight validateSyntaxNornic failed for %s: %v", tc.name, err)
+				}
+			} else {
+				if err := antlrparser.Validate(tc.query); err != nil {
+					b.Fatalf("preflight antlr.Validate failed for %s: %v", tc.name, err)
+				}
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := validate(tc.query); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkParserValidationIsolation measures the parser/validator cost in isolation,
+// excluding executor routing, store setup, and query execution work.
+func BenchmarkParserValidationIsolation(b *testing.B) {
+	exec := &StorageExecutor{}
+	benchmarkParserValidationIsolation(b, "Nornic", exec.validateSyntaxNornic)
+	benchmarkParserValidationIsolation(b, "ANTLR", antlrparser.Validate)
 }
 
 // TestParserComparison runs A/B tests between Nornic and ANTLR parsers
