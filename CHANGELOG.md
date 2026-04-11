@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.40] "Kiyote" by rumspringa - 2026-04-11
+
+### Added
+
+- **Structured Cypher hot-path matchers**:
+  - replaced several regex-based fast-path routers with scanner/helper-based matchers for compound queries, `UNWIND` routes, traversal shapes, shortest-path handling, and related query-shape detection.
+  - added explicit hot-path trace coverage so the executor can report when the new structured matchers are used.
+
+- **Parser comparison reporting**:
+  - added an integrated Nornic-vs-ANTLR comparison harness that prints per-query timing ratios and an overall summary.
+  - stabilized the comparison output so users and maintainers can trust the speedup numbers instead of single-run noise.
+
+### Changed
+
+- **Traversal and match planning**:
+  - improved traversal planning for top-k seeded lookups so multi-key `ORDER BY` shapes can still use the indexed path when possible.
+  - compiled common binding-row `WHERE` predicates and made traversal execution honor the active temporal viewport consistently.
+  - refined MERGE routing for composite-key patterns and hardened batch deduplication so key collisions are handled predictably.
+
+- **Cypher execution cleanup**:
+  - migrated hot-path query-shape parsing away from regex capture arrays and onto shared helpers.
+  - removed obsolete hot-path regex definitions after the structured matcher cutover.
+  - refreshed parser-mode and query-pattern plumbing so the same user-facing queries route more consistently across executor paths.
+
+- **Documentation and release hygiene**:
+  - refreshed README and deployment notes to reflect the current product direction.
+  - updated performance notes for hybrid Bolt queries.
+  - refreshed dependencies as part of the release cycle.
+
+### Fixed
+
+- **Shortest-path parsing regression**:
+  - fixed a panic in single-`MATCH` shortest-path queries by correcting the clause boundary scan used to recover the preceding `MATCH` clause.
+  - added regression coverage for the exact Bolt fallback query shape that exposed the issue.
+
+- **Query-shape stability**:
+  - restored deterministic ordering and route selection for the query families that were being optimized in the hot path.
+  - tightened parser and traversal tests around the new helper-based implementations.
+
+### Tests
+
+- Added and expanded coverage for:
+  - structured compound-query matcher behavior and reject reasons
+  - hot-path trace assertions for compound query routing and traversal seeding
+  - shortest-path parsing, execution, and regression handling
+  - `UNWIND` collect/distinct and batch merge helper paths
+  - parser comparison output and performance reporting
+
+### Technical Details
+
+- **Range covered**: `v1.0.39..HEAD`
+- **Commits in range**: 13 (non-merge)
+- **Primary focus areas**: Cypher hot-path matcher migration, traversal and merge routing, parser comparison tooling, shortest-path correctness, and release documentation updates.
+
 ## [v1.0.39] "Punkrocker" - 2026-04-06
 
 ### Added
