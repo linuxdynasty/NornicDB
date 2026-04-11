@@ -157,55 +157,6 @@ var (
 )
 
 // =============================================================================
-// Fast-Path Compound Query Patterns
-// =============================================================================
-
-var (
-	// MATCH (a:Label), (b:Label) WITH a, b LIMIT 1 CREATE (a)-[r:Type]->(b) DELETE r
-	// This pattern is used heavily in benchmarks and relationship tests.
-	// Groups: 1=var1, 2=label1, 3=var2, 4=label2, 5=withVar1, 6=withVar2, 7=limit, 8=relVar, 9=relType, 10=delVar
-	matchCreateDeleteRelPattern = regexp.MustCompile(
-		`(?i)^\s*MATCH\s*\((\w+):(\w+)\)\s*,\s*\((\w+):(\w+)\)` +
-			`\s*WITH\s+(\w+)\s*,\s*(\w+)` +
-			`\s+LIMIT\s+(\d+)` +
-			`\s+CREATE\s*\(\w+\)-\[(\w+):(\w+)\]->\(\w+\)` +
-			`\s+DELETE\s+(\w+)\s*$`)
-
-	// MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:KNOWS]->(p2) DELETE r
-	// LDBC-style pattern: property match without WITH/LIMIT
-	// Groups: 1=var1, 2=label1, 3=prop1, 4=val1, 5=var2, 6=label2, 7=prop2, 8=val2, 9=relVar, 10=relType, 11=delVar
-	matchPropCreateDeleteRelPattern = regexp.MustCompile(
-		`(?i)^\s*MATCH\s*\((\w+):(\w+)\s*\{\s*(\w+)\s*:\s*(\d+)\s*\}\s*\)` +
-			`\s*,\s*\((\w+):(\w+)\s*\{\s*(\w+)\s*:\s*(\d+)\s*\}\s*\)` +
-			`\s+CREATE\s*\(\w+\)-\[(\w+):(\w+)\]->\(\w+\)` +
-			`\s+DELETE\s+(\w+)\s*$`)
-
-	// MATCH (s:Supplier {supplierID: 1}), (p:Product {productID: 1})
-	// CREATE (s)-[r:TEST_REL]->(p) WITH r DELETE r RETURN count(r)
-	//
-	// Groups:
-	//  1=var1 2=label1 3=prop1 4=val1
-	//  5=var2 6=label2 7=prop2 8=val2
-	//  9=relVar 10=relType 11=withVar 12=delVar 13=countVar
-	matchPropCreateWithDeleteReturnCountRelPattern = regexp.MustCompile(
-		`(?i)^\s*MATCH\s*\((\w+):(\w+)\s*\{\s*(\w+)\s*:\s*(\d+)\s*\}\s*\)` +
-			`\s*,\s*\((\w+):(\w+)\s*\{\s*(\w+)\s*:\s*(\d+)\s*\}\s*\)` +
-			`\s+CREATE\s*\(\w+\)-\[(\w+):(\w+)\]->\(\w+\)` +
-			`\s+WITH\s+(\w+)\s+DELETE\s+(\w+)\s+RETURN\s+COUNT\s*\(\s*(\w+)\s*\)\s*$`)
-
-	// UNWIND fixed-chain link batch fast-path patterns.
-	// These are intentionally structural; runtime checks bind to the actual UNWIND variable.
-	fixedChainRootByPropPattern = regexp.MustCompile(
-		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\{\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*\}\s*\)`)
-	fixedChainRootByElementIDPattern = regexp.MustCompile(
-		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\)\s*where\s*elementid\(\s*([a-z_][a-z0-9_]*)\s*\)\s*=\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)`)
-	fixedChainHopMatchPattern = regexp.MustCompile(
-		`(?i)match\s*\(\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\s*\{\s*([a-z_][a-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*\+\s*':(\d+)'\s*\}\s*\)`)
-	fixedChainMergePattern = regexp.MustCompile(
-		`(?i)merge\s*\(\s*([a-z_][a-z0-9_]*)\s*\)\s*-\s*\[:\s*([a-z_][a-z0-9_]*)\s*\]\s*->\s*\(\s*([a-z_][a-z0-9_]*)\s*\)`)
-)
-
-// =============================================================================
 // Query Analysis Patterns (EXPLAIN/PROFILE)
 // =============================================================================
 
@@ -271,31 +222,8 @@ var (
 // =============================================================================
 
 var (
-	// Variable-length relationship: *1..3, *, *..5, *2..
-	// Group 1: min hops (optional digits)
-	// Group 2: max hops (optional digits after ..)
-	varLengthRelPattern = regexp.MustCompile(`\*(\d*)(?:\.\.(\d*))?`)
-
-	// Path pattern: (node1)-[rel]->(node2)
-	pathPatternRe = regexp.MustCompile(`\(([^)]*)\)\s*(<?\-\[[^\]]*\]\-?>?)\s*\(([^)]*)\)`)
-
 	// ID extraction: id(n)
 	idFunctionPattern = regexp.MustCompile(`id\((\w+)\)`)
-)
-
-// =============================================================================
-// Shortest Path Patterns
-// =============================================================================
-
-var (
-	// shortestPath/allShortestPaths function call
-	shortestPathFuncPattern = regexp.MustCompile(`(?i)(allShortestPaths|shortestPath)\s*\(\s*(\([^)]+\)\s*-\[.*?\]->\s*\([^)]+\)|\([^)]+\)\s*<-\[.*?\]-\s*\([^)]+\)|\([^)]+\)\s*-\[.*?\]-\s*\([^)]+\))\s*\)`)
-
-	// Variable assignment: varName = shortestPath(...)
-	shortestPathVarPattern = regexp.MustCompile(`(?i)(\w+)\s*=\s*(?:all)?shortestPath`)
-
-	// MATCH clause extraction for shortest path
-	matchClausePattern = regexp.MustCompile(`(?is)MATCH\s+(.+?)\s+MATCH`)
 )
 
 // =============================================================================

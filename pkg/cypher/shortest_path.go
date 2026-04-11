@@ -21,56 +21,30 @@ func (e *StorageExecutor) parseShortestPathQuery(cypher string) (*ShortestPathQu
 		originalCypher: cypher,
 	}
 
-	upper := strings.ToUpper(cypher)
-
-	// Check which function is used
-	if strings.Contains(upper, "ALLSHORTESTPATHS") {
-		query.findAll = true
-	} else if !strings.Contains(upper, "SHORTESTPATH") {
+	funcName, pattern, funcIdx, ok := extractShortestPathCall(cypher)
+	if !ok {
 		return nil, fmt.Errorf("not a shortest path query")
 	}
-
-	// Extract the pattern: shortestPath((start)-[...]-(end))
-	// Pattern: (variable = )?(?:all)?shortestPath\(\s*\((.*?)\)\s*\)
-	matches := shortestPathFuncPattern.FindStringSubmatch(cypher)
-
-	if matches == nil || len(matches) < 3 {
+	query.findAll = strings.EqualFold(funcName, "allShortestPaths")
+	if pattern == "" {
 		return nil, fmt.Errorf("invalid shortestPath syntax")
 	}
-
-	pattern := matches[2]
-
-	// Parse the pattern: (start:Label {props})-[:TYPE*..max]-(end:Label {props})
-	patternMatches := pathPatternRe.FindStringSubmatch(pattern)
-
-	if patternMatches == nil || len(patternMatches) < 4 {
+	match := e.parseTraversalPattern(pattern)
+	if match == nil {
 		return nil, fmt.Errorf("invalid path pattern: %s", pattern)
 	}
-
-	// Parse start node pattern (may be just a variable reference like "start")
-	startPattern := strings.TrimSpace(patternMatches[1])
-	query.startNode = e.parseNodePatternFromString(startPattern)
-
-	// Parse relationship
-	relPat := e.parseRelationshipPattern(patternMatches[2])
-	query.relTypes = relPat.Types
-	query.direction = relPat.Direction
-	if relPat.MaxHops > 0 {
-		query.maxHops = relPat.MaxHops
+	query.startNode = match.StartNode
+	query.endNode = match.EndNode
+	query.relTypes = match.Relationship.Types
+	query.direction = match.Relationship.Direction
+	if match.Relationship.MaxHops > 0 {
+		query.maxHops = match.Relationship.MaxHops
 	}
-
-	// Parse end node pattern (may be just a variable reference like "end")
-	endPattern := strings.TrimSpace(patternMatches[3])
-	query.endNode = e.parseNodePatternFromString(endPattern)
-
-	// Extract path variable from: p = shortestPath(...)
-	if varMatches := shortestPathVarPattern.FindStringSubmatch(cypher); varMatches != nil {
-		query.pathVariable = varMatches[1]
-	}
+	query.pathVariable = extractShortestPathPathVariable(cypher, funcIdx)
 
 	// Extract WHERE clause if present
-	whereIdx := findKeywordIndex(cypher, "WHERE")
-	returnIdx := findKeywordIndex(cypher, "RETURN")
+	whereIdx := findKeywordIndexInContext(cypher, "WHERE")
+	returnIdx := findKeywordIndexInContext(cypher, "RETURN")
 	if whereIdx > 0 && whereIdx < returnIdx {
 		query.whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 	}
@@ -80,24 +54,17 @@ func (e *StorageExecutor) parseShortestPathQuery(cypher string) (*ShortestPathQu
 		query.returnClause = strings.TrimSpace(cypher[returnIdx+6:])
 	}
 
-	// Resolve variable bindings from the preceding MATCH clause
-	// Look for patterns like: MATCH (start:Person {name: 'Alice'}), (end:Person {name: 'Carol'})
-	e.resolveShortestPathVariables(query, startPattern, endPattern)
+	// Resolve variable bindings from the preceding MATCH clause, if present.
+	e.resolveShortestPathVariables(query, match.StartNode.variable, match.EndNode.variable, extractPreviousMatchClause(cypher, funcIdx))
 
 	return query, nil
 }
 
 // resolveShortestPathVariables resolves variable references from the MATCH clause
-func (e *StorageExecutor) resolveShortestPathVariables(query *ShortestPathQuery, startVar, endVar string) {
-	// Extract the first MATCH clause that defines the variables
-	// Use (?is) for case-insensitive and single-line (dot matches newlines)
-	matches := matchClausePattern.FindStringSubmatch(query.originalCypher)
-
-	if matches == nil || len(matches) < 2 {
+func (e *StorageExecutor) resolveShortestPathVariables(query *ShortestPathQuery, startVar, endVar, matchClause string) {
+	if strings.TrimSpace(matchClause) == "" {
 		return
 	}
-
-	matchClause := matches[1]
 
 	// Parse node patterns from the MATCH clause
 	// Pattern: (var:Label {props}), (var2:Label2 {props2})
@@ -128,6 +95,68 @@ func (e *StorageExecutor) resolveShortestPathVariables(query *ShortestPathQuery,
 			query.endVarBinding = e.findNodeByPattern(binding)
 		}
 	}
+}
+
+func extractShortestPathCall(cypher string) (string, string, int, bool) {
+	upperCypher := strings.ToUpper(cypher)
+	for _, funcName := range []string{"allShortestPaths", "shortestPath"} {
+		upperFunc := strings.ToUpper(funcName)
+		searchStart := 0
+		for searchStart < len(cypher) {
+			idx := strings.Index(upperCypher[searchStart:], upperFunc)
+			if idx < 0 {
+				break
+			}
+			idx += searchStart
+			if idx > 0 && isWordChar(cypher[idx-1]) {
+				searchStart = idx + 1
+				continue
+			}
+			openParen := idx + len(funcName)
+			for openParen < len(cypher) && (cypher[openParen] == ' ' || cypher[openParen] == '\t' || cypher[openParen] == '\n' || cypher[openParen] == '\r') {
+				openParen++
+			}
+			if openParen >= len(cypher) || cypher[openParen] != '(' {
+				searchStart = idx + 1
+				continue
+			}
+			closeParen := findMatchingParen(cypher, openParen)
+			if closeParen < 0 {
+				return funcName, "", idx, false
+			}
+			return funcName, strings.TrimSpace(cypher[openParen+1 : closeParen]), idx, true
+		}
+	}
+	return "", "", -1, false
+}
+
+func extractShortestPathPathVariable(cypher string, funcIdx int) string {
+	matchIdx := lastKeywordIndexBefore(cypher, "MATCH", funcIdx)
+	if matchIdx < 0 {
+		return ""
+	}
+	clause := strings.TrimSpace(cypher[matchIdx+len("MATCH") : funcIdx])
+	eqIdx := strings.LastIndex(clause, "=")
+	if eqIdx <= 0 {
+		return ""
+	}
+	left := strings.TrimSpace(clause[:eqIdx])
+	if !isValidIdentifier(left) {
+		return ""
+	}
+	return left
+}
+
+func extractPreviousMatchClause(cypher string, beforeIdx int) string {
+	currentMatchIdx := lastKeywordIndexBefore(cypher, "MATCH", beforeIdx)
+	if currentMatchIdx < 0 {
+		return ""
+	}
+	previousMatchIdx := lastKeywordIndexBefore(cypher, "MATCH", currentMatchIdx)
+	if previousMatchIdx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(cypher[previousMatchIdx+len("MATCH") : currentMatchIdx])
 }
 
 // findNodeByPattern finds a node matching the given pattern

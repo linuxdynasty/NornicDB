@@ -9,6 +9,46 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUnwindCollectDistinctProjection_UsesHelperRoute(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	rows := []map[string]interface{}{
+		{"textKey128": "k1"},
+		{"textKey128": "k2"},
+		{"textKey128": "k1"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+WITH collect(DISTINCT row.textKey128) AS keys
+RETURN keys
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"keys"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Len(t, res.Rows[0], 1)
+	values, ok := res.Rows[0][0].([]interface{})
+	require.True(t, ok)
+	require.Len(t, values, 2)
+	require.Equal(t, "k1", values[0])
+	require.Equal(t, "k2", values[1])
+}
+
+func TestParseUnwindCollectDistinctProjection(t *testing.T) {
+	exec := &StorageExecutor{}
+	plan, ok := exec.parseUnwindCollectDistinctProjection("WITH collect(DISTINCT row.textKey128) AS keys RETURN keys")
+	require.True(t, ok)
+	require.Equal(t, "row", plan.srcVar)
+	require.Equal(t, "textKey128", plan.prop)
+	require.Equal(t, "keys", plan.alias)
+
+	_, ok = exec.parseUnwindCollectDistinctProjection("WITH collect(DISTINCT row.textKey128) AS keys RETURN other")
+	require.False(t, ok)
+}
+
 func TestUnwindMergeBatch_HopUpsertShape(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")

@@ -776,9 +776,13 @@ func (e *StorageExecutor) tryCollectNodesFromIDInParam(
 //	MATCH (n:Label) WHERE <filter> ORDER BY n.createdAt DESC LIMIT 30
 //
 // It only applies when:
-//   - A single ORDER BY property with a matching index exists
+//   - The first ORDER BY property with a matching index exists
 //   - The node pattern has at least one label
 //   - limit > 0
+//
+// If the ORDER BY has multiple keys, the indexed property is used to fetch
+// a candidate window and the remaining keys are applied with the in-memory
+// top-K comparator.
 func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
 	nodePattern nodePatternInfo,
 	whereClause string,
@@ -838,6 +842,11 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexOrderLimit(
 		nodes = append(nodes, node)
 		if len(nodes) >= limit {
 			break
+		}
+	}
+	if len(nodes) > limit {
+		if topK, ok := e.selectTopKNodesByOrder(nodes, nodePattern.variable, orderExpr, limit); ok {
+			nodes = topK
 		}
 	}
 
@@ -908,6 +917,11 @@ func (e *StorageExecutor) tryCollectNodesFromPropertyIndexNotNullOrderLimit(
 		nodes = append(nodes, node)
 		if len(nodes) >= limit {
 			break
+		}
+	}
+	if len(nodes) > limit {
+		if topK, ok := e.selectTopKNodesByOrder(nodes, nodePattern.variable, orderExpr, limit); ok {
+			nodes = topK
 		}
 	}
 	return nodes, true, nil

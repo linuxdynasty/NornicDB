@@ -6,6 +6,7 @@ type HotPathTrace struct {
 	OuterScanFallbackUsed     bool
 	FabricBatchedApplyRows    bool
 	SimpleMatchLimitFastPath  bool
+	CompoundQueryFastPath     bool
 	TraversalStartSeedTopK    bool
 	TraversalEndSeedTopK      bool
 	UnwindSimpleMergeBatch    bool
@@ -60,6 +61,15 @@ func (e *StorageExecutor) markSimpleMatchLimitFastPathUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.SimpleMatchLimitFastPath = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markCompoundQueryFastPathUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.CompoundQueryFastPath = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

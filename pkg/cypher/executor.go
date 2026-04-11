@@ -112,7 +112,6 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,22 +128,17 @@ import (
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
 )
 
-// Pre-compiled regexes for subquery detection (whitespace-flexible)
-var (
-	// Matches EXISTS followed by optional whitespace and opening brace
-	existsSubqueryRe = regexp.MustCompile(`(?i)\bEXISTS\s*\{`)
-	// Matches NOT EXISTS followed by optional whitespace and opening brace
-	notExistsSubqueryRe = regexp.MustCompile(`(?i)\bNOT\s+EXISTS\s*\{`)
-	// Matches COUNT followed by optional whitespace and opening brace
-	countSubqueryRe = regexp.MustCompile(`(?i)\bCOUNT\s*\{`)
-	// Matches CALL followed by optional whitespace and opening brace (not CALL procedure())
-	callSubqueryRe = regexp.MustCompile(`(?i)\bCALL\s*\{`)
-	// Matches COLLECT followed by optional whitespace and opening brace
-	collectSubqueryRe = regexp.MustCompile(`(?i)\bCOLLECT\s*\{`)
+// Subquery detection tags. Routing uses scanner helpers below rather than regex.
+const (
+	existsSubqueryRe    = "EXISTS"
+	notExistsSubqueryRe = "NOT EXISTS"
+	countSubqueryRe     = "COUNT"
+	callSubqueryRe      = "CALL"
+	collectSubqueryRe   = "COLLECT"
 )
 
 // hasSubqueryPattern checks if the query contains a subquery pattern (keyword + optional whitespace + brace)
-func hasSubqueryPattern(query string, pattern *regexp.Regexp) bool {
+func hasSubqueryPattern(query string, pattern string) bool {
 	switch pattern {
 	case existsSubqueryRe:
 		return hasKeywordFollowedByBrace(query, "EXISTS")
@@ -157,7 +151,7 @@ func hasSubqueryPattern(query string, pattern *regexp.Regexp) bool {
 	case collectSubqueryRe:
 		return hasKeywordFollowedByBrace(query, "COLLECT")
 	}
-	return pattern.MatchString(query)
+	return false
 }
 
 func hasNotExistsFollowedByBrace(query string) bool {
@@ -2155,55 +2149,49 @@ func (w *transactionStorageWrapper) DeleteByPrefix(prefix string) (nodesDeleted 
 }
 
 // tryFastPathCompoundQuery attempts to handle common compound query patterns
-// using pre-compiled regex for faster routing. Returns (result, true) if handled,
-// (nil, false) if the query should go through normal routing.
+// using structured scanning rather than regex capture arrays.
+// Returns (result, true) if handled, (nil, false) if the query should go through normal routing.
 //
 // Pattern: MATCH (a:Label), (b:Label) WITH a, b LIMIT 1 CREATE (a)-[r:Type]->(b) DELETE r
 // This is a very common pattern in benchmarks and relationship tests.
 func (e *StorageExecutor) tryFastPathCompoundQuery(ctx context.Context, cypher string) (*ExecuteResult, bool) {
-	// Try Pattern 1: MATCH (a:Label), (b:Label) WITH a, b LIMIT 1 CREATE ... DELETE
-	if matches := matchCreateDeleteRelPattern.FindStringSubmatch(cypher); matches != nil {
-		label1 := matches[2]
-		label2 := matches[4]
-		relType := matches[9]
-		return e.executeFastPathCreateDeleteRel(label1, label2, "", nil, "", nil, relType)
-	}
-
-	// Try Pattern 2: MATCH (p1:Label {prop: val}), (p2:Label {prop: val}) CREATE ... DELETE
-	// LDBC-style pattern with property matching
-	if matches := matchPropCreateDeleteRelPattern.FindStringSubmatch(cypher); matches != nil {
-		// Groups: 1=var1, 2=label1, 3=prop1, 4=val1, 5=var2, 6=label2, 7=prop2, 8=val2, 9=relVar, 10=relType, 11=delVar
-		label1 := matches[2]
-		prop1 := matches[3]
-		val1 := matches[4]
-		label2 := matches[6]
-		prop2 := matches[7]
-		val2 := matches[8]
-		relType := matches[10]
-		return e.executeFastPathCreateDeleteRel(label1, label2, prop1, val1, prop2, val2, relType)
-	}
-
-	// Try Pattern 3: MATCH (a:Label {prop: val}), (b:Label {prop: val}) CREATE ... WITH r DELETE r RETURN count(r)
-	// Northwind-style create/delete relationship benchmark shape.
-	if matches := matchPropCreateWithDeleteReturnCountRelPattern.FindStringSubmatch(cypher); matches != nil {
-		label1 := matches[2]
-		prop1 := matches[3]
-		val1 := matches[4]
-		label2 := matches[6]
-		prop2 := matches[7]
-		val2 := matches[8]
-		relVar := matches[9]
-		relType := matches[10]
-		withVar := matches[11]
-		delVar := matches[12]
-		countVar := matches[13]
-
-		// We can't enforce backreferences in Go regex, so validate variable consistency here.
-		if relVar == "" || withVar != relVar || delVar != relVar || countVar != relVar {
-			return nil, false
+	if match, ok := matchCompoundQueryShape(cypher); ok {
+		switch match.Kind {
+		case shapeKindCompoundCreateDeleteRel:
+			e.markCompoundQueryFastPathUsed()
+			return e.executeFastPathCreateDeleteRel(
+				match.Captures.String("label1"),
+				match.Captures.String("label2"),
+				match.Captures.String("prop1"),
+				match.Captures.Any("value1"),
+				match.Captures.String("prop2"),
+				match.Captures.Any("value2"),
+				match.Captures.String("rel_type"),
+			)
+		case shapeKindCompoundPropCreateDeleteRel:
+			e.markCompoundQueryFastPathUsed()
+			return e.executeFastPathCreateDeleteRel(
+				match.Captures.String("label1"),
+				match.Captures.String("label2"),
+				match.Captures.String("prop1"),
+				match.Captures.Any("value1"),
+				match.Captures.String("prop2"),
+				match.Captures.Any("value2"),
+				match.Captures.String("rel_type"),
+			)
+		case shapeKindCompoundPropCreateDeleteReturnCountRel:
+			e.markCompoundQueryFastPathUsed()
+			return e.executeFastPathCreateDeleteRelCount(
+				match.Captures.String("label1"),
+				match.Captures.String("label2"),
+				match.Captures.String("prop1"),
+				match.Captures.Any("value1"),
+				match.Captures.String("prop2"),
+				match.Captures.Any("value2"),
+				match.Captures.String("rel_type"),
+				match.Captures.String("rel_var"),
+			)
 		}
-
-		return e.executeFastPathCreateDeleteRelCount(label1, label2, prop1, val1, prop2, val2, relType, relVar)
 	}
 
 	return nil, false

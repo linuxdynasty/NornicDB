@@ -56,6 +56,7 @@ func TestFastPath_MatchCreateDeleteRel(t *testing.T) {
 	opsPerSec := float64(iterations) / elapsed.Seconds()
 
 	t.Logf("Pattern 1 (WITH LIMIT): %.0f ops/sec", opsPerSec)
+	require.True(t, executor.LastHotPathTrace().CompoundQueryFastPath)
 
 	assertMinOpsPerSec(t, "Fast-path WITH LIMIT", opsPerSec, 10000)
 }
@@ -99,78 +100,70 @@ func TestFastPath_LDBCPattern(t *testing.T) {
 	opsPerSec := float64(iterations) / elapsed.Seconds()
 
 	t.Logf("Pattern 2 (LDBC property match): %.0f ops/sec", opsPerSec)
+	require.True(t, executor.LastHotPathTrace().CompoundQueryFastPath)
 
 	// First iteration is slower due to cache miss, subsequent are fast.
 	assertMinOpsPerSec(t, "Fast-path LDBC property match", opsPerSec, 5000)
 }
 
-// TestFastPath_RegexMatching verifies the regex patterns match correctly.
-func TestFastPath_RegexMatching(t *testing.T) {
+// TestFastPath_CompoundQueryShapeMatching verifies the structured matcher matches correctly.
+func TestFastPath_CompoundQueryShapeMatching(t *testing.T) {
 	tests := []struct {
-		name    string
-		query   string
-		pattern string
-		match   bool
+		name     string
+		query    string
+		wantKind ShapeKind
 	}{
 		// Pattern 1: WITH LIMIT
 		{
-			name:    "benchmark pattern exact",
-			query:   "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r",
-			pattern: "withLimit",
-			match:   true,
+			name:     "benchmark pattern exact",
+			query:    "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r",
+			wantKind: shapeKindCompoundCreateDeleteRel,
 		},
 		{
-			name:    "benchmark pattern with spaces",
-			query:   "MATCH (a:Actor),(m:Movie) WITH a,m LIMIT 1 CREATE (a)-[r:T]->(m) DELETE r",
-			pattern: "withLimit",
-			match:   true,
+			name:     "benchmark pattern with spaces",
+			query:    "MATCH (a:Actor),(m:Movie) WITH a,m LIMIT 1 CREATE (a)-[r:T]->(m) DELETE r",
+			wantKind: shapeKindCompoundCreateDeleteRel,
 		},
 		{
-			name:    "benchmark pattern uppercase",
-			query:   "MATCH (A:ACTOR), (M:MOVIE) WITH A, M LIMIT 1 CREATE (A)-[R:REL]->(M) DELETE R",
-			pattern: "withLimit",
-			match:   true,
+			name:     "benchmark pattern uppercase",
+			query:    "MATCH (A:ACTOR), (M:MOVIE) WITH A, M LIMIT 1 CREATE (A)-[R:REL]->(M) DELETE R",
+			wantKind: shapeKindCompoundCreateDeleteRel,
 		},
 		// Pattern 2: LDBC property match
 		{
-			name:    "LDBC pattern exact",
-			query:   "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:TEMP_KNOWS]->(p2) DELETE r",
-			pattern: "ldbc",
-			match:   true,
+			name:     "LDBC pattern exact",
+			query:    "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:TEMP_KNOWS]->(p2) DELETE r",
+			wantKind: shapeKindCompoundPropCreateDeleteRel,
 		},
 		{
-			name:    "LDBC pattern with spaces",
-			query:   "MATCH (p1:Person { id: 1 }), (p2:Person { id: 2 }) CREATE (p1)-[r:KNOWS]->(p2) DELETE r",
-			pattern: "ldbc",
-			match:   true,
+			name:     "LDBC pattern with spaces",
+			query:    "MATCH (p1:Person { id: 1 }), (p2:Person { id: 2 }) CREATE (p1)-[r:KNOWS]->(p2) DELETE r",
+			wantKind: shapeKindCompoundPropCreateDeleteRel,
 		},
 		// Non-matching patterns
 		{
-			name:    "LDBC without DELETE",
-			query:   "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:KNOWS]->(p2)",
-			pattern: "ldbc",
-			match:   false,
+			name:     "LDBC without DELETE",
+			query:    "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:KNOWS]->(p2)",
+			wantKind: shapeKindUnknown,
 		},
 		{
-			name:    "simple CREATE",
-			query:   "CREATE (n:Test)",
-			pattern: "withLimit",
-			match:   false,
+			name:     "simple CREATE",
+			query:    "CREATE (n:Test)",
+			wantKind: shapeKindUnknown,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var matched bool
-			if tt.pattern == "withLimit" {
-				matched = matchCreateDeleteRelPattern.MatchString(tt.query)
-			} else {
-				matched = matchPropCreateDeleteRelPattern.MatchString(tt.query)
+			match, ok := matchCompoundQueryShape(tt.query)
+			if tt.wantKind == shapeKindUnknown {
+				require.False(t, ok)
+				require.Equal(t, shapeKindUnknown, match.Kind)
+				return
 			}
 
-			if matched != tt.match {
-				t.Errorf("Expected match=%v, got %v for query: %s", tt.match, matched, tt.query)
-			}
+			require.True(t, ok)
+			require.Equal(t, tt.wantKind, match.Kind)
 		})
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -839,8 +838,6 @@ type unwindSimpleMergePlan struct {
 	onMatchAssignments  []unwindSimpleSetAssignment
 }
 
-var unwindSimpleMergePatternRE = regexp.MustCompile(`(?is)^MERGE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*(.+?)\s*\}\s*\)\s*$`)
-
 func parseUnwindSimpleMergeMatchAssignments(raw string) ([]unwindSimpleSetAssignment, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -905,6 +902,50 @@ func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAss
 	return out, true
 }
 
+func parseSimpleUnwindMergeClause(mergePart string) (string, string, []unwindSimpleSetAssignment, bool) {
+	trimmed := strings.TrimSpace(mergePart)
+	if !startsWithKeywordFold(trimmed, "MERGE") {
+		return "", "", nil, false
+	}
+	rest := strings.TrimSpace(trimmed[len("MERGE"):])
+	if !strings.HasPrefix(rest, "(") {
+		return "", "", nil, false
+	}
+	parenEnd := findMatchingParen(rest, 0)
+	if parenEnd < 0 || strings.TrimSpace(rest[parenEnd+1:]) != "" {
+		return "", "", nil, false
+	}
+	nodePattern := strings.TrimSpace(rest[1:parenEnd])
+	braceStart := strings.Index(nodePattern, "{")
+	if braceStart < 0 {
+		return "", "", nil, false
+	}
+	exec := &StorageExecutor{}
+	braceEnd := exec.findMatchingBrace(nodePattern, braceStart)
+	if braceEnd < 0 || strings.TrimSpace(nodePattern[braceEnd+1:]) != "" {
+		return "", "", nil, false
+	}
+	head := strings.TrimSpace(nodePattern[:braceStart])
+	propMap := strings.TrimSpace(nodePattern[braceStart+1 : braceEnd])
+	if head == "" || propMap == "" {
+		return "", "", nil, false
+	}
+	parts := strings.Split(head, ":")
+	if len(parts) != 2 {
+		return "", "", nil, false
+	}
+	mergeVar := strings.TrimSpace(parts[0])
+	label := strings.TrimSpace(parts[1])
+	if !isSimpleIdentifier(mergeVar) || !isSimpleIdentifier(label) {
+		return "", "", nil, false
+	}
+	assignments, ok := parseUnwindSimpleMergeMatchAssignments(propMap)
+	if !ok {
+		return "", "", nil, false
+	}
+	return mergeVar, label, assignments, true
+}
+
 func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 	plan := unwindSimpleMergePlan{supported: false}
 	mutation := strings.TrimSpace(mutationPart)
@@ -951,16 +992,12 @@ func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
 		}
 	}
 
-	m := unwindSimpleMergePatternRE.FindStringSubmatch(mergePart)
-	if len(m) != 4 {
-		return plan
-	}
-	plan.mergeVar = strings.TrimSpace(m[1])
-	plan.label = strings.TrimSpace(m[2])
-	assignments, ok := parseUnwindSimpleMergeMatchAssignments(strings.TrimSpace(m[3]))
+	mergeVar, label, assignments, ok := parseSimpleUnwindMergeClause(mergePart)
 	if !ok {
 		return plan
 	}
+	plan.mergeVar = mergeVar
+	plan.label = label
 	plan.matchAssignments = assignments
 
 	if setPart != "" {
@@ -1294,65 +1331,267 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 		propName string
 		rowField string
 	}
-	parseRootSpec := func() (rootSpec, bool) {
-		var out rootSpec
-		if m := fixedChainRootByPropPattern.FindStringSubmatch(normalized); len(m) == 6 && strings.EqualFold(m[4], unwindVar) {
-			out.varName = strings.ToLower(m[1])
-			out.label = m[2]
-			out.propName = m[3]
-			out.rowField = m[5]
-			return out, true
-		}
-		if m := fixedChainRootByElementIDPattern.FindStringSubmatch(normalized); len(m) == 6 && strings.EqualFold(m[4], unwindVar) && strings.EqualFold(m[1], m[3]) {
-			out.varName = strings.ToLower(m[1])
-			out.label = m[2]
-			out.byID = true
-			out.rowField = m[5]
-			return out, true
-		}
-		return rootSpec{}, false
-	}
-	root, ok := parseRootSpec()
-	if !ok {
-		return nil, false, nil
-	}
-
 	type hopSpec struct {
 		label      string
 		propName   string
 		rowField   string
 		depthByVar map[string]int
 	}
-	parseHopSpec := func() (hopSpec, bool) {
+	parseRowFieldRef := func(expr string) (string, string, bool) {
+		trimmed := strings.TrimSpace(expr)
+		dotIdx := strings.Index(trimmed, ".")
+		if dotIdx <= 0 || dotIdx == len(trimmed)-1 {
+			return "", "", false
+		}
+		base := strings.TrimSpace(trimmed[:dotIdx])
+		field := strings.TrimSpace(trimmed[dotIdx+1:])
+		if !isSimpleIdentifier(base) || !isSimpleIdentifier(field) {
+			return "", "", false
+		}
+		return base, field, true
+	}
+	parseIdentifierNodePattern := func(pattern string) (string, string, string, string, bool) {
+		trimmed := strings.TrimSpace(pattern)
+		if strings.HasPrefix(trimmed, "(") && strings.HasSuffix(trimmed, ")") {
+			trimmed = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+		}
+		braceIdx := strings.Index(trimmed, "{")
+		head := trimmed
+		props := ""
+		if braceIdx >= 0 {
+			closeIdx := e.findMatchingBrace(trimmed, braceIdx)
+			if closeIdx != len(trimmed)-1 {
+				return "", "", "", "", false
+			}
+			head = strings.TrimSpace(trimmed[:braceIdx])
+			props = strings.TrimSpace(trimmed[braceIdx+1 : closeIdx])
+		}
+		parts := strings.Split(head, ":")
+		if len(parts) != 2 {
+			return "", "", "", "", false
+		}
+		varName := strings.TrimSpace(parts[0])
+		label := strings.TrimSpace(parts[1])
+		if !isSimpleIdentifier(varName) || !isSimpleIdentifier(label) {
+			return "", "", "", "", false
+		}
+		if props == "" {
+			return varName, label, "", "", true
+		}
+		pairs := splitTopLevelComma(props)
+		if len(pairs) != 1 {
+			return "", "", "", "", false
+		}
+		pair := strings.TrimSpace(pairs[0])
+		colonIdx := strings.Index(pair, ":")
+		if colonIdx <= 0 || colonIdx == len(pair)-1 {
+			return "", "", "", "", false
+		}
+		propName := strings.TrimSpace(pair[:colonIdx])
+		propExpr := strings.TrimSpace(pair[colonIdx+1:])
+		if !isSimpleIdentifier(propName) || propExpr == "" {
+			return "", "", "", "", false
+		}
+		return varName, label, propName, propExpr, true
+	}
+	parseRowFieldDepthExpr := func(expr string) (string, string, int, bool) {
+		parts := strings.SplitN(strings.TrimSpace(expr), "+", 2)
+		if len(parts) != 2 {
+			return "", "", 0, false
+		}
+		rowVar, rowField, ok := parseRowFieldRef(parts[0])
+		if !ok {
+			return "", "", 0, false
+		}
+		suffix := strings.TrimSpace(parts[1])
+		if len(suffix) < 4 {
+			return "", "", 0, false
+		}
+		if (suffix[0] != '\'' || suffix[len(suffix)-1] != '\'') && (suffix[0] != '"' || suffix[len(suffix)-1] != '"') {
+			return "", "", 0, false
+		}
+		literal := suffix[1 : len(suffix)-1]
+		if !strings.HasPrefix(literal, ":") {
+			return "", "", 0, false
+		}
+		depth, err := strconv.Atoi(strings.TrimSpace(literal[1:]))
+		if err != nil || depth <= 0 {
+			return "", "", 0, false
+		}
+		return rowVar, rowField, depth, true
+	}
+	parseMergeClause := func(clause string) (string, string, string, bool) {
+		trimmed := strings.TrimSpace(clause)
+		if !strings.HasPrefix(strings.ToUpper(trimmed), "MERGE ") {
+			return "", "", "", false
+		}
+		body := strings.TrimSpace(trimmed[len("MERGE "):])
+		if !strings.HasPrefix(body, "(") {
+			return "", "", "", false
+		}
+		fromEnd := findMatchingParen(body, 0)
+		if fromEnd <= 1 {
+			return "", "", "", false
+		}
+		fromVar := strings.TrimSpace(body[1:fromEnd])
+		rest := strings.TrimSpace(body[fromEnd+1:])
+		if !isSimpleIdentifier(fromVar) || !strings.HasPrefix(rest, "-") {
+			return "", "", "", false
+		}
+		openBracket := strings.Index(rest, "[")
+		closeBracket := strings.Index(rest, "]")
+		if openBracket < 0 || closeBracket <= openBracket {
+			return "", "", "", false
+		}
+		relInner := strings.TrimSpace(rest[openBracket+1 : closeBracket])
+		if !strings.HasPrefix(relInner, ":") {
+			return "", "", "", false
+		}
+		relType := strings.TrimSpace(relInner[1:])
+		afterRel := strings.TrimSpace(rest[closeBracket+1:])
+		if !strings.HasPrefix(afterRel, "->") {
+			return "", "", "", false
+		}
+		afterArrow := strings.TrimSpace(afterRel[2:])
+		if !strings.HasPrefix(afterArrow, "(") {
+			return "", "", "", false
+		}
+		toEnd := findMatchingParen(afterArrow, 0)
+		if toEnd != len(afterArrow)-1 {
+			return "", "", "", false
+		}
+		toVar := strings.TrimSpace(afterArrow[1:toEnd])
+		if !isSimpleIdentifier(relType) || !isSimpleIdentifier(toVar) {
+			return "", "", "", false
+		}
+		return strings.ToLower(fromVar), relType, strings.ToLower(toVar), true
+	}
+	splitMutationClauses := func(input string) ([]string, bool) {
+		trimmed := strings.TrimSpace(input)
+		if trimmed == "" {
+			return nil, false
+		}
+		var clauses []string
+		for trimmed != "" {
+			upper := strings.ToUpper(trimmed)
+			var keyword string
+			switch {
+			case strings.HasPrefix(upper, "MATCH "):
+				keyword = "MATCH"
+			case strings.HasPrefix(upper, "MERGE "):
+				keyword = "MERGE"
+			default:
+				return nil, false
+			}
+			next := len(trimmed)
+			for _, candidate := range []string{"MATCH", "MERGE"} {
+				if idx := findKeywordIndexInContext(trimmed[len(keyword):], candidate); idx >= 0 {
+					pos := len(keyword) + idx
+					if pos < next {
+						next = pos
+					}
+				}
+			}
+			clauses = append(clauses, strings.TrimSpace(trimmed[:next]))
+			trimmed = strings.TrimSpace(trimmed[next:])
+		}
+		return clauses, true
+	}
+	mutationClauses, ok := splitMutationClauses(normalized)
+	if !ok || len(mutationClauses) < 3 {
+		return nil, false, nil
+	}
+	parseRootSpec := func(clause string) (rootSpec, bool) {
+		trimmed := strings.TrimSpace(clause)
+		if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
+			return rootSpec{}, false
+		}
+		body := strings.TrimSpace(trimmed[len("MATCH "):])
+		if !strings.HasPrefix(body, "(") {
+			return rootSpec{}, false
+		}
+		closeIdx := findMatchingParen(body, 0)
+		if closeIdx < 0 {
+			return rootSpec{}, false
+		}
+		varName, label, propName, propExpr, ok := parseIdentifierNodePattern(body[:closeIdx+1])
+		if !ok {
+			return rootSpec{}, false
+		}
+		rest := strings.TrimSpace(body[closeIdx+1:])
+		var out rootSpec
+		out.varName = strings.ToLower(varName)
+		out.label = label
+		if propName != "" {
+			rowVar, rowField, ok := parseRowFieldRef(propExpr)
+			if !ok || !strings.EqualFold(rowVar, unwindVar) {
+				return rootSpec{}, false
+			}
+			out.propName = propName
+			out.rowField = rowField
+			return out, rest == ""
+		}
+		if rest == "" || !strings.HasPrefix(strings.ToUpper(rest), "WHERE ") {
+			return rootSpec{}, false
+		}
+		whereExpr := strings.TrimSpace(rest[len("WHERE "):])
+		parts := strings.SplitN(whereExpr, "=", 2)
+		if len(parts) != 2 {
+			return rootSpec{}, false
+		}
+		left := strings.TrimSpace(parts[0])
+		right := strings.TrimSpace(parts[1])
+		lowerLeft := strings.ToLower(left)
+		if !strings.HasPrefix(lowerLeft, "elementid(") || !strings.HasSuffix(left, ")") {
+			return rootSpec{}, false
+		}
+		whereVar := strings.TrimSpace(left[len("elementId(") : len(left)-1])
+		rowVar, rowField, ok := parseRowFieldRef(right)
+		if !ok || !strings.EqualFold(whereVar, varName) || !strings.EqualFold(rowVar, unwindVar) {
+			return rootSpec{}, false
+		}
+		out.byID = true
+		out.rowField = rowField
+		return out, true
+	}
+	root, ok := parseRootSpec(mutationClauses[0])
+	if !ok {
+		return nil, false, nil
+	}
+	parseHopSpec := func(clauses []string) (hopSpec, bool) {
 		var out hopSpec
 		out.depthByVar = make(map[string]int)
-		matches := fixedChainHopMatchPattern.FindAllStringSubmatch(normalized, -1)
-		if len(matches) == 0 {
-			return hopSpec{}, false
-		}
 		seenDepth := make(map[int]bool)
-		for _, m := range matches {
-			// 1=var, 2=label, 3=prop, 4=unwindVar, 5=rowField, 6=depth
-			if len(m) != 7 || !strings.EqualFold(m[4], unwindVar) {
-				continue
-			}
-			depth, err := strconv.Atoi(m[6])
-			if err != nil || depth <= 0 {
+		for _, clause := range clauses {
+			trimmed := strings.TrimSpace(clause)
+			if !strings.HasPrefix(strings.ToUpper(trimmed), "MATCH ") {
 				return hopSpec{}, false
 			}
-			v := strings.ToLower(m[1])
+			body := strings.TrimSpace(trimmed[len("MATCH "):])
+			if strings.Contains(strings.ToUpper(body), " WHERE ") {
+				return hopSpec{}, false
+			}
+			varName, label, propName, propExpr, ok := parseIdentifierNodePattern(body)
+			if !ok || propName == "" {
+				return hopSpec{}, false
+			}
+			rowVar, rowField, depth, ok := parseRowFieldDepthExpr(propExpr)
+			if !ok || !strings.EqualFold(rowVar, unwindVar) {
+				return hopSpec{}, false
+			}
 			if out.label == "" {
-				out.label = m[2]
-				out.propName = m[3]
-				out.rowField = m[5]
+				out.label = label
+				out.propName = propName
+				out.rowField = rowField
 			}
-			if !strings.EqualFold(out.label, m[2]) || !strings.EqualFold(out.propName, m[3]) || !strings.EqualFold(out.rowField, m[5]) {
+			if !strings.EqualFold(out.label, label) || !strings.EqualFold(out.propName, propName) || !strings.EqualFold(out.rowField, rowField) {
 				return hopSpec{}, false
 			}
-			if prev, exists := out.depthByVar[v]; exists && prev != depth {
+			lowerVar := strings.ToLower(varName)
+			if prev, exists := out.depthByVar[lowerVar]; exists && prev != depth {
 				return hopSpec{}, false
 			}
-			out.depthByVar[v] = depth
+			out.depthByVar[lowerVar] = depth
 			seenDepth[depth] = true
 		}
 		if len(out.depthByVar) == 0 {
@@ -1365,19 +1604,27 @@ func (e *StorageExecutor) executeUnwindFixedChainLinkBatch(ctx context.Context, 
 		}
 		return out, true
 	}
-	hop, ok := parseHopSpec()
-	if !ok {
+	firstMergeIdx := -1
+	for idx, clause := range mutationClauses {
+		if strings.HasPrefix(strings.ToUpper(clause), "MERGE ") {
+			firstMergeIdx = idx
+			break
+		}
+	}
+	if firstMergeIdx <= 1 || firstMergeIdx >= len(mutationClauses) {
 		return nil, false, nil
 	}
-
-	mergeMatches := fixedChainMergePattern.FindAllStringSubmatch(normalized, -1)
-	if len(mergeMatches) == 0 {
+	hop, ok := parseHopSpec(mutationClauses[1:firstMergeIdx])
+	if !ok {
 		return nil, false, nil
 	}
 	relType := ""
 	nextByFrom := make(map[string]string)
-	for _, m := range mergeMatches {
-		from, rel, to := strings.ToLower(m[1]), m[2], strings.ToLower(m[3])
+	for _, clause := range mutationClauses[firstMergeIdx:] {
+		from, rel, to, ok := parseMergeClause(clause)
+		if !ok {
+			return nil, false, nil
+		}
 		if relType == "" {
 			relType = rel
 		}
@@ -1567,12 +1814,64 @@ func rewriteUnwindCorrelationToIn(query string, variable string, paramName strin
 	//   a.prop = unwindVar AND b.prop = unwindVar
 	// => a.prop IN $items AND b.prop = a.prop
 	// so we do not produce cross-key cartesian joins.
-	re := regexp.MustCompile(`(?i)([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*=\s*` + regexp.QuoteMeta(variable) + `\b`)
-	matches := re.FindAllStringSubmatchIndex(query, -1)
+	type equalityMatch struct {
+		start int
+		end   int
+		lhs   string
+	}
+	matches := make([]equalityMatch, 0, 2)
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' && !inDouble && (i == 0 || query[i-1] != '\\') {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle && (i == 0 || query[i-1] != '\\') {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble || ch != '=' {
+			continue
+		}
+
+		lhsEnd := i
+		for lhsEnd > 0 && isASCIISpace(query[lhsEnd-1]) {
+			lhsEnd--
+		}
+		lhsStart := lhsEnd
+		for lhsStart > 0 {
+			prev := query[lhsStart-1]
+			if isIdentByte(prev) || prev == '.' {
+				lhsStart--
+				continue
+			}
+			break
+		}
+		lhs := strings.TrimSpace(query[lhsStart:lhsEnd])
+		if lhs == "" || !isSimplePropertyReference(lhs) {
+			continue
+		}
+
+		rhsStart := i + 1
+		for rhsStart < len(query) && isASCIISpace(query[rhsStart]) {
+			rhsStart++
+		}
+		if rhsStart+len(variable) > len(query) || !strings.EqualFold(query[rhsStart:rhsStart+len(variable)], variable) {
+			continue
+		}
+		rhsEnd := rhsStart + len(variable)
+		if rhsEnd < len(query) && isIdentByte(query[rhsEnd]) {
+			continue
+		}
+		matches = append(matches, equalityMatch{start: lhsStart, end: rhsEnd, lhs: lhs})
+		i = rhsEnd - 1
+	}
 	if len(matches) == 0 {
 		return "", false
 	}
-	firstExpr := strings.TrimSpace(query[matches[0][2]:matches[0][3]])
+	firstExpr := matches[0].lhs
 	if firstExpr == "" {
 		return "", false
 	}
@@ -1580,22 +1879,33 @@ func rewriteUnwindCorrelationToIn(query string, variable string, paramName strin
 	var b strings.Builder
 	cursor := 0
 	for i, m := range matches {
-		start, end := m[0], m[1]
-		lhs := strings.TrimSpace(query[m[2]:m[3]])
-		b.WriteString(query[cursor:start])
+		b.WriteString(query[cursor:m.start])
 		if i == 0 {
-			b.WriteString(lhs)
+			b.WriteString(m.lhs)
 			b.WriteString(" IN $")
 			b.WriteString(paramName)
 		} else {
-			b.WriteString(lhs)
+			b.WriteString(m.lhs)
 			b.WriteString(" = ")
 			b.WriteString(firstExpr)
 		}
-		cursor = end
+		cursor = m.end
 	}
 	b.WriteString(query[cursor:])
 	return b.String(), true
+}
+
+func isSimplePropertyReference(expr string) bool {
+	parts := strings.Split(expr, ".")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !isSimpleIdentifier(strings.TrimSpace(part)) {
+			return false
+		}
+	}
+	return true
 }
 
 func rewriteTopLevelMultiMatchToCartesianMatch(query string) string {
@@ -1753,18 +2063,51 @@ func normalizeMultiMatchWhereClauses(query string) string {
 	return b.String()
 }
 
-var unwindCollectDistinctProjectionPattern = regexp.MustCompile(`(?is)^\s*WITH\s+collect\s*\(\s*DISTINCT\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\s+RETURN\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+type unwindCollectDistinctProjectionPlan struct {
+	srcVar string
+	prop   string
+	alias  string
+}
+
+func (e *StorageExecutor) parseUnwindCollectDistinctProjection(restQuery string) (unwindCollectDistinctProjectionPlan, bool) {
+	trimmed := strings.TrimSpace(restQuery)
+	if !startsWithKeywordFold(trimmed, "WITH") {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	returnIdx := findKeywordIndexInContext(trimmed, "RETURN")
+	if returnIdx <= 0 {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	withClause := strings.TrimSpace(trimmed[len("WITH"):returnIdx])
+	returnClause := strings.TrimSpace(trimmed[returnIdx+len("RETURN"):])
+	if withClause == "" || returnClause == "" {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	withItems := e.splitWithItems(withClause)
+	if len(withItems) != 1 {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	expr, alias := parseProjectionExprAlias(strings.TrimSpace(withItems[0]))
+	if expr == "" || alias == "" {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	agg := ParseAggregation(expr)
+	if agg == nil || !strings.EqualFold(agg.Function, "COLLECT") || !agg.Distinct || agg.IsStar || agg.Variable == "" || agg.Property == "" {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	returnItems := e.parseReturnItems(returnClause)
+	if len(returnItems) != 1 || !strings.EqualFold(strings.TrimSpace(returnItems[0].expr), alias) || returnItems[0].alias != "" {
+		return unwindCollectDistinctProjectionPlan{}, false
+	}
+	return unwindCollectDistinctProjectionPlan{srcVar: agg.Variable, prop: agg.Property, alias: alias}, true
+}
 
 func (e *StorageExecutor) executeUnwindWithCollectProjection(unwindVar string, items []interface{}, restQuery string) (*ExecuteResult, bool) {
-	m := unwindCollectDistinctProjectionPattern.FindStringSubmatch(strings.TrimSpace(restQuery))
-	if len(m) != 5 {
+	plan, ok := e.parseUnwindCollectDistinctProjection(restQuery)
+	if !ok {
 		return nil, false
 	}
-	srcVar := strings.TrimSpace(m[1])
-	prop := strings.TrimSpace(m[2])
-	alias := strings.TrimSpace(m[3])
-	returnAlias := strings.TrimSpace(m[4])
-	if !strings.EqualFold(srcVar, unwindVar) || !strings.EqualFold(alias, returnAlias) {
+	if !strings.EqualFold(plan.srcVar, unwindVar) {
 		return nil, false
 	}
 
@@ -1774,9 +2117,9 @@ func (e *StorageExecutor) executeUnwindWithCollectProjection(unwindVar string, i
 		var v interface{}
 		switch row := it.(type) {
 		case map[string]interface{}:
-			v = row[prop]
+			v = row[plan.prop]
 		case map[interface{}]interface{}:
-			v = row[prop]
+			v = row[plan.prop]
 		default:
 			continue
 		}
@@ -1788,7 +2131,7 @@ func (e *StorageExecutor) executeUnwindWithCollectProjection(unwindVar string, i
 	}
 
 	return &ExecuteResult{
-		Columns: []string{alias},
+		Columns: []string{plan.alias},
 		Rows:    [][]interface{}{{values}},
 	}, true
 }
@@ -1959,71 +2302,14 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 // Supports both single UNION (query1 UNION query2) and chained UNIONs (query1 UNION query2 UNION query3 ...)
 // Handles UNION with flexible whitespace (spaces, newlines, tabs)
 func (e *StorageExecutor) executeUnion(ctx context.Context, cypher string, unionAll bool) (*ExecuteResult, error) {
-	// Normalize whitespace for easier parsing (preserve structure but make UNION detection easier)
-	// Replace newlines/tabs with spaces, then normalize multiple spaces to single space
-	normalized := regexp.MustCompile(`\s+`).ReplaceAllString(cypher, " ")
-	upper := strings.ToUpper(normalized)
-
-	var separatorPattern *regexp.Regexp
-	if unionAll {
-		// Match "UNION ALL" with flexible whitespace
-		separatorPattern = regexp.MustCompile(`(?i)\s+UNION\s+ALL\s+`)
-	} else {
-		// Match "UNION" with flexible whitespace (but not "UNION ALL")
-		// We'll check manually to avoid matching "UNION ALL"
-		separatorPattern = regexp.MustCompile(`(?i)\s+UNION\s+`)
+	queries, splitAll, ok := splitTopLevelUnionBranches(cypher)
+	if !ok || len(queries) < 2 {
+		return nil, fmt.Errorf("UNION clause not found in query: %q", truncateQuery(cypher, 80))
 	}
-
-	// Find all UNION occurrences (handle chained UNIONs)
-	var queries []string
-	remaining := normalized
-	lastIndex := 0
-
-	for {
-		matches := separatorPattern.FindStringIndex(upper[lastIndex:])
-		if matches == nil {
-			// No more UNIONs - add remaining query
-			if strings.TrimSpace(remaining[lastIndex:]) != "" {
-				queries = append(queries, strings.TrimSpace(remaining[lastIndex:]))
-			}
-			break
+	if unionAll != splitAll {
+		if unionAll {
+			return nil, fmt.Errorf("UNION ALL clause not found in query: %q", truncateQuery(cypher, 80))
 		}
-
-		// Extract query before UNION
-		unionStart := lastIndex + matches[0]
-		unionEnd := lastIndex + matches[1]
-
-		// For UNION (not UNION ALL), check if this is actually "UNION ALL"
-		if !unionAll {
-			// Check if the next characters after "UNION" are "ALL"
-			if unionEnd < len(upper) {
-				afterUnion := strings.TrimSpace(upper[unionEnd:])
-				if strings.HasPrefix(afterUnion, "ALL") {
-					// This is "UNION ALL", skip it (we're looking for plain UNION)
-					// Find the end of "ALL"
-					allEnd := unionEnd
-					for allEnd < len(upper) && (upper[allEnd] == ' ' || upper[allEnd] == 'A' || upper[allEnd] == 'L') {
-						if allEnd+1 < len(upper) && upper[allEnd] == 'L' && upper[allEnd+1] == 'L' {
-							allEnd += 2
-							break
-						}
-						allEnd++
-					}
-					lastIndex = allEnd
-					continue
-				}
-			}
-		}
-		query := strings.TrimSpace(remaining[lastIndex:unionStart])
-		if query != "" {
-			queries = append(queries, query)
-		}
-
-		// Move past this UNION
-		lastIndex = unionEnd
-	}
-
-	if len(queries) < 2 {
 		return nil, fmt.Errorf("UNION clause not found in query: %q", truncateQuery(cypher, 80))
 	}
 

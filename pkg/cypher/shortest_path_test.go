@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -373,6 +374,38 @@ func TestShortestPathQueryParsingAndExecutionHelpers(t *testing.T) {
 	assert.True(t, isShortestPathQuery("MATCH p = shortestPath((a)-[*]-(b)) RETURN p"))
 	assert.True(t, isShortestPathQuery("MATCH p = allShortestPaths((a)-[*]-(b)) RETURN p"))
 	assert.False(t, isShortestPathQuery("MATCH (n) RETURN n"))
+}
+
+func TestShortestPathSingleMatchRegression(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (a:Person {name:'Alice'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `CREATE (b:Person {name:'Bob'})`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `MATCH (a:Person {name:'Alice'}), (b:Person {name:'Bob'}) CREATE (a)-[:KNOWS]->(b)`, nil)
+	require.NoError(t, err)
+
+	query := "MATCH p = shortestPath((a:Person {name:'Alice'})-[*..3]->(b:Person {name:'Bob'})) RETURN p LIMIT 1"
+
+	assert.Equal(t, "", extractPreviousMatchClause(query, strings.Index(query, "shortestPath")))
+
+	parsed, err := exec.parseShortestPathQuery(query)
+	require.NoError(t, err)
+	assert.Equal(t, "p", parsed.pathVariable)
+	assert.Equal(t, 3, parsed.maxHops)
+	assert.Nil(t, parsed.startVarBinding)
+	assert.Nil(t, parsed.endVarBinding)
+
+	result, err := exec.Execute(ctx, query, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	path, ok := result.Rows[0][0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, int64(1), path["length"])
 }
 
 func TestFindNodeByPattern_HelperBranches(t *testing.T) {

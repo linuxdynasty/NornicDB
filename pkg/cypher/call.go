@@ -21,7 +21,6 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -842,9 +841,6 @@ func (e *StorageExecutor) executeCallTailSetBased(
 	}
 	return res, true
 }
-
-var maxLengthWithItemPattern = regexp.MustCompile(`(?i)^max\s*\(\s*length\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$`)
-
 func (e *StorageExecutor) tryExecuteCallTailVariableLengthMaxLengthFastPath(
 	ctx context.Context,
 	seed *ExecuteResult,
@@ -1136,11 +1132,12 @@ func (e *StorageExecutor) parseCallTailVariableLengthMaxLengthPlan(tail string) 
 		if item == "" {
 			continue
 		}
-		if matches := maxLengthWithItemPattern.FindStringSubmatch(item); matches != nil {
-			if matches[1] != pathVar || aggAlias != "" {
+		expr, alias := parseProjectionExprAlias(item)
+		if alias, ok := parseAggregateExprAlias(expr, alias, "max", "length("+pathVar+")"); ok {
+			if aggAlias != "" {
 				return nil, false
 			}
-			aggAlias = matches[2]
+			aggAlias = alias
 			continue
 		}
 		if !isSimpleIdentifier(item) {
@@ -1359,7 +1356,8 @@ func (e *StorageExecutor) parseCallTailFrontierReachablePlan(tail string) (*call
 	if len(secondItems) != 4 || strings.TrimSpace(secondItems[0]) != match.StartNode.variable || strings.TrimSpace(secondItems[1]) != "score" {
 		return nil, false
 	}
-	nearestAlias, ok1 := parseAggregateAlias(secondItems[2], "min", dAlias)
+	nearestExpr, nearestAliasRaw := parseProjectionExprAlias(secondItems[2])
+	nearestAlias, ok1 := parseAggregateExprAlias(nearestExpr, nearestAliasRaw, "min", dAlias)
 	reachableAlias, ok2 := parseCountStarAlias(secondItems[3])
 	if !ok1 || !ok2 {
 		return nil, false
@@ -1408,11 +1406,11 @@ func (e *StorageExecutor) parseCallTailConstrainedMaxDepthPlan(tail string) (*ca
 	if len(returnItems) != 3 || compactCypherFragment(returnItems[0].expr) != compactCypherFragment("elementId("+match.StartNode.variable+")") || returnItems[1].expr != "score" {
 		return nil, false
 	}
-	matches := maxLengthWithItemPattern.FindStringSubmatch(strings.TrimSpace(returnItems[2].expr + " AS " + returnItems[2].alias))
-	if matches == nil || matches[1] != pathVar {
+	alias, ok := parseAggregateExprAlias(returnItems[2].expr, returnItems[2].alias, "max", "length("+pathVar+")")
+	if !ok {
 		return nil, false
 	}
-	return &callTailConstrainedMaxDepthPlan{match: match, nodeVar: match.StartNode.variable, aggregateExpr: returnItems[2].expr, aggregateAlias: returnItems[2].alias, minWeightToken: minWeightToken, categoriesToken: categoriesToken, returnItems: returnItems, limitToken: returnOptions.limitRaw}, true
+	return &callTailConstrainedMaxDepthPlan{match: match, nodeVar: match.StartNode.variable, aggregateExpr: returnItems[2].expr, aggregateAlias: alias, minWeightToken: minWeightToken, categoriesToken: categoriesToken, returnItems: returnItems, limitToken: returnOptions.limitRaw}, true
 }
 
 type callTailReturnOptionsRaw struct {
@@ -1565,18 +1563,14 @@ func splitPathAssignment(patternPart string) (string, string, bool) {
 	return left, right, true
 }
 
-func parseAggregateAlias(item, funcName, inner string) (string, bool) {
-	upper := strings.ToUpper(item)
-	asIdx := strings.LastIndex(upper, " AS ")
-	if asIdx == -1 {
+func parseAggregateExprAlias(expr, alias, funcName, inner string) (string, bool) {
+	if !isSimpleIdentifier(alias) {
 		return "", false
 	}
-	expr := compactCypherFragment(item[:asIdx])
-	expected := compactCypherFragment(funcName + "(" + inner + ")")
-	if expr != expected {
+	if compactCypherFragment(expr) != compactCypherFragment(funcName+"("+inner+")") {
 		return "", false
 	}
-	return strings.TrimSpace(item[asIdx+4:]), true
+	return alias, true
 }
 
 func parseCountStarAlias(item string) (string, bool) {

@@ -537,7 +537,10 @@ func (e *StorageExecutor) executeMultiMatch(ctx context.Context, cypher string) 
 // lastKeywordIndexBefore returns the last occurrence of keyword before endIdx.
 // It uses keyword-aware scanning and returns -1 when not found.
 func lastKeywordIndexBefore(query, keyword string, endIdx int) int {
-	if endIdx <= 0 || endIdx > len(query) {
+	if endIdx <= 0 {
+		return -1
+	}
+	if endIdx > len(query) {
 		endIdx = len(query)
 	}
 	segment := query[:endIdx]

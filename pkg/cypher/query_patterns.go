@@ -11,11 +11,7 @@
 //   - Large Result Set: Any traversal with LIMIT > 100
 package cypher
 
-import (
-	"regexp"
-	"strconv"
-	"strings"
-)
+import "strings"
 
 // QueryPattern identifies optimizable query structures
 type QueryPattern int
@@ -76,44 +72,6 @@ type PatternInfo struct {
 	GroupByVars  []string // Variables in implicit GROUP BY
 }
 
-// Pre-compiled patterns for detection
-var (
-	// Matches: (a)-[:TYPE]->(b)-[:TYPE]->(a) or (a)<-[:TYPE]-(b)<-[:TYPE]-(a)
-	// Captures: startVar, relType, midVar, relType2, endVar
-	mutualRelPattern = regexp.MustCompile(
-		`(?i)\(\s*(\w+)(?::\w+)?\s*\)\s*` + // (a) or (a:Label)
-			`(<)?-\[(?:\w+)?(?::(\w+))?\]->(?)?\s*` + // -[:TYPE]-> or <-[:TYPE]-
-			`\(\s*(\w+)(?::\w+)?\s*\)\s*` + // (b) or (b:Label)
-			`(<)?-\[(?:\w+)?(?::(\w+))?\]->(?)?\s*` + // -[:TYPE]-> or <-[:TYPE]-
-			`\(\s*(\w+)(?::\w+)?\s*\)`, // (a) - same as start
-	)
-
-	// Matches incoming relationship with count: (x)<-[:TYPE]-(y) ... count(y)
-	incomingCountPattern = regexp.MustCompile(
-		`(?i)\(\s*(\w+)(?::\w+)?\s*\)\s*` + // (x)
-			`<-\[(\w+)?(?::(\w+))?\]-\s*` + // <-[r:TYPE]-
-			`\(\s*(\w+)(?::\w+)?\s*\)`, // (y)
-	)
-
-	// Matches outgoing relationship with count: (x)-[:TYPE]->(y) ... count(y)
-	outgoingCountPattern = regexp.MustCompile(
-		`(?i)\(\s*(\w+)(?::\w+)?\s*\)\s*` + // (x)
-			`-\[(\w+)?(?::(\w+))?\]->\s*` + // -[r:TYPE]->
-			`\(\s*(\w+)(?::\w+)?\s*\)`, // (y)
-	)
-
-	// Matches aggregation on relationship variable: avg(r.prop), sum(r.prop), count(r)
-	edgeAggPattern = regexp.MustCompile(
-		`(?i)(count|sum|avg|min|max)\s*\(\s*(\w+)(?:\.(\w+))?\s*\)`,
-	)
-
-	// Matches LIMIT clause for pattern detection
-	patternLimitRegex = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
-
-	// Matches relationship variable in MATCH
-	relVarPattern = regexp.MustCompile(`-\[(\w+)(?::\w+)?\]-`)
-)
-
 // DetectQueryPattern analyzes a Cypher query and returns pattern info
 func DetectQueryPattern(query string) PatternInfo {
 	info := PatternInfo{
@@ -130,8 +88,7 @@ func DetectQueryPattern(query string) PatternInfo {
 	}
 
 	// Extract LIMIT first (affects multiple patterns)
-	if matches := patternLimitRegex.FindStringSubmatch(query); matches != nil {
-		limit, _ := strconv.Atoi(matches[1])
+	if limit, ok := ExtractLimit(query); ok {
 		info.Limit = limit
 	}
 
@@ -235,60 +192,54 @@ func countRelationshipPatterns(s string) int {
 
 // detectMutualRelationship checks for (a)-[:T]->(b)-[:T]->(a) pattern
 func detectMutualRelationship(query string, info *PatternInfo) bool {
-	// Simplified detection: look for pattern where start var == end var
-	// Pattern: MATCH (a)-[:TYPE]->(b)-[:TYPE]->(a)
+	matchClause := extractMatchClause(query)
+	matchClause = strings.TrimSpace(matchClause)
+	if matchClause == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToUpper(matchClause), "MATCH") {
+		matchClause = strings.TrimSpace(matchClause[len("MATCH"):])
+	}
 
-	upperQuery := strings.ToUpper(query)
-	if !strings.Contains(upperQuery, "MATCH") {
+	exec := &StorageExecutor{}
+	match := exec.parseTraversalPattern(matchClause)
+	if match == nil || !match.IsChained || len(match.Segments) != 2 {
+		return false
+	}
+	first := match.Segments[0]
+	second := match.Segments[1]
+	if first.Relationship.Direction != "outgoing" || second.Relationship.Direction != "outgoing" {
+		return false
+	}
+	if first.FromNode.variable == "" || first.ToNode.variable == "" || second.ToNode.variable == "" {
+		return false
+	}
+	if first.FromNode.variable != second.ToNode.variable {
+		return false
+	}
+	if first.ToNode.variable != second.FromNode.variable {
+		return false
+	}
+	if len(first.Relationship.Types) == 0 || len(second.Relationship.Types) == 0 {
+		return false
+	}
+	if !strings.EqualFold(first.Relationship.Types[0], second.Relationship.Types[0]) {
 		return false
 	}
 
-	// Extract MATCH clause
-	matchIdx := findKeywordIndex(query, "MATCH")
-	if matchIdx < 0 {
-		return false
-	}
-
-	// Find end of MATCH pattern (WHERE, RETURN, WITH, etc.)
-	matchEnd := len(query)
-	for _, keyword := range []string{"WHERE", "RETURN", "WITH", "ORDER", "LIMIT"} {
-		idx := findKeywordIndex(query[matchIdx:], keyword)
-		if idx > 0 && matchIdx+idx < matchEnd {
-			matchEnd = matchIdx + idx
-		}
-	}
-
-	matchClause := query[matchIdx:matchEnd]
-
-	// Look for two relationship patterns with same type going back to start
-	// Simple heuristic: count node variables and check if first == last
-	nodeVars := extractNodeVariables(matchClause)
-	if len(nodeVars) >= 3 && nodeVars[0] == nodeVars[len(nodeVars)-1] {
-		// Extract relationship type
-		relType := extractRelationshipType(matchClause)
-		if relType != "" {
-			info.Pattern = PatternMutualRelationship
-			info.StartVar = nodeVars[0]
-			info.EndVar = nodeVars[1]
-			info.RelType = relType
-			return true
-		}
-	}
-
-	return false
+	info.Pattern = PatternMutualRelationship
+	info.StartVar = first.FromNode.variable
+	info.EndVar = first.ToNode.variable
+	info.RelType = first.Relationship.Types[0]
+	return true
 }
 
 // detectIncomingCountAgg checks for (x)<-[:T]-(y) ... count(y) pattern
 func detectIncomingCountAgg(query string, info *PatternInfo) bool {
-	matches := incomingCountPattern.FindStringSubmatch(query)
-	if matches == nil {
+	startVar, relVar, relType, endVar, ok := parseDirectionalCountPattern(extractMatchClause(query), true)
+	if !ok {
 		return false
 	}
-
-	startVar := matches[1] // x
-	relVar := matches[2]   // r (optional)
-	relType := matches[3]  // TYPE
-	endVar := matches[4]   // y
 
 	// Check if count() is on the end variable (the one doing the incoming), and
 	// only optimize the narrow "RETURN x.name, count(y)" shape that the optimized executor implements.
@@ -312,15 +263,10 @@ func detectIncomingCountAgg(query string, info *PatternInfo) bool {
 
 // detectOutgoingCountAgg checks for (x)-[:T]->(y) ... count(y) pattern
 func detectOutgoingCountAgg(query string, info *PatternInfo) bool {
-	matches := outgoingCountPattern.FindStringSubmatch(query)
-	if matches == nil {
+	startVar, relVar, relType, endVar, ok := parseDirectionalCountPattern(extractMatchClause(query), false)
+	if !ok {
 		return false
 	}
-
-	startVar := matches[1] // x
-	relVar := matches[2]   // r (optional)
-	relType := matches[3]  // TYPE
-	endVar := matches[4]   // y
 
 	// Check if count() is on the end variable, and only optimize the narrow
 	// "RETURN x.name, count(y)" shape that the optimized executor implements.
@@ -387,47 +333,105 @@ func isReturnNameCountShape(query string, startVar string, endVar string) bool {
 	return rightUpper == wantCountVar || rightUpper == "COUNT(*)"
 }
 
+func parseDirectionalCountPattern(matchClause string, incoming bool) (string, string, string, string, bool) {
+	matchClause = strings.TrimSpace(matchClause)
+	if matchClause == "" {
+		return "", "", "", "", false
+	}
+	if strings.HasPrefix(strings.ToUpper(matchClause), "MATCH") {
+		matchClause = strings.TrimSpace(matchClause[len("MATCH"):])
+	}
+	if matchClause == "" {
+		return "", "", "", "", false
+	}
+
+	exec := &StorageExecutor{}
+	match := exec.parseTraversalPattern(matchClause)
+	if match == nil || match.IsChained {
+		return "", "", "", "", false
+	}
+	if incoming {
+		if match.Relationship.Direction != "incoming" {
+			return "", "", "", "", false
+		}
+	} else if match.Relationship.Direction != "outgoing" {
+		return "", "", "", "", false
+	}
+	if match.StartNode.variable == "" || match.EndNode.variable == "" {
+		return "", "", "", "", false
+	}
+	relType := ""
+	if len(match.Relationship.Types) > 0 {
+		relType = match.Relationship.Types[0]
+	}
+	return match.StartNode.variable, match.Relationship.Variable, relType, match.EndNode.variable, true
+}
+
 // detectEdgePropertyAgg checks for avg(r.prop), sum(r.prop) patterns
 func detectEdgePropertyAgg(query string, info *PatternInfo) bool {
 	// First, find relationship variable in MATCH
-	relMatches := relVarPattern.FindStringSubmatch(query)
-	if relMatches == nil {
-		return false
-	}
-	relVar := relMatches[1]
-
-	// Look for aggregation on this relationship variable
-	aggMatches := edgeAggPattern.FindAllStringSubmatch(query, -1)
-	if aggMatches == nil {
+	matchClause := extractMatchClause(query)
+	relVar := extractRelationshipVariable(matchClause)
+	if relVar == "" {
 		return false
 	}
 
-	for _, match := range aggMatches {
-		aggFunc := strings.ToLower(match[1]) // count, sum, avg, etc.
-		varName := match[2]                  // variable name
-		propName := match[3]                 // property name (optional for count)
+	exec := &StorageExecutor{}
+	returnIdx := findKeywordIndex(query, "RETURN")
+	if returnIdx < 0 {
+		return false
+	}
+	returnItems := exec.parseReturnItems(strings.TrimSpace(query[returnIdx+len("RETURN"):]))
+	if len(returnItems) < 2 {
+		return false
+	}
 
-		// Check if aggregation is on the relationship variable
-		if strings.EqualFold(varName, relVar) {
-			// Only use EdgePropertyAgg optimization for actual property aggregations
-			// Simple count(r) without a property should use the regular path
-			if propName == "" {
-				return false // Let regular executeMatch handle simple count(r)
-			}
-			// Guardrail: only optimize the narrow "RETURN n.name, <agg>(r.prop)..." shape that
-			// executeEdgePropertyAggOptimized implements (it hardcodes the node "name" property).
-			if !isReturnEdgePropertyAggNameShape(query, relVar, propName) {
-				return false
-			}
-			info.Pattern = PatternEdgePropertyAgg
-			info.RelVar = relVar
-			info.AggFunctions = append(info.AggFunctions, aggFunc)
-			info.AggProperty = propName
-			return true
+	for _, item := range returnItems[1:] {
+		expr, _ := parseProjectionExprAlias(item.expr)
+		u := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(expr), " ", ""))
+		open := strings.IndexByte(u, '(')
+		close := strings.LastIndexByte(u, ')')
+		if open <= 0 || close <= open {
+			continue
 		}
+		aggFunc := strings.ToLower(u[:open])
+		inner := u[open+1 : close]
+
+		if aggFunc == "count" {
+			if inner == "*" || strings.EqualFold(inner, strings.ToUpper(relVar)) {
+				continue
+			}
+			return false
+		}
+		if aggFunc != "sum" && aggFunc != "avg" && aggFunc != "min" && aggFunc != "max" {
+			return false
+		}
+		wantPrefix := strings.ToUpper(relVar) + "."
+		if !strings.HasPrefix(inner, wantPrefix) {
+			return false
+		}
+		propName := inner[len(wantPrefix):]
+		if propName == "" {
+			return false
+		}
+		if info.AggProperty == "" {
+			info.AggProperty = strings.ToLower(propName)
+		} else if !strings.EqualFold(info.AggProperty, propName) {
+			return false
+		}
+		info.AggFunctions = append(info.AggFunctions, aggFunc)
 	}
 
-	return false
+	if info.AggProperty == "" {
+		return false
+	}
+	if !isReturnEdgePropertyAggNameShape(query, relVar, info.AggProperty) {
+		return false
+	}
+	info.Pattern = PatternEdgePropertyAgg
+	info.RelVar = relVar
+
+	return true
 }
 
 func isReturnEdgePropertyAggNameShape(query string, relVar string, propName string) bool {
@@ -509,26 +513,140 @@ func isReturnEdgePropertyAggNameShape(query string, relVar string, propName stri
 // extractNodeVariables extracts node variable names from a MATCH pattern
 func extractNodeVariables(matchClause string) []string {
 	var vars []string
-	// Simple extraction: find (varName) or (varName:Label) patterns
-	nodePattern := regexp.MustCompile(`\(\s*(\w+)(?::\w+)?`)
-	matches := nodePattern.FindAllStringSubmatch(matchClause, -1)
-	for _, m := range matches {
-		if m[1] != "" {
-			vars = append(vars, m[1])
+	for i := 0; i < len(matchClause); i++ {
+		if matchClause[i] != '(' {
+			continue
 		}
+		j := i + 1
+		for j < len(matchClause) && isWhitespace(matchClause[j]) {
+			j++
+		}
+		name, next, ok := scanIdentifierToken(matchClause, j)
+		if !ok {
+			continue
+		}
+		if next < len(matchClause) {
+			for next < len(matchClause) && isWhitespace(matchClause[next]) {
+				next++
+			}
+			if next < len(matchClause) && matchClause[next] != ':' && matchClause[next] != ')' && matchClause[next] != '{' {
+				continue
+			}
+		}
+		vars = append(vars, name)
 	}
 	return vars
 }
 
 // extractRelationshipType extracts the relationship type from a pattern
 func extractRelationshipType(pattern string) string {
-	// Match -[:TYPE]- or -[r:TYPE]-
-	relTypePattern := regexp.MustCompile(`-\[(?:\w+)?:(\w+)\]-`)
-	matches := relTypePattern.FindStringSubmatch(pattern)
-	if matches != nil && len(matches) > 1 {
-		return matches[1]
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '[' {
+			continue
+		}
+		inner, _, ok := extractBracketSectionQueryPattern(pattern[i:])
+		if !ok {
+			continue
+		}
+		if colonIdx := strings.Index(inner, ":"); colonIdx >= 0 {
+			typePart := strings.TrimSpace(inner[colonIdx+1:])
+			if propIdx := strings.Index(typePart, "{"); propIdx >= 0 {
+				typePart = strings.TrimSpace(typePart[:propIdx])
+			}
+			if pipeIdx := strings.Index(typePart, "|"); pipeIdx >= 0 {
+				typePart = strings.TrimSpace(typePart[:pipeIdx])
+			}
+			if typePart != "" {
+				return typePart
+			}
+		}
 	}
 	return ""
+}
+
+func extractRelationshipVariable(pattern string) string {
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '[' {
+			continue
+		}
+		inner, _, ok := extractBracketSectionQueryPattern(pattern[i:])
+		if !ok {
+			continue
+		}
+		inner = strings.TrimSpace(inner)
+		if inner == "" {
+			return ""
+		}
+		if colonIdx := strings.Index(inner, ":"); colonIdx >= 0 {
+			name := strings.TrimSpace(inner[:colonIdx])
+			if name != "" {
+				return name
+			}
+			return ""
+		}
+		if inner[0] == '*' {
+			return ""
+		}
+		name, _, ok := parseIdentifierTokenQueryPattern(inner)
+		if ok {
+			return name
+		}
+		return ""
+	}
+	return ""
+}
+
+func scanIdentifierToken(s string, start int) (string, int, bool) {
+	if start < 0 || start >= len(s) {
+		return "", start, false
+	}
+	if !isIdentifierStart(s[start]) {
+		return "", start, false
+	}
+	i := start + 1
+	for i < len(s) && isIdentifierPart(s[i]) {
+		i++
+	}
+	return s[start:i], i, true
+}
+
+func isIdentifierStart(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+func isIdentifierPart(c byte) bool {
+	return isIdentifierStart(c) || (c >= '0' && c <= '9')
+}
+
+func parseIdentifierTokenQueryPattern(s string) (string, string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || !isIdentifierStart(s[0]) {
+		return "", "", false
+	}
+	i := 1
+	for i < len(s) && isIdentifierPart(s[i]) {
+		i++
+	}
+	return s[:i], s[i:], true
+}
+
+func extractBracketSectionQueryPattern(s string) (inside string, rest string, ok bool) {
+	if !strings.HasPrefix(s, "[") {
+		return "", "", false
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return s[1:i], s[i+1:], true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // IsOptimizable returns true if the pattern can be optimized

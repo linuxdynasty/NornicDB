@@ -8,6 +8,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -137,28 +138,52 @@ func TestParserComparison(t *testing.T) {
 	}
 	var results []result
 
-	runOnce := func(t *testing.T, parserType string, query string) (time.Duration, error) {
+	measureMedian := func(t *testing.T, parserType string, query string, samples int) (time.Duration, error) {
 		t.Helper()
+		if samples < 1 {
+			samples = 1
+		}
 
-		config.SetParserType(parserType)
-		exec, ctx := setupParserComparisonExecutor(t)
-		setupParserComparisonData(t, exec, ctx)
+		durations := make([]time.Duration, 0, samples)
+		for i := 0; i < samples; i++ {
+			config.SetParserType(parserType)
+			exec, ctx := setupParserComparisonExecutor(t)
+			setupParserComparisonData(t, exec, ctx)
 
-		start := time.Now()
-		_, err := exec.Execute(ctx, query, nil)
-		return time.Since(start), err
+			start := time.Now()
+			_, err := exec.Execute(ctx, query, nil)
+			duration := time.Since(start)
+			if err != nil {
+				return duration, err
+			}
+			durations = append(durations, duration)
+		}
+
+		sort.Slice(durations, func(i, j int) bool {
+			return durations[i] < durations[j]
+		})
+		return durations[len(durations)/2], nil
 	}
 
-	for _, tc := range testQueries {
+	const samplesPerParser = 5
+
+	for idx, tc := range testQueries {
 		t.Run(tc.name, func(t *testing.T) {
 			var r result
 			r.name = tc.name
 
-			// IMPORTANT: Use fresh executors per parser run.
+			// IMPORTANT: Use fresh executors per parser sample.
 			// Reusing the same executor biases results due to warmed caches
 			// (query cache / plan cache / analyzer cache) and mutated store state.
-			r.nornicTime, r.nornicErr = runOnce(t, config.ParserTypeNornic, tc.query)
-			r.antlrTime, r.antlrErr = runOnce(t, config.ParserTypeANTLR, tc.query)
+			// Also alternate parser order per query so the first measured parser
+			// does not systematically absorb one-time process jitter.
+			if idx%2 == 0 {
+				r.nornicTime, r.nornicErr = measureMedian(t, config.ParserTypeNornic, tc.query, samplesPerParser)
+				r.antlrTime, r.antlrErr = measureMedian(t, config.ParserTypeANTLR, tc.query, samplesPerParser)
+			} else {
+				r.antlrTime, r.antlrErr = measureMedian(t, config.ParserTypeANTLR, tc.query, samplesPerParser)
+				r.nornicTime, r.nornicErr = measureMedian(t, config.ParserTypeNornic, tc.query, samplesPerParser)
+			}
 
 			// Reset to default
 			config.SetParserType(config.ParserTypeNornic)

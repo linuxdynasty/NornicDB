@@ -91,30 +91,37 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 
 		// Check for variable length: [*], [*2], [*1..3], [*2..], [*..5]
 		if strings.Contains(inner, "*") {
-			if matches := varLengthRelPattern.FindStringSubmatch(inner); matches != nil {
-				hasRange := strings.Contains(matches[0], "..") // Check if .. is present
-
-				if matches[1] != "" {
-					result.MinHops, _ = strconv.Atoi(matches[1])
-				} else {
-					result.MinHops = 1
+			varLengthStart := strings.Index(inner, "*")
+			varLengthEnd := varLengthStart + 1
+			for varLengthEnd < len(inner) {
+				ch := inner[varLengthEnd]
+				if (ch < '0' || ch > '9') && ch != '.' {
+					break
 				}
-
-				if matches[2] != "" {
-					result.MaxHops, _ = strconv.Atoi(matches[2])
-				} else if hasRange {
-					// *2.. or *.. means unbounded max
-					result.MaxHops = 100 // High number for unbounded
-				} else if matches[1] != "" {
-					// *2 means exactly 2 hops
-					result.MaxHops = result.MinHops
-				} else {
-					// * means any length (1 to default max)
-					result.MaxHops = 10
-				}
+				varLengthEnd++
 			}
-			// Remove variable length part
-			inner = varLengthRelPattern.ReplaceAllString(inner, "")
+			spec := inner[varLengthStart+1 : varLengthEnd]
+			hasRange := strings.Contains(spec, "..")
+			switch {
+			case spec == "":
+				result.MinHops = 1
+				result.MaxHops = 10
+			case hasRange:
+				parts := strings.SplitN(spec, "..", 2)
+				result.MinHops = 1
+				if parts[0] != "" {
+					result.MinHops, _ = strconv.Atoi(parts[0])
+				}
+				if parts[1] != "" {
+					result.MaxHops, _ = strconv.Atoi(parts[1])
+				} else {
+					result.MaxHops = 100
+				}
+			default:
+				result.MinHops, _ = strconv.Atoi(spec)
+				result.MaxHops = result.MinHops
+			}
+			inner = strings.TrimSpace(inner[:varLengthStart] + inner[varLengthEnd:])
 		}
 
 		// Parse variable and types: r:TYPE|OTHER
@@ -478,7 +485,7 @@ func (e *StorageExecutor) tryExecuteTraversalEndSeedOrderLimit(ctx context.Conte
 	}
 
 	orderSpecs := e.parseNodeOrderSpecs(orderExpr, matches.EndNode.variable)
-	if len(orderSpecs) != 1 {
+	if len(orderSpecs) == 0 {
 		return nil, false, nil
 	}
 
@@ -974,31 +981,6 @@ func (e *StorageExecutor) parseTraversalPattern(pattern string) *TraversalMatch 
 	if e.isChainedPattern(pattern) {
 		return e.parseChainedTraversalPattern(pattern)
 	}
-
-	// Try regex first for simple patterns (faster)
-	matches := pathPatternRe.FindStringSubmatch(pattern)
-	if matches != nil {
-		// Verify the regex matched the ENTIRE pattern - if not, it got confused by special chars
-		// The full match (matches[0]) should equal the trimmed pattern
-		fullMatch := strings.TrimSpace(matches[0])
-		trimmedPattern := strings.TrimSpace(pattern)
-
-		if fullMatch == trimmedPattern {
-			// Regex captured the complete pattern
-			startNode := e.parseNodePatternFromString(matches[1])
-			endNode := e.parseNodePatternFromString(matches[3])
-
-			return &TraversalMatch{
-				StartNode:    startNode,
-				Relationship: *e.parseRelationshipPattern(matches[2]),
-				EndNode:      endNode,
-			}
-		}
-		// Regex matched only a partial pattern (e.g., stopped at ')' inside a quoted string)
-		// Fall through to state machine parsing
-	}
-
-	// Fall back to state-machine parsing for complex patterns with special chars
 	return e.parseTraversalPatternStateMachine(pattern)
 }
 
@@ -1208,11 +1190,10 @@ func (e *StorageExecutor) parseTraversalPatternStateMachine(pattern string) *Tra
 		return nil
 	}
 	relStart += startEnd
-	relEnd := strings.Index(pattern[relStart:], "]")
+	relEnd := findMatchingBracket(pattern, relStart)
 	if relEnd < 0 {
 		return nil
 	}
-	relEnd += relStart
 
 	// Extract full relationship pattern including arrows
 	relPatternStart := startEnd + 1
@@ -1240,6 +1221,42 @@ func (e *StorageExecutor) parseTraversalPatternStateMachine(pattern string) *Tra
 		Relationship: *e.parseRelationshipPattern(relStr),
 		EndNode:      e.parseNodePatternFromString(endNodeStr),
 	}
+}
+
+func findMatchingBracket(s string, startIdx int) int {
+	if startIdx >= len(s) || s[startIdx] != '[' {
+		return -1
+	}
+
+	depth := 0
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := startIdx; i < len(s); i++ {
+		c := s[i]
+		if (c == '\'' || c == '"') && (i == 0 || s[i-1] != '\\') {
+			if !inQuote {
+				inQuote = true
+				quoteChar = c
+			} else if c == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if c == '[' {
+			depth++
+		} else if c == ']' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
 }
 
 // findMatchingParen finds the index of the closing paren that matches the opening paren at startIdx.
