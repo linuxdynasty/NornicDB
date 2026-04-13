@@ -1,4 +1,4 @@
-# Patent Grant (Defensive Non-Assertion)
+# Patent Policy (Defensive Non-Assertion)
 
 This project is licensed under MIT in [LICENSE.md](LICENSE.md).
 

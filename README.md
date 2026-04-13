@@ -566,6 +566,8 @@ Patent rights are handled via a defensive non-assertion grant in [PATENTS.md](PA
 
 See [NOTICES.md](NOTICES.md) for third-party license information, including bundled AI models (BGE-M3, Qwen2.5) and dependencies.
 
+Historical note: NornicDB was originally developed as part of the Mimir project and was split into this standalone repository in December 2025.
+
 ---
 
 <p align="center">

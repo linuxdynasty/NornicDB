@@ -19,27 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## Third-Party Components
-
-This software includes third-party libraries and models with their own licenses.
-See NOTICES.md for complete license information and attributions for:
-
-- Bundled AI models (BGE-M3, Qwen2.5)
-- Go dependencies
-- C/C++ libraries (llama.cpp, GGML)
-- JavaScript/TypeScript UI dependencies
-
-All third-party licenses are compatible with and permit the uses allowed by 
-the MIT License.
-
----
-
-## Historical Note
-
-NornicDB was originally developed as part of the Mimir project 
-(https://github.com/orneryd/Mimir) and was split into this standalone 
-repository in December 2025. All commit history and attributions have 
-been preserved.
