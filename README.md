@@ -5,8 +5,9 @@
 <h1 align="center">NornicDB</h1>
 
 <p align="center">
-  <strong>The Graph Database That Learns <br/> Achieving Psygnosis for AI</strong><br/>
-  Neo4j-compatible • GPU-accelerated • Memory that evolves
+  <strong>Graph, vector, and historical truth in one database</strong><br/>
+  Neo4j-compatible • Hybrid graph + vector retrieval • Historical reads via MVCC<br/>
+  <em>Achieving Psygnosis for AI</em>
 </p>
 
 <p align="center">
@@ -14,7 +15,7 @@
   <a href="https://coveralls.io/github/orneryd/NornicDB?branch=main"><img src="https://coveralls.io/repos/github/orneryd/NornicDB/badge.svg?branch=main" alt="Coveralls Report"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
-  <a href="https://github.com/qdrant/qdrant"><img src="https://img.shields.io/badge/qdrant-compatible-008CC1?logo=qdrant" alt="Qdrant Compatible Compatible"></a>
+  <a href="https://github.com/qdrant/qdrant"><img src="https://img.shields.io/badge/qdrant-compatible-008CC1?logo=qdrant" alt="Qdrant Compatible"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.26-00ADD8?logo=go" alt="Go Version"></a>
   <a href="https://goreportcard.com/report/github.com/orneryd/nornicdb"><img src="https://goreportcard.com/badge/github.com/orneryd/nornicdb" alt="Go Report Card"></a>
   <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
@@ -34,7 +35,7 @@
   <a href="#contributors">Contributors</a>
 </p>
 
-## Try It With One Command
+## Quick Start
 
 ```bash
 # arm64 / Apple Silicon
@@ -48,7 +49,7 @@ Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA
 
 ---
 
-> Note: I know that metal is not supported in docker at this time. There is a macOS Installer that you can either build yourself or download from the [release](https://github.com/orneryd/NornicDB/releases) page for native macOS installations.
+> Note: Docker on macOS does not expose Metal acceleration. The Apple Silicon image still runs, but GPU acceleration on macOS requires a native install from the [releases page](https://github.com/orneryd/NornicDB/releases) or a local build.
 
 ## What NornicDB Is
 
@@ -65,12 +66,12 @@ It is built for knowledge systems, agent memory, Graph-RAG, and canonical truth 
 - **Hardware-accelerated execution**: Metal/CUDA/Vulkan pathways for high-throughput graph + semantic workloads.
 - **Operational flexibility**: full images (models included), BYOM images, and headless API-only deployments.
 
-## Production Deployment Patterns
+## Deployment Patterns
 
-NornicDB is currently deployed internally at CVS. The current deployment patterns are not theoretical migration slides; they are active stack consolidation projects.
+NornicDB is being used in internal production deployments for stack-consolidation workloads where graph traversal, vector retrieval, and auditability need to live in the same system.
 
-- **Parallel workload systems**: replacing a Neo4j + Qdrant + OpenAI stack with a single Docker deployment to manage and track tasks and dependencies of LLM swarms and automated graph-rag retreival pipleines and the pipelines themselves. Performance timing varies on application structure and load. However, distribution is broad enough that I am actively and reliably hitting edge cases in production, cover those cases and hit a broad breadth of queries-in-production I actively test with.
-- **LLM translation quality systems**: replacing a Mongo Atlas plus Azure embeddings pipeline stack with a single Docker deployment to improve the quality and speed of LLM-generated translations. (Mongo Atlas aggregation queries replaced with node labels + edges dropping vector search + aggregation query time from ~1s to ~1.6ms)
+- **Agent and Graph-RAG systems**: replacing a Neo4j + Qdrant + embeddings stack with a single deployment for task tracking, dependency graphs, and retrieval pipelines.
+- **Translation and evaluation workflows**: replacing a document store plus embeddings pipeline with a single deployment for graph-native retrieval and faster aggregation paths.
 
 ## Transactional Guarantees & Isolation
 
@@ -146,7 +147,7 @@ Read more:
 - [Cypher parser modes and execution trade-offs](docs/architecture/cypher-parser-modes.md)
 - [How we sped up HNSW construction 2.7x](https://dev.to/orneryd/how-i-sped-up-hnsw-construction-27x-2jhn)
 
-## Quick Start
+## More Setup Options
 
 ### Docker (Recommended)
 
@@ -208,7 +209,7 @@ with driver.session() as session:
 
 ### 🔌 Neo4j Compatible
 
-Drop-in replacement for Neo4j. Your existing code works unchanged.
+Designed to work with existing Neo4j drivers and Bolt/Cypher workflows, with minimal or no application changes for supported query shapes.
 
 - **Bolt Protocol** — Use official Neo4j drivers
 - **Cypher Queries** — Full query language support
@@ -565,8 +566,6 @@ MIT License — See [LICENSE.md](LICENSE.md) for details.
 Patent rights are handled via a defensive non-assertion grant in [PATENTS.md](PATENTS.md). This keeps the project open for broad use (including commercial use) while adding patent retaliation protection.
 
 See [NOTICES.md](NOTICES.md) for third-party license information, including bundled AI models (BGE-M3, Qwen2.5) and dependencies.
-
-Historical note: NornicDB was originally developed as part of the Mimir project and was split into this standalone repository in December 2025.
 
 ---
 
