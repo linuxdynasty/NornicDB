@@ -68,6 +68,7 @@ elif [[ "$OS" == "linux" && "$ARCH" == "amd64" ]] && command -v nvcc &> /dev/nul
     echo "   Features: Flash Attention for all quants"
     CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA=ON"
     CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA_FA_ALL_QUANTS=ON"  # Flash attention for all quants
+    CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA_NCCL=OFF"  # Avoid NCCL linkage in single-process builds
     GPU_SUFFIX="_cuda"
 else
     echo "   GPU: None (CPU only with SIMD)"
