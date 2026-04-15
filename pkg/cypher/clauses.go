@@ -419,12 +419,14 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	}
 
 	params := getParamsFromContext(ctx)
+	unwindParamName := ""
 	var list interface{}
 	if strings.HasPrefix(strings.TrimSpace(listExpr), "$") {
 		paramName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(listExpr), "$"))
 		if paramName == "" {
 			return nil, fmt.Errorf("UNWIND requires a valid parameter name after $")
 		}
+		unwindParamName = paramName
 		if params == nil {
 			return nil, fmt.Errorf("UNWIND parameter $%s requires parameters to be provided", paramName)
 		}
@@ -485,6 +487,10 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	if restQuery != "" {
 		upperRest := strings.ToUpper(strings.TrimSpace(restQuery))
 		if strings.HasPrefix(upperRest, "CREATE") || strings.HasPrefix(upperRest, "MERGE") {
+			if fast, ok, err := e.executeUnwindCompoundMutationBatch(ctx, variable, unwindParamName, items, restQuery); ok {
+				return fast, err
+			}
+
 			result := &ExecuteResult{
 				Columns: []string{},
 				Rows:    [][]interface{}{},
@@ -1215,10 +1221,130 @@ func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelation
 	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relType: relType}, true
 }
 
+func splitUnwindCompoundMutationStages(restQuery, unwindParamName, unwindVar string) ([]string, bool) {
+	trimmed := strings.TrimSpace(restQuery)
+	if trimmed == "" || unwindParamName == "" || unwindVar == "" {
+		return nil, false
+	}
+	skipSpace := func(pos int) int {
+		for pos < len(trimmed) && isASCIISpace(trimmed[pos]) {
+			pos++
+		}
+		return pos
+	}
+
+	stages := make([]string, 0, 4)
+	start := 0
+	searchFrom := 0
+	for {
+		withIdx := keywordIndexFrom(trimmed, "WITH", searchFrom, defaultKeywordScanOpts())
+		if withIdx < 0 {
+			break
+		}
+
+		pos := skipSpace(withIdx + len("WITH"))
+		if pos >= len(trimmed) || trimmed[pos] != '$' {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		paramName, trailing, ok := parseIdentifierToken(trimmed[pos+1:])
+		if !ok || !strings.EqualFold(paramName, unwindParamName) {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		nextPos := pos + 1 + len(paramName)
+		_ = trailing
+
+		pos = skipSpace(nextPos)
+		if !startsWithKeywordFold(trimmed[pos:], "AS") {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		pos = skipSpace(pos + len("AS"))
+		aliasOne, _, ok := parseIdentifierToken(trimmed[pos:])
+		if !ok {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		nextPos = pos + len(aliasOne)
+
+		pos = skipSpace(nextPos)
+		if !startsWithKeywordFold(trimmed[pos:], "UNWIND") {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		pos = skipSpace(pos + len("UNWIND"))
+		aliasTwo, _, ok := parseIdentifierToken(trimmed[pos:])
+		if !ok || !strings.EqualFold(aliasOne, aliasTwo) {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		nextPos = pos + len(aliasTwo)
+
+		pos = skipSpace(nextPos)
+		if !startsWithKeywordFold(trimmed[pos:], "AS") {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		pos = skipSpace(pos + len("AS"))
+		stageVar, _, ok := parseIdentifierToken(trimmed[pos:])
+		if !ok || !strings.EqualFold(stageVar, unwindVar) {
+			searchFrom = withIdx + len("WITH")
+			continue
+		}
+		nextPos = pos + len(stageVar)
+
+		stage := strings.TrimSpace(trimmed[start:withIdx])
+		if stage == "" {
+			return nil, false
+		}
+		stages = append(stages, stage)
+		start = nextPos
+		searchFrom = nextPos
+	}
+	if len(stages) == 0 {
+		return nil, false
+	}
+	last := strings.TrimSpace(trimmed[start:])
+	if last == "" {
+		return nil, false
+	}
+	stages = append(stages, last)
+	return stages, len(stages) > 1
+}
+
+func (e *StorageExecutor) executeUnwindCompoundMutationBatch(ctx context.Context, unwindVar, unwindParamName string, items []interface{}, restQuery string) (*ExecuteResult, bool, error) {
+	stages, ok := splitUnwindCompoundMutationStages(restQuery, unwindParamName, unwindVar)
+	if !ok {
+		return nil, false, nil
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+	for _, stage := range stages {
+		fast, supported, err := e.executeUnwindMergeChainBatch(ctx, unwindVar, items, stage, "")
+		if err != nil {
+			return nil, true, err
+		}
+		if !supported {
+			return nil, false, nil
+		}
+		if fast != nil && fast.Stats != nil {
+			result.Stats.NodesCreated += fast.Stats.NodesCreated
+			result.Stats.RelationshipsCreated += fast.Stats.RelationshipsCreated
+		}
+	}
+	e.markCompoundQueryFastPathUsed()
+	return result, true, nil
+}
+
 func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 	plan := unwindMergeChainPlan{supported: false}
 	mutation := strings.TrimSpace(mutationPart)
-	if !startsWithKeywordFold(mutation, "MERGE") {
+	if !startsWithKeywordFold(mutation, "MERGE") && !startsWithKeywordFold(mutation, "MATCH") && !startsWithKeywordFold(mutation, "OPTIONAL MATCH") {
 		return plan
 	}
 	if findKeywordIndexInContext(mutation, "CALL") >= 0 ||

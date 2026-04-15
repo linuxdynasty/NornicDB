@@ -16,7 +16,7 @@ Traced executor hot paths:
 - `OuterScanFallbackUsed`: same outer read shape when index pruning is unavailable or rejected
 - `FabricBatchedApplyRows`: Fabric cross-shard batched APPLY row lookups
 - `SimpleMatchLimitFastPath`: `MATCH (n) RETURN n LIMIT k`
-- `CompoundQueryFastPath`: benchmark-oriented compound mutation shape with paired `MATCH` inputs
+- `CompoundQueryFastPath`: staged compound `UNWIND` mutation pipeline that splits repeated `WITH $rows AS ... UNWIND ... AS row` segments into hot-path-eligible batch stages
 - `TraversalStartSeedTopK`: start-node-seeded traversal with `ORDER BY ... LIMIT`
 - `TraversalEndSeedTopK`: end-node-seeded reverse traversal with bounded result count
 - `UnwindSimpleMergeBatch`: single-node `UNWIND ... MERGE` upsert with optional `SET` and optional `RETURN count(...)`
@@ -559,6 +559,30 @@ MERGE (event)-[:BELONGS_TO]->(key)
 
 Use this for qVersions-style write families where one input row materializes multiple node upserts and multiple idempotent relationship upserts in a deterministic order.
 
+### 7.3e.1 Staged Compound `UNWIND` Version Pipeline
+
+```cypher
+UNWIND $rows AS row
+MERGE (key:EntityA {primaryKey: row.primaryKey, tenantId: row.tenantId})
+MERGE (state:EntityB {primaryKey: row.stateKey})
+SET state.status = row.status,
+    state.updatedAt = row.updatedAt,
+    state.category = row.category
+MERGE (event:Event {primaryKey: row.eventKey})
+ON CREATE SET event.createdAt = row.updatedAt,
+              event.tenantId = row.tenantId
+WITH $rows AS rows
+UNWIND rows AS row
+MATCH (key:EntityA {primaryKey: row.primaryKey, tenantId: row.tenantId})
+MATCH (state:EntityB {primaryKey: row.stateKey})
+MATCH (event:Event {primaryKey: row.eventKey})
+MERGE (key)-[:KEY_REL]->(state)
+MERGE (event)-[:LINKS_TO]->(state)
+MERGE (event)-[:BELONGS_TO]->(key)
+```
+
+Use this when the caller emits a single standard Cypher statement with multiple repeated `UNWIND $rows AS row` stages. The executor now splits the statement at `WITH $rows AS ... UNWIND ... AS row` boundaries and routes each stage through the batch mutation hot path instead of falling back to generic per-row execution.
+
 ### 7.3f Batched Optional Lookup Chain With Coalesced Target Resolution
 
 ```cypher
@@ -580,6 +604,53 @@ MERGE (event)-[:KEY_REL]->(target)
 ```
 
 Use this for qEvents-style write families where each row always upserts source entities but only conditionally attaches the terminal relationship after `OPTIONAL MATCH` and `coalesce(...)` target resolution.
+
+### 7.3f.1 Staged Compound `UNWIND` Optional-Lookup Pipeline
+
+```cypher
+UNWIND $rows AS row
+MERGE (event:Event {primaryKey: row.eventKey})
+SET event.status = row.status,
+    event.updatedAt = row.updatedAt
+MERGE (owner:EntityA {primaryKey: row.ownerKey})
+ON CREATE SET owner.createdAt = row.updatedAt,
+              owner.tenantId = row.tenantId
+WITH $rows AS rows
+UNWIND rows AS row
+MATCH (event:Event {primaryKey: row.eventKey})
+MATCH (owner:EntityA {primaryKey: row.ownerKey})
+MERGE (owner)-[:LINKS_TO]->(event)
+WITH event, row
+OPTIONAL MATCH (direct:EntityB {primaryKey: row.targetKey})
+OPTIONAL MATCH (fallback:EntityB {alternateKey: row.fallbackTargetKey, tenantId: row.tenantId})
+WITH event, coalesce(direct, fallback) AS target
+WHERE target IS NOT NULL
+MERGE (event)-[:KEY_REL]->(target)
+```
+
+Use this when a monolithic repeated-`UNWIND` statement first upserts source entities and then performs row-bound lookup/link work. Consecutive `OPTIONAL MATCH` clauses are supported as long as the stage remains non-aggregating and ends in idempotent `MERGE` relationship creation.
+
+### 7.3g Single-Row Fallback Version Shape
+
+```cypher
+MERGE (key:EntityA {primaryKey: $primaryKey, tenantId: $tenantId})
+MERGE (state:EntityB {primaryKey: $stateKey})
+SET state.status = $status,
+    state.updatedAt = $updatedAt,
+    state.category = $category
+MERGE (event:Event {primaryKey: $eventKey})
+ON CREATE SET event.createdAt = $updatedAt,
+              event.tenantId = $tenantId
+WITH $primaryKey AS primaryKey, $tenantId AS tenantId, $stateKey AS stateKey, $eventKey AS eventKey
+MATCH (key:EntityA {primaryKey: primaryKey, tenantId: tenantId})
+MATCH (state:EntityB {primaryKey: stateKey})
+MATCH (event:Event {primaryKey: eventKey})
+MERGE (key)-[:KEY_REL]->(state)
+MERGE (event)-[:LINKS_TO]->(state)
+MERGE (event)-[:BELONGS_TO]->(key)
+```
+
+This is the exact single-row fallback form commonly used when a batched version pipeline times out or is retried one row at a time. It is semantically covered by deterministic E2E tests and should remain behaviorally equivalent to the batched version family, but it is not itself a batch hot path.
 
 ### 7.4 Single-Statement Autocommit Shape
 
