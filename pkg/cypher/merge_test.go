@@ -720,22 +720,32 @@ func TestApplyWithProjection_Branches(t *testing.T) {
 	r := &storage.Edge{ID: "e1", Type: "KNOWS", StartNode: "n1", EndNode: "n1", Properties: map[string]interface{}{}}
 	nodeCtx := map[string]*storage.Node{"n": n}
 	relCtx := map[string]*storage.Edge{"r": r}
+	scalarCtx := map[string]interface{}{"answer": int64(42)}
 
-	remaining, keptNodes, keptRels := exec.applyWithProjection("* MATCH (n) RETURN n", nodeCtx, relCtx)
+	remaining, keptNodes, keptRels, keptScalars := exec.applyWithProjection("* MATCH (n) RETURN n", nodeCtx, relCtx, scalarCtx)
 	assert.Equal(t, "MATCH (n) RETURN n", remaining)
 	assert.Equal(t, nodeCtx, keptNodes)
 	assert.Equal(t, relCtx, keptRels)
+	assert.Equal(t, scalarCtx, keptScalars)
 
-	remaining, keptNodes, keptRels = exec.applyWithProjection("n RETURN n", nodeCtx, relCtx)
+	remaining, keptNodes, keptRels, keptScalars = exec.applyWithProjection("n RETURN n", nodeCtx, relCtx, scalarCtx)
 	assert.Equal(t, "RETURN n", remaining)
 	require.Contains(t, keptNodes, "n")
 	assert.Empty(t, keptRels)
+	assert.Empty(t, keptScalars)
+
+	remaining, keptNodes, keptRels, keptScalars = exec.applyWithProjection("answer AS projected RETURN projected", nodeCtx, relCtx, scalarCtx)
+	assert.Equal(t, "RETURN projected", remaining)
+	assert.Empty(t, keptNodes)
+	assert.Empty(t, keptRels)
+	assert.Equal(t, map[string]interface{}{"projected": int64(42)}, keptScalars)
 
 	// Non-matching projection drops context keys not explicitly projected.
-	remaining, keptNodes, keptRels = exec.applyWithProjection("n + 1", nodeCtx, relCtx)
+	remaining, keptNodes, keptRels, keptScalars = exec.applyWithProjection("n + 1", nodeCtx, relCtx, scalarCtx)
 	assert.Equal(t, "", remaining)
 	assert.Empty(t, keptNodes)
 	assert.Empty(t, keptRels)
+	assert.Empty(t, keptScalars)
 }
 
 func TestExecuteMergeWithChain_AdditionalBranches(t *testing.T) {
@@ -795,6 +805,107 @@ func TestSplitMergeChainSegments_AdditionalBranches(t *testing.T) {
 	one := e.splitMergeChainSegments("MERGE (n:Solo {id:'1'}) RETURN n.id")
 	require.Len(t, one, 1)
 	assert.Contains(t, one[0], "MERGE (n:Solo")
+}
+
+func TestSplitMultipleMerges_WithScalarProjectionTail(t *testing.T) {
+	e := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
+	segments := e.splitMultipleMerges(strings.TrimSpace(`
+WITH 'entity-single' AS entity_id, 'calls' AS relation_type, 'state-single' AS state_id, 'commit-single-row' AS commit_hash
+MATCH (ck:CodeKey {entity_id: entity_id, relation_type: relation_type})
+MATCH (cs:CodeState {state_id: state_id})
+MATCH (c:Commit {hash: commit_hash})
+MERGE (ck)-[:HAS_STATE]->(cs)
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)
+`))
+	require.Equal(t, []string{
+		"WITH 'entity-single' AS entity_id, 'calls' AS relation_type, 'state-single' AS state_id, 'commit-single-row' AS commit_hash",
+		"MATCH (ck:CodeKey {entity_id: entity_id, relation_type: relation_type})",
+		"MATCH (cs:CodeState {state_id: state_id})",
+		"MATCH (c:Commit {hash: commit_hash})",
+		"MERGE (ck)-[:HAS_STATE]->(cs)",
+		"MERGE (c)-[:CHANGED]->(cs)",
+		"MERGE (c)-[:TOUCHED]->(ck)",
+	}, segments)
+}
+
+func TestSplitMultipleMerges_FullFallbackRowShape(t *testing.T) {
+	e := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
+	segments := e.splitMultipleMerges(strings.TrimSpace(`
+MERGE (ck:CodeKey {entity_id: 'entity-single', relation_type: 'calls'})
+MERGE (cs:CodeState {state_id: 'state-single'})
+SET cs.code_key = 'repo_fact|calls|single',
+    cs.tx_id = 'tx-single',
+    cs.commit_hash = 'commit-single-row',
+    cs.valid_from_iso = '2026-03-20T20:22:20Z',
+    cs.valid_from = datetime('2026-03-20T20:22:20Z'),
+    cs.value_json = '{"repo":"git-to-graph","source":"single-a","target":"single-b"}',
+    cs.valid_to = CASE WHEN null IS NULL THEN null ELSE datetime(null) END,
+    cs.asserted_at = datetime('2026-03-20T20:22:20Z'),
+    cs.asserted_by = 'TJ Sweet',
+    cs.semantic_type = 'CallEdgeVersion'
+MERGE (c:Commit {hash: 'commit-single-row'})
+ON CREATE SET c.timestamp = datetime('2026-03-20T20:22:20Z'), c.tx_id = 'tx-single', c.actor = 'TJ Sweet'
+WITH 'entity-single' AS entity_id, 'calls' AS relation_type, 'state-single' AS state_id, 'commit-single-row' AS commit_hash
+MATCH (ck:CodeKey {entity_id: entity_id, relation_type: relation_type})
+MATCH (cs:CodeState {state_id: state_id})
+MATCH (c:Commit {hash: commit_hash})
+MERGE (ck)-[:HAS_STATE]->(cs)
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)
+`))
+	require.Equal(t, []string{
+		"MERGE (ck:CodeKey {entity_id: 'entity-single', relation_type: 'calls'})",
+		"MERGE (cs:CodeState {state_id: 'state-single'})\nSET cs.code_key = 'repo_fact|calls|single',\n    cs.tx_id = 'tx-single',\n    cs.commit_hash = 'commit-single-row',\n    cs.valid_from_iso = '2026-03-20T20:22:20Z',\n    cs.valid_from = datetime('2026-03-20T20:22:20Z'),\n    cs.value_json = '{\"repo\":\"git-to-graph\",\"source\":\"single-a\",\"target\":\"single-b\"}',\n    cs.valid_to = CASE WHEN null IS NULL THEN null ELSE datetime(null) END,\n    cs.asserted_at = datetime('2026-03-20T20:22:20Z'),\n    cs.asserted_by = 'TJ Sweet',\n    cs.semantic_type = 'CallEdgeVersion'",
+		"MERGE (c:Commit {hash: 'commit-single-row'})\nON CREATE SET c.timestamp = datetime('2026-03-20T20:22:20Z'), c.tx_id = 'tx-single', c.actor = 'TJ Sweet'",
+		"WITH 'entity-single' AS entity_id, 'calls' AS relation_type, 'state-single' AS state_id, 'commit-single-row' AS commit_hash",
+		"MATCH (ck:CodeKey {entity_id: entity_id, relation_type: relation_type})",
+		"MATCH (cs:CodeState {state_id: state_id})",
+		"MATCH (c:Commit {hash: commit_hash})",
+		"MERGE (ck)-[:HAS_STATE]->(cs)",
+		"MERGE (c)-[:CHANGED]->(cs)",
+		"MERGE (c)-[:TOUCHED]->(ck)",
+	}, segments)
+}
+
+func TestProjectWithContext_PreservesScalarAliases(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewNamespacedEngine(newTestMemoryEngine(t), "test"))
+	nodes, rels, scalars := exec.projectWithContext(
+		`'entity-single' AS entity_id, 'calls' AS relation_type, 'state-single' AS state_id, 'commit-single-row' AS commit_hash`,
+		map[string]*storage.Node{},
+		map[string]*storage.Edge{},
+		nil,
+	)
+	assert.Empty(t, nodes)
+	assert.Empty(t, rels)
+	assert.Equal(t, map[string]interface{}{
+		"entity_id":     "entity-single",
+		"relation_type": "calls",
+		"state_id":      "state-single",
+		"commit_hash":   "commit-single-row",
+	}, scalars)
+}
+
+func TestExecuteMatchSegment_ResolvesScalarBindings(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := store.CreateNode(&storage.Node{ID: "ck-1", Labels: []string{"CodeKey"}, Properties: map[string]interface{}{"entity_id": "entity-single", "relation_type": "calls"}})
+	require.NoError(t, err)
+
+	exec.fabricRecordBindings = map[string]interface{}{
+		"entity_id":     "entity-single",
+		"relation_type": "calls",
+	}
+	t.Cleanup(func() { exec.fabricRecordBindings = nil })
+
+	node, varName, err := exec.executeMatchSegment(ctx, `MATCH (ck:CodeKey {entity_id: entity_id, relation_type: relation_type})`, map[string]*storage.Node{})
+	require.NoError(t, err)
+	require.NotNil(t, node)
+	require.Equal(t, "ck", varName)
+	require.Equal(t, "entity-single", node.Properties["entity_id"])
 }
 
 func TestExecuteMerge_UnsubstitutedParamAndFallbackPatternBranches(t *testing.T) {

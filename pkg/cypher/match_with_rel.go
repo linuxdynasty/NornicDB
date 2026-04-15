@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -738,6 +739,13 @@ func (e *StorageExecutor) evaluateWhereOnComputedRow(whereClause string, values 
 // evaluateExpressionFromValues evaluates an expression using computed values map
 func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[string]interface{}) interface{} {
 	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+
+	if isCaseExpression(expr) {
+		return e.evaluateCaseExpressionFromValues(expr, values)
+	}
 
 	// Direct lookup
 	if val, ok := values[expr]; ok {
@@ -786,6 +794,40 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 
 	// Handle function calls
 	if strings.Contains(expr, "(") && strings.Contains(expr, ")") {
+		if isFunctionCall(expr, "datetime") {
+			inner := strings.TrimSpace(expr[9 : len(expr)-1])
+			if inner == "" {
+				return time.Now().Format(time.RFC3339)
+			}
+			val := e.evaluateExpressionFromValues(inner, values)
+			if literal, ok := val.(string); ok && literal == strings.TrimSpace(inner) {
+				if parsed, parsedOK := parseLiteralValueFromComputedRow(inner); parsedOK {
+					val = parsed
+				}
+			}
+			if val == nil {
+				return nil
+			}
+			if str, ok := val.(string); ok {
+				str = strings.Trim(str, "'\"")
+				for _, layout := range []string{
+					time.RFC3339,
+					"2006-01-02T15:04:05",
+					"2006-01-02 15:04:05",
+					"2006-01-02",
+				} {
+					if t, err := time.Parse(layout, str); err == nil {
+						return t.Format(time.RFC3339)
+					}
+				}
+			}
+			return nil
+		}
+
+		if strings.EqualFold(expr, "localdatetime()") {
+			return time.Now().Format("2006-01-02T15:04:05")
+		}
+
 		// elementId(n) / id(n)
 		if matchFuncStartAndSuffix(expr, "elementid") || matchFuncStartAndSuffix(expr, "id") {
 			inner := extractFuncArgs(expr, "elementid")
@@ -937,6 +979,120 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 	}
 
 	return expr // Return as literal if not found
+}
+
+func (e *StorageExecutor) evaluateCaseExpressionFromValues(expr string, values map[string]interface{}) interface{} {
+	ce, err := parseCaseExpression(expr)
+	if err != nil {
+		return nil
+	}
+
+	resolve := func(caseExpr string) interface{} {
+		val := e.evaluateExpressionFromValues(caseExpr, values)
+		if literal, ok := val.(string); ok && literal == strings.TrimSpace(caseExpr) {
+			if parsed, parsedOK := parseLiteralValueFromComputedRow(caseExpr); parsedOK {
+				return parsed
+			}
+		}
+		return val
+	}
+
+	if ce.isSimple {
+		testValue := resolve(ce.testExpression)
+		for _, clause := range ce.whenClauses {
+			whenValue := resolve(clause.value)
+			if compareValues(testValue, whenValue) {
+				return resolve(clause.result)
+			}
+		}
+	} else {
+		for _, clause := range ce.whenClauses {
+			if e.evaluateConditionFromValues(clause.condition, values) {
+				return resolve(clause.result)
+			}
+		}
+	}
+
+	if ce.elseResult != "" {
+		return resolve(ce.elseResult)
+	}
+	return nil
+}
+
+func (e *StorageExecutor) evaluateConditionFromValues(condition string, values map[string]interface{}) bool {
+	condition = strings.TrimSpace(condition)
+	upper := strings.ToUpper(condition)
+
+	if idx := findTopLevelKeyword(condition, " AND "); idx > 0 {
+		left := strings.TrimSpace(condition[:idx])
+		right := strings.TrimSpace(condition[idx+5:])
+		return e.evaluateConditionFromValues(left, values) && e.evaluateConditionFromValues(right, values)
+	}
+
+	if idx := findTopLevelKeyword(condition, " OR "); idx > 0 {
+		left := strings.TrimSpace(condition[:idx])
+		right := strings.TrimSpace(condition[idx+4:])
+		return e.evaluateConditionFromValues(left, values) || e.evaluateConditionFromValues(right, values)
+	}
+
+	if strings.HasPrefix(upper, "NOT ") {
+		return !e.evaluateConditionFromValues(strings.TrimSpace(condition[4:]), values)
+	}
+
+	if strings.HasSuffix(upper, " IS NULL") {
+		expr := strings.TrimSpace(condition[:len(condition)-8])
+		return e.evaluateExpressionFromValues(expr, values) == nil
+	}
+	if strings.HasSuffix(upper, " IS NOT NULL") {
+		expr := strings.TrimSpace(condition[:len(condition)-12])
+		return e.evaluateExpressionFromValues(expr, values) != nil
+	}
+
+	for _, op := range []string{"<=", ">=", "<>", "!=", "<", ">", "="} {
+		if idx := findTopLevelKeyword(condition, op); idx > 0 {
+			left := strings.TrimSpace(condition[:idx])
+			right := strings.TrimSpace(condition[idx+len(op):])
+			leftVal := e.evaluateExpressionFromValues(left, values)
+			rightVal := e.evaluateExpressionFromValues(right, values)
+			if literal, ok := rightVal.(string); ok && literal == right {
+				if parsed, parsedOK := parseLiteralValueFromComputedRow(right); parsedOK {
+					rightVal = parsed
+				}
+			}
+			if op == "!=" {
+				op = "<>"
+			}
+			return compareWithOperator(leftVal, rightVal, op)
+		}
+	}
+
+	return isTruthy(e.evaluateExpressionFromValues(condition, values))
+}
+
+func parseLiteralValueFromComputedRow(expr string) (interface{}, bool) {
+	trimmed := strings.TrimSpace(expr)
+	upper := strings.ToUpper(trimmed)
+	if upper == "NULL" {
+		return nil, true
+	}
+	if upper == "TRUE" {
+		return true, true
+	}
+	if upper == "FALSE" {
+		return false, true
+	}
+	if len(trimmed) >= 2 {
+		if (trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'') || (trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"') {
+			return decodeCypherQuotedString(trimmed)
+		}
+	}
+	if num, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return num, true
+	}
+	if num, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return num, true
+	}
+	return nil, false
 }
 
 // evaluateMapLiteralFromValues evaluates a map literal using computed values

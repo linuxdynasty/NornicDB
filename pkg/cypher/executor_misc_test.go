@@ -2879,6 +2879,24 @@ func TestExecuteMatchWithClause_DelegationAndErrorBranches(t *testing.T) {
 	require.Len(t, res.Rows, 0)
 }
 
+func TestEvaluateExpressionFromValues_MaterializesTemporalExpressions(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	values := map[string]interface{}{
+		"row": map[string]interface{}{
+			"valid_from_iso":  "2026-03-20T20:22:20Z",
+			"valid_to_iso":    nil,
+			"asserted_at_iso": "2026-03-21T01:02:03Z",
+		},
+	}
+
+	require.Equal(t, "2026-03-20T20:22:20Z", exec.evaluateExpressionFromValues("datetime(row.valid_from_iso)", values))
+	require.Nil(t, exec.evaluateExpressionFromValues("CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END", values))
+	require.Equal(t, "2026-03-21T01:02:03Z", exec.evaluateExpressionFromValues("CASE WHEN row.asserted_at_iso IS NULL THEN null ELSE datetime(row.asserted_at_iso) END", values))
+}
+
 func TestExecuteMatchWithClause_ChainedWithAndStorageFailureBranches(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")

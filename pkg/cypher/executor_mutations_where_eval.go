@@ -569,12 +569,9 @@ func (e *StorageExecutor) parseValue(s string) interface{} {
 	// Handle quoted strings with escape sequence support
 	if (strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'")) ||
 		(strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"")) {
-		inner := s[1 : len(s)-1]
-		// Unescape: \' -> ', \" -> ", \\ -> \
-		inner = strings.ReplaceAll(inner, "\\'", "'")
-		inner = strings.ReplaceAll(inner, "\\\"", "\"")
-		inner = strings.ReplaceAll(inner, "\\\\", "\\")
-		return inner
+		if decoded, ok := decodeCypherQuotedString(s); ok {
+			return decoded
+		}
 	}
 
 	// Handle booleans

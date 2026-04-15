@@ -1895,6 +1895,11 @@ func (e *StorageExecutor) expressionToAlias(expr string) string {
 // the query returns 0 rows (the chain is broken). The MERGE still executes
 // for nodes found before the break.
 func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	originalFabricBindings := e.fabricRecordBindings
+	defer func() {
+		e.fabricRecordBindings = originalFabricBindings
+	}()
+
 	// Substitute parameters
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -1920,6 +1925,7 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 	// Context to track bound variables (node variable -> *storage.Node)
 	nodeContext := make(map[string]*storage.Node)
 	relContext := make(map[string]*storage.Edge)
+	scalarContext := cloneStringAnyMap(e.fabricRecordBindings)
 
 	// Track if chain is broken (a MATCH returned 0 rows)
 	chainBroken := false
@@ -1934,15 +1940,31 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 		upperSeg := strings.ToUpper(segment)
 
 		if i == 0 {
-			// First segment: MERGE (node) [ON CREATE SET ...] [ON MATCH SET ...]
-			// Execute the initial MERGE to create/find the node
-			mergedNode, varName, err := e.executeMergeNodeSegment(ctx, segment)
-			if err != nil {
-				return nil, fmt.Errorf("initial MERGE failed: %w", err)
-			}
-			if mergedNode != nil && varName != "" {
-				nodeContext[varName] = mergedNode
-				result.Stats.NodesCreated++ // May be 0 if node existed
+			// First segment may contain multiple setup MERGEs before the first WITH.
+			initialClauses := e.splitMultipleMerges(segment)
+			for _, initialClause := range initialClauses {
+				initialClause = strings.TrimSpace(initialClause)
+				if initialClause == "" {
+					continue
+				}
+				upperInitial := strings.ToUpper(initialClause)
+				if strings.HasPrefix(upperInitial, "MERGE") {
+					mergeContent := strings.TrimSpace(initialClause[5:])
+					if strings.Contains(mergeContent, "-[") || strings.Contains(mergeContent, "]-") {
+						if err := e.executeMergeRelSegment(ctx, mergeContent, nodeContext); err != nil {
+							return nil, fmt.Errorf("initial MERGE failed: %w", err)
+						}
+						result.Stats.RelationshipsCreated++
+						continue
+					}
+					mergedNode, varName, err := e.executeMergeNodeSegment(ctx, initialClause)
+					if err != nil {
+						return nil, fmt.Errorf("initial MERGE failed: %w", err)
+					}
+					if mergedNode != nil && varName != "" {
+						nodeContext[varName] = mergedNode
+					}
+				}
 			}
 		} else if strings.HasPrefix(upperSeg, "FOREACH") {
 			if chainBroken {
@@ -1993,10 +2015,13 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 
 			segmentNodeCtx := nodeContext
 			segmentRelCtx := relContext
+			segmentScalarCtx := scalarContext
 
-			remaining, newNodeCtx, newRelCtx := e.applyWithProjection(segment, segmentNodeCtx, segmentRelCtx)
+			remaining, newNodeCtx, newRelCtx, newScalarCtx := e.applyWithProjection(segment, segmentNodeCtx, segmentRelCtx, segmentScalarCtx)
 			segmentNodeCtx = newNodeCtx
 			segmentRelCtx = newRelCtx
+			segmentScalarCtx = newScalarCtx
+			e.fabricRecordBindings = segmentScalarCtx
 
 			clauses := splitMergeChainClauseBlock(remaining)
 			for _, clause := range clauses {
@@ -2046,6 +2071,14 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 							}
 						}
 					}
+				case strings.HasPrefix(upperClause, "MERGE"):
+					mergePart := strings.TrimSpace(clause[5:])
+					if strings.Contains(mergePart, "-[") || strings.Contains(mergePart, "]-") {
+						if err := e.executeMergeRelSegment(ctx, mergePart, segmentNodeCtx); err != nil {
+							return nil, err
+						}
+						result.Stats.RelationshipsCreated++
+					}
 				case strings.HasPrefix(upperClause, "FOREACH"):
 					_, err := e.executeForeachWithContext(ctx, clause, segmentNodeCtx, segmentRelCtx)
 					if err != nil {
@@ -2057,6 +2090,8 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 			// Persist segment context back to main context for subsequent segments.
 			nodeContext = segmentNodeCtx
 			relContext = segmentRelCtx
+			scalarContext = segmentScalarCtx
+			e.fabricRecordBindings = scalarContext
 		}
 	}
 
@@ -2087,13 +2122,13 @@ func collapseConsecutiveDuplicateWithClauses(cypher string) string {
 // The input segment is the text between "WITH" and the next "WITH"/"RETURN",
 // i.e. it starts with a projection list (e.g., "e") followed by the next clause.
 // It returns the remaining clause block plus filtered contexts.
-func (e *StorageExecutor) applyWithProjection(segment string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) (remaining string, newNodeCtx map[string]*storage.Node, newRelCtx map[string]*storage.Edge) {
+func (e *StorageExecutor) applyWithProjection(segment string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge, scalarCtx map[string]interface{}) (remaining string, newNodeCtx map[string]*storage.Node, newRelCtx map[string]*storage.Edge, newScalarCtx map[string]interface{}) {
 	segment = strings.TrimSpace(segment)
 	if segment == "" {
-		return "", nodeCtx, relCtx
+		return "", nodeCtx, relCtx, scalarCtx
 	}
 
-	keywords := []string{"OPTIONAL MATCH", "MATCH", "FOREACH", "RETURN"}
+	keywords := []string{"OPTIONAL MATCH", "MATCH", "MERGE", "FOREACH", "RETURN"}
 	nextClausePos := -1
 	for _, kw := range keywords {
 		if idx := findKeywordIndex(segment, kw); idx >= 0 {
@@ -2112,34 +2147,53 @@ func (e *StorageExecutor) applyWithProjection(segment string, nodeCtx map[string
 
 	// WITH * keeps everything.
 	if strings.TrimSpace(withPart) == "*" {
-		return remaining, nodeCtx, relCtx
+		return remaining, nodeCtx, relCtx, scalarCtx
 	}
 
 	items := e.parseReturnItems(withPart)
 	if len(items) == 0 {
 		// If we can't parse, avoid dropping context.
-		return remaining, nodeCtx, relCtx
+		return remaining, nodeCtx, relCtx, scalarCtx
 	}
 
 	newNodeCtx = make(map[string]*storage.Node)
 	newRelCtx = make(map[string]*storage.Edge)
+	newScalarCtx = make(map[string]interface{})
 	for _, item := range items {
-		name := strings.TrimSpace(item.expr)
-		if item.alias != "" {
-			name = strings.TrimSpace(item.alias)
+		alias := strings.TrimSpace(item.alias)
+		expr := strings.TrimSpace(item.expr)
+		if alias == "" {
+			alias = expr
 		}
-		if name == "" {
+		if alias == "" {
 			continue
 		}
-		if n, ok := nodeCtx[name]; ok {
-			newNodeCtx[name] = n
+		if n, ok := nodeCtx[expr]; ok {
+			newNodeCtx[alias] = n
+			continue
 		}
-		if r, ok := relCtx[name]; ok {
-			newRelCtx[name] = r
+		if r, ok := relCtx[expr]; ok {
+			newRelCtx[alias] = r
+			continue
+		}
+		if scalarCtx != nil {
+			if val, ok := scalarCtx[expr]; ok {
+				newScalarCtx[alias] = val
+				continue
+			}
+		}
+		if item.alias != "" {
+			if value := e.evaluateExpressionWithContext(expr, nodeCtx, relCtx); value != nil {
+				if literal, ok := value.(string); ok && literal == expr {
+					continue
+				}
+				newScalarCtx[alias] = value
+				continue
+			}
 		}
 	}
 
-	return remaining, newNodeCtx, newRelCtx
+	return remaining, newNodeCtx, newRelCtx, newScalarCtx
 }
 
 func splitMergeChainClauseBlock(block string) []string {
@@ -2453,10 +2507,22 @@ func (e *StorageExecutor) executeMatchSegment(ctx context.Context, segment strin
 	if nodePattern.variable == "" && len(nodePattern.labels) == 0 {
 		return nil, "", fmt.Errorf("could not parse node pattern: %s", pattern)
 	}
-
+	for key, raw := range nodePattern.properties {
+		ident, ok := raw.(string)
+		if !ok || !isSimpleIdentifier(ident) {
+			continue
+		}
+		if bound, exists := e.fabricRecordBindings[ident]; exists {
+			nodePattern.properties[key] = bound
+		}
+	}
 	// Check if variable is already bound
 	if boundNode, exists := nodeContext[nodePattern.variable]; exists {
 		return boundNode, nodePattern.variable, nil
+	}
+
+	if cached := e.findMergeNodeInCache(nodePattern.labels, nodePattern.properties); cached != nil {
+		return cached, nodePattern.variable, nil
 	}
 
 	// Find matching node
@@ -2584,6 +2650,11 @@ func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern st
 // Each MERGE is executed in sequence, building a context of bound variables.
 // Relationship MERGEs use variables from previous node MERGEs.
 func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	originalFabricBindings := e.fabricRecordBindings
+	defer func() {
+		e.fabricRecordBindings = originalFabricBindings
+	}()
+
 	// Substitute parameters
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -2598,6 +2669,7 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 	// Context to track bound variables
 	nodeContext := make(map[string]*storage.Node)
 	relContext := make(map[string]*storage.Edge)
+	scalarContext := cloneStringAnyMap(e.fabricRecordBindings)
 
 	// Split into MERGE segments
 	segments := e.splitMultipleMerges(cypher)
@@ -2666,9 +2738,11 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 			if chainBroken {
 				continue
 			}
-			newNodeCtx, newRelCtx := e.projectWithContext(strings.TrimSpace(segment[4:]), nodeContext, relContext)
+			newNodeCtx, newRelCtx, newScalarCtx := e.projectWithContext(strings.TrimSpace(segment[4:]), nodeContext, relContext, scalarContext)
 			nodeContext = newNodeCtx
 			relContext = newRelCtx
+			scalarContext = newScalarCtx
+			e.fabricRecordBindings = scalarContext
 		} else if strings.HasPrefix(upperSeg, "WHERE") {
 			if chainBroken {
 				continue
@@ -2868,50 +2942,62 @@ func isOptionalMatchModifier(cypher string, matchPos int) bool {
 	return strings.HasSuffix(strings.ToUpper(prefix), "OPTIONAL")
 }
 
-func (e *StorageExecutor) projectWithContext(withClause string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) (map[string]*storage.Node, map[string]*storage.Edge) {
+func (e *StorageExecutor) projectWithContext(withClause string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge, scalarCtx map[string]interface{}) (map[string]*storage.Node, map[string]*storage.Edge, map[string]interface{}) {
 	withClause = strings.TrimSpace(withClause)
 	if withClause == "" {
-		return nodeCtx, relCtx
+		return nodeCtx, relCtx, scalarCtx
 	}
 	if withClause == "*" {
-		return nodeCtx, relCtx
+		return nodeCtx, relCtx, scalarCtx
 	}
 
 	items := e.parseReturnItems(withClause)
 	if len(items) == 0 {
-		return nodeCtx, relCtx
+		return nodeCtx, relCtx, scalarCtx
 	}
 
 	newNodeCtx := make(map[string]*storage.Node)
 	newRelCtx := make(map[string]*storage.Edge)
+	newScalarCtx := make(map[string]interface{})
 
 	for _, item := range items {
-		name := strings.TrimSpace(item.expr)
-		if item.alias != "" {
-			name = strings.TrimSpace(item.alias)
+		alias := strings.TrimSpace(item.alias)
+		expr := strings.TrimSpace(item.expr)
+		if alias == "" {
+			alias = expr
 		}
-		if name == "" {
+		if alias == "" {
 			continue
 		}
-		val := e.evaluateExpressionWithContext(item.expr, nodeCtx, relCtx)
+		val := e.evaluateExpressionWithContext(expr, nodeCtx, relCtx)
 		switch v := val.(type) {
 		case *storage.Node:
-			newNodeCtx[name] = v
+			newNodeCtx[alias] = v
 		case *storage.Edge:
-			newRelCtx[name] = v
+			newRelCtx[alias] = v
 		default:
-			// Keep passthrough bindings for simple identifiers when evaluation did not
-			// return a graph value (e.g., unresolved expressions).
-			if n, ok := nodeCtx[name]; ok {
-				newNodeCtx[name] = n
+			if scalarCtx != nil {
+				if existing, ok := scalarCtx[expr]; ok {
+					newScalarCtx[alias] = existing
+					continue
+				}
 			}
-			if r, ok := relCtx[name]; ok {
-				newRelCtx[name] = r
+			if item.alias != "" && val != nil {
+				if literal, ok := val.(string); !ok || literal != expr {
+					newScalarCtx[alias] = val
+					continue
+				}
+			}
+			if n, ok := nodeCtx[expr]; ok {
+				newNodeCtx[alias] = n
+			}
+			if r, ok := relCtx[expr]; ok {
+				newRelCtx[alias] = r
 			}
 		}
 	}
 
-	return newNodeCtx, newRelCtx
+	return newNodeCtx, newRelCtx, newScalarCtx
 }
 
 func (e *StorageExecutor) evaluateWhereForMergeContext(whereClause string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) bool {

@@ -2377,15 +2377,6 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			findKeywordIndexInContext(cypher, "WHERE") > 0 {
 			return e.executeMultipleMerges(ctx, cypher)
 		}
-		// Check for MERGE ... WITH ... MATCH chain pattern (e.g., import script pattern)
-		withIdx := findKeywordIndex(cypher, "WITH")
-		if withIdx > 0 {
-			// Check for MATCH after WITH (this is the chained pattern)
-			afterWith := cypher[withIdx:]
-			if findKeywordIndex(afterWith, "MATCH") > 0 {
-				return e.executeMergeWithChain(ctx, cypher)
-			}
-		}
 		// Check for multiple MERGEs without WITH (e.g., MERGE (a) MERGE (b) MERGE (a)-[:REL]->(b))
 		firstMergeEnd := findKeywordIndex(cypher[5:], ")")
 		if firstMergeEnd > 0 {

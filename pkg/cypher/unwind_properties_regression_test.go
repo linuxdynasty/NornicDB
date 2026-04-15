@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
@@ -327,6 +328,25 @@ RETURN
 	require.Equal(t, int64(1), res.Rows[0][2])
 	require.Equal(t, "CallEdgeVersion", res.Rows[0][3])
 	require.Equal(t, "TJ Sweet", res.Rows[0][4])
+
+	temporalRes, err := exec.Execute(ctx, `
+MATCH (fv:FactVersion {version_id: 'fv-14e79330ba4ce24ae71d67774a4ff17226944475'})
+MATCH (c:Commit {hash: '5671c64fcba850a6fd01ef68f2b9d592389f41c1'})
+RETURN fv.valid_from, fv.valid_to, fv.asserted_at, c.timestamp, c.tx_id
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, temporalRes.Rows, 1)
+	validFrom, ok := coerceDateTime(temporalRes.Rows[0][0])
+	require.True(t, ok)
+	require.Equal(t, "2026-03-20T20:22:20Z", validFrom.UTC().Format(time.RFC3339))
+	require.Nil(t, temporalRes.Rows[0][1])
+	assertedAt, ok := coerceDateTime(temporalRes.Rows[0][2])
+	require.True(t, ok)
+	require.Equal(t, "2026-03-20T20:22:20Z", assertedAt.UTC().Format(time.RFC3339))
+	commitTimestamp, ok := coerceDateTime(temporalRes.Rows[0][3])
+	require.True(t, ok)
+	require.Equal(t, "2026-03-20T20:22:20Z", commitTimestamp.UTC().Format(time.RFC3339))
+	require.Equal(t, "tx-5671c64f-000001", temporalRes.Rows[0][4])
 }
 
 func TestUnwindCreateSetMergeFromParameterMap_LargeComplexStrings(t *testing.T) {

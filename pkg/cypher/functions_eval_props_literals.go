@@ -127,18 +127,14 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 	// String literal (single or double quotes)
 	if len(expr) >= 2 {
 		if expr[0] == '\'' && expr[len(expr)-1] == '\'' {
-			// Unescape doubled single quotes
-			inner := expr[1 : len(expr)-1]
-			inner = strings.ReplaceAll(inner, "''", "'")
-			inner = strings.ReplaceAll(inner, "\\\\", "\\")
-			return inner
+			if decoded, ok := decodeCypherQuotedString(expr); ok {
+				return decoded
+			}
 		}
 		if expr[0] == '"' && expr[len(expr)-1] == '"' {
-			// Unescape doubled double quotes
-			inner := expr[1 : len(expr)-1]
-			inner = strings.ReplaceAll(inner, "\"\"", "\"")
-			inner = strings.ReplaceAll(inner, "\\\\", "\\")
-			return inner
+			if decoded, ok := decodeCypherQuotedString(expr); ok {
+				return decoded
+			}
 		}
 	}
 

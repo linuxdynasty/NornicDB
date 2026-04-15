@@ -298,16 +298,9 @@ func (e *StorageExecutor) parsePropertyValue(valueStr string) interface{} {
 	if len(valueStr) >= 2 {
 		first, last := valueStr[0], valueStr[len(valueStr)-1]
 		if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
-			// Unescape the string content
-			content := valueStr[1 : len(valueStr)-1]
-			// Handle escaped quotes
-			if first == '\'' {
-				content = strings.ReplaceAll(content, "''", "'")
-			} else {
-				content = strings.ReplaceAll(content, "\\\"", "\"")
+			if decoded, ok := decodeCypherQuotedString(valueStr); ok {
+				return decoded
 			}
-			content = strings.ReplaceAll(content, "\\\\", "\\")
-			return content
 		}
 	}
 
