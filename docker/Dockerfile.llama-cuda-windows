@@ -28,7 +28,7 @@ RUN choco install -y git cmake ninja visualstudio2022buildtools --package-parame
 # Note: CUDA Toolkit must be pre-installed on the host or use NVIDIA's CUDA Windows container image
 # For CI, consider using: mcr.microsoft.com/dotnet/framework/sdk with manual CUDA install
 
-ARG LLAMA_VERSION=b8547
+ARG LLAMA_VERSION=b8796
 ARG CUDA_VERSION=12.6
 
 WORKDIR C:\\llama

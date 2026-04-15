@@ -72,7 +72,7 @@ IMAGE_CPU_BGE_HEADLESS := $(REGISTRY)/nornicdb-cpu-bge-headless:$(VERSION)
 IMAGE_AMD64_VULKAN := $(REGISTRY)/nornicdb-amd64-vulkan:$(VERSION)
 IMAGE_AMD64_VULKAN_BGE := $(REGISTRY)/nornicdb-amd64-vulkan-bge:$(VERSION)
 IMAGE_AMD64_VULKAN_HEADLESS := $(REGISTRY)/nornicdb-amd64-vulkan-headless:$(VERSION)
-LLAMA_VERSION ?= b8547
+LLAMA_VERSION ?= b8796
 LLAMA_CPU := $(REGISTRY)/llama-cpu-libs:$(LLAMA_VERSION)
 LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:$(LLAMA_VERSION)
 
@@ -86,8 +86,7 @@ QWEN_MODEL := $(MODELS_DIR)/qwen3-0.6b-instruct.gguf
 # Reranker: download target uses Q4_K_M; Dockerfiles accept either bge-reranker-v2-m3.gguf or bge-reranker-v2-m3-Q4_K_M.gguf
 BGE_RERANKER_MODEL := $(MODELS_DIR)/bge-reranker-v2-m3-Q4_K_M.gguf
 BGE_URL := https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
-# Ungated community mirror (single-file Q4_K_M). Official Qwen repo may require auth.
-QWEN_URL := https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
+QWEN_URL := https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
 BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
 
 .PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-bge-heimdall build-arm64-metal-headless
@@ -157,30 +156,57 @@ endif
 # Download Qwen LLM model if missing
 download-qwen: $(MODELS_DIR)
 ifeq ($(HOST_OS),windows)
-	@if not exist "$(QWEN_MODEL)" ( \
-		echo =============================================================== && \
-		echo  Downloading qwen3-0.6b-Instruct model... && \
-		echo =============================================================== && \
-		echo Source: $(QWEN_URL) && \
-		echo Target: $(QWEN_MODEL) && \
-		echo Size: ~350MB (this may take a few minutes) && \
-		powershell -Command "Invoke-WebRequest -Uri '$(QWEN_URL)' -OutFile '$(QWEN_MODEL)'" && \
-		echo Downloaded $(QWEN_MODEL) \
-	) else ( \
-		echo Qwen model already exists: $(QWEN_MODEL) \
-	)
+	@powershell -NoProfile -Command " \
+		$$modelPath = '$(QWEN_MODEL)'; \
+		$$url = '$(QWEN_URL)'; \
+		function Test-GGUF([string]$$path) { \
+			if (-not (Test-Path $$path)) { return $$false } \
+			$$bytes = [System.IO.File]::ReadAllBytes($$path); \
+			if ($$bytes.Length -lt 4) { return $$false } \
+			return $$bytes[0] -eq 71 -and $$bytes[1] -eq 71 -and $$bytes[2] -eq 85 -and $$bytes[3] -eq 70; \
+		} \
+		if (-not (Test-GGUF $$modelPath)) { \
+			if (Test-Path $$modelPath) { \
+				Write-Host 'Removing invalid existing Qwen model:' $$modelPath; \
+				Remove-Item $$modelPath -Force; \
+			} \
+			Write-Host '==============================================================='; \
+			Write-Host ' Downloading qwen3-0.6b-Instruct model...'; \
+			Write-Host '==============================================================='; \
+			Write-Host 'Source:' $$url; \
+			Write-Host 'Target:' $$modelPath; \
+			Write-Host 'Size: ~350MB (this may take a few minutes)'; \
+			Invoke-WebRequest -Uri $$url -OutFile $$modelPath; \
+			if (-not (Test-GGUF $$modelPath)) { \
+				if (Test-Path $$modelPath) { Remove-Item $$modelPath -Force } \
+				throw 'Downloaded file is not a valid GGUF model'; \
+			} \
+			Write-Host 'Downloaded' $$modelPath; \
+		} else { \
+			Write-Host 'Qwen model already exists and is valid:' $$modelPath; \
+		} \
+	"
 else
-	@if [ ! -f "$(QWEN_MODEL)" ]; then \
+	@if [ ! -f "$(QWEN_MODEL)" ] || ! head -c 4 "$(QWEN_MODEL)" 2>/dev/null | grep -q '^GGUF$$'; then \
+		if [ -f "$(QWEN_MODEL)" ]; then \
+			echo "Removing invalid existing Qwen model: $(QWEN_MODEL)"; \
+			rm -f "$(QWEN_MODEL)"; \
+		fi; \
 		echo "==============================================================="; \
 		echo " Downloading qwen3-0.6b-Instruct model..."; \
 		echo "==============================================================="; \
 		echo "Source: $(QWEN_URL)"; \
 		echo "Target: $(QWEN_MODEL)"; \
 		echo "Size: ~350MB (this may take a few minutes)"; \
-		curl -L --progress-bar "$(QWEN_URL)" -o "$(QWEN_MODEL)"; \
+		curl -fL --progress-bar "$(QWEN_URL)" -o "$(QWEN_MODEL)"; \
+		if ! head -c 4 "$(QWEN_MODEL)" 2>/dev/null | grep -q '^GGUF$$'; then \
+			echo "Downloaded file is not a valid GGUF model: $(QWEN_MODEL)"; \
+			rm -f "$(QWEN_MODEL)"; \
+			exit 1; \
+		fi; \
 		echo "Downloaded $(QWEN_MODEL)"; \
 	else \
-		echo "Qwen model already exists: $(QWEN_MODEL)"; \
+		echo "Qwen model already exists and is valid: $(QWEN_MODEL)"; \
 	fi
 endif
 
@@ -665,12 +691,15 @@ ifeq ($(HOST_OS),windows)
 else
 	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
 		echo "⚠️  llama.cpp library not found, building..."; \
-		./scripts/build-llama.sh; \
+		./scripts/build-llama.sh $(LLAMA_VERSION); \
+	elif [ ! -f lib/llama/VERSION ] || [ "$$(cat lib/llama/VERSION 2>/dev/null)" != "$(LLAMA_VERSION)" ]; then \
+		echo "⚠️  llama.cpp library version mismatch (have $$(cat lib/llama/VERSION 2>/dev/null || echo unknown), need $(LLAMA_VERSION)), rebuilding..."; \
+		./scripts/build-llama.sh $(LLAMA_VERSION); \
 	elif ! nm lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a 2>/dev/null | grep -q "llama_get_memory"; then \
 		echo "⚠️  llama.cpp library outdated (missing llama_get_memory), rebuilding..."; \
-		./scripts/build-llama.sh; \
+		./scripts/build-llama.sh $(LLAMA_VERSION); \
 	else \
-		echo "✓ llama.cpp library up to date"; \
+		echo "✓ llama.cpp library up to date ($(LLAMA_VERSION))"; \
 	fi
 endif
 
