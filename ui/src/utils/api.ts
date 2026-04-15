@@ -42,6 +42,41 @@ export interface SearchResult {
   bm25_rank?: number;
 }
 
+export interface GraphNodePayload {
+  id: string;
+  labels: string[];
+  properties: Record<string, unknown>;
+  score?: number;
+  status?: string;
+}
+
+export interface GraphEdgePayload {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  properties?: Record<string, unknown>;
+  semantic?: boolean;
+  status?: string;
+}
+
+export interface GraphMetaPayload {
+  database: string;
+  generated_from: string;
+  depth?: number;
+  as_of?: string;
+  compare_to?: string;
+  node_count: number;
+  edge_count: number;
+  truncated: boolean;
+}
+
+export interface GraphNeighborhoodResponse {
+  nodes: GraphNodePayload[];
+  edges: GraphEdgePayload[];
+  meta: GraphMetaPayload;
+}
+
 export interface CypherResponse {
   results: Array<{
     columns: string[];
@@ -446,6 +481,49 @@ class NornicDBClient {
         ? database
         : await this.getDefaultDatabase();
     return this.postCypherCommit(dbName, statement, parameters);
+  }
+
+  async getResolvedDatabaseName(database?: string): Promise<string> {
+    return database != null && database !== ""
+      ? database
+      : await this.getDefaultDatabase();
+  }
+
+  async getGraphNeighborhood(options: {
+    nodeIds: string[];
+    depth?: number;
+    limit?: number;
+    labels?: string[];
+    relationshipTypes?: string[];
+    database?: string;
+  }): Promise<GraphNeighborhoodResponse> {
+    const dbName = await this.getResolvedDatabaseName(options.database);
+    const res = await fetch(
+      joinBasePath(
+        BASE_PATH,
+        `/nornicdb/graph/${encodeURIComponent(dbName)}/neighborhood`,
+      ),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          node_ids: options.nodeIds,
+          depth: options.depth,
+          limit: options.limit,
+          labels: options.labels,
+          relationship_types: options.relationshipTypes,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Graph neighborhood request failed (${res.status})`,
+      );
+      throw new Error(message);
+    }
+    return (await res.json()) as GraphNeighborhoodResponse;
   }
 
   async executeCypherOnDatabase(

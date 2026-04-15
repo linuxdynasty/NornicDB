@@ -1,16 +1,23 @@
 import { useEffect, useId, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Terminal, Sparkles, Database } from "lucide-react";
+import { Terminal, Sparkles, Database, Share2 } from "lucide-react";
 import { useAppStore } from "../store/appStore";
 import { Bifrost } from "../../Bifrost";
 import { api } from "../utils/api";
 import { Header } from "../components/browser/Header";
 import { QueryPanel } from "../components/browser/QueryPanel";
 import { SearchPanel } from "../components/browser/SearchPanel";
+import { GraphExplorerPanel } from "../components/browser/GraphExplorerPanel";
 import { NodeDetailsPanel } from "../components/browser/NodeDetailsPanel";
 import { DeleteConfirmModal } from "../components/modals/DeleteConfirmModal";
 import { RegenerateConfirmModal } from "../components/modals/RegenerateConfirmModal";
 import { BASE_PATH, joinBasePath } from "../utils/basePath";
+import type {
+  GraphEdgePayload,
+  GraphNodePayload,
+  SearchResult,
+} from "../utils/api";
+import { graphNodeToSearchResult } from "../utils/nodeUtils";
 
 interface EmbedStats {
   running: boolean;
@@ -60,7 +67,12 @@ export function Browser() {
     collapseSimilar,
   } = useAppStore();
 
-  const [activeTab, setActiveTab] = useState<"query" | "search">("query");
+  const [activeTab, setActiveTab] = useState<"query" | "search" | "graph">(
+    "query",
+  );
+  const [selectedRelationship, setSelectedRelationship] =
+    useState<GraphEdgePayload | null>(null);
+  const [graphRootNodeId, setGraphRootNodeId] = useState<string | null>(null);
   const [embedData, setEmbedData] = useState<EmbedData>({
     stats: null,
     totalEmbeddings: 0,
@@ -81,7 +93,9 @@ export function Browser() {
   useEffect(() => {
     const fetchEmbedStats = async () => {
       try {
-        const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/embed/stats"));
+        const res = await fetch(
+          joinBasePath(BASE_PATH, "/nornicdb/embed/stats"),
+        );
         if (res.ok) {
           const data = await res.json();
           setEmbedData({
@@ -104,9 +118,12 @@ export function Browser() {
     setEmbedTriggering(true);
     setEmbedMessage(null);
     try {
-      const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/embed/trigger?regenerate=true"), {
-        method: "POST",
-      });
+      const res = await fetch(
+        joinBasePath(BASE_PATH, "/nornicdb/embed/trigger?regenerate=true"),
+        {
+          method: "POST",
+        },
+      );
       const data = await res.json();
       if (res.ok) {
         setEmbedMessage(data.message);
@@ -137,7 +154,11 @@ export function Browser() {
   // Sync URL ?database= with selected database (apply URL when list is loaded)
   useEffect(() => {
     const dbFromUrl = searchParams.get("database");
-    if (dbFromUrl && databaseList.length > 0 && databaseList.includes(dbFromUrl)) {
+    if (
+      dbFromUrl &&
+      databaseList.length > 0 &&
+      databaseList.includes(dbFromUrl)
+    ) {
       setSelectedDatabase(dbFromUrl);
     }
   }, [databaseList, searchParams, setSelectedDatabase]);
@@ -171,7 +192,9 @@ export function Browser() {
       }
     } catch (err) {
       setShowDeleteConfirm(false);
-      setDeleteError(err instanceof Error ? err.message : "Unknown error occurred");
+      setDeleteError(
+        err instanceof Error ? err.message : "Unknown error occurred",
+      );
     } finally {
       setDeleting(false);
     }
@@ -179,15 +202,57 @@ export function Browser() {
 
   const handleUpdateProperties = async (
     nodeId: string,
-    props: Record<string, unknown>
+    props: Record<string, unknown>,
   ) => {
-    return await api.updateNodeProperties(nodeId, props, selectedDatabase ?? undefined);
+    return await api.updateNodeProperties(
+      nodeId,
+      props,
+      selectedDatabase ?? undefined,
+    );
   };
+
+  const handleSelectSearchResult = (result: SearchResult | null) => {
+    setSelectedRelationship(null);
+    setSelectedNode(result);
+  };
+
+  const handleSelectNodeData = (nodeData: {
+    id: string;
+    labels: string[];
+    properties: Record<string, unknown>;
+  }) => {
+    handleSelectSearchResult({
+      node: { ...nodeData, created_at: "" },
+      score: 0,
+    });
+  };
+
+  const handleSelectGraphNode = (node: GraphNodePayload) => {
+    handleSelectSearchResult(graphNodeToSearchResult(node));
+  };
+
+  const handleSelectGraphEdge = (edge: GraphEdgePayload) => {
+    setSelectedRelationship(edge);
+  };
+
+  const handleActivateGraphTab = () => {
+    setActiveTab("graph");
+    setSelectedRelationship(null);
+    if (selectedNode?.node.id) {
+      setGraphRootNodeId(selectedNode.node.id);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "graph" && !graphRootNodeId && selectedNode?.node.id) {
+      setGraphRootNodeId(selectedNode.node.id);
+    }
+  }, [activeTab, graphRootNodeId, selectedNode]);
 
   const handleRefresh = () => {
     if (activeTab === "query") {
       executeCypher();
-    } else {
+    } else if (activeTab === "search") {
       executeSearch();
     }
   };
@@ -211,8 +276,14 @@ export function Browser() {
         <div className="w-1/2 border-r border-norse-rune flex flex-col">
           {/* Database selector - all queries run against this database */}
           <div className="flex items-center gap-2 px-4 py-2 border-b border-norse-rune bg-norse-shadow/30">
-            <Database className="w-4 h-4 text-norse-silver shrink-0" aria-hidden />
-            <label htmlFor={databaseSelectId} className="text-sm text-norse-silver shrink-0">
+            <Database
+              className="w-4 h-4 text-norse-silver shrink-0"
+              aria-hidden
+            />
+            <label
+              htmlFor={databaseSelectId}
+              className="text-sm text-norse-silver shrink-0"
+            >
               Database
             </label>
             <select
@@ -256,6 +327,18 @@ export function Browser() {
               <Sparkles className="w-4 h-4" />
               Semantic Search
             </button>
+            <button
+              type="button"
+              onClick={handleActivateGraphTab}
+              className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
+                activeTab === "graph"
+                  ? "text-nornic-primary border-b-2 border-nornic-primary bg-norse-shadow/50"
+                  : "text-norse-silver hover:text-white"
+              }`}
+            >
+              <Share2 className="w-4 h-4" />
+              Graph Explorer
+            </button>
           </div>
 
           {/* Query Panel */}
@@ -270,13 +353,10 @@ export function Browser() {
               cypherResults={cypherResults}
               selectedNodeIds={selectedNodeIds}
               deleteError={deleteError}
-              onExecute={(continueOnError) => executeCypher({ continueOnError })}
-              onNodeSelect={(nodeData) => {
-                setSelectedNode({
-                  node: { ...nodeData, created_at: "" },
-                  score: 0,
-                });
-              }}
+              onExecute={(continueOnError) =>
+                executeCypher({ continueOnError })
+              }
+              onNodeSelect={handleSelectNodeData}
               onToggleSelect={toggleNodeSelection}
               onSelectAll={(nodeIds) => selectAllNodes(nodeIds)}
               onClearSelection={clearNodeSelection}
@@ -302,7 +382,7 @@ export function Browser() {
               deleteError={deleteError}
               expandedSimilar={expandedSimilar}
               onExecute={executeSearch}
-              onNodeSelect={setSelectedNode}
+              onNodeSelect={handleSelectSearchResult}
               onToggleSelect={toggleNodeSelection}
               onSelectAll={(nodeIds) => selectAllNodes(nodeIds)}
               onClearSelection={clearNodeSelection}
@@ -315,17 +395,36 @@ export function Browser() {
               deleting={deleting}
             />
           )}
+
+          {activeTab === "graph" && (
+            <GraphExplorerPanel
+              selectedDatabase={selectedDatabase ?? ""}
+              selectedNode={selectedNode}
+              rootNodeId={graphRootNodeId}
+              selectedRelationship={selectedRelationship}
+              onRootNodeChange={setGraphRootNodeId}
+              onNodeSelect={handleSelectGraphNode}
+              onRelationshipSelect={handleSelectGraphEdge}
+            />
+          )}
         </div>
 
         {/* Right Panel - Node Details */}
         <div className="w-1/2 flex flex-col bg-norse-shadow/30">
           <NodeDetailsPanel
             selectedNode={selectedNode}
+            selectedRelationship={selectedRelationship}
             expandedSimilar={expandedSimilar}
-            onClose={() => setSelectedNode(null)}
+            onClose={() => {
+              if (selectedRelationship) {
+                setSelectedRelationship(null);
+                return;
+              }
+              setSelectedNode(null);
+            }}
             onFindSimilar={findSimilar}
             onCollapseSimilar={collapseSimilar}
-            onNodeSelect={setSelectedNode}
+            onNodeSelect={handleSelectSearchResult}
             onUpdateProperties={handleUpdateProperties}
             onRefresh={handleRefresh}
           />

@@ -4,15 +4,23 @@
  */
 
 import { useState } from "react";
-import { X, Sparkles, Edit, ChevronRight, Database, Loader2 } from "lucide-react";
+import {
+  X,
+  Sparkles,
+  Edit,
+  ChevronRight,
+  Database,
+  Loader2,
+} from "lucide-react";
 import { EmbeddingStatus } from "../common/EmbeddingStatus";
 import { PropertyEditor } from "../common/PropertyEditor";
 import { JsonPreview } from "../common/JsonPreview";
 import { isReadOnlyProperty, getNodePreview } from "../../utils/nodeUtils";
-import type { SearchResult } from "../../utils/api";
+import type { GraphEdgePayload, SearchResult } from "../../utils/api";
 
 interface NodeDetailsPanelProps {
   selectedNode: SearchResult | null;
+  selectedRelationship?: GraphEdgePayload | null;
   expandedSimilar: {
     nodeId: string;
     results: SearchResult[];
@@ -22,12 +30,16 @@ interface NodeDetailsPanelProps {
   onFindSimilar: (nodeId: string) => void;
   onCollapseSimilar: () => void;
   onNodeSelect: (result: SearchResult) => void;
-  onUpdateProperties: (nodeId: string, props: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
+  onUpdateProperties: (
+    nodeId: string,
+    props: Record<string, unknown>,
+  ) => Promise<{ success: boolean; error?: string }>;
   onRefresh: () => void;
 }
 
 export function NodeDetailsPanel({
   selectedNode,
+  selectedRelationship = null,
   expandedSimilar,
   onClose,
   onFindSimilar,
@@ -37,9 +49,11 @@ export function NodeDetailsPanel({
   onRefresh,
 }: NodeDetailsPanelProps) {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [editingProperties, setEditingProperties] = useState<Record<string, unknown>>({});
+  const [editingProperties, setEditingProperties] = useState<
+    Record<string, unknown>
+  >({});
 
-  if (!selectedNode) {
+  if (!selectedNode && !selectedRelationship) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <div className="text-center text-norse-silver">
@@ -51,6 +65,111 @@ export function NodeDetailsPanel({
         </div>
       </div>
     );
+  }
+
+  if (selectedRelationship) {
+    return (
+      <>
+        <div className="flex items-center justify-between p-4 border-b border-norse-rune">
+          <h2 className="font-medium text-white">Relationship Details</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 hover:bg-norse-rune rounded transition-colors"
+          >
+            <X className="w-4 h-4 text-norse-silver" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-4 space-y-4">
+          <div>
+            <h3 className="text-xs font-medium text-norse-silver mb-2">TYPE</h3>
+            <span className="inline-flex px-3 py-1 bg-frost-ice/20 text-frost-ice rounded-full text-sm">
+              {selectedRelationship.type}
+            </span>
+          </div>
+
+          <div>
+            <h3 className="text-xs font-medium text-norse-silver mb-2">ID</h3>
+            <code className="text-sm text-valhalla-gold font-mono break-all">
+              {selectedRelationship.id}
+            </code>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <h3 className="text-xs font-medium text-norse-silver mb-2">
+                SOURCE
+              </h3>
+              <code className="text-sm text-white font-mono break-all">
+                {selectedRelationship.source}
+              </code>
+            </div>
+            <div>
+              <h3 className="text-xs font-medium text-norse-silver mb-2">
+                TARGET
+              </h3>
+              <code className="text-sm text-white font-mono break-all">
+                {selectedRelationship.target}
+              </code>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="text-xs font-medium text-norse-silver mb-2">
+              PROPERTIES
+            </h3>
+            <div className="space-y-2">
+              <div className="bg-norse-stone rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <ChevronRight className="w-3 h-3 text-norse-fog" />
+                  <span className="text-sm text-frost-ice font-medium">
+                    semantic
+                  </span>
+                </div>
+                <div className="pl-5 break-words overflow-wrap-anywhere">
+                  <JsonPreview
+                    data={selectedRelationship.semantic ?? false}
+                    expanded
+                  />
+                </div>
+              </div>
+              {selectedRelationship.status !== undefined && (
+                <div className="bg-norse-stone rounded-lg p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <ChevronRight className="w-3 h-3 text-norse-fog" />
+                    <span className="text-sm text-frost-ice font-medium">
+                      status
+                    </span>
+                  </div>
+                  <div className="pl-5 break-words overflow-wrap-anywhere">
+                    <JsonPreview data={selectedRelationship.status} expanded />
+                  </div>
+                </div>
+              )}
+              <div className="bg-norse-stone rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <ChevronRight className="w-3 h-3 text-norse-fog" />
+                  <span className="text-sm text-frost-ice font-medium">
+                    edge_properties
+                  </span>
+                </div>
+                <div className="pl-5 break-words overflow-wrap-anywhere">
+                  <JsonPreview
+                    data={selectedRelationship.properties ?? {}}
+                    expanded
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (!selectedNode) {
+    return null;
   }
 
   const isExpanded = expandedSimilar?.nodeId === selectedNode.node.id;
@@ -121,7 +240,8 @@ export function NodeDetailsPanel({
             <EmbeddingStatus
               embedding={{
                 has_embedding: selectedNode.node.properties.has_embedding,
-                embedding_dimensions: selectedNode.node.properties.embedding_dimensions,
+                embedding_dimensions:
+                  selectedNode.node.properties.embedding_dimensions,
                 embedding_model: selectedNode.node.properties.embedding_model,
                 embedded_at: selectedNode.node.properties.embedded_at,
               }}
@@ -144,20 +264,25 @@ export function NodeDetailsPanel({
                 </span>
               </div>
             )}
-            {selectedNode.vector_rank != null && selectedNode.vector_rank > 0 && (
-              <div>
-                <h3 className="text-xs font-medium text-norse-silver mb-1">
-                  Vector Rank
-                </h3>
-                <span className="text-frost-ice">#{selectedNode.vector_rank}</span>
-              </div>
-            )}
+            {selectedNode.vector_rank != null &&
+              selectedNode.vector_rank > 0 && (
+                <div>
+                  <h3 className="text-xs font-medium text-norse-silver mb-1">
+                    Vector Rank
+                  </h3>
+                  <span className="text-frost-ice">
+                    #{selectedNode.vector_rank}
+                  </span>
+                </div>
+              )}
             {selectedNode.bm25_rank != null && selectedNode.bm25_rank > 0 && (
               <div>
                 <h3 className="text-xs font-medium text-norse-silver mb-1">
                   BM25 Rank
                 </h3>
-                <span className="text-valhalla-gold">#{selectedNode.bm25_rank}</span>
+                <span className="text-valhalla-gold">
+                  #{selectedNode.bm25_rank}
+                </span>
               </div>
             )}
           </div>
@@ -166,7 +291,9 @@ export function NodeDetailsPanel({
         {/* Properties */}
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-xs font-medium text-norse-silver">PROPERTIES</h3>
+            <h3 className="text-xs font-medium text-norse-silver">
+              PROPERTIES
+            </h3>
             {editingNodeId !== selectedNode.node.id && (
               <button
                 type="button"
@@ -188,7 +315,7 @@ export function NodeDetailsPanel({
               onSave={async (updatedProps) => {
                 const result = await onUpdateProperties(
                   selectedNode.node.id,
-                  updatedProps
+                  updatedProps,
                 );
                 if (result.success) {
                   setEditingNodeId(null);
@@ -262,7 +389,9 @@ export function NodeDetailsPanel({
                 Finding similar...
               </div>
             ) : expandedSimilar.results.length === 0 ? (
-              <p className="text-xs text-norse-fog py-2">No similar items found</p>
+              <p className="text-xs text-norse-fog py-2">
+                No similar items found
+              </p>
             ) : (
               <div className="space-y-1">
                 {expandedSimilar.results.map((similar) => (
@@ -274,16 +403,14 @@ export function NodeDetailsPanel({
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1 flex-wrap min-w-0">
-                        {similar.node.labels
-                          .slice(0, 2)
-                          .map((label) => (
-                            <span
-                              key={label}
-                              className="px-1.5 py-0.5 text-xs bg-frost-ice/10 text-frost-ice/80 rounded flex-shrink-0"
-                            >
-                              {label}
-                            </span>
-                          ))}
+                        {similar.node.labels.slice(0, 2).map((label) => (
+                          <span
+                            key={label}
+                            className="px-1.5 py-0.5 text-xs bg-frost-ice/10 text-frost-ice/80 rounded flex-shrink-0"
+                          >
+                            {label}
+                          </span>
+                        ))}
                       </div>
                       <span className="text-xs text-valhalla-gold/70 flex-shrink-0">
                         {similar.score.toFixed(2)}
@@ -302,4 +429,3 @@ export function NodeDetailsPanel({
     </>
   );
 }
-

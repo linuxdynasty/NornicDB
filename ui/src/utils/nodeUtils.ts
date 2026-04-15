@@ -1,3 +1,5 @@
+import type { GraphNodePayload, SearchResult } from "./api";
+
 /**
  * Node utility functions extracted from Browser.tsx
  * These functions handle node data extraction and formatting
@@ -14,7 +16,7 @@ export interface ExtractedNode {
  * Supports both Neo4j format (nested properties) and legacy format (flat properties)
  */
 export function extractNodeFromResult(
-  cell: Record<string, unknown>
+  cell: Record<string, unknown>,
 ): ExtractedNode | null {
   if (!cell || typeof cell !== "object") return null;
 
@@ -92,6 +94,18 @@ export function getNodePreview(properties: Record<string, unknown>): string {
   return JSON.stringify(properties).slice(0, 100);
 }
 
+export function graphNodeToSearchResult(node: GraphNodePayload): SearchResult {
+  return {
+    node: {
+      id: node.id,
+      labels: node.labels,
+      properties: node.properties,
+      created_at: "",
+    },
+    score: node.score ?? 0,
+  };
+}
+
 /**
  * Check if a property is read-only
  * These properties are managed by the system and should not be edited
@@ -120,7 +134,7 @@ export function getAllNodeIdsFromQueryResults(
         row: unknown[];
       }>;
     }>;
-  } | null
+  } | null,
 ): string[] {
   if (!cypherResult || !cypherResult.results[0]) {
     return [];
@@ -142,4 +156,3 @@ export function getAllNodeIdsFromQueryResults(
   }
   return nodeIds;
 }
-
