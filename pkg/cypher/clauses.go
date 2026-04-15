@@ -1421,8 +1421,19 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	lookupCache := make(map[string]*storage.Node)
 	lookupKnown := make(map[string]bool)
 	notified := make(map[string]struct{})
-	resolveWithValue := func(expr string, values map[string]interface{}) interface{} {
+	params := getParamsFromContext(ctx)
+	resolveBatchValue := func(expr string, values map[string]interface{}) interface{} {
 		trimmed := strings.TrimSpace(expr)
+		if params != nil {
+			if strings.HasPrefix(trimmed, "$") && len(trimmed) > 1 && isSimpleIdentifier(trimmed[1:]) {
+				if val, ok := params[trimmed[1:]]; ok {
+					return val
+				}
+			}
+			if strings.Contains(trimmed, "$") {
+				trimmed = strings.TrimSpace(e.substituteParams(trimmed, params))
+			}
+		}
 		if strings.HasPrefix(strings.ToUpper(trimmed), "COALESCE(") && strings.HasSuffix(trimmed, ")") {
 			nodeMap := make(map[string]*storage.Node)
 			for key, raw := range values {
@@ -1432,7 +1443,14 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 			}
 			return e.evaluateCoalesceInContext(trimmed, nodeMap, nil, values)
 		}
-		return e.evaluateExpressionFromValues(trimmed, values)
+		val := e.evaluateExpressionFromValues(trimmed, values)
+		if literal, ok := val.(string); ok && literal == trimmed {
+			return e.parseValue(trimmed)
+		}
+		return val
+	}
+	resolveWithValue := func(expr string, values map[string]interface{}) interface{} {
+		return resolveBatchValue(expr, values)
 	}
 	notifyOnce := func(nodeID storage.NodeID) {
 		key := string(nodeID)
@@ -1454,7 +1472,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				nodePlan := step.node
 				matchProps := make(map[string]interface{}, len(nodePlan.matchAssignments))
 				for _, assignment := range nodePlan.matchAssignments {
-					matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+					matchProps[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 				}
 				lookupKey := unwindMergeKey(nodePlan.label, matchProps)
 				node := lookupCache[lookupKey]
@@ -1474,10 +1492,10 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						Properties: cloneNodePropertiesMap(matchProps),
 					}
 					for _, assignment := range nodePlan.setAssignments {
-						node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 					}
 					for _, assignment := range nodePlan.onCreateAssignments {
-						node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 					}
 					actualID, err := store.CreateNode(node)
 					if err != nil {
@@ -1491,14 +1509,14 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				} else {
 					needsUpdate := false
 					for _, assignment := range nodePlan.setAssignments {
-						val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						val := resolveBatchValue(assignment.expr, rowValues)
 						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
 							node.Properties[assignment.prop] = val
 							needsUpdate = true
 						}
 					}
 					for _, assignment := range nodePlan.onMatchAssignments {
-						val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						val := resolveBatchValue(assignment.expr, rowValues)
 						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
 							node.Properties[assignment.prop] = val
 							needsUpdate = true
@@ -1520,7 +1538,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				lookupPlan := step.lookup
 				matchProps := make(map[string]interface{}, len(lookupPlan.matchAssignments))
 				for _, assignment := range lookupPlan.matchAssignments {
-					matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+					matchProps[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 				}
 				lookupKey := unwindMergeKey(lookupPlan.label, matchProps)
 				node := lookupCache[lookupKey]
