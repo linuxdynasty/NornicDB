@@ -505,7 +505,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 			// Hot path: UNWIND row MERGE (n:Label {k: row.x}) [SET n.p = row.y] RETURN count(n)
 			// Execute as a single batched pass to avoid per-item MERGE query re-parsing/scans.
 			if startsWithKeywordFold(strings.TrimSpace(mutationPart), "MERGE") {
-				if fast, ok, err := e.executeUnwindSimpleMergeBatch(ctx, variable, items, mutationPart, returnPart); ok {
+				if fast, ok, err := e.executeUnwindMergeChainBatch(ctx, variable, items, mutationPart, returnPart); ok {
 					return fast, err
 				}
 			}
@@ -828,14 +828,53 @@ type unwindSimpleSetAssignment struct {
 	expr string
 }
 
-type unwindSimpleMergePlan struct {
-	supported           bool
+type unwindMergeChainNodePlan struct {
 	mergeVar            string
 	label               string
 	matchAssignments    []unwindSimpleSetAssignment
 	setAssignments      []unwindSimpleSetAssignment
 	onCreateAssignments []unwindSimpleSetAssignment
 	onMatchAssignments  []unwindSimpleSetAssignment
+}
+
+type unwindMergeChainLookupPlan struct {
+	varName          string
+	label            string
+	matchAssignments []unwindSimpleSetAssignment
+	optional         bool
+}
+
+type unwindMergeChainWithAssignment struct {
+	alias string
+	expr  string
+}
+
+type unwindMergeChainWithPlan struct {
+	assignments []unwindMergeChainWithAssignment
+}
+
+type unwindMergeChainWherePlan struct {
+	clause string
+}
+
+type unwindMergeChainRelationshipPlan struct {
+	fromVar string
+	toVar   string
+	relType string
+}
+
+type unwindMergeChainStep struct {
+	node         *unwindMergeChainNodePlan
+	lookup       *unwindMergeChainLookupPlan
+	with         *unwindMergeChainWithPlan
+	where        *unwindMergeChainWherePlan
+	relationship *unwindMergeChainRelationshipPlan
+}
+
+type unwindMergeChainPlan struct {
+	supported bool
+	simple    bool
+	steps     []unwindMergeChainStep
 }
 
 func parseUnwindSimpleMergeMatchAssignments(raw string) ([]unwindSimpleSetAssignment, bool) {
@@ -903,11 +942,15 @@ func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAss
 }
 
 func parseSimpleUnwindMergeClause(mergePart string) (string, string, []unwindSimpleSetAssignment, bool) {
-	trimmed := strings.TrimSpace(mergePart)
-	if !startsWithKeywordFold(trimmed, "MERGE") {
+	return parseUnwindNodePatternClause(mergePart, "MERGE")
+}
+
+func parseUnwindNodePatternClause(clause string, keyword string) (string, string, []unwindSimpleSetAssignment, bool) {
+	trimmed := strings.TrimSpace(clause)
+	if !startsWithKeywordFold(trimmed, keyword) {
 		return "", "", nil, false
 	}
-	rest := strings.TrimSpace(trimmed[len("MERGE"):])
+	rest := strings.TrimSpace(trimmed[len(keyword):])
 	if !strings.HasPrefix(rest, "(") {
 		return "", "", nil, false
 	}
@@ -946,126 +989,87 @@ func parseSimpleUnwindMergeClause(mergePart string) (string, string, []unwindSim
 	return mergeVar, label, assignments, true
 }
 
-func parseSimpleUnwindMergePattern(mutationPart string) unwindSimpleMergePlan {
-	plan := unwindSimpleMergePlan{supported: false}
-	mutation := strings.TrimSpace(mutationPart)
-	if !startsWithKeywordFold(mutation, "MERGE") {
-		return plan
+func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
+	optional := startsWithKeywordFold(strings.TrimSpace(clause), "OPTIONAL MATCH")
+	keyword := "MATCH"
+	if optional {
+		keyword = "OPTIONAL MATCH"
 	}
-	// Strictly limit this optimization to a single-node MERGE with optional SET.
-	// Complex pipelines (MATCH/WITH/extra MERGE/etc.) must use the regular executor.
-	rest := strings.TrimSpace(mutation[len("MERGE"):])
-	if findKeywordIndexInContext(rest, "MERGE") >= 0 ||
-		findKeywordIndexInContext(mutation, "OPTIONAL MATCH") >= 0 ||
-		findKeywordIndexInContext(mutation, "WITH") >= 0 ||
-		findKeywordIndexInContext(mutation, "CALL") >= 0 ||
-		findKeywordIndexInContext(mutation, "DELETE") >= 0 ||
-		findKeywordIndexInContext(mutation, "DETACH") >= 0 ||
-		findKeywordIndexInContext(mutation, "REMOVE") >= 0 ||
-		findKeywordIndexInContext(mutation, "FOREACH") >= 0 ||
-		findKeywordIndexInContext(mutation, "UNWIND") >= 0 ||
-		findKeywordIndexInContext(mutation, "RETURN") >= 0 {
-		return plan
-	}
-
-	mergePart := mutation
-	setPart := ""
-	tailStart := len(mutation)
-	onCreateIdx := findKeywordIndexInContext(mutation, "ON CREATE SET")
-	onMatchIdx := findKeywordIndexInContext(mutation, "ON MATCH SET")
-	setIdx := findKeywordIndexInContext(mutation, "SET")
-	if onCreateIdx < 0 && onMatchIdx < 0 && setIdx > 0 {
-		tailStart = setIdx
-		mergePart = strings.TrimSpace(mutation[:setIdx])
-		setPart = strings.TrimSpace(mutation[setIdx+3:])
-	} else {
-		clauseStart := -1
-		if onCreateIdx >= 0 {
-			clauseStart = onCreateIdx
-		}
-		if onMatchIdx >= 0 && (clauseStart < 0 || onMatchIdx < clauseStart) {
-			clauseStart = onMatchIdx
-		}
-		if clauseStart > 0 {
-			tailStart = clauseStart
-			mergePart = strings.TrimSpace(mutation[:clauseStart])
-		}
-	}
-
-	mergeVar, label, assignments, ok := parseSimpleUnwindMergeClause(mergePart)
+	varName, label, assignments, ok := parseUnwindNodePatternClause(clause, keyword)
 	if !ok {
-		return plan
+		return unwindMergeChainLookupPlan{}, false
 	}
-	plan.mergeVar = mergeVar
-	plan.label = label
-	plan.matchAssignments = assignments
-
-	if setPart != "" {
-		assignments, ok := parseUnwindSimpleSetAssignments(setPart, plan.mergeVar)
-		if !ok {
-			return unwindSimpleMergePlan{}
-		}
-		plan.setAssignments = assignments
-		plan.supported = true
-		return plan
-	}
-
-	restTail := strings.TrimSpace(mutation[tailStart:])
-	for strings.TrimSpace(restTail) != "" {
-		if startsWithKeywordFold(restTail, "ON CREATE SET") {
-			clause := strings.TrimSpace(restTail[len("ON CREATE SET"):])
-			next := findKeywordIndexInContext(clause, "ON MATCH SET")
-			assignSource := clause
-			if next >= 0 {
-				assignSource = strings.TrimSpace(clause[:next])
-				restTail = strings.TrimSpace(clause[next:])
-			} else {
-				restTail = ""
-			}
-			assignments, ok := parseUnwindSimpleSetAssignments(assignSource, plan.mergeVar)
-			if !ok {
-				return unwindSimpleMergePlan{}
-			}
-			plan.onCreateAssignments = append(plan.onCreateAssignments, assignments...)
-			continue
-		}
-		if startsWithKeywordFold(restTail, "ON MATCH SET") {
-			clause := strings.TrimSpace(restTail[len("ON MATCH SET"):])
-			next := findKeywordIndexInContext(clause, "ON CREATE SET")
-			assignSource := clause
-			if next >= 0 {
-				assignSource = strings.TrimSpace(clause[:next])
-				restTail = strings.TrimSpace(clause[next:])
-			} else {
-				restTail = ""
-			}
-			assignments, ok := parseUnwindSimpleSetAssignments(assignSource, plan.mergeVar)
-			if !ok {
-				return unwindSimpleMergePlan{}
-			}
-			plan.onMatchAssignments = append(plan.onMatchAssignments, assignments...)
-			continue
-		}
-		return unwindSimpleMergePlan{}
-	}
-
-	plan.supported = true
-	return plan
+	return unwindMergeChainLookupPlan{
+		varName:          varName,
+		label:            label,
+		matchAssignments: assignments,
+		optional:         optional,
+	}, true
 }
 
-func (e *StorageExecutor) cachedUnwindSimpleMergePlan(mutationPart string) unwindSimpleMergePlan {
+func parseUnwindWithClause(clause string) (unwindMergeChainWithPlan, bool) {
+	trimmed := strings.TrimSpace(clause)
+	if !startsWithKeywordFold(trimmed, "WITH") {
+		return unwindMergeChainWithPlan{}, false
+	}
+	body := strings.TrimSpace(trimmed[len("WITH"):])
+	if body == "" {
+		return unwindMergeChainWithPlan{}, false
+	}
+	parts := splitTopLevelComma(body)
+	plan := unwindMergeChainWithPlan{}
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		if isSimpleIdentifier(item) {
+			continue
+		}
+		asIdx := findKeywordIndexInContext(item, "AS")
+		if asIdx <= 0 {
+			return unwindMergeChainWithPlan{}, false
+		}
+		expr := strings.TrimSpace(item[:asIdx])
+		alias := strings.TrimSpace(item[asIdx+2:])
+		if expr == "" || !isSimpleIdentifier(alias) {
+			return unwindMergeChainWithPlan{}, false
+		}
+		plan.assignments = append(plan.assignments, unwindMergeChainWithAssignment{alias: alias, expr: expr})
+	}
+	return plan, true
+}
+
+func parseUnwindWhereClause(clause string) (unwindMergeChainWherePlan, bool) {
+	trimmed := strings.TrimSpace(clause)
+	if !startsWithKeywordFold(trimmed, "WHERE") {
+		return unwindMergeChainWherePlan{}, false
+	}
+	body := strings.TrimSpace(trimmed[len("WHERE"):])
+	if body == "" {
+		return unwindMergeChainWherePlan{}, false
+	}
+	return unwindMergeChainWherePlan{clause: body}, true
+}
+
+func (e *StorageExecutor) cachedUnwindMergeChainPlan(mutationPart string) unwindMergeChainPlan {
 	key := strings.TrimSpace(mutationPart)
-	e.unwindSimpleMergePlanMu.RLock()
-	if plan, ok := e.unwindSimpleMergePlanCache[key]; ok {
-		e.unwindSimpleMergePlanMu.RUnlock()
+	cache := e.unwindMergeChainPlanCache
+	if cache == nil {
+		cache = &unwindMergeChainPlanCache{plans: make(map[string]unwindMergeChainPlan, 128)}
+		e.unwindMergeChainPlanCache = cache
+	}
+	cache.mu.RLock()
+	if plan, ok := cache.plans[key]; ok {
+		cache.mu.RUnlock()
 		return plan
 	}
-	e.unwindSimpleMergePlanMu.RUnlock()
+	cache.mu.RUnlock()
 
-	plan := parseSimpleUnwindMergePattern(key)
-	e.unwindSimpleMergePlanMu.Lock()
-	e.unwindSimpleMergePlanCache[key] = plan
-	e.unwindSimpleMergePlanMu.Unlock()
+	plan := parseUnwindMergeChainPattern(key)
+	cache.mu.Lock()
+	cache.plans[key] = plan
+	cache.mu.Unlock()
 	return plan
 }
 
@@ -1100,6 +1104,216 @@ func parseSimpleCountReturn(returnPart, mergeVar string) (alias string, ok bool)
 		alias = "count(" + mergeVar + ")"
 	}
 	return alias, true
+}
+
+func parseUnwindBatchCountReturn(returnPart string) (alias string, ok bool) {
+	r := strings.TrimSpace(returnPart)
+	if r == "" {
+		return "", true
+	}
+	if !startsWithKeywordFold(r, "RETURN") {
+		return "", false
+	}
+	body := strings.TrimSpace(r[len("RETURN "):])
+	asIdx := findKeywordIndexInContext(body, "AS")
+	if asIdx <= 0 {
+		return "", false
+	}
+	expr := strings.TrimSpace(body[:asIdx])
+	alias = strings.TrimSpace(body[asIdx+2:])
+	if alias == "" {
+		return "", false
+	}
+	upperExpr := strings.ToUpper(strings.ReplaceAll(expr, " ", ""))
+	if !strings.HasPrefix(upperExpr, "COUNT(") || !strings.HasSuffix(upperExpr, ")") {
+		return "", false
+	}
+	inner := strings.TrimSpace(expr[len("count(") : len(expr)-1])
+	if inner != "*" && !isSimpleIdentifier(inner) {
+		return "", false
+	}
+	return alias, true
+}
+
+func splitUnwindMergeChainClauses(input string) ([]string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil, false
+	}
+	keywords := []string{"ON CREATE SET", "ON MATCH SET", "OPTIONAL MATCH", "MATCH", "MERGE", "WITH", "WHERE", "SET"}
+	var clauses []string
+	for trimmed != "" {
+		keyword := ""
+		for _, candidate := range keywords {
+			if startsWithKeywordFold(trimmed, candidate) {
+				keyword = candidate
+				break
+			}
+		}
+		if keyword == "" {
+			return nil, false
+		}
+		next := len(trimmed)
+		for _, candidate := range keywords {
+			if idx := findKeywordIndexInContext(trimmed[len(keyword):], candidate); idx >= 0 {
+				pos := len(keyword) + idx
+				if pos < next {
+					next = pos
+				}
+			}
+		}
+		clauses = append(clauses, strings.TrimSpace(trimmed[:next]))
+		trimmed = strings.TrimSpace(trimmed[next:])
+	}
+	return clauses, len(clauses) > 0
+}
+
+func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelationshipPlan, bool) {
+	trimmed := strings.TrimSpace(clause)
+	if !startsWithKeywordFold(trimmed, "MERGE") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	rest := strings.TrimSpace(trimmed[len("MERGE"):])
+	if !strings.HasPrefix(rest, "(") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	fromEnd := findMatchingParen(rest, 0)
+	if fromEnd <= 1 {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	fromVar := strings.TrimSpace(rest[1:fromEnd])
+	afterFrom := strings.TrimSpace(rest[fromEnd+1:])
+	if !isSimpleIdentifier(fromVar) || !strings.HasPrefix(afterFrom, "-") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	openBracket := strings.Index(afterFrom, "[")
+	closeBracket := strings.Index(afterFrom, "]")
+	if openBracket < 0 || closeBracket <= openBracket {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	relInner := strings.TrimSpace(afterFrom[openBracket+1 : closeBracket])
+	if !strings.HasPrefix(relInner, ":") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	relType := strings.TrimSpace(relInner[1:])
+	afterRel := strings.TrimSpace(afterFrom[closeBracket+1:])
+	if !strings.HasPrefix(afterRel, "->") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	afterArrow := strings.TrimSpace(afterRel[2:])
+	if !strings.HasPrefix(afterArrow, "(") {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	toEnd := findMatchingParen(afterArrow, 0)
+	if toEnd != len(afterArrow)-1 {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	toVar := strings.TrimSpace(afterArrow[1:toEnd])
+	if !isSimpleIdentifier(relType) || !isSimpleIdentifier(toVar) {
+		return unwindMergeChainRelationshipPlan{}, false
+	}
+	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relType: relType}, true
+}
+
+func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
+	plan := unwindMergeChainPlan{supported: false}
+	mutation := strings.TrimSpace(mutationPart)
+	if !startsWithKeywordFold(mutation, "MERGE") {
+		return plan
+	}
+	if findKeywordIndexInContext(mutation, "CALL") >= 0 ||
+		findKeywordIndexInContext(mutation, "DELETE") >= 0 ||
+		findKeywordIndexInContext(mutation, "DETACH") >= 0 ||
+		findKeywordIndexInContext(mutation, "REMOVE") >= 0 ||
+		findKeywordIndexInContext(mutation, "FOREACH") >= 0 ||
+		findKeywordIndexInContext(mutation, "UNWIND") >= 0 ||
+		findKeywordIndexInContext(mutation, "RETURN") >= 0 {
+		return plan
+	}
+	clauses, ok := splitUnwindMergeChainClauses(mutation)
+	if !ok || len(clauses) == 0 {
+		return plan
+	}
+	boundVars := make(map[string]struct{})
+	for i := 0; i < len(clauses); i++ {
+		clause := clauses[i]
+		if !startsWithKeywordFold(clause, "MERGE") {
+			if lookupPlan, ok := parseUnwindLookupClause(clause); ok {
+				plan.steps = append(plan.steps, unwindMergeChainStep{lookup: &lookupPlan})
+				boundVars[lookupPlan.varName] = struct{}{}
+				continue
+			}
+			if withPlan, ok := parseUnwindWithClause(clause); ok {
+				for _, assignment := range withPlan.assignments {
+					boundVars[assignment.alias] = struct{}{}
+				}
+				plan.steps = append(plan.steps, unwindMergeChainStep{with: &withPlan})
+				continue
+			}
+			if wherePlan, ok := parseUnwindWhereClause(clause); ok {
+				plan.steps = append(plan.steps, unwindMergeChainStep{where: &wherePlan})
+				continue
+			}
+			return unwindMergeChainPlan{}
+		}
+		mergeVar, label, assignments, ok := parseSimpleUnwindMergeClause(clause)
+		if ok {
+			nodePlan := &unwindMergeChainNodePlan{
+				mergeVar:         mergeVar,
+				label:            label,
+				matchAssignments: assignments,
+			}
+			for i+1 < len(clauses) {
+				nextClause := clauses[i+1]
+				switch {
+				case startsWithKeywordFold(nextClause, "SET"):
+					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("SET"):]), mergeVar)
+					if !ok {
+						return unwindMergeChainPlan{}
+					}
+					nodePlan.setAssignments = append(nodePlan.setAssignments, parsed...)
+					i++
+				case startsWithKeywordFold(nextClause, "ON CREATE SET"):
+					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("ON CREATE SET"):]), mergeVar)
+					if !ok {
+						return unwindMergeChainPlan{}
+					}
+					nodePlan.onCreateAssignments = append(nodePlan.onCreateAssignments, parsed...)
+					i++
+				case startsWithKeywordFold(nextClause, "ON MATCH SET"):
+					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("ON MATCH SET"):]), mergeVar)
+					if !ok {
+						return unwindMergeChainPlan{}
+					}
+					nodePlan.onMatchAssignments = append(nodePlan.onMatchAssignments, parsed...)
+					i++
+				default:
+					goto nodeDone
+				}
+			}
+		nodeDone:
+			plan.steps = append(plan.steps, unwindMergeChainStep{node: nodePlan})
+			boundVars[mergeVar] = struct{}{}
+			continue
+		}
+		relPlan, ok := parseUnwindMergeRelationshipClause(clause)
+		if !ok {
+			return unwindMergeChainPlan{}
+		}
+		if _, exists := boundVars[relPlan.fromVar]; !exists {
+			return unwindMergeChainPlan{}
+		}
+		if _, exists := boundVars[relPlan.toVar]; !exists {
+			return unwindMergeChainPlan{}
+		}
+		plan.steps = append(plan.steps, unwindMergeChainStep{relationship: &relPlan})
+	}
+	if len(plan.steps) == 0 {
+		return unwindMergeChainPlan{}
+	}
+	plan.simple = len(plan.steps) == 1 && plan.steps[0].node != nil
+	plan.supported = true
+	return plan
 }
 
 func canonicalUnwindMergeValue(v interface{}) interface{} {
@@ -1180,132 +1394,206 @@ func unwindMergeKey(label string, props map[string]interface{}) string {
 	return string(encoded)
 }
 
-func (e *StorageExecutor) executeUnwindSimpleMergeBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
-	plan := e.cachedUnwindSimpleMergePlan(mutationPart)
+func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
+	plan := e.cachedUnwindMergeChainPlan(mutationPart)
 	if !plan.supported {
 		return nil, false, nil
 	}
-
-	countAlias, ok := parseSimpleCountReturn(returnPart, plan.mergeVar)
+	countAlias, ok := parseUnwindBatchCountReturn(returnPart)
 	if !ok {
 		return nil, false, nil
 	}
-	e.markUnwindSimpleMergeBatchUsed()
-
-	type mergeBatchEntry struct {
-		item       interface{}
-		matchProps map[string]interface{}
-		lookupKey  string
-		node       *storage.Node
+	e.markUnwindMergeChainBatchUsed()
+	if plan.simple {
+		e.markUnwindSimpleMergeBatchUsed()
 	}
 
 	store := e.getStorage(ctx)
-	inputRowCount := int64(len(items))
-	rowValues := map[string]interface{}{unwindVar: nil}
-	ordered := make([]*mergeBatchEntry, 0, len(items))
-	byLookupKey := make(map[string]*mergeBatchEntry, len(items))
-	for _, item := range items {
-		rowValues[unwindVar] = item
-		matchProps := make(map[string]interface{}, len(plan.matchAssignments))
-		for _, assignment := range plan.matchAssignments {
-			matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
-		}
-		lookupKey := unwindMergeKey(plan.label, matchProps)
-		if existing, exists := byLookupKey[lookupKey]; exists {
-			existing.item = item
-			continue
-		}
-		entry := &mergeBatchEntry{
-			item:       item,
-			matchProps: matchProps,
-			lookupKey:  lookupKey,
-		}
-		byLookupKey[lookupKey] = entry
-		ordered = append(ordered, entry)
-	}
-
-	for _, entry := range ordered {
-		node, err := e.findMergeNode(store, []string{plan.label}, entry.matchProps)
-		if err != nil {
-			return nil, true, err
-		}
-		entry.node = node
-	}
-
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
-	if returnPart != "" {
+	if countAlias != "" {
 		result.Columns = []string{countAlias}
 	}
 
-	notified := make(map[string]struct{}, len(ordered))
-	notifyOnce := func(nodeID string) {
-		if nodeID == "" {
+	lookupCache := make(map[string]*storage.Node)
+	lookupKnown := make(map[string]bool)
+	notified := make(map[string]struct{})
+	resolveWithValue := func(expr string, values map[string]interface{}) interface{} {
+		trimmed := strings.TrimSpace(expr)
+		if strings.HasPrefix(strings.ToUpper(trimmed), "COALESCE(") && strings.HasSuffix(trimmed, ")") {
+			nodeMap := make(map[string]*storage.Node)
+			for key, raw := range values {
+				if node, ok := raw.(*storage.Node); ok && node != nil {
+					nodeMap[key] = node
+				}
+			}
+			return e.evaluateCoalesceInContext(trimmed, nodeMap, nil, values)
+		}
+		return e.evaluateExpressionFromValues(trimmed, values)
+	}
+	notifyOnce := func(nodeID storage.NodeID) {
+		key := string(nodeID)
+		if key == "" {
 			return
 		}
-		if _, exists := notified[nodeID]; exists {
+		if _, exists := notified[key]; exists {
 			return
 		}
-		notified[nodeID] = struct{}{}
-		e.notifyNodeMutated(nodeID)
+		notified[key] = struct{}{}
+		e.notifyNodeMutated(key)
 	}
 
-	for _, entry := range ordered {
-		rowValues[unwindVar] = entry.item
-		node := entry.node
-		if node == nil {
-			node = &storage.Node{
-				ID:         storage.NodeID(e.generateID()),
-				Labels:     []string{plan.label},
-				Properties: cloneNodePropertiesMap(entry.matchProps),
+	for _, item := range items {
+		rowValues := map[string]interface{}{unwindVar: item}
+		skipRow := false
+		for _, step := range plan.steps {
+			if step.node != nil {
+				nodePlan := step.node
+				matchProps := make(map[string]interface{}, len(nodePlan.matchAssignments))
+				for _, assignment := range nodePlan.matchAssignments {
+					matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+				}
+				lookupKey := unwindMergeKey(nodePlan.label, matchProps)
+				node := lookupCache[lookupKey]
+				if !lookupKnown[lookupKey] {
+					var err error
+					node, err = e.findMergeNode(store, []string{nodePlan.label}, matchProps)
+					if err != nil {
+						return nil, true, err
+					}
+					lookupCache[lookupKey] = node
+					lookupKnown[lookupKey] = true
+				}
+				if node == nil {
+					node = &storage.Node{
+						ID:         storage.NodeID(e.generateID()),
+						Labels:     []string{nodePlan.label},
+						Properties: cloneNodePropertiesMap(matchProps),
+					}
+					for _, assignment := range nodePlan.setAssignments {
+						node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+					}
+					for _, assignment := range nodePlan.onCreateAssignments {
+						node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+					}
+					actualID, err := store.CreateNode(node)
+					if err != nil {
+						return nil, true, fmt.Errorf("UNWIND MERGE chain create failed: %w", err)
+					}
+					node.ID = actualID
+					lookupCache[lookupKey] = node
+					e.cacheMergeNode([]string{nodePlan.label}, matchProps, node)
+					result.Stats.NodesCreated++
+					notifyOnce(node.ID)
+				} else {
+					needsUpdate := false
+					for _, assignment := range nodePlan.setAssignments {
+						val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+							node.Properties[assignment.prop] = val
+							needsUpdate = true
+						}
+					}
+					for _, assignment := range nodePlan.onMatchAssignments {
+						val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
+						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+							node.Properties[assignment.prop] = val
+							needsUpdate = true
+						}
+					}
+					if needsUpdate {
+						if err := store.UpdateNode(node); err != nil {
+							return nil, true, fmt.Errorf("UNWIND MERGE chain update failed: %w", err)
+						}
+						e.cacheMergeNode([]string{nodePlan.label}, matchProps, node)
+						notifyOnce(node.ID)
+					}
+				}
+				rowValues[nodePlan.mergeVar] = node
+				continue
 			}
-			for _, assignment := range plan.setAssignments {
-				node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+
+			if step.lookup != nil {
+				lookupPlan := step.lookup
+				matchProps := make(map[string]interface{}, len(lookupPlan.matchAssignments))
+				for _, assignment := range lookupPlan.matchAssignments {
+					matchProps[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+				}
+				lookupKey := unwindMergeKey(lookupPlan.label, matchProps)
+				node := lookupCache[lookupKey]
+				if !lookupKnown[lookupKey] {
+					var err error
+					node, err = e.findMergeNode(store, []string{lookupPlan.label}, matchProps)
+					if err != nil {
+						return nil, true, err
+					}
+					lookupCache[lookupKey] = node
+					lookupKnown[lookupKey] = true
+				}
+				if node == nil && !lookupPlan.optional {
+					skipRow = true
+					break
+				}
+				if node == nil {
+					rowValues[lookupPlan.varName] = nil
+				} else {
+					rowValues[lookupPlan.varName] = node
+				}
+				continue
 			}
-			for _, assignment := range plan.onCreateAssignments {
-				node.Properties[assignment.prop] = e.evaluateExpressionFromValues(assignment.expr, rowValues)
+
+			if step.with != nil {
+				for _, assignment := range step.with.assignments {
+					rowValues[assignment.alias] = resolveWithValue(assignment.expr, rowValues)
+				}
+				continue
 			}
-			actualID, createErr := store.CreateNode(node)
-			if createErr != nil {
-				return nil, true, fmt.Errorf("UNWIND MERGE batch create failed: %w", createErr)
+
+			if step.where != nil {
+				if !e.evaluateWithWhereCondition(step.where.clause, rowValues) {
+					skipRow = true
+					break
+				}
+				continue
 			}
-			node.ID = actualID
-			entry.node = node
-			result.Stats.NodesCreated++
-			e.cacheMergeNode([]string{plan.label}, entry.matchProps, node)
-			notifyOnce(string(node.ID))
+
+			relPlan := step.relationship
+			fromNode, _ := rowValues[relPlan.fromVar].(*storage.Node)
+			toNode, _ := rowValues[relPlan.toVar].(*storage.Node)
+			if fromNode == nil || toNode == nil {
+				skipRow = true
+				break
+			}
+			if store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType) != nil {
+				continue
+			}
+			edge := &storage.Edge{
+				ID:         storage.EdgeID(e.generateID()),
+				Type:       relPlan.relType,
+				StartNode:  fromNode.ID,
+				EndNode:    toNode.ID,
+				Properties: map[string]interface{}{},
+			}
+			if err := store.CreateEdge(edge); err != nil {
+				if err != storage.ErrAlreadyExists {
+					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship create failed: %w", err)
+				}
+				continue
+			}
+			result.Stats.RelationshipsCreated++
+			notifyOnce(fromNode.ID)
+			notifyOnce(toNode.ID)
+		}
+		if skipRow {
 			continue
 		}
-
-		needsUpdate := false
-		for _, assignment := range plan.setAssignments {
-			val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
-			if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-				node.Properties[assignment.prop] = val
-				needsUpdate = true
-			}
-		}
-		for _, assignment := range plan.onMatchAssignments {
-			val := e.evaluateExpressionFromValues(assignment.expr, rowValues)
-			if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-				node.Properties[assignment.prop] = val
-				needsUpdate = true
-			}
-		}
-		if needsUpdate {
-			if updateErr := store.UpdateNode(node); updateErr != nil {
-				return nil, true, fmt.Errorf("UNWIND MERGE batch update failed: %w", updateErr)
-			}
-			e.cacheMergeNode([]string{plan.label}, entry.matchProps, node)
-			notifyOnce(string(node.ID))
-		}
 	}
 
-	if returnPart != "" {
-		result.Rows = [][]interface{}{{inputRowCount}}
+	if countAlias != "" {
+		result.Rows = [][]interface{}{{int64(len(items))}}
 	}
 	return result, true, nil
 }

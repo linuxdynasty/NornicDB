@@ -6,6 +6,36 @@ Use this cookbook as a menu of proven query shapes. Pick the shape that matches 
 
 Hot-path additions since `v1.0.36` include bounded `UNWIND ... MERGE` batch upserts, fixed-depth chain materialization, vector-result `elementId()` pinning, and vector-seeded traversal aggregations for chain, branching, frontier, and constrained traversal shapes.
 
+## Hot Path Eligibility Inventory
+
+These are the query shapes currently recognized as specialized hot paths or optimized executor routes.
+
+Traced executor hot paths:
+
+- `OuterIndexTopK`: `MATCH (n:Label) WHERE ... RETURN ... ORDER BY n.prop LIMIT k`
+- `OuterScanFallbackUsed`: same outer read shape when index pruning is unavailable or rejected
+- `FabricBatchedApplyRows`: Fabric cross-shard batched APPLY row lookups
+- `SimpleMatchLimitFastPath`: `MATCH (n) RETURN n LIMIT k`
+- `CompoundQueryFastPath`: benchmark-oriented compound mutation shape with paired `MATCH` inputs
+- `TraversalStartSeedTopK`: start-node-seeded traversal with `ORDER BY ... LIMIT`
+- `TraversalEndSeedTopK`: end-node-seeded reverse traversal with bounded result count
+- `UnwindSimpleMergeBatch`: single-node `UNWIND ... MERGE` upsert with optional `SET` and optional `RETURN count(...)`
+- `UnwindMergeChainBatch`: generalized `UNWIND` batch mutation pipeline with N-ary node `MERGE`s, relationship `MERGE`s, `MATCH` and `OPTIONAL MATCH` lookups on row-bound expressions, non-aggregating `WITH` aliases, and `WHERE` filters such as `IS NOT NULL`
+- `UnwindFixedChainLinkBatch`: `UNWIND`-driven fixed-depth chain materialization by key or root `elementId()`
+- `CallTailTraversalFastPath`: `CALL { ... }` tail traversal/path-count shapes
+- `MergeSchemaLookupUsed`: index-backed `MERGE` lookup on property or composite schema keys
+- `MergeScanFallbackUsed`: label-scan `MERGE` lookup when no suitable schema path exists
+
+Optimized executor patterns:
+
+- `PatternMutualRelationship`: `MATCH (a)-[:T]->(b)-[:T]->(a) RETURN ...`
+- `PatternIncomingCountAgg`: `MATCH (x)<-[:T]-(y) RETURN x.name, count(y)`
+- `PatternOutgoingCountAgg`: `MATCH (x)-[:T]->(y) RETURN x.name, count(y)`
+- `PatternEdgePropertyAgg`: grouped edge-property aggregates such as `avg(r.prop), count(r)`
+- `PatternLargeResultSet`: large `MATCH ... LIMIT > 100` result sets routed to batched lookup execution
+
+Not every fast query in this cookbook maps 1:1 to a single trace flag, but every traced or optimized hot path currently exposed by the executor is represented here.
+
 ## Generic Model Used In Examples
 
 - Node labels: `EntityA`, `EntityB`, `Tenant`, `Event`
@@ -509,6 +539,47 @@ RETURN count(root) AS prepared;
 ```
 
 Use this variant when the caller already has stable `elementId()` values for roots and only needs a lightweight key suffix to resolve chain members.
+
+### 7.3e Generalized Batched Merge Chain
+
+```cypher
+UNWIND $rows AS row
+MERGE (key:EntityA {primaryKey: row.primaryKey, tenantId: row.tenantId})
+MERGE (state:EntityB {primaryKey: row.stateKey})
+SET state.status = row.status,
+    state.updatedAt = row.updatedAt,
+    state.category = row.category
+MERGE (key)-[:KEY_REL]->(state)
+MERGE (event:Event {primaryKey: row.eventKey})
+ON CREATE SET event.createdAt = row.updatedAt,
+              event.tenantId = row.tenantId
+MERGE (event)-[:LINKS_TO]->(state)
+MERGE (event)-[:BELONGS_TO]->(key)
+```
+
+Use this for qVersions-style write families where one input row materializes multiple node upserts and multiple idempotent relationship upserts in a deterministic order.
+
+### 7.3f Batched Optional Lookup Chain With Coalesced Target Resolution
+
+```cypher
+UNWIND $rows AS row
+MERGE (event:Event {primaryKey: row.eventKey})
+SET event.status = row.status,
+    event.updatedAt = row.updatedAt
+MERGE (owner:EntityA {primaryKey: row.ownerKey})
+ON CREATE SET owner.createdAt = row.updatedAt,
+              owner.tenantId = row.tenantId
+MERGE (owner)-[:LINKS_TO]->(event)
+WITH event, row
+OPTIONAL MATCH (direct:EntityB {primaryKey: row.targetKey})
+WITH event, row, direct
+OPTIONAL MATCH (fallback:EntityB {alternateKey: row.fallbackTargetKey, tenantId: row.tenantId})
+WITH event, coalesce(direct, fallback) AS target
+WHERE target IS NOT NULL
+MERGE (event)-[:KEY_REL]->(target)
+```
+
+Use this for qEvents-style write families where each row always upserts source entities but only conditionally attaches the terminal relationship after `OPTIONAL MATCH` and `coalesce(...)` target resolution.
 
 ### 7.4 Single-Statement Autocommit Shape
 

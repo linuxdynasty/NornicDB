@@ -292,6 +292,7 @@ MERGE (cc)-[:IMPACTS]->(cs)
 		},
 	})
 	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
 
 	impactsRes, err := exec.Execute(ctx, `MATCH (:CodeChange)-[:IMPACTS]->(:CodeState) RETURN count(*) AS impacts_count`, nil)
 	require.NoError(t, err)
@@ -365,6 +366,7 @@ MERGE (c)-[:TOUCHED]->(ck)
 		},
 	})
 	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
 
 	commitCount, err := exec.Execute(ctx, `MATCH (c:Commit) RETURN count(c)`, nil)
 	require.NoError(t, err)

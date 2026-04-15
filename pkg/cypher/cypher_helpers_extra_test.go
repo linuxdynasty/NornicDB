@@ -340,6 +340,24 @@ func TestCypherHelpers_NodeLookupCacheHelpers(t *testing.T) {
 	assert.Len(t, exec.nodeLookupCache, 0)
 }
 
+func TestCypherHelpers_UnwindMergeChainPlanCacheHelpers(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+	mutation := "MERGE (t:TranslatedText {translationId: row.translationId, language: row.language}) ON CREATE SET t.translatedText = row.translatedText ON MATCH SET t.translatedText = row.translatedText"
+
+	plan := exec.cachedUnwindMergeChainPlan(mutation)
+	require.True(t, plan.supported)
+	require.NotNil(t, exec.unwindMergeChainPlanCache)
+	assert.Len(t, exec.unwindMergeChainPlanCache.plans, 1)
+
+	clone := exec.cloneWithStorage(exec.storage)
+	require.Same(t, exec.unwindMergeChainPlanCache, clone.unwindMergeChainPlanCache)
+
+	clonedPlan := clone.cachedUnwindMergeChainPlan(mutation)
+	assert.Equal(t, plan, clonedPlan)
+	assert.Len(t, exec.unwindMergeChainPlanCache.plans, 1)
+	assert.Len(t, clone.unwindMergeChainPlanCache.plans, 1)
+}
+
 func TestCypherHelpers_MatchRowsAndTransactionProjection(t *testing.T) {
 	exec := &StorageExecutor{}
 	nodes := map[string]*storage.Node{

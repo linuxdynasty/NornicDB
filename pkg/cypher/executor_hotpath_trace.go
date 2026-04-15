@@ -10,6 +10,7 @@ type HotPathTrace struct {
 	TraversalStartSeedTopK    bool
 	TraversalEndSeedTopK      bool
 	UnwindSimpleMergeBatch    bool
+	UnwindMergeChainBatch     bool
 	UnwindFixedChainLinkBatch bool
 	CallTailTraversalFastPath bool
 	MergeSchemaLookupUsed     bool
@@ -97,6 +98,15 @@ func (e *StorageExecutor) markUnwindSimpleMergeBatchUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.UnwindSimpleMergeBatch = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markUnwindMergeChainBatchUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.UnwindMergeChainBatch = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

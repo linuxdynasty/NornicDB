@@ -744,6 +744,16 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 		return val
 	}
 
+	if strings.HasPrefix(strings.ToUpper(expr), "COALESCE(") && strings.HasSuffix(expr, ")") {
+		nodeMap := make(map[string]*storage.Node)
+		for key, raw := range values {
+			if node, ok := raw.(*storage.Node); ok && node != nil {
+				nodeMap[key] = node
+			}
+		}
+		return e.evaluateCoalesceInContext(expr, nodeMap, nil, values)
+	}
+
 	// Handle property access on computed values (e.g., x.property where x is a node)
 	if idx := strings.Index(expr, "."); idx > 0 {
 		varName := expr[:idx]

@@ -307,6 +307,7 @@ MERGE (c)-[:TOUCHED_KEY]->(fk)
 		},
 	})
 	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
 
 	res, err := exec.Execute(ctx, `
 MATCH (fk:FactKey {subject_entity_id: 'file::internal/indexer/indexer.go', predicate: 'calls'})

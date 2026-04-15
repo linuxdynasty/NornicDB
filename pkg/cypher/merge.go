@@ -40,7 +40,7 @@ func mergeNodeMatches(node *storage.Node, labels []string, props map[string]inte
 	}
 	for key, val := range props {
 		nodeVal, ok := node.Properties[key]
-		if !ok || fmt.Sprintf("%v", nodeVal) != fmt.Sprintf("%v", val) {
+		if !ok || !reflect.DeepEqual(canonicalUnwindMergeValue(nodeVal), canonicalUnwindMergeValue(val)) {
 			return false
 		}
 	}
@@ -55,7 +55,7 @@ func mergeCreateConflict(err error) bool {
 }
 
 func mergeLookupCacheKey(label, prop string, val interface{}) string {
-	return fmt.Sprintf("%s:{%s:%v}", label, prop, val)
+	return unwindMergeKey(label, map[string]interface{}{prop: val})
 }
 
 func cloneNodePropertiesMap(in map[string]interface{}) map[string]interface{} {

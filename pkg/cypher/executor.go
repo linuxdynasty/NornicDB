@@ -323,10 +323,14 @@ type StorageExecutor struct {
 	vectorQueryEmbedInflight map[string]*vectorEmbedInflight
 	vectorQueryEmbedMu       sync.Mutex
 
-	// unwindSimpleMergePlanCache memoizes parsed plans for the UNWIND ... MERGE
-	// batch fast path keyed by mutation query text.
-	unwindSimpleMergePlanCache map[string]unwindSimpleMergePlan
-	unwindSimpleMergePlanMu    sync.RWMutex
+	// unwindMergeChainPlanCache memoizes parsed plans for the generalized
+	// UNWIND ... MERGE batch hot path keyed by mutation query text.
+	unwindMergeChainPlanCache *unwindMergeChainPlanCache
+}
+
+type unwindMergeChainPlanCache struct {
+	mu    sync.RWMutex
+	plans map[string]unwindMergeChainPlan
 }
 
 func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExecutor {
@@ -356,7 +360,7 @@ func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExec
 		hotPathTraceState:           e.hotPathTraceState,
 		vectorQueryEmbedCache:       e.vectorQueryEmbedCache,
 		vectorQueryEmbedInflight:    e.vectorQueryEmbedInflight,
-		unwindSimpleMergePlanCache:  e.unwindSimpleMergePlanCache,
+		unwindMergeChainPlanCache:   e.unwindMergeChainPlanCache,
 	}
 }
 
@@ -456,7 +460,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		hotPathTraceState:           &hotPathTraceState{},
 		vectorQueryEmbedCache:       make(map[string][]float32, 512),
 		vectorQueryEmbedInflight:    make(map[string]*vectorEmbedInflight, 64),
-		unwindSimpleMergePlanCache:  make(map[string]unwindSimpleMergePlan, 128),
+		unwindMergeChainPlanCache:   &unwindMergeChainPlanCache{plans: make(map[string]unwindMergeChainPlan, 128)},
 		inlineEmbeddingTextOptions:  embeddingutil.EmbedTextOptionsFromConfig(config.LoadFromEnv()),
 		inlineEmbeddingChunkSize:    maxInt(config.LoadFromEnv().EmbeddingWorker.ChunkSize, 1),
 		inlineEmbeddingChunkOverlap: maxInt(config.LoadFromEnv().EmbeddingWorker.ChunkOverlap, 0),
