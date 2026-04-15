@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.41] "Blue Orchid" - 2026-04-15
+
+### Added
+
+- **Graph explorer UI**:
+  - added a new graph explorer tab with neighborhood visualization and node-details integration.
+  - wired the browser page, node details panel, and client API helpers to support the new exploration flow.
+
+- **MERGE and string-literal infrastructure**:
+  - added shared string-literal decoding helpers so Cypher literal handling is consistent across execution paths.
+  - expanded merge-chain and relationship-shape support for the fallback and hot-path planner routes.
+
+### Changed
+
+- **UNWIND and MERGE hot paths**:
+  - generalized the staged compound `UNWIND` mutation path and tightened the merge-chain hot path so parameter handling and optional lookups behave consistently.
+  - memoized the merge-chain path where the executor can safely reuse the structured shape detection.
+
+- **Cypher executor plumbing**:
+  - updated executor, pattern parsing, property evaluation, and clause handling to align the new hot-path routing logic.
+  - refreshed the query-shape tests and regression coverage around compound `UNWIND`, merge chains, and literal decoding.
+
+- **Release and dependency maintenance**:
+  - updated README/version metadata and release workflows for the new build.
+  - refreshed dependency pins across Go, UI, llama.cpp, Docker, and build scripts.
+  - updated the hot-path performance cookbook to document the new query-shape coverage.
+
+### Fixed
+
+- **Fallback MERGE binding preservation**:
+  - fixed fallback MERGE chain handling so bindings are preserved correctly when the structured hot path is not selected.
+  - restored parameter handling in the generalized `UNWIND` merge-chain route.
+
+- **Linker and packaging stability**:
+  - fixed the native linker path used by the CUDA build flow.
+  - cleaned up version bump artifacts so the packaged build reports `1.0.41` consistently.
+
+### Tests
+
+- Added and expanded coverage for:
+  - compound `UNWIND` mutation staging and merge-chain hot-path routing
+  - fallback MERGE chain bindings and optional lookup behavior
+  - string-literal decoding and property evaluation helpers
+  - graph explorer browser integration and node-details interactions
+  - executor trace coverage and query-shape regression cases
+
+### Technical Details
+
+- **Range covered**: `v1.0.40..HEAD`
+- **Commits in range**: 10 (non-merge)
+- **Repository delta**: 50 files changed, +3,163 / -502 lines
+- **Primary focus areas**: Cypher merge/UNWIND hot-path generalization, literal decoding cleanup, graph explorer UI delivery, dependency refreshes, and packaging/build fixes.
+
 ## [v1.0.40] "Kiyote" by rumspringa - 2026-04-11
 
 ### Added
