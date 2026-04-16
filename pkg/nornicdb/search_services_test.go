@@ -433,6 +433,10 @@ func TestSearchServices_RunClusteringOnceAllDatabases_BranchMatrix(t *testing.T)
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	if db.buildCancel != nil {
+		db.buildCancel()
+	}
+	db.bgWg.Wait()
 
 	// Add namespace lister branch coverage (skips empty/system namespaces).
 	db.baseStorage = &namespaceListEngine{
