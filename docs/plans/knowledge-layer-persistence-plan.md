@@ -228,14 +228,21 @@ Property-level score data should not be written back into the entity's stored fi
 
 The engine should support multiple decay function identifiers over time.
 
-Initial supported functions can include:
+Initial supported scoring modes can include:
 
 - `exponential`
 - `linear`
 - `step`
 - `none`
 
-The engine should resolve these as policy behavior, not as special categories.
+The engine should resolve these as runtime scoring behavior, not as special categories.
+
+These scoring modes should be accepted both:
+
+- from resolved policy and constraint configuration, and
+- from an explicit Cypher options object on decay scoring functions.
+
+Cypher may override the policy-resolved scoring mode for the scope of that scoring expression only. Unified retrieval should not expose that override surface and should remain policy-resolved.
 
 ### 6.4 Explainability
 
@@ -254,9 +261,15 @@ The decay subsystem should expose scoring through native Cypher functions so cal
 Proposed functions:
 
 - `decayScore(entity)` returns the effective scalar decay score for a node or relationship
-- `decayScore(entity, propertyKey)` returns the effective scalar decay score for a specific property on that node or relationship
+- `decayScore(entity, { scoringMode: 'linear' })` returns the effective scalar decay score for a node or relationship using the requested scoring mode
+- `decayScore(entity, { property: 'summary' })` returns the effective scalar decay score for a specific property on that node or relationship
+- `decayScore(entity, { property: 'summary', scoringMode: 'step' })` returns the effective scalar decay score for a specific property using the requested scoring mode
 - `decay(entity)` returns a structured decay object for the node or relationship
-- `decay(entity, propertyKey)` returns a structured decay object for the requested property
+- `decay(entity, { scoringMode: 'linear' })` returns a structured decay object for the node or relationship using the requested scoring mode
+- `decay(entity, { property: 'summary' })` returns a structured decay object for the requested property
+- `decay(entity, { property: 'summary', scoringMode: 'step' })` returns a structured decay object for the requested property using the requested scoring mode
+
+The options-object shape avoids ambiguous string overloads. `property` and `scoringMode` are named keys rather than positional string arguments.
 
 The structured `decay(...)` result should always expose a Cypher-accessible `.score` field so callers can write concise expressions without needing a second helper function when they want richer metadata.
 
@@ -282,7 +295,17 @@ RETURN n, decayScore(n) AS entityDecayScore
 
 ```cypher
 MATCH (n:SessionRecord)
-RETURN n.summary, decayScore(n, 'summary') AS summaryDecayScore
+RETURN n.summary, decayScore(n, {property: 'summary'}) AS summaryDecayScore
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decayScore(n, {scoringMode: 'linear'}) AS entityDecayScoreLinear
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n.summary, decayScore(n, {property: 'summary', scoringMode: 'step'}) AS summaryDecayScoreStep
 ```
 
 ```cypher
@@ -292,12 +315,51 @@ RETURN n, decay(n).score AS entityDecayScore, decay(n).policy AS entityDecayPoli
 
 ```cypher
 MATCH (n:SessionRecord)
-RETURN n.summary, decay(n, 'summary').score AS summaryDecayScore, decay(n, 'summary').reason AS summaryDecayReason
+RETURN n.summary, decay(n, {property: 'summary'}).score AS summaryDecayScore, decay(n, {property: 'summary'}).reason AS summaryDecayReason
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n.summary, decay(n, {property: 'summary', scoringMode: 'step'}).score AS summaryDecayScore, decay(n, {property: 'summary', scoringMode: 'step'}).function AS summaryDecayFunction
 ```
 
 ```cypher
 MATCH ()-[r:CO_ACCESSED]-()
-RETURN r, decayScore(r) AS edgeDecayScore, decay(r, 'signalScore').score AS signalDecayScore
+RETURN r, decayScore(r) AS edgeDecayScore, decay(r, {property: 'signalScore'}).score AS signalDecayScore
+```
+
+```cypher
+MATCH ()-[r:CO_ACCESSED]-()
+RETURN r, decay(r, {property: 'signalScore', scoringMode: 'exponential'}).score AS signalDecayScoreExponential
+```
+
+Example `ORDER BY` usage:
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decayScore(n) AS decayScoreValue
+ORDER BY decayScoreValue DESC
+LIMIT 25
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decayScore(n, {property: 'summary'}) AS summaryDecayScore
+ORDER BY summaryDecayScore DESC, n.createdAt DESC
+LIMIT 25
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decay(n, {property: 'summary'}).score AS summaryDecayScore
+ORDER BY summaryDecayScore DESC
+```
+
+```cypher
+MATCH ()-[r:CO_ACCESSED]-()
+RETURN r, decayScore(r, {property: 'signalScore', scoringMode: 'linear'}) AS signalDecayScore
+ORDER BY signalDecayScore DESC
+LIMIT 50
 ```
 
 Compatibility rule:
@@ -306,11 +368,20 @@ Compatibility rule:
 - callers opt in by returning `decayScore(...)` or `decay(...)` explicitly as additional columns
 - property-level scores are therefore visible to Cypher without changing Bolt node or relationship structures
 
+Implementation rule:
+
+- Cypher scoring functions should call the same shared runtime scorer used by unified retrieval scoring
+- Cypher options objects should be validated against the accepted keys `property` and `scoringMode`
+- supported Cypher `scoringMode` values remain: `exponential`, `linear`, `step`, `none`
+- unified retrieval should call the same scorer but should not accept a caller-supplied `scoringMode`
+
 ### 6.6 Unified Search Metadata
 
 The unified search service should follow the same derived-on-read model as native Cypher.
 
 It should not persist node-, edge-, or property-level decay scores into stored entity fields. Instead, when requested, it should add resolved scoring metadata into a separate response `meta` structure.
+
+Unified retrieval scoring should use the same scorer as Cypher scoring functions, but it should remain policy-resolved and should not expose the Cypher-only `scoringMode` override.
 
 The shape should be a keyed object rather than an array of single-entry maps.
 
@@ -359,6 +430,12 @@ Suggested conventions:
 - property-level scores nested at `scores[id].properties[propertyKey].decay`
 - optional richer metadata can be added later beside `decay`, such as `policy`, `reason`, or `scope`
 
+Suggested retrieval scoring inputs:
+
+- options object with optional `property` when scoring needs to target a specific property
+- options object may later grow additional explicit keys without breaking call-site semantics
+- retrieval callers should not provide `scoringMode`; mode selection comes from resolved policy
+
 ---
 
 ## 7. Constraint Design
@@ -396,7 +473,9 @@ Property-level retention rules should be authored inline within the same `REQUIR
 
 Nested `FOR ... REQUIRE` entries should remain invalid inside a block. If operators need retention rules for a different label or relationship type, they should create a separate targeted block constraint, consistent with the current schema-contract behavior.
 
-When property-level retention rules exist, the runtime should make the resolved score available through `decayScore(entity, propertyKey)` and `decay(entity, propertyKey)` even if the underlying Bolt result only returns the base node or relationship structure.
+When property-level retention rules exist, the runtime should make the resolved score available through `decayScore(entity, {property: propertyKey})` and `decay(entity, {property: propertyKey})` even if the underlying Bolt result only returns the base node or relationship structure.
+
+The same shared scorer should also back retrieval scoring, using the scoring mode resolved from policy rather than a caller override.
 
 ### 7.4 Sample Constraints in Cypher
 
@@ -540,11 +619,12 @@ DROP DECAY POLICY session_summary
 
 ### Suggested Cypher additions
 
-- native scalar function: `decayScore(entity[, propertyKey])`
-- native structured function: `decay(entity[, propertyKey])`
+- native scalar function: `decayScore(entity[, options])`
+- native structured function: `decay(entity[, options])`
 - both functions should work for nodes and relationships
 - `decay(...).score` should be the canonical Cypher-visible field for downstream sorting, filtering, and projection
 - both functions derive scores from the shared resolver rather than reading persisted property-level score fields
+- both functions accept an explicit Cypher options object with keys such as `property` and `scoringMode`
 
 ### Suggested storage rules
 
@@ -559,6 +639,7 @@ DROP DECAY POLICY session_summary
 - unified search may return node-, edge-, and property-level decay metadata additively in a separate `meta` section
 - the `meta` section should mirror the same resolved scores available through `decayScore()` and `decay()`
 - search hits themselves remain standard result entities plus ordinary ranking fields
+- unified retrieval scoring should call the same shared scorer implementation as Cypher, but without exposing the Cypher-only `scoringMode` override
 
 ---
 
@@ -571,7 +652,7 @@ Deliverables:
 - define the policy schema model
 - define supported decay functions and thresholds
 - define explainable resolution output
-- define the native `decayScore()` and `decay()` Cypher function contracts
+- define the native `decayScore()` and `decay()` Cypher function contracts, including explicit `property` and `scoringMode` options
 - define the derived search metadata contract for node-, edge-, and property-level scores
 
 ### Workstream B: Constraint Extensions
@@ -592,6 +673,8 @@ Deliverables:
 - expose an explainable resolution trace for any effective policy
 - make resolved node-, edge-, and property-level scores available to native Cypher functions
 - make the same resolved scores available to unified search metadata without persisting them into entity fields
+- centralize policy-resolved scoring so Cypher and unified retrieval call the same scorer
+- keep Cypher-only scoring-mode override handling at the function surface while leaving unified retrieval policy-resolved
 
 ### Workstream D: Runtime Integration
 
@@ -618,11 +701,12 @@ Deliverables:
 3. Add configurable per-policy half-lives, decay rates, named presets, and function identifiers.
 4. Define and implement schema-backed persistence and decay entries on block constraints for nodes and relationships.
 5. Extend block parsing and compiled contract metadata to support property-targeted retention entries.
-6. Add native Cypher functions `decayScore()` and `decay()` for nodes, relationships, and property keys.
+6. Add native Cypher functions `decayScore()` and `decay()` for nodes and relationships with an explicit options object for `property` and optional `scoringMode`.
 7. Migrate runtime logic away from fixed tier assumptions.
-8. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
-9. Add regression tests for resolution, property-level retention, Cypher score access, and archival behavior.
-10. Add benchmark and evaluation coverage for policy resolution overhead and correctness.
+8. Bind unified retrieval scoring to the same shared scorer and policy-resolved scoring configuration.
+9. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
+10. Add regression tests for resolution, property-level retention, Cypher score access, Cypher-only `scoringMode` overrides, explicit property-target options, and archival behavior.
+11. Add benchmark and evaluation coverage for policy resolution overhead and correctness.
 
 ---
 
@@ -637,10 +721,13 @@ Deliverables:
 - removing or changing a decay constraint changes future resolution without corrupting stored history
 - relationship-level blocks and inline property rules both resolve correctly
 - explain output identifies the exact block entry and effective policy
-- `decayScore(n)` and `decayScore(n, 'prop')` return the same resolved score used by runtime policy evaluation
-- `decay(n).score` and `decay(n, 'prop').score` are Cypher-accessible and stable for projection and ordering
+- `decayScore(n)` and `decayScore(n, {property: 'prop'})` return the same resolved score used by runtime policy evaluation
+- `decayScore()` and `decay()` accept Cypher-only `scoringMode` overrides with values `exponential`, `linear`, `step`, and `none`
+- `decay(n).score` and `decay(n, {property: 'prop'}).score` are Cypher-accessible and stable for projection and ordering
 - returning `n` alone does not alter Neo4j-compatible result shape
 - unified search `meta` returns entity and property decay scores in a separate keyed structure without mutating the hit payload
+- unified retrieval scoring returns the same score family as the equivalent Cypher call when both use the same resolved policy
+- unified retrieval does not expose the Cypher-only `scoringMode` override surface
 
 ### Benchmark targets
 
@@ -662,6 +749,7 @@ The plan is complete when:
 - explainable policy resolution is available for diagnostics
 - native Cypher functions expose resolved entity and property scores without mutating Neo4j-compatible node or relationship payloads
 - unified search exposes the same resolved scores additively through response metadata rather than persisted fields
+- Cypher scoring and unified retrieval scoring share the same scorer implementation, but only Cypher exposes an explicit `scoringMode` override
 - new decay models can be expressed as policy and constraints without new engine categories
 
 ---
@@ -682,6 +770,7 @@ The plan is complete when:
 - a shared decay policy resolver with config-backed defaults and constraint-backed block entries
 - block-constraint extensions for inline property-level retention rules
 - native Cypher function support for `decayScore()` and `decay()`
+- shared runtime scorer support for Cypher and unified retrieval, with Cypher-only `scoringMode` override support and policy-resolved search scoring
 - unified search metadata support for additive node-, edge-, and property-level decay scores
 - regression tests covering node-, edge-, and property-level semantics
 - user-facing documentation for persistence and decay policy authoring
