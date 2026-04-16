@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,78 @@ func (e *txCapableCypherQueryExecutor) RollbackTransaction(ctx context.Context) 
 	}
 	_, err := exec.Execute(ctx, "ROLLBACK", nil)
 	return err
+}
+
+func startBoltIntegrationServer(t *testing.T, store storage.Engine) (*Server, int) {
+	t.Helper()
+	executor := &cypherQueryExecutor{executor: cypher.NewStorageExecutor(store)}
+	server := New(&Config{
+		Port:            0,
+		MaxConnections:  10,
+		ReadBufferSize:  8192,
+		WriteBufferSize: 8192,
+	}, executor)
+	t.Cleanup(func() {
+		server.Close()
+	})
+	go func() {
+		if err := server.ListenAndServe(); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	return server, server.listener.Addr().(*net.TCPAddr).Port
+}
+
+func openBoltTestConn(t *testing.T, port int) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
+	requireNoError(t, err)
+	t.Cleanup(func() {
+		conn.Close()
+	})
+	requireNoError(t, PerformHandshakeWithTesting(t, conn))
+	requireNoError(t, SendHello(t, conn, nil))
+	requireNoError(t, ReadSuccess(t, conn))
+	return conn
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runBoltQueryAndCollectRecords(t *testing.T, conn net.Conn, query string) [][]any {
+	t.Helper()
+	requireNoError(t, SendRun(t, conn, query, nil, nil))
+	requireNoError(t, ReadSuccess(t, conn))
+	requireNoError(t, SendPull(t, conn, nil))
+
+	var records [][]any
+	for {
+		msgType, msgData, err := ReadMessage(conn)
+		requireNoError(t, err)
+		switch msgType {
+		case MsgRecord:
+			fields, _, err := decodePackStreamList(msgData, 0)
+			requireNoError(t, err)
+			records = append(records, fields)
+		case MsgSuccess:
+			return records
+		default:
+			t.Fatalf("unexpected Bolt message type 0x%02X for query %q", msgType, query)
+		}
+	}
+}
+
+func runBoltQueryExpectFailure(t *testing.T, conn net.Conn, query string) (string, string) {
+	t.Helper()
+	requireNoError(t, SendRun(t, conn, query, nil, nil))
+	code, message, err := AssertFailure(t, conn)
+	requireNoError(t, err)
+	return code, message
 }
 
 // TestBoltCypherIntegration tests the full stack: Bolt server + Cypher executor.
@@ -361,6 +434,359 @@ func TestBoltCypherIntegration(t *testing.T) {
 		ReadSuccess(t, conn)
 	})
 
+}
+
+func TestBoltConstraintIntegration_NewerConstraintTypes(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	_, port := startBoltIntegrationServer(t, store)
+	conn := openBoltTestConn(t, port)
+
+	queries := []string{
+		"CREATE CONSTRAINT person_name_required IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL",
+		"CREATE CONSTRAINT user_key IF NOT EXISTS FOR (u:User) REQUIRE (u.username, u.domain) IS NODE KEY",
+		"CREATE CONSTRAINT fact_temporal IF NOT EXISTS FOR (v:FactVersion) REQUIRE (v.fact_key, v.valid_from, v.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT rel_exists IF NOT EXISTS FOR ()-[r:FOLLOWS]-() REQUIRE r.since IS NOT NULL",
+		"CREATE CONSTRAINT rel_key IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE (r.since, r.how) IS RELATIONSHIP KEY",
+	}
+
+	for _, query := range queries {
+		records := runBoltQueryAndCollectRecords(t, conn, query)
+		if len(records) != 0 {
+			t.Fatalf("expected no records for schema mutation %q, got %d", query, len(records))
+		}
+	}
+
+	showRecords := runBoltQueryAndCollectRecords(t, conn, "SHOW CONSTRAINTS")
+	if len(showRecords) < len(queries) {
+		t.Fatalf("expected at least %d constraints, got %d", len(queries), len(showRecords))
+	}
+
+	typesByName := map[string]string{}
+	entityTypesByName := map[string]string{}
+	for _, row := range showRecords {
+		if len(row) < 4 {
+			continue
+		}
+		name, _ := row[1].(string)
+		constraintType, ok := row[2].(string)
+		if ok && name != "" {
+			typesByName[name] = constraintType
+		}
+		entityType, ok := row[3].(string)
+		if ok && name != "" {
+			entityTypesByName[name] = entityType
+		}
+	}
+
+	wantTypes := map[string]string{
+		"person_name_required": "EXISTS",
+		"user_key":             "NODE_KEY",
+		"fact_temporal":        "TEMPORAL_NO_OVERLAP",
+		"rel_exists":           "EXISTS",
+		"rel_key":              "RELATIONSHIP_KEY",
+	}
+	for name, want := range wantTypes {
+		if got := typesByName[name]; got != want {
+			t.Fatalf("expected SHOW CONSTRAINTS type %q for %q, got %q (all=%v)", want, name, got, typesByName)
+		}
+	}
+
+	if entityTypesByName["person_name_required"] != "NODE" ||
+		entityTypesByName["user_key"] != "NODE" ||
+		entityTypesByName["fact_temporal"] != "NODE" {
+		t.Fatalf("unexpected node entity types in SHOW CONSTRAINTS: %v", entityTypesByName)
+	}
+	if entityTypesByName["rel_exists"] != "RELATIONSHIP" ||
+		entityTypesByName["rel_key"] != "RELATIONSHIP" {
+		t.Fatalf("unexpected relationship entity types in SHOW CONSTRAINTS: %v", entityTypesByName)
+	}
+}
+
+func TestBoltConstraintIntegration_AllConstraintFamilies(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	_, port := startBoltIntegrationServer(t, store)
+	conn := openBoltTestConn(t, port)
+
+	queries := []string{
+		"CREATE CONSTRAINT person_email_unique IF NOT EXISTS FOR (p:Person) REQUIRE p.email IS UNIQUE",
+		"CREATE CONSTRAINT person_name_required IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL",
+		"CREATE CONSTRAINT user_key IF NOT EXISTS FOR (u:User) REQUIRE (u.username, u.domain) IS NODE KEY",
+		"CREATE CONSTRAINT person_age_type IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+		"CREATE CONSTRAINT person_status_domain IF NOT EXISTS FOR (p:Person) REQUIRE p.status IN ['active', 'inactive']",
+		"CREATE CONSTRAINT fact_temporal IF NOT EXISTS FOR (v:FactVersion) REQUIRE (v.fact_key, v.valid_from, v.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT rel_exists IF NOT EXISTS FOR ()-[r:FOLLOWS]-() REQUIRE r.since IS NOT NULL",
+		"CREATE CONSTRAINT rel_key IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE (r.since, r.how) IS RELATIONSHIP KEY",
+		"CREATE CONSTRAINT rel_order_type IF NOT EXISTS FOR ()-[r:PART_OF]-() REQUIRE r.order IS :: INTEGER",
+		"CREATE CONSTRAINT rel_role_domain IF NOT EXISTS FOR ()-[r:WORKS_AT]-() REQUIRE r.role IN ['engineer', 'manager']",
+		"CREATE CONSTRAINT max_jobs IF NOT EXISTS FOR ()-[r:WORKS_AT]->() REQUIRE MAX COUNT 2",
+		"CREATE CONSTRAINT works_at_allowed IF NOT EXISTS FOR (:Person)-[r:WORKS_AT]->(:Company) REQUIRE ALLOWED",
+		"CREATE CONSTRAINT no_intern_exec IF NOT EXISTS FOR (:Intern)-[r:REPORTS_TO]->(:Executive) REQUIRE DISALLOWED",
+	}
+
+	for _, query := range queries {
+		records := runBoltQueryAndCollectRecords(t, conn, query)
+		if len(records) != 0 {
+			t.Fatalf("expected no records for schema mutation %q, got %d", query, len(records))
+		}
+	}
+
+	showRecords := runBoltQueryAndCollectRecords(t, conn, "SHOW CONSTRAINTS")
+	if len(showRecords) < len(queries) {
+		t.Fatalf("expected at least %d constraints, got %d", len(queries), len(showRecords))
+	}
+
+	typesByName := map[string]string{}
+	entityTypesByName := map[string]string{}
+	propertyTypeByName := map[string]string{}
+	for _, row := range showRecords {
+		if len(row) < 8 {
+			continue
+		}
+		name, _ := row[1].(string)
+		constraintType, _ := row[2].(string)
+		entityType, _ := row[3].(string)
+		propType, _ := row[7].(string)
+		if name != "" {
+			typesByName[name] = constraintType
+			entityTypesByName[name] = entityType
+			if propType != "" {
+				propertyTypeByName[name] = propType
+			}
+		}
+	}
+
+	wantTypes := map[string]string{
+		"person_email_unique":  "UNIQUE",
+		"person_name_required": "EXISTS",
+		"user_key":             "NODE_KEY",
+		"person_age_type":      "PROPERTY_TYPE",
+		"person_status_domain": "DOMAIN",
+		"fact_temporal":        "TEMPORAL_NO_OVERLAP",
+		"rel_exists":           "EXISTS",
+		"rel_key":              "RELATIONSHIP_KEY",
+		"rel_order_type":       "PROPERTY_TYPE",
+		"rel_role_domain":      "DOMAIN",
+		"max_jobs":             "CARDINALITY",
+		"works_at_allowed":     "RELATIONSHIP_POLICY",
+		"no_intern_exec":       "RELATIONSHIP_POLICY",
+	}
+	for name, want := range wantTypes {
+		if got := typesByName[name]; got != want {
+			t.Fatalf("expected SHOW CONSTRAINTS type %q for %q, got %q (all=%v)", want, name, got, typesByName)
+		}
+	}
+
+	if propertyTypeByName["person_age_type"] != "INTEGER" {
+		t.Fatalf("expected property type INTEGER for person_age_type, got %q", propertyTypeByName["person_age_type"])
+	}
+	if propertyTypeByName["rel_order_type"] != "INTEGER" {
+		t.Fatalf("expected property type INTEGER for rel_order_type, got %q", propertyTypeByName["rel_order_type"])
+	}
+
+	nodeNames := []string{"person_email_unique", "person_name_required", "user_key", "person_age_type", "person_status_domain", "fact_temporal"}
+	for _, name := range nodeNames {
+		if entityTypesByName[name] != "NODE" {
+			t.Fatalf("expected NODE entity type for %q, got %q", name, entityTypesByName[name])
+		}
+	}
+	relNames := []string{"rel_exists", "rel_key", "rel_order_type", "rel_role_domain", "max_jobs", "works_at_allowed", "no_intern_exec"}
+	for _, name := range relNames {
+		if entityTypesByName[name] != "RELATIONSHIP" {
+			t.Fatalf("expected RELATIONSHIP entity type for %q, got %q", name, entityTypesByName[name])
+		}
+	}
+}
+
+func TestBoltConstraintIntegration_ConstraintContracts(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	_, port := startBoltIntegrationServer(t, store)
+	conn := openBoltTestConn(t, port)
+
+	createContract := `
+		CREATE CONSTRAINT person_contract
+		FOR (n:Person)
+		REQUIRE {
+		  n.id IS UNIQUE
+		  n.name IS NOT NULL
+		  n.age IS :: INTEGER
+		  n.status IS :: STRING
+		  n.status IN ['active', 'inactive']
+		  (n.tenant, n.externalId) IS NODE KEY
+		  COUNT { (n)-[:PRIMARY_EMPLOYER]->(:Company) } <= 1
+		  NOT EXISTS { (n)-[:FORBIDDEN_REL]->() }
+		}`
+
+	records := runBoltQueryAndCollectRecords(t, conn, createContract)
+	if len(records) != 0 {
+		t.Fatalf("expected no records creating contract, got %d", len(records))
+	}
+
+	contracts := runBoltQueryAndCollectRecords(t, conn, "SHOW CONSTRAINT CONTRACTS")
+	if len(contracts) != 1 {
+		t.Fatalf("expected 1 contract row, got %d", len(contracts))
+	}
+	row := contracts[0]
+	if len(row) < 7 {
+		t.Fatalf("unexpected SHOW CONSTRAINT CONTRACTS row shape: %v", row)
+	}
+	if row[0] != "person_contract" || row[1] != "NODE" || row[2] != "Person" {
+		t.Fatalf("unexpected contract metadata row: %v", row)
+	}
+	if row[3] != int64(8) || row[4] != int64(5) || row[5] != int64(3) {
+		t.Fatalf("unexpected contract entry counts: %v", row)
+	}
+	defn, ok := row[6].(string)
+	if !ok || defn == "" {
+		t.Fatalf("expected non-empty contract definition, got %v", row[6])
+	}
+
+	records = runBoltQueryAndCollectRecords(t, conn, `
+		CREATE CONSTRAINT works_at_contract
+		FOR ()-[r:WORKS_AT]-()
+		REQUIRE {
+		  r.id IS UNIQUE
+		  r.startedAt IS NOT NULL
+		  r.role IS :: STRING
+		  (r.tenant, r.externalId) IS RELATIONSHIP KEY
+		  startNode(r) <> endNode(r)
+		  startNode(r).tenant = endNode(r).tenant
+		  r.status IN ['active', 'inactive']
+		  r.hoursPerWeek > 0
+		}`)
+	if len(records) != 0 {
+		t.Fatalf("expected no records creating relationship contract, got %d", len(records))
+	}
+
+	contracts = runBoltQueryAndCollectRecords(t, conn, "SHOW CONSTRAINT CONTRACTS")
+	if len(contracts) != 2 {
+		t.Fatalf("expected 2 contract rows, got %d", len(contracts))
+	}
+}
+
+func TestBoltConstraintIntegration_EnforcementForNewFamilies(t *testing.T) {
+	t.Run("domain", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE CONSTRAINT person_status_domain FOR (n:Person) REQUIRE n.status IN ['active', 'inactive']")
+		_, msg := runBoltQueryExpectFailure(t, conn, "CREATE (:Person {id:'p1', status:'paused'})")
+		if !strings.Contains(msg, "allowed") && !strings.Contains(msg, "DOMAIN") && !strings.Contains(msg, "active") {
+			t.Fatalf("expected domain violation message, got %q", msg)
+		}
+	})
+
+	t.Run("cardinality", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE CONSTRAINT max_jobs FOR ()-[r:WORKS_AT]->() REQUIRE MAX COUNT 2")
+		runBoltQueryAndCollectRecords(t, conn, "CREATE (:Person {id:'p1'}), (:Company {id:'c1'}), (:Company {id:'c2'}), (:Company {id:'c3'})")
+		runBoltQueryAndCollectRecords(t, conn, "MATCH (p:Person {id:'p1'}), (c:Company {id:'c1'}) CREATE (p)-[:WORKS_AT]->(c)")
+		runBoltQueryAndCollectRecords(t, conn, "MATCH (p:Person {id:'p1'}), (c:Company {id:'c2'}) CREATE (p)-[:WORKS_AT]->(c)")
+		_, msg := runBoltQueryExpectFailure(t, conn, "MATCH (p:Person {id:'p1'}), (c:Company {id:'c3'}) CREATE (p)-[:WORKS_AT]->(c)")
+		if !strings.Contains(msg, "max count") && !strings.Contains(msg, "exceed") {
+			t.Fatalf("expected cardinality violation message, got %q", msg)
+		}
+	})
+
+	t.Run("policy", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE CONSTRAINT works_at_allowed FOR (:Person)-[r:WORKS_AT]->(:Company) REQUIRE ALLOWED")
+		runBoltQueryAndCollectRecords(t, conn, "CREATE (:Robot {id:'r1'}), (:Company {id:'c1'})")
+		_, msg := runBoltQueryExpectFailure(t, conn, "MATCH (r:Robot {id:'r1'}), (c:Company {id:'c1'}) CREATE (r)-[:WORKS_AT]->(c)")
+		if !strings.Contains(msg, "ALLOWED") {
+			t.Fatalf("expected ALLOWED policy violation message, got %q", msg)
+		}
+	})
+
+	t.Run("policy_disallowed", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE CONSTRAINT no_intern_exec FOR (:Intern)-[r:REPORTS_TO]->(:Executive) REQUIRE DISALLOWED")
+		runBoltQueryAndCollectRecords(t, conn, "CREATE (:Intern {id:'i1'}), (:Executive {id:'e1'})")
+		_, msg := runBoltQueryExpectFailure(t, conn, "MATCH (i:Intern {id:'i1'}), (e:Executive {id:'e1'}) CREATE (i)-[:REPORTS_TO]->(e)")
+		if !strings.Contains(msg, "DISALLOWED") {
+			t.Fatalf("expected DISALLOWED policy violation message, got %q", msg)
+		}
+	})
+
+	t.Run("relationship_domain", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE CONSTRAINT rel_role_domain FOR ()-[r:WORKS_AT]-() REQUIRE r.role IN ['engineer', 'manager']")
+		runBoltQueryAndCollectRecords(t, conn, "CREATE (:Person {id:'p1'}), (:Company {id:'c1'})")
+		_, msg := runBoltQueryExpectFailure(t, conn, "MATCH (p:Person {id:'p1'}), (c:Company {id:'c1'}) CREATE (p)-[:WORKS_AT {role:'director'}]->(c)")
+		if !strings.Contains(msg, "allowed") && !strings.Contains(msg, "DOMAIN") && !strings.Contains(msg, "engineer") {
+			t.Fatalf("expected relationship domain violation message, got %q", msg)
+		}
+	})
+
+	t.Run("contract_runtime", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, `
+			CREATE CONSTRAINT person_contract
+			FOR (n:Person)
+			REQUIRE {
+			  n.id IS UNIQUE
+			  n.name IS NOT NULL
+			  n.age IS :: INTEGER
+			  n.status IN ['active', 'inactive']
+			  (n.tenant, n.externalId) IS NODE KEY
+			}`)
+		_, msg := runBoltQueryExpectFailure(t, conn, "CREATE (:Person {id:'bad', name:'Bob', age:40, status:'paused', tenant:'t1', externalId:'u2'})")
+		if !strings.Contains(msg, "constraint contract person_contract violated") {
+			t.Fatalf("expected contract violation message, got %q", msg)
+		}
+	})
+
+	t.Run("contract_relationship_runtime", func(t *testing.T) {
+		baseStore := storage.NewMemoryEngine()
+		store := storage.NewNamespacedEngine(baseStore, "test")
+		_, port := startBoltIntegrationServer(t, store)
+		conn := openBoltTestConn(t, port)
+
+		runBoltQueryAndCollectRecords(t, conn, "CREATE (:Person {id:'p1', tenant:'t1'}), (:Person {id:'p2', tenant:'t2'}), (:Person {id:'p3', tenant:'t1'})")
+		runBoltQueryAndCollectRecords(t, conn, `
+			CREATE CONSTRAINT works_at_contract
+			FOR ()-[r:WORKS_AT]-()
+			REQUIRE {
+			  r.id IS UNIQUE
+			  r.startedAt IS NOT NULL
+			  r.role IS :: STRING
+			  (r.tenant, r.externalId) IS RELATIONSHIP KEY
+			  startNode(r) <> endNode(r)
+			  startNode(r).tenant = endNode(r).tenant
+			  r.status IN ['active', 'inactive']
+			  r.hoursPerWeek > 0
+			}`)
+		_, msg := runBoltQueryExpectFailure(t, conn, `
+			MATCH (a:Person {id:'p1'}), (b:Person {id:'p2'})
+			CREATE (a)-[:WORKS_AT {id:'w2', startedAt:'2024-01-01', role:'Engineer', tenant:'t1', externalId:'rel-2', status:'active', hoursPerWeek:40}]->(b)`)
+		if !strings.Contains(msg, "constraint contract works_at_contract violated") && !strings.Contains(msg, "startNode(r).tenant = endNode(r).tenant") {
+			t.Fatalf("expected relationship contract violation message, got %q", msg)
+		}
+	})
 }
 
 func TestBoltExplicitTransactionRollbackRevertsCreate(t *testing.T) {

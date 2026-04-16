@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,6 +18,22 @@ func newTestBadgerNamespacedStore(t *testing.T) storage.Engine {
 		require.NoError(t, baseStore.Close())
 	})
 	return storage.NewNamespacedEngine(baseStore, "test")
+}
+
+func newTestServerLikeNamespacedStore(t *testing.T) storage.Engine {
+	t.Helper()
+	baseStore, err := storage.NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	wal, err := storage.NewWAL(t.TempDir(), nil)
+	require.NoError(t, err)
+	walStore := storage.NewWALEngine(baseStore, wal)
+	asyncStore := storage.NewAsyncEngine(walStore, nil)
+	t.Cleanup(func() {
+		asyncStore.Flush()
+		require.NoError(t, wal.Close())
+		require.NoError(t, asyncStore.Close())
+	})
+	return storage.NewNamespacedEngine(asyncStore, "test")
 }
 
 func TestE2E_UnwindMergeChainBatch_QVersionsFamily_Deterministic(t *testing.T) {
@@ -1032,6 +1049,246 @@ FOREACH (_ IN CASE WHEN row.target_entity_id IS NULL OR row.target_entity_id = '
 	targetRes, err := exec.Execute(ctx, `MATCH (:FactVersion:CodeState)-[:TARGET]->(:Entity:CodeEntity {entity_id: 'symbol::repo::function::callee'}) RETURN count(*)`, nil)
 	require.NoError(t, err)
 	require.Equal(t, [][]interface{}{{int64(2)}}, targetRes.Rows)
+}
+
+func TestE2E_G2GVersionNodesPhase_WithSourceForeach_BadgerImplicitTx_Deterministic(t *testing.T) {
+	store := newTestBadgerNamespacedStore(t)
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	bootstrap := []string{
+		"CREATE CONSTRAINT g2g_entity_entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
+		"CREATE CONSTRAINT g2g_codestate_state_id_unique IF NOT EXISTS FOR (cs:CodeState) REQUIRE cs.state_id IS UNIQUE",
+		"CREATE CONSTRAINT g2g_commit_hash_unique IF NOT EXISTS FOR (c:Commit) REQUIRE c.hash IS UNIQUE",
+		"CREATE CONSTRAINT g2g_codekey_entity_relation_nodekey IF NOT EXISTS FOR (ck:CodeKey) REQUIRE (ck.entity_id, ck.relation_type) IS NODE KEY",
+		"CREATE CONSTRAINT g2g_factversion_fact_key_temporal_no_overlap IF NOT EXISTS FOR (fv:FactVersion) REQUIRE (fv.fact_key, fv.valid_from, fv.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT g2g_factversion_fact_key_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.fact_key IS NOT NULL",
+		"CREATE CONSTRAINT g2g_factversion_predicate_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.predicate IS NOT NULL",
+		"CREATE CONSTRAINT g2g_factversion_valid_from_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.valid_from IS NOT NULL",
+	}
+	for _, stmt := range bootstrap {
+		_, err := exec.Execute(ctx, stmt, nil)
+		require.NoError(t, err, stmt)
+	}
+
+	query := strings.TrimSpace(`
+UNWIND $rows AS row
+MERGE (e:Entity:CodeEntity {entity_id: row.entity_id})
+ON CREATE SET e.created_at = datetime(row.asserted_at_iso)
+SET e.entity_type = row.entity_type,
+	e.repo_id = row.repo_id,
+	e.display_name = coalesce(row.name, row.path, row.file_path, row.entity_id),
+	e.path = CASE WHEN row.path IS NULL OR row.path = '' THEN null ELSE row.path END,
+	e.file_path = CASE WHEN row.file_path IS NULL OR row.file_path = '' THEN null ELSE row.file_path END,
+	e.lang = CASE WHEN row.language IS NULL OR row.language = '' THEN null ELSE row.language END,
+	e.symbol_kind = CASE WHEN row.symbol_kind IS NULL OR row.symbol_kind = '' THEN null ELSE row.symbol_kind END,
+	e.line_number = CASE WHEN row.line_number IS NULL OR row.line_number = 0 THEN null ELSE row.line_number END
+MERGE (ck:FactKey:CodeKey {
+	subject_entity_id: row.entity_id,
+	predicate: row.predicate,
+	entity_id: row.entity_id,
+	relation_type: row.relation_type
+})
+SET ck.fact_key = row.code_key,
+	ck.repo_id = row.repo_id,
+	ck.subject_entity_type = row.entity_type
+MERGE (cs:FactVersion:CodeState {state_id: row.state_id})
+SET cs.fact_key = row.code_key,
+	cs.code_key = row.code_key,
+	cs.tx_id = row.tx_id,
+	cs.commit_hash = row.commit_hash,
+	cs.valid_from_iso = row.valid_from_iso,
+	cs.valid_from = datetime(row.valid_from_iso),
+	cs.value_json = row.value_json,
+	cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+	cs.asserted_at = datetime(row.asserted_at_iso),
+	cs.asserted_by = row.asserted_by,
+	cs.semantic_type = row.semantic_type,
+	cs.repo_id = row.repo_id,
+	cs.entity_id = row.entity_id,
+	cs.entity_type = row.entity_type,
+	cs.predicate = row.predicate,
+	cs.source_entity_id = CASE WHEN row.source_entity_id IS NULL OR row.source_entity_id = '' THEN null ELSE row.source_entity_id END,
+	cs.source_entity_type = CASE WHEN row.source_entity_type IS NULL OR row.source_entity_type = '' THEN null ELSE row.source_entity_type END,
+	cs.target_entity_id = CASE WHEN row.target_entity_id IS NULL OR row.target_entity_id = '' THEN null ELSE row.target_entity_id END,
+	cs.target_entity_type = CASE WHEN row.target_entity_type IS NULL OR row.target_entity_type = '' THEN null ELSE row.target_entity_type END,
+	cs.path = CASE WHEN row.path IS NULL OR row.path = '' THEN null ELSE row.path END,
+	cs.file_path = CASE WHEN row.file_path IS NULL OR row.file_path = '' THEN null ELSE row.file_path END,
+	cs.name = CASE WHEN row.name IS NULL OR row.name = '' THEN null ELSE row.name END,
+	cs.language = CASE WHEN row.language IS NULL OR row.language = '' THEN null ELSE row.language END,
+	cs.symbol_kind = CASE WHEN row.symbol_kind IS NULL OR row.symbol_kind = '' THEN null ELSE row.symbol_kind END,
+	cs.line_number = CASE WHEN row.line_number IS NULL OR row.line_number = 0 THEN null ELSE row.line_number END
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+FOREACH (_ IN CASE WHEN row.source_entity_id IS NULL OR row.source_entity_id = '' THEN [] ELSE [1] END |
+	MERGE (src:Entity:CodeEntity {entity_id: row.source_entity_id})
+	ON CREATE SET src.created_at = datetime(row.asserted_at_iso)
+	SET src.entity_type = row.source_entity_type,
+		src.repo_id = row.repo_id
+	MERGE (cs)-[:SOURCE]->(src)
+)
+FOREACH (_ IN CASE WHEN row.target_entity_id IS NULL OR row.target_entity_id = '' THEN [] ELSE [1] END |
+	MERGE (dst:Entity:CodeEntity {entity_id: row.target_entity_id})
+	ON CREATE SET dst.created_at = datetime(row.asserted_at_iso)
+	SET dst.entity_type = row.target_entity_type,
+		dst.repo_id = row.repo_id
+)`)
+
+	rows := make([]map[string]interface{}, 0, 32)
+	for i := 0; i < 32; i++ {
+		rows = append(rows, map[string]interface{}{
+			"entity_id":          "repo_fact|calls|symbol::repo::function::caller-" + strconv.Itoa(i),
+			"entity_type":        "calls_edge",
+			"repo_id":            "repo",
+			"relation_type":      "calls",
+			"predicate":          "calls",
+			"state_id":           "cs-g2g-version-nodes-" + strconv.Itoa(i),
+			"code_key":           "repo_fact|calls|symbol::repo::function::caller-" + strconv.Itoa(i),
+			"tx_id":              "tx-g2g-000001",
+			"commit_hash":        "commit-g2g-shared",
+			"valid_from_iso":     "2026-03-20T20:22:20Z",
+			"asserted_at_iso":    "2026-03-20T20:22:20Z",
+			"asserted_by":        "TJ Sweet",
+			"value_json":         `{"caller":"symbol::repo::function::caller","callee":"symbol::repo::function::callee"}`,
+			"semantic_type":      "calls",
+			"source_entity_id":   "symbol::repo::function::caller",
+			"source_entity_type": "function",
+			"target_entity_id":   "symbol::repo::function::callee",
+			"target_entity_type": "function",
+			"path":               "internal/parser/parser.go",
+			"file_path":          "internal/parser/parser.go",
+			"name":               "caller->callee",
+			"language":           "go",
+			"symbol_kind":        "function",
+			"line_number":        int64(42 + i),
+			"valid_to_iso":       nil,
+		})
+	}
+
+	_, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+
+	sourceRes, err := exec.Execute(ctx, `MATCH (:FactVersion:CodeState)-[:SOURCE]->(:Entity:CodeEntity {entity_id: 'symbol::repo::function::caller'}) RETURN count(*)`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{int64(32)}}, sourceRes.Rows)
+}
+
+func TestE2E_G2GVersionNodesPhase_WithSourceForeach_ServerStack_Deterministic(t *testing.T) {
+	store := newTestServerLikeNamespacedStore(t)
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	bootstrap := []string{
+		"CREATE CONSTRAINT g2g_entity_entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
+		"CREATE CONSTRAINT g2g_codestate_state_id_unique IF NOT EXISTS FOR (cs:CodeState) REQUIRE cs.state_id IS UNIQUE",
+		"CREATE CONSTRAINT g2g_commit_hash_unique IF NOT EXISTS FOR (c:Commit) REQUIRE c.hash IS UNIQUE",
+		"CREATE CONSTRAINT g2g_codekey_entity_relation_nodekey IF NOT EXISTS FOR (ck:CodeKey) REQUIRE (ck.entity_id, ck.relation_type) IS NODE KEY",
+		"CREATE CONSTRAINT g2g_factversion_fact_key_temporal_no_overlap IF NOT EXISTS FOR (fv:FactVersion) REQUIRE (fv.fact_key, fv.valid_from, fv.valid_to) IS TEMPORAL NO OVERLAP",
+		"CREATE CONSTRAINT g2g_factversion_fact_key_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.fact_key IS NOT NULL",
+		"CREATE CONSTRAINT g2g_factversion_predicate_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.predicate IS NOT NULL",
+		"CREATE CONSTRAINT g2g_factversion_valid_from_exists IF NOT EXISTS FOR (fv:FactVersion) REQUIRE fv.valid_from IS NOT NULL",
+	}
+	for _, stmt := range bootstrap {
+		_, err := exec.Execute(ctx, stmt, nil)
+		require.NoError(t, err, stmt)
+	}
+
+	rows := make([]map[string]interface{}, 0, 32)
+	for i := 0; i < 32; i++ {
+		rows = append(rows, map[string]interface{}{
+			"entity_id":          "repo_fact|calls|symbol::repo::function::server-" + strconv.Itoa(i),
+			"entity_type":        "calls_edge",
+			"repo_id":            "repo",
+			"relation_type":      "calls",
+			"predicate":          "calls",
+			"state_id":           "cs-g2g-server-stack-" + strconv.Itoa(i),
+			"code_key":           "repo_fact|calls|symbol::repo::function::server-" + strconv.Itoa(i),
+			"tx_id":              "tx-g2g-000001",
+			"commit_hash":        "commit-g2g-server-shared",
+			"valid_from_iso":     "2026-03-20T20:22:20Z",
+			"asserted_at_iso":    "2026-03-20T20:22:20Z",
+			"asserted_by":        "TJ Sweet",
+			"value_json":         `{"caller":"symbol::repo::function::caller","callee":"symbol::repo::function::callee"}`,
+			"semantic_type":      "calls",
+			"source_entity_id":   "symbol::repo::function::caller",
+			"source_entity_type": "function",
+			"target_entity_id":   "symbol::repo::function::callee",
+			"target_entity_type": "function",
+			"path":               "internal/parser/parser.go",
+			"file_path":          "internal/parser/parser.go",
+			"name":               "caller->callee",
+			"language":           "go",
+			"symbol_kind":        "function",
+			"line_number":        int64(42 + i),
+			"valid_to_iso":       nil,
+		})
+	}
+
+	query := strings.TrimSpace(`
+UNWIND $rows AS row
+MERGE (e:Entity:CodeEntity {entity_id: row.entity_id})
+ON CREATE SET e.created_at = datetime(row.asserted_at_iso)
+SET e.entity_type = row.entity_type,
+	e.repo_id = row.repo_id,
+	e.display_name = coalesce(row.name, row.path, row.file_path, row.entity_id),
+	e.path = CASE WHEN row.path IS NULL OR row.path = '' THEN null ELSE row.path END,
+	e.file_path = CASE WHEN row.file_path IS NULL OR row.file_path = '' THEN null ELSE row.file_path END,
+	e.lang = CASE WHEN row.language IS NULL OR row.language = '' THEN null ELSE row.language END,
+	e.symbol_kind = CASE WHEN row.symbol_kind IS NULL OR row.symbol_kind = '' THEN null ELSE row.symbol_kind END,
+	e.line_number = CASE WHEN row.line_number IS NULL OR row.line_number = 0 THEN null ELSE row.line_number END
+MERGE (ck:FactKey:CodeKey {
+	subject_entity_id: row.entity_id,
+	predicate: row.predicate,
+	entity_id: row.entity_id,
+	relation_type: row.relation_type
+})
+SET ck.fact_key = row.code_key,
+	ck.repo_id = row.repo_id,
+	ck.subject_entity_type = row.entity_type
+MERGE (cs:FactVersion:CodeState {state_id: row.state_id})
+SET cs.fact_key = row.code_key,
+	cs.code_key = row.code_key,
+	cs.tx_id = row.tx_id,
+	cs.commit_hash = row.commit_hash,
+	cs.valid_from_iso = row.valid_from_iso,
+	cs.valid_from = datetime(row.valid_from_iso),
+	cs.value_json = row.value_json,
+	cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+	cs.asserted_at = datetime(row.asserted_at_iso),
+	cs.asserted_by = row.asserted_by,
+	cs.semantic_type = row.semantic_type,
+	cs.repo_id = row.repo_id,
+	cs.entity_id = row.entity_id,
+	cs.entity_type = row.entity_type,
+	cs.predicate = row.predicate,
+	cs.source_entity_id = CASE WHEN row.source_entity_id IS NULL OR row.source_entity_id = '' THEN null ELSE row.source_entity_id END,
+	cs.source_entity_type = CASE WHEN row.source_entity_type IS NULL OR row.source_entity_type = '' THEN null ELSE row.source_entity_type END,
+	cs.target_entity_id = CASE WHEN row.target_entity_id IS NULL OR row.target_entity_id = '' THEN null ELSE row.target_entity_id END,
+	cs.target_entity_type = CASE WHEN row.target_entity_type IS NULL OR row.target_entity_type = '' THEN null ELSE row.target_entity_type END,
+	cs.path = CASE WHEN row.path IS NULL OR row.path = '' THEN null ELSE row.path END,
+	cs.file_path = CASE WHEN row.file_path IS NULL OR row.file_path = '' THEN null ELSE row.file_path END,
+	cs.name = CASE WHEN row.name IS NULL OR row.name = '' THEN null ELSE row.name END,
+	cs.language = CASE WHEN row.language IS NULL OR row.language = '' THEN null ELSE row.language END,
+	cs.symbol_kind = CASE WHEN row.symbol_kind IS NULL OR row.symbol_kind = '' THEN null ELSE row.symbol_kind END,
+	cs.line_number = CASE WHEN row.line_number IS NULL OR row.line_number = 0 THEN null ELSE row.line_number END
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+FOREACH (_ IN CASE WHEN row.source_entity_id IS NULL OR row.source_entity_id = '' THEN [] ELSE [1] END |
+	MERGE (src:Entity:CodeEntity {entity_id: row.source_entity_id})
+	ON CREATE SET src.created_at = datetime(row.asserted_at_iso)
+	SET src.entity_type = row.source_entity_type,
+		src.repo_id = row.repo_id
+	MERGE (cs)-[:SOURCE]->(src)
+)
+FOREACH (_ IN CASE WHEN row.target_entity_id IS NULL OR row.target_entity_id = '' THEN [] ELSE [1] END |
+	MERGE (dst:Entity:CodeEntity {entity_id: row.target_entity_id})
+	ON CREATE SET dst.created_at = datetime(row.asserted_at_iso)
+	SET dst.entity_type = row.target_entity_type,
+		dst.repo_id = row.repo_id
+)`)
+
+	_, err := exec.Execute(ctx, query, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
 }
 
 func TestE2E_UnwindCompoundBatch_NAryThreeStage_Deterministic(t *testing.T) {
