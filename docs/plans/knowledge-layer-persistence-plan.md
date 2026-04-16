@@ -452,12 +452,13 @@ Decay behavior should be authored through a dedicated policy subsystem, not thro
 
 `NO DECAY`, `DECAY RATE`, `DECAY ARCHIVE THRESHOLD`, `DECAY POLICY`, `DECAY FUNCTION`, `DECAY FLOOR`, and `DECAY SCOPE` are policy directives inside policy definitions. They are not standalone constraint types.
 
+
 Suggested policy DDL surface:
 
-- `CREATE POLICY`
-- `ALTER POLICY`
-- `DROP POLICY`
-- `SHOW POLICIES`
+- `CREATE DECAY POLICY`
+- `ALTER DECAY POLICY`
+- `DROP DECAY POLICY`
+- `SHOW DECAY POLICIES`
 
 These are NornicDB extensions, not Neo4j compatibility targets.
 
@@ -489,7 +490,7 @@ The same shared scorer should also back retrieval scoring, using the scoring mod
 #### Node-level default policy with inline property rules
 
 ```cypher
-CREATE POLICY session_record_retention
+CREATE DECAY POLICY session_record_retention
 FOR (n:SessionRecord)
 APPLY {
   DECAY POLICY 'working_memory'
@@ -503,7 +504,7 @@ APPLY {
 #### Node-level no-decay with explicit permanent properties
 
 ```cypher
-CREATE POLICY canonical_fact_retention
+CREATE DECAY POLICY canonical_fact_retention
 FOR (n:CanonicalFact)
 APPLY {
   NO DECAY
@@ -515,7 +516,7 @@ APPLY {
 #### Node-level custom function and score floor
 
 ```cypher
-CREATE POLICY review_queue_retention
+CREATE DECAY POLICY review_queue_retention
 FOR (n:ReviewQueueItem)
 APPLY {
   DECAY FUNCTION 'linear'
@@ -527,7 +528,7 @@ APPLY {
 #### Relationship-level default policy with inline property rules
 
 ```cypher
-CREATE POLICY coaccess_retention
+CREATE DECAY POLICY coaccess_retention
 FOR ()-[r:CO_ACCESSED]-()
 APPLY {
   DECAY RATE 1209600
@@ -540,7 +541,7 @@ APPLY {
 #### Explicit property-only override inside a block
 
 ```cypher
-CREATE POLICY draft_retention
+CREATE DECAY POLICY draft_retention
 FOR (n:Draft)
 APPLY {
   DECAY RATE 604800
@@ -588,14 +589,14 @@ OPTIONS {
 Then bind those policies with policy statements:
 
 ```cypher
-CREATE POLICY event_retention
+CREATE DECAY POLICY event_retention
 FOR (n:SessionRecord)
 APPLY {
   DECAY POLICY 'working_memory'
   n.summary DECAY POLICY 'session_summary'
 }
 
-CREATE POLICY claim_retention
+CREATE DECAY POLICY claim_retention
 FOR (n:CanonicalFact)
 APPLY {
   DECAY POLICY 'durable_fact'
@@ -605,11 +606,11 @@ APPLY {
 Suggested follow-on DDL:
 
 ```cypher
-SHOW POLICIES
+SHOW DECAY POLICIES
 ```
 
 ```cypher
-ALTER POLICY working_memory
+ALTER DECAY POLICY working_memory
 SET OPTIONS {
   halfLifeSeconds: 432000,
   archiveThreshold: 0.08
@@ -617,7 +618,7 @@ SET OPTIONS {
 ```
 
 ```cypher
-DROP POLICY session_summary
+DROP DECAY POLICY session_summary
 ```
 
 ---
