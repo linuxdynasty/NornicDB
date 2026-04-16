@@ -66,20 +66,55 @@ func cloneNodePropertiesMap(in map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func (e *StorageExecutor) findMergeNodeInCache(labels []string, props map[string]interface{}) *storage.Node {
+func (e *StorageExecutor) evictMergeNodeCacheEntries(labels []string, props map[string]interface{}, nodeID storage.NodeID) {
+	if len(labels) == 0 || len(props) == 0 {
+		return
+	}
+
+	e.nodeLookupCacheMu.Lock()
+	defer e.nodeLookupCacheMu.Unlock()
+	for prop, val := range props {
+		key := mergeLookupCacheKey(labels, prop, val)
+		cached, ok := e.nodeLookupCache[key]
+		if !ok || cached == nil {
+			continue
+		}
+		if nodeID == "" || cached.ID == nodeID {
+			delete(e.nodeLookupCache, key)
+		}
+	}
+}
+
+func (e *StorageExecutor) findMergeNodeInCache(store storage.Engine, labels []string, props map[string]interface{}) *storage.Node {
 	if len(labels) == 0 || len(props) == 0 {
 		return nil
 	}
 
+	var cachedNode *storage.Node
 	e.nodeLookupCacheMu.RLock()
-	defer e.nodeLookupCacheMu.RUnlock()
 	for prop, val := range props {
 		if cached, ok := e.nodeLookupCache[mergeLookupCacheKey(labels, prop, val)]; ok {
 			if mergeNodeMatches(cached, labels, props) {
-				return cached
+				cachedNode = cached
+				break
 			}
 		}
 	}
+	e.nodeLookupCacheMu.RUnlock()
+
+	if cachedNode == nil {
+		return nil
+	}
+	if store == nil {
+		return cachedNode
+	}
+
+	liveNode, err := store.GetNode(cachedNode.ID)
+	if err == nil && mergeNodeMatches(liveNode, labels, props) {
+		return liveNode
+	}
+
+	e.evictMergeNodeCacheEntries(labels, props, cachedNode.ID)
 	return nil
 }
 
@@ -148,7 +183,7 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 		return nil, nil
 	}
 
-	if cached := e.findMergeNodeInCache(labels, props); cached != nil {
+	if cached := e.findMergeNodeInCache(store, labels, props); cached != nil {
 		e.markMergeSchemaLookupUsed()
 		return cached, nil
 	}
@@ -2519,7 +2554,7 @@ func (e *StorageExecutor) executeMatchSegment(ctx context.Context, segment strin
 		return boundNode, nodePattern.variable, nil
 	}
 
-	if cached := e.findMergeNodeInCache(nodePattern.labels, nodePattern.properties); cached != nil {
+	if cached := e.findMergeNodeInCache(store, nodePattern.labels, nodePattern.properties); cached != nil {
 		return cached, nodePattern.variable, nil
 	}
 

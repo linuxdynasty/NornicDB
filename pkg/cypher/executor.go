@@ -1562,6 +1562,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	if execErr != nil {
 		// Rollback on any error - prevents partial data corruption
 		tx.Rollback()
+		txExec.invalidateNodeLookupCache()
 		if wal != nil && walSeqStart > 0 {
 			_, _ = wal.AppendTxAbort(dbName, txID, execErr.Error())
 		}
@@ -1571,6 +1572,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	if inlineEmbeddingEnabled {
 		if err := txExec.applyInlineEmbeddingMutations(txCtx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
 			tx.Rollback()
+			txExec.invalidateNodeLookupCache()
 			if wal != nil && walSeqStart > 0 {
 				_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
 			}
@@ -1580,6 +1582,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 
 	// Commit successful transaction
 	if err := tx.Commit(); err != nil {
+		txExec.invalidateNodeLookupCache()
 		if wal != nil && walSeqStart > 0 {
 			_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
 		}

@@ -87,6 +87,39 @@ func TestMergeNode_MatchWhenExists(t *testing.T) {
 	assert.Equal(t, int64(1), countResult.Rows[0][0])
 }
 
+func TestMergeNode_FindMergeNodeIgnoresStaleCacheEntry(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	actual := &storage.Node{
+		ID:         "actual-person",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	_, err := store.CreateNode(actual)
+	require.NoError(t, err)
+
+	labels := []string{"Person"}
+	props := map[string]interface{}{"name": "Alice"}
+	exec.cacheMergeNode(labels, props, &storage.Node{
+		ID:         "stale-person",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	})
+
+	found, err := exec.findMergeNode(store, labels, props)
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	assert.Equal(t, storage.NodeID("actual-person"), found.ID)
+
+	exec.nodeLookupCacheMu.RLock()
+	cached := exec.nodeLookupCache[mergeLookupCacheKey(labels, "name", "Alice")]
+	exec.nodeLookupCacheMu.RUnlock()
+	require.NotNil(t, cached)
+	assert.Equal(t, storage.NodeID("actual-person"), cached.ID)
+}
+
 // ========================================
 // MERGE with ON CREATE/ON MATCH Tests
 // ========================================
