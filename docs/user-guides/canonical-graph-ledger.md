@@ -184,7 +184,7 @@ SHOW INDEXES;
 
 ### Block-style constraint contracts
 
-NornicDB also supports grouping several related checks into a single contract with `REQUIRE { ... }`. The block can mix primitive constraints that compile into existing schema objects with boolean predicates that are checked at creation time and on every write.
+NornicDB also supports grouping several related checks into a single contract with `REQUIRE { ... }`. The block can mix primitive constraints that compile into existing schema objects with boolean predicates that are checked at creation time and on every write. Use [Managing Constraints](managing-constraints.md) for the operational guide; this section keeps the canonical-graph examples in one place.
 
 #### Node contract example
 

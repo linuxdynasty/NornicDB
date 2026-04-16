@@ -83,6 +83,7 @@ ALLOWED policies form a union whitelist: once any ALLOWED policy exists for a re
 Temporal no-overlap, domain/enum, cardinality, and endpoint policy constraints are NornicDB extensions not available in Neo4j.
 Uniqueness and key constraints on relationships automatically create owned backing indexes.
 `SHOW CONSTRAINTS` returns all constraint types with entity type, direction, maxCount, sourceLabel, targetLabel, and policyMode columns where applicable.
+For operational guidance on NornicDB-specific schema features, including `REQUIRE { ... }` block contracts and `SHOW CONSTRAINT CONTRACTS`, see [Managing Constraints](../user-guides/managing-constraints.md).
 
 ### CALL Procedures
 

@@ -5,6 +5,7 @@ Use this section for task-oriented product workflows and examples.
 ## Start Here
 
 - Cypher workflows: [cypher-queries.md](cypher-queries.md)
+- Constraint management: [managing-constraints.md](managing-constraints.md)
 - Vector search: [vector-search.md](vector-search.md)
 - Hybrid retrieval: [hybrid-search.md](hybrid-search.md)
 - Transactions: [transactions.md](transactions.md)
@@ -15,6 +16,7 @@ Use this section for task-oriented product workflows and examples.
 - Search semantically: [vector-search.md](vector-search.md)
 - Improve retrieval quality: [hybrid-search.md](hybrid-search.md)
 - Traverse relationships/paths: [graph-traversal.md](graph-traversal.md)
+- Manage NornicDB schema constraints and contracts: [managing-constraints.md](managing-constraints.md)
 - Use ACID transactions: [transactions.md](transactions.md)
 - Query historical state and retention: [historical-reads-mvcc-retention.md](historical-reads-mvcc-retention.md)
 - Operate MVCC lifecycle controls: [mvcc-lifecycle-admin-api.md](mvcc-lifecycle-admin-api.md)

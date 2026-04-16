@@ -69,3 +69,4 @@ llama.cpp/
 macos/MenuBarApp/.build
 pkg/cypher/file:
 .todos.md
+ui/dist/index.html

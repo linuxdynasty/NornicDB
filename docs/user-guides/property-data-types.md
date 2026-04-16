@@ -356,24 +356,9 @@ CREATE (p:Person {status: "unknown"})  // Error: value not in allowed set
 CREATE (p:Person {status: "active"})  // Valid
 ```
 
-All constraint DDL supports `IF NOT EXISTS` for idempotent creation. NornicDB also provides cardinality constraints (`REQUIRE MAX COUNT N`) to limit edge count per node and endpoint policy constraints (`REQUIRE ALLOWED` / `REQUIRE DISALLOWED`) to restrict which label pairs may be connected by a relationship type. See the [Canonical Graph Ledger](canonical-graph-ledger.md) guide for full examples and [APOC Schema Functions](../features/apoc-functions.md) for programmatic schema management.
+All constraint DDL supports `IF NOT EXISTS` for idempotent creation. NornicDB also provides cardinality constraints (`REQUIRE MAX COUNT N`) to limit edge count per node, endpoint policy constraints (`REQUIRE ALLOWED` / `REQUIRE DISALLOWED`) to restrict which label pairs may be connected by a relationship type, and block-style contract definitions with `REQUIRE { ... }` when you need several related checks under one named schema object.
 
-Block-style constraint contracts are also supported when you need multiple related checks under one named schema object. Use `REQUIRE { ... }` for node- or relationship-scoped contracts, and inspect them with `SHOW CONSTRAINT CONTRACTS`.
-
-```cypher
-CREATE CONSTRAINT person_contract
-FOR (n:Person)
-REQUIRE {
-  n.id IS UNIQUE
-  n.name IS NOT NULL
-  n.age IS :: INTEGER
-  n.status IN ['active', 'inactive']
-}
-
-SHOW CONSTRAINT CONTRACTS
-```
-
-For a complete end-to-end example with creation-time validation, runtime enforcement, and the contract listing output, see [Canonical Graph Ledger](canonical-graph-ledger.md).
+Use [Managing Constraints](managing-constraints.md) as the canonical guide for block contracts, creation-time validation, runtime enforcement, and `SHOW CONSTRAINT CONTRACTS`. See [Canonical Graph Ledger](canonical-graph-ledger.md) for a domain walkthrough and [APOC Schema Functions](../features/apoc-functions.md) for programmatic schema management.
 
 ---
 

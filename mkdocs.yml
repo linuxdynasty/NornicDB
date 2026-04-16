@@ -115,6 +115,7 @@ nav:
       - Event Triggers & Remediation: user-guides/heimdall-event-triggers-remediation.md
       - Heimdall Plugins: user-guides/heimdall-plugins.md
       - Heimdall Context & Tokens: user-guides/heimdall-context.md
+      - Managing Constraints: user-guides/managing-constraints.md
   - Architecture:
       - Overview: architecture/README.md
       - System Design: architecture/system-design.md
