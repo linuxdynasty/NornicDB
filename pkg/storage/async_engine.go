@@ -84,6 +84,22 @@ type AsyncEngine struct {
 	flushMu sync.RWMutex
 }
 
+// HoldFlush acquires a shared flush guard and returns a release function.
+//
+// While held, background or manual Flush calls block on flushMu.Lock(), which is
+// useful when a higher-level transaction needs a stable committed view for its
+// full lifetime. Regular async writes still queue into memory and will flush once
+// the returned release function is called.
+func (ae *AsyncEngine) HoldFlush() func() {
+	if ae == nil {
+		return func() {}
+	}
+	ae.flushMu.RLock()
+	return func() {
+		ae.flushMu.RUnlock()
+	}
+}
+
 // AsyncEngineConfig configures the async engine behavior.
 type AsyncEngineConfig struct {
 	// FlushInterval controls how often pending writes are flushed.

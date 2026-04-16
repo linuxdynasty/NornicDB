@@ -84,3 +84,37 @@ func TestAsyncEngine_NodeCount_BlocksDuringFlush(t *testing.T) {
 		t.Fatal("NodeCount did not return after flush completed")
 	}
 }
+
+func TestAsyncEngine_FlushBlocksWhileHoldFlushActive(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+
+	ae := NewAsyncEngine(base, &AsyncEngineConfig{
+		FlushInterval:    time.Hour,
+		MaxNodeCacheSize: 0,
+		MaxEdgeCacheSize: 0,
+	})
+	t.Cleanup(func() { _ = ae.Close() })
+
+	_, err := ae.CreateNode(&Node{ID: "nornic:guarded-node", Labels: []string{"N"}})
+	require.NoError(t, err)
+
+	release := ae.HoldFlush()
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- ae.Flush()
+	}()
+
+	select {
+	case err := <-flushDone:
+		t.Fatalf("Flush returned while HoldFlush was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	require.NoError(t, <-flushDone)
+
+	node, err := base.GetNode("nornic:guarded-node")
+	require.NoError(t, err)
+	require.NotNil(t, node)
+}

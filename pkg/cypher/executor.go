@@ -1472,6 +1472,13 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 
 	// Try to get a transaction-capable engine and async wrapper (if present)
 	engines := e.resolveImplicitTxEngines()
+	if engines.namespace == "" {
+		if dbName := strings.TrimSpace(GetUseDatabaseFromContext(ctx)); dbName != "" {
+			engines.namespace = dbName
+		} else if _, dbName := e.resolveWALAndDatabase(); strings.TrimSpace(dbName) != "" {
+			engines.namespace = strings.TrimSpace(dbName)
+		}
+	}
 	txEngine := engines.txEngine
 	asyncEngine := engines.asyncEngine
 
@@ -1501,6 +1508,18 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	// We use HasPendingWrites() first as a cheap check to avoid unnecessary flushes.
 	if asyncEngine != nil && asyncEngine.HasPendingWrites() {
 		asyncEngine.Flush()
+	}
+	releaseAsyncFlushHold := func() {}
+	if asyncEngine != nil {
+		release := asyncEngine.HoldFlush()
+		held := true
+		releaseAsyncFlushHold = func() {
+			if held {
+				release()
+				held = false
+			}
+		}
+		defer releaseAsyncFlushHold()
 	}
 
 	// Start implicit transaction
@@ -1604,6 +1623,7 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 
 	// Flush if needed for durability
 	if !e.deferFlush && asyncEngine != nil {
+		releaseAsyncFlushHold()
 		asyncEngine.Flush()
 	}
 
