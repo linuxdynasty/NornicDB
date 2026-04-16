@@ -85,8 +85,9 @@ Required behavior:
 
 Suggested fit in NornicDB:
 
-- extend the existing node and relationship constraint system
+- extend the existing node and relationship block-constraint system
 - add NornicDB-specific persistence and decay constraint families
+- express property-level retention as inline entries inside `REQUIRE { ... }` blocks
 - reuse existing constraint persistence, validation, and introspection patterns
 - add retention-specific resolution rules alongside existing schema rules
 
@@ -99,6 +100,8 @@ Required behavior:
 - resolve policy during recall, reinforcement, recalc, archive, and ranking
 - support explicit overrides and inheritance
 - allow property-level state without forcing entity-wide decay
+- resolve inline property entries from the active block constraint before falling back to entity defaults
+- expose decay state through native Cypher functions without changing Neo4j-compatible node or relationship result shapes
 - avoid duplicated logic across CLI, DB, and API code paths
 
 Suggested fit in NornicDB:
@@ -108,20 +111,17 @@ Suggested fit in NornicDB:
 
 ---
 
-## 5. Data Model Plan
+## 5. Logical Resolution Model
 
-### 5.1 Core Entities
+Because decay scores are derived rather than stored on fields, this section describes runtime resolution artifacts and schema objects, not a persisted score data model.
 
-- `DecayPolicy`
-- `DecayPolicyBinding`
-- `PropertyDecayState`
-- `RetentionResolution`
-- `ConstraintBackedDecayRule`
-- `ProvenanceRecord`
-
-### 5.2 Minimum Fields
+### 5.1 Persistent Schema Objects
 
 #### DecayPolicy
+
+Persistent database object used to define reusable decay behavior.
+
+Minimum fields:
 
 - policy id
 - policy name
@@ -133,36 +133,55 @@ Suggested fit in NornicDB:
 - scope type: node, edge, property
 - enabled or disabled
 
-#### DecayPolicyBinding
+#### ConstraintBackedDecayRule
 
-- target matcher
-- matcher type: label, relationship type, property path, constraint target, explicit id
-- policy id
-- precedence
-- no-decay flag
-- source of resolution: config, constraint, inherited
-- explanation payload for diagnostics
+Logical rule compiled from block constraints and used by the resolver.
 
-#### PropertyDecayState
+Minimum fields:
 
-- entity id
-- property path
-- current decay score
-- last accessed
-- access count
-- effective decay policy id
-- archived, hidden, or superseded state
+- contract name
+- entity target: label or relationship type
+- property path, if any
+- rule kind: no-decay, policy, rate, threshold, floor, function
+- referenced policy name, if any
+- inline block order for deterministic precedence
+- original expression text for diagnostics
+
+### 5.2 Derived Runtime Artifacts
 
 #### RetentionResolution
+
+Derived resolution result produced by the shared resolver for a requested node, edge, or property.
+
+Minimum fields:
 
 - target id
 - target scope
 - resolved policy id
 - resolution source chain
 - applied constraint names
+- applied block entries
 - effective rate
 - effective threshold
 - no-decay boolean
+
+#### DecayResolutionMeta
+
+Derived metadata emitted at read time for Cypher and unified search surfaces.
+
+Minimum fields:
+
+- entity id
+- entity scope: node or edge
+- entity decay score, if applicable
+- per-property resolved score map
+- optional per-property explanation payload
+
+### 5.3 Design Rule
+
+- derived scores are not persisted into node, edge, or property payloads
+- the shared resolver is the source of truth for entity- and property-level scoring
+- Cypher functions and unified search metadata project derived scores outward without mutating stored graph data
 
 ---
 
@@ -172,9 +191,9 @@ Suggested fit in NornicDB:
 
 Every decay-aware read or maintenance operation should resolve policy in this order:
 
-1. explicit no-decay constraint or binding
-2. property-level policy
-3. entity-level policy
+1. explicit no-decay rule
+2. property-level inline rule inside the applicable block constraint
+3. entity-level rule inside the applicable block constraint
 4. relationship-type or label-targeted policy
 5. configured default policy
 
@@ -201,6 +220,10 @@ Property decay should support at least these outcomes:
 - archival or hiding of the property value while preserving the parent entity
 - explicit supersession or replacement of the property if configured
 
+Property-level scores should only influence retrieval when the property is directly involved in matching, ranking, reranking, filtering, projection, summarization, or archival unless an explicit roll-up policy says otherwise. A decayed property should not silently degrade the score of the entire entity by default.
+
+Property-level score data should not be written back into the entity's stored fields. It should be derived on demand from the shared resolver and exposed only through native Cypher access or search metadata.
+
 ### 6.3 Decay Function Semantics
 
 The engine should support multiple decay function identifiers over time.
@@ -220,9 +243,121 @@ For any entity or property, the system should be able to explain:
 
 - whether decay applies
 - which policy was selected
-- which constraint or binding selected it
+- which constraint block and inline entry selected it
 - what rate, threshold, and floor are active
 - why archival or retention occurred
+
+### 6.5 Native Cypher Access
+
+The decay subsystem should expose scoring through native Cypher functions so callers can inspect resolved scores without altering Neo4j-compatible node or relationship structures.
+
+Proposed functions:
+
+- `decayScore(entity)` returns the effective scalar decay score for a node or relationship
+- `decayScore(entity, propertyKey)` returns the effective scalar decay score for a specific property on that node or relationship
+- `decay(entity)` returns a structured decay object for the node or relationship
+- `decay(entity, propertyKey)` returns a structured decay object for the requested property
+
+The structured `decay(...)` result should always expose a Cypher-accessible `.score` field so callers can write concise expressions without needing a second helper function when they want richer metadata.
+
+Suggested fields on `decay(...)` results:
+
+- `score`
+- `policy`
+- `scope`
+- `function`
+- `archiveThreshold`
+- `floor`
+- `applies`
+- `reason`
+
+The `decay(...)` object is a derived value. It should not imply that score metadata is being persisted back onto the node, edge, or property itself.
+
+Example usage:
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decayScore(n) AS entityDecayScore
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n.summary, decayScore(n, 'summary') AS summaryDecayScore
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, decay(n).score AS entityDecayScore, decay(n).policy AS entityDecayPolicy
+```
+
+```cypher
+MATCH (n:SessionRecord)
+RETURN n.summary, decay(n, 'summary').score AS summaryDecayScore, decay(n, 'summary').reason AS summaryDecayReason
+```
+
+```cypher
+MATCH ()-[r:CO_ACCESSED]-()
+RETURN r, decayScore(r) AS edgeDecayScore, decay(r, 'signalScore').score AS signalDecayScore
+```
+
+Compatibility rule:
+
+- `RETURN n` remains Neo4j-compatible and does not automatically inject decay metadata into the node
+- callers opt in by returning `decayScore(...)` or `decay(...)` explicitly as additional columns
+- property-level scores are therefore visible to Cypher without changing Bolt node or relationship structures
+
+### 6.6 Unified Search Metadata
+
+The unified search service should follow the same derived-on-read model as native Cypher.
+
+It should not persist node-, edge-, or property-level decay scores into stored entity fields. Instead, when requested, it should add resolved scoring metadata into a separate response `meta` structure.
+
+The shape should be a keyed object rather than an array of single-entry maps.
+
+Preferred shape:
+
+```json
+{
+  "scores": {
+    "node-id-12": {
+      "decay": 0.82,
+      "properties": {
+        "property1": { "decay": 0.44 },
+        "property2": { "decay": 0.91 }
+      }
+    },
+    "edge-id-77": {
+      "decay": 0.63,
+      "properties": {
+        "signalScore": { "decay": 0.28 }
+      }
+    }
+  }
+}
+```
+
+That is preferable to a shape like:
+
+```json
+[
+  {
+    "node-id-12": {
+      "decay": 0.82,
+      "property1": { "decay": 0.44 },
+      "property2": { "decay": 0.91 }
+    }
+  }
+]
+```
+
+because the keyed object form is easier to merge, extend, and consume deterministically.
+
+Suggested conventions:
+
+- top-level key by entity id
+- entity-level score at `scores[id].decay`
+- property-level scores nested at `scores[id].properties[propertyKey].decay`
+- optional richer metadata can be added later beside `decay`, such as `policy`, `reason`, or `scope`
 
 ---
 
@@ -248,8 +383,8 @@ These constraints should be valid on:
 
 - node labels
 - relationship types
-- explicit property paths on nodes
-- explicit property paths on relationships
+- inline property paths on nodes within a block constraint
+- inline property paths on relationships within a block constraint
 
 ### 7.3 Constraint Semantics
 
@@ -257,119 +392,78 @@ If persistence or decay is globally disabled, the constraints still exist in sch
 
 Conflicting constraints must resolve deterministically according to precedence rules rather than implicit ordering.
 
+Property-level retention rules should be authored inline within the same `REQUIRE { ... }` block that declares the entity-level defaults for that label or relationship type. That keeps the authoring model aligned with existing block constraints and avoids introducing a second binding mechanism just for properties.
+
+Nested `FOR ... REQUIRE` entries should remain invalid inside a block. If operators need retention rules for a different label or relationship type, they should create a separate targeted block constraint, consistent with the current schema-contract behavior.
+
+When property-level retention rules exist, the runtime should make the resolved score available through `decayScore(entity, propertyKey)` and `decay(entity, propertyKey)` even if the underlying Bolt result only returns the base node or relationship structure.
+
 ### 7.4 Sample Constraints in Cypher
 
-#### Node-level no-decay
+#### Node-level default policy with inline property rules
 
 ```cypher
-CREATE CONSTRAINT fact_no_decay
-FOR (n:CanonicalFact)
-REQUIRE NO DECAY
-```
-
-#### Node-level decay rate
-
-```cypher
-CREATE CONSTRAINT event_decay
+CREATE CONSTRAINT session_record_retention
 FOR (n:SessionRecord)
-REQUIRE DECAY RATE 604800
+REQUIRE {
+  DECAY POLICY 'working_memory'
+  DECAY ARCHIVE THRESHOLD 0.10
+  n.summary DECAY POLICY 'session_summary'
+  n.lastConversationSummary DECAY RATE 2592000
+  n.tenantId NO DECAY
+}
 ```
 
-#### Node-level named policy
+#### Node-level no-decay with explicit permanent properties
 
 ```cypher
-CREATE CONSTRAINT durable_claim_policy
+CREATE CONSTRAINT canonical_fact_retention
 FOR (n:CanonicalFact)
-REQUIRE DECAY POLICY 'durable_fact'
+REQUIRE {
+  NO DECAY
+  n.tenantId NO DECAY
+  n.externalId NO DECAY
+}
 ```
 
-#### Node-level custom function
+#### Node-level custom function and score floor
 
 ```cypher
-CREATE CONSTRAINT review_queue_decay
+CREATE CONSTRAINT review_queue_retention
 FOR (n:ReviewQueueItem)
-REQUIRE DECAY FUNCTION 'linear'
+REQUIRE {
+  DECAY FUNCTION 'linear'
+  DECAY RATE 604800
+  n.confidence DECAY FLOOR 0.40
+}
 ```
 
-#### Node-level archive threshold
+#### Relationship-level default policy with inline property rules
 
 ```cypher
-CREATE CONSTRAINT session_archive_threshold
-FOR (n:SessionRecord)
-REQUIRE DECAY ARCHIVE THRESHOLD 0.10
-```
-
-#### Property-level decay rate on node property
-
-```cypher
-CREATE CONSTRAINT profile_summary_decay
-FOR (n:Profile)
-REQUIRE n.lastConversationSummary DECAY RATE 2592000
-```
-
-#### Property-level no-decay on node property
-
-```cypher
-CREATE CONSTRAINT profile_identity_no_decay
-FOR (n:Profile)
-REQUIRE n.tenantId NO DECAY
-```
-
-#### Property-level named policy on node property
-
-```cypher
-CREATE CONSTRAINT session_summary_policy
-FOR (n:SessionRecord)
-REQUIRE n.summary DECAY POLICY 'session_summary'
-```
-
-#### Relationship-level no-decay
-
-```cypher
-CREATE CONSTRAINT citation_rel_no_decay
-FOR ()-[r:CITES]-()
-REQUIRE NO DECAY
-```
-
-#### Relationship-level decay rate
-
-```cypher
-CREATE CONSTRAINT coaccess_rel_decay
+CREATE CONSTRAINT coaccess_retention
 FOR ()-[r:CO_ACCESSED]-()
-REQUIRE DECAY RATE 1209600
+REQUIRE {
+  DECAY RATE 1209600
+  r.signalScore DECAY RATE 1209600
+  r.signalScore DECAY FLOOR 0.15
+  r.externalId NO DECAY
+}
 ```
 
-#### Property-level decay rate on relationship property
+#### Explicit property-only override inside a block
 
 ```cypher
-CREATE CONSTRAINT rel_signal_decay
-FOR ()-[r:CO_ACCESSED]-()
-REQUIRE r.signalScore DECAY RATE 1209600
-```
-
-#### Property-level no-decay on relationship property
-
-```cypher
-CREATE CONSTRAINT rel_identity_no_decay
-FOR ()-[r:WORKED_WITH]-()
-REQUIRE r.externalId NO DECAY
-```
-
-#### Score floor
-
-```cypher
-CREATE CONSTRAINT wisdom_floor
-FOR (n:RetainedDirective)
-REQUIRE DECAY FLOOR 0.40
-```
-
-#### Explicit scope declaration
-
-```cypher
-CREATE CONSTRAINT draft_confidence_scope
+CREATE CONSTRAINT draft_retention
 FOR (n:Draft)
-REQUIRE n.confidence DECAY SCOPE PROPERTY
+REQUIRE {
+  DECAY RATE 604800
+  n.confidence DECAY RATE 86400
+  n.confidence DECAY FLOOR 0.25
+}
 ```
+
+In this model, property-level rules are just targeted entries in the same block constraint. They should not require a separate `CREATE CONSTRAINT` statement unless the target label or relationship type itself changes.
 
 ### 7.5 Policy DDL
 
@@ -408,17 +502,18 @@ OPTIONS {
 Then bind those policies with constraints:
 
 ```cypher
-CREATE CONSTRAINT claim_retention
-FOR (n:CanonicalFact)
-REQUIRE DECAY POLICY 'durable_fact'
-
 CREATE CONSTRAINT event_retention
 FOR (n:SessionRecord)
-REQUIRE DECAY POLICY 'working_memory'
+REQUIRE {
+  DECAY POLICY 'working_memory'
+  n.summary DECAY POLICY 'session_summary'
+}
 
-CREATE CONSTRAINT summary_retention
-FOR (n:SessionRecord)
-REQUIRE n.summary DECAY POLICY 'session_summary'
+CREATE CONSTRAINT claim_retention
+FOR (n:CanonicalFact)
+REQUIRE {
+  DECAY POLICY 'durable_fact'
+}
 ```
 
 Suggested follow-on DDL:
@@ -441,24 +536,29 @@ DROP DECAY POLICY session_summary
 
 ---
 
-## 8. API and Storage Changes
+## 8. Cypher, Search, and Storage Changes
 
-### Suggested API additions
+### Suggested Cypher additions
 
-- `POST /memory/event`
-- `GET /memory/query`
-- `GET /memory/decay/policy/:id`
-- `POST /memory/decay/policy`
-- `POST /memory/decay/bind`
-- `GET /memory/decay/resolve`
-- `GET /memory/decay/explain/:entityId`
+- native scalar function: `decayScore(entity[, propertyKey])`
+- native structured function: `decay(entity[, propertyKey])`
+- both functions should work for nodes and relationships
+- `decay(...).score` should be the canonical Cypher-visible field for downstream sorting, filtering, and projection
+- both functions derive scores from the shared resolver rather than reading persisted property-level score fields
 
 ### Suggested storage rules
 
-- decay eligibility and rate are resolved from policy bindings and constraints, not a baked-in tier enum
-- property decay state may be stored separately from node or edge decay state where required for precision and performance
+- decay eligibility and rate are resolved from decay policies plus block-constraint entries, not a baked-in tier enum
+- property-level decay scores are derived on demand and are not written into the entity's stored property map
+- temporary caches of resolved scores are allowed as implementation detail, but they are not the source of truth
 - policy resolution artifacts should be diagnosable without mutating the underlying entity
 - no-decay policies should be enforced consistently across recall, archive, and maintenance paths
+
+### Suggested search response behavior
+
+- unified search may return node-, edge-, and property-level decay metadata additively in a separate `meta` section
+- the `meta` section should mirror the same resolved scores available through `decayScore()` and `decay()`
+- search hits themselves remain standard result entities plus ordinary ranking fields
 
 ---
 
@@ -471,12 +571,14 @@ Deliverables:
 - define the policy schema model
 - define supported decay functions and thresholds
 - define explainable resolution output
+- define the native `decayScore()` and `decay()` Cypher function contracts
+- define the derived search metadata contract for node-, edge-, and property-level scores
 
 ### Workstream B: Constraint Extensions
 
 Deliverables:
 
-- extend the existing constraint system for decay-aware constraints
+- extend the existing block-constraint system for decay-aware entries
 - support node-, relationship-, and property-targeted constraints
 - validate creation-time behavior and introspection
 
@@ -486,8 +588,10 @@ Deliverables:
 
 - introduce a shared decay policy resolver
 - support configurable decay rates and named presets
-- define precedence and conflict rules for overlapping constraints
+- define precedence and conflict rules for overlapping inline block entries
 - expose an explainable resolution trace for any effective policy
+- make resolved node-, edge-, and property-level scores available to native Cypher functions
+- make the same resolved scores available to unified search metadata without persisting them into entity fields
 
 ### Workstream D: Runtime Integration
 
@@ -501,7 +605,7 @@ Deliverables:
 
 Deliverables:
 
-- show effective policy in browser and API output
+- show effective policy in browser, search metadata, and Cypher-visible outputs
 - let operators inspect constraints, policies, and resolution traces
 - add diagnostics for why a value decayed or did not decay
 
@@ -512,12 +616,13 @@ Deliverables:
 1. Define the decay policy schema model and resolution precedence.
 2. Centralize decay resolution in a shared helper used by recall, recalc, archive, ranking, and stats paths.
 3. Add configurable per-policy half-lives, decay rates, named presets, and function identifiers.
-4. Define and implement schema-backed persistence and decay constraints on nodes and relationships.
-5. Extend constraint support to property-level targeting.
-6. Migrate runtime logic away from fixed tier assumptions.
-7. Expose policy and resolution information in API and UI surfaces.
-8. Add regression tests for resolution, property-level retention, and archival behavior.
-9. Add benchmark and evaluation coverage for policy resolution overhead and correctness.
+4. Define and implement schema-backed persistence and decay entries on block constraints for nodes and relationships.
+5. Extend block parsing and compiled contract metadata to support property-targeted retention entries.
+6. Add native Cypher functions `decayScore()` and `decay()` for nodes, relationships, and property keys.
+7. Migrate runtime logic away from fixed tier assumptions.
+8. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
+9. Add regression tests for resolution, property-level retention, Cypher score access, and archival behavior.
+10. Add benchmark and evaluation coverage for policy resolution overhead and correctness.
 
 ---
 
@@ -527,11 +632,15 @@ Deliverables:
 
 - no-decay entities are skipped by recalc and archive paths
 - effective decay rate comes from resolved policy rather than hardcoded tier
-- property-level decay can age one property without decaying the parent entity
+- property-level inline rules can age one property without decaying the parent entity
 - conflicting constraints resolve deterministically
 - removing or changing a decay constraint changes future resolution without corrupting stored history
-- relationship-level and property-level constraints both resolve correctly
-- explain output identifies the exact binding and effective policy
+- relationship-level blocks and inline property rules both resolve correctly
+- explain output identifies the exact block entry and effective policy
+- `decayScore(n)` and `decayScore(n, 'prop')` return the same resolved score used by runtime policy evaluation
+- `decay(n).score` and `decay(n, 'prop').score` are Cypher-accessible and stable for projection and ordering
+- returning `n` alone does not alter Neo4j-compatible result shape
+- unified search `meta` returns entity and property decay scores in a separate keyed structure without mutating the hit payload
 
 ### Benchmark targets
 
@@ -548,8 +657,11 @@ The plan is complete when:
 
 - no runtime path depends on a hardcoded tier enum to decide whether something decays
 - operators can define persistence and decay semantics through config and constraints
+- operators can define property-level retention inline in existing `REQUIRE { ... }` block constraints
 - node-, edge-, and property-level decay are all supported
 - explainable policy resolution is available for diagnostics
+- native Cypher functions expose resolved entity and property scores without mutating Neo4j-compatible node or relationship payloads
+- unified search exposes the same resolved scores additively through response metadata rather than persisted fields
 - new decay models can be expressed as policy and constraints without new engine categories
 
 ---
@@ -566,8 +678,11 @@ The plan is complete when:
 ## 14. Deliverables
 
 - a constraint-driven persistence and decay specification
-- schema and API updates for policy-aware decay behavior
-- a shared decay policy resolver with config-backed and constraint-backed bindings
+- schema and Cypher/search updates for policy-aware decay behavior
+- a shared decay policy resolver with config-backed defaults and constraint-backed block entries
+- block-constraint extensions for inline property-level retention rules
+- native Cypher function support for `decayScore()` and `decay()`
+- unified search metadata support for additive node-, edge-, and property-level decay scores
 - regression tests covering node-, edge-, and property-level semantics
 - user-facing documentation for persistence and decay policy authoring
 
