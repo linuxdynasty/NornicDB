@@ -551,10 +551,11 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 					// This avoids brittle top-level MERGE parsing for shapes like:
 					// MERGE (...) MERGE (...) SET ... MERGE (...) ...
 					if strings.HasPrefix(strings.ToUpper(trimmed), "MERGE ") {
+						complexMergeChain := findKeywordIndexInContext(trimmed, "FOREACH") > 0 || findKeywordIndexInContext(trimmed, "WITH") > 0
 						// Queries containing MATCH after MERGE (e.g. MERGE ... MATCH ... MERGE rel)
 						// are better handled by the regular executor route so MATCH bindings are
 						// preserved for downstream relationship merges.
-						if findKeywordIndexInContext(trimmed, "MATCH") > 0 {
+						if findKeywordIndexInContext(trimmed, "MATCH") > 0 || complexMergeChain {
 							mutationResult, err = e.Execute(ctx, substitutedFull, params)
 						} else {
 							mutationResult, err = e.executeMergeWithContext(ctx, trimmed, make(map[string]*storage.Node), make(map[string]*storage.Edge))
