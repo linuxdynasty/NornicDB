@@ -231,12 +231,15 @@ struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, i
 
     params.n_ctx = n_ctx;
     params.n_batch = n_batch;
+    params.n_ubatch = n_batch;
     params.n_threads = n_threads;
     params.n_threads_batch = n_threads;
 
 	// Generation mode: keep the context params as close as possible to
 	// llama.cpp defaults and only flip the fields we actually need.
     params.embeddings = 0;
+    params.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
+    params.attention_type = LLAMA_ATTENTION_TYPE_UNSPECIFIED;
 
     // logits_all removed - controlled per-batch now
 
@@ -515,6 +518,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -1087,6 +1091,53 @@ type GenerateParams struct {
 	StopTokens  []string
 }
 
+func longestStopTokenLength(stopTokens []string) int {
+	longest := 0
+	for _, stop := range stopTokens {
+		if len(stop) > longest {
+			longest = len(stop)
+		}
+	}
+	return longest
+}
+
+func splitVisibleTextForStopTokens(candidate string, stopTokens []string, longestStopToken int) (visible string, remaining string, stop bool) {
+	for _, stopToken := range stopTokens {
+		if stopToken == "" {
+			continue
+		}
+		if idx := strings.Index(candidate, stopToken); idx >= 0 {
+			return candidate[:idx], "", true
+		}
+	}
+
+	keepSuffix := 0
+	maxCheck := len(candidate)
+	if longestStopToken > 1 && maxCheck > longestStopToken-1 {
+		maxCheck = longestStopToken - 1
+	}
+	for suffixLen := 1; suffixLen <= maxCheck; suffixLen++ {
+		suffix := candidate[len(candidate)-suffixLen:]
+		for _, stopToken := range stopTokens {
+			if stopToken == "" || len(stopToken) <= suffixLen {
+				continue
+			}
+			if strings.HasPrefix(stopToken, suffix) {
+				if suffixLen > keepSuffix {
+					keepSuffix = suffixLen
+				}
+				break
+			}
+		}
+	}
+
+	flushUpto := len(candidate) - keepSuffix
+	if flushUpto <= 0 {
+		return "", candidate, false
+	}
+	return candidate[:flushUpto], candidate[flushUpto:], false
+}
+
 // DefaultGenerateParams returns sensible defaults for structured output.
 func DefaultGenerateParams() GenerateParams {
 	return GenerateParams{
@@ -1177,6 +1228,8 @@ func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, par
 	// Autoregressive generation
 	genPos := tokenCount     // Start generation after all prompt tokens
 	buf := make([]byte, 256) // Buffer for detokenization
+	var emittedTail strings.Builder
+	longestStopToken := longestStopTokenLength(params.StopTokens)
 
 	for i := 0; i < params.MaxTokens; i++ {
 		select {
@@ -1197,16 +1250,25 @@ func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, par
 		nBytes := C.detokenize(g.model, token, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
 		if nBytes > 0 {
 			text := string(buf[:nBytes])
-
-			// Check stop tokens
-			for _, stop := range params.StopTokens {
-				if text == stop {
-					return nil
+			emittedTail.WriteString(text)
+			candidate := emittedTail.String()
+			visible, remaining, stop := splitVisibleTextForStopTokens(candidate, params.StopTokens, longestStopToken)
+			if stop {
+				if visible != "" {
+					if err := callback(visible); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			if visible != "" {
+				if err := callback(visible); err != nil {
+					return err
 				}
 			}
-
-			if err := callback(text); err != nil {
-				return err
+			emittedTail.Reset()
+			if remaining != "" {
+				emittedTail.WriteString(remaining)
 			}
 		}
 
@@ -1224,6 +1286,12 @@ func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, par
 			return fmt.Errorf("decode failed at position %d: %s (code=%d)", genPos, errMsg, result)
 		}
 		genPos++
+	}
+
+	if emittedTail.Len() > 0 {
+		if err := callback(emittedTail.String()); err != nil {
+			return err
+		}
 	}
 
 	return nil

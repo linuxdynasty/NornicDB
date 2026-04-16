@@ -222,6 +222,63 @@ func TestHandler_ChatCompletions_DefaultModel(t *testing.T) {
 	assert.Equal(t, "test-model", chatResp.Model)
 }
 
+func TestHandler_ChatCompletions_IgnoresRequestedModel(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	chatReq := ChatRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var chatResp ChatResponse
+	err := json.NewDecoder(resp.Body).Decode(&chatResp)
+	require.NoError(t, err)
+	assert.Equal(t, "test-model", chatResp.Model)
+}
+
+func TestHandler_ModelsEndpoint(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var payload map[string]interface{}
+	err := json.NewDecoder(resp.Body).Decode(&payload)
+	require.NoError(t, err)
+	assert.Equal(t, "list", payload["object"])
+	data, ok := payload["data"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, data, 1)
+	modelInfo, ok := data[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "test-model", modelInfo["id"])
+}
+
 func TestHandler_ChatCompletions_Streaming(t *testing.T) {
 	mockGen := NewMockGenerator("/test/model.gguf")
 	manager := newTestManager(mockGen)
@@ -971,6 +1028,86 @@ func TestHandler_ActionExecution(t *testing.T) {
 	assert.Contains(t, response.Choices[0].Message.Content, "Hello from test action!")
 }
 
+func TestHandler_OpenAI_V1ChatCompletions_PassThroughUnknownActionAsToolCall(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
+		return `{"action":"mcp__ide__getDiagnostics","params":{"uri":"file:///tmp/test.go"}}`, nil
+	}
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	chatReq := ChatRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "check diagnostics"},
+		},
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var chatResp ChatResponse
+	err := json.NewDecoder(resp.Body).Decode(&chatResp)
+	require.NoError(t, err)
+	require.Len(t, chatResp.Choices, 1)
+	require.NotNil(t, chatResp.Choices[0].Message)
+	assert.Equal(t, "tool_calls", chatResp.Choices[0].FinishReason)
+	require.Len(t, chatResp.Choices[0].Message.ToolCalls, 1)
+	assert.Equal(t, "function", chatResp.Choices[0].Message.ToolCalls[0].Type)
+	assert.Equal(t, "mcp__ide__getDiagnostics", chatResp.Choices[0].Message.ToolCalls[0].Function.Name)
+	assert.JSONEq(t, `{"uri":"file:///tmp/test.go"}`, chatResp.Choices[0].Message.ToolCalls[0].Function.Arguments)
+	assert.Equal(t, "", chatResp.Choices[0].Message.Content)
+}
+
+func TestHandler_OpenAI_V1Streaming_PassThroughUnknownActionAsToolCall(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	mockGen.streamFunc = func(ctx context.Context, prompt string, params GenerateParams, callback func(token string) error) error {
+		for _, token := range []string{"{", `"action":"mcp__repo__search",`, `"params":{"query":"heimdall"}`, "}"} {
+			if err := callback(token); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	chatReq := ChatRequest{
+		Model:  "gpt-4o",
+		Stream: true,
+		Messages: []ChatMessage{
+			{Role: "user", Content: "search repo"},
+		},
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyStr := string(bodyBytes)
+	assert.Contains(t, bodyStr, `"finish_reason":"tool_calls"`)
+	assert.Contains(t, bodyStr, `"tool_calls":[{`)
+	assert.Contains(t, bodyStr, `"name":"mcp__repo__search"`)
+	assert.Contains(t, bodyStr, `"arguments":"{\"query\":\"heimdall\"}"`)
+	assert.Contains(t, bodyStr, `data: [DONE]`)
+	assert.NotContains(t, bodyStr, `Sorry, I don't know how to perform the action`)
+}
+
 // =============================================================================
 // trimAgenticResponse / extractNonJSONAnswer (prompt-based agentic loop helpers)
 // =============================================================================
@@ -1055,6 +1192,68 @@ func TestTrimAgenticResponse(t *testing.T) {
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+func TestSanitizeAssistantResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "keeps plain assistant reply",
+			input:    "Hello! How can I assist you today?",
+			expected: "Hello! How can I assist you today?\n",
+		},
+		{
+			name:     "removes im template replay",
+			input:    "Hello! How can I assist you today?<|im_end|> <|im_start|>user what actions can you perform?<|im_end|>",
+			expected: "Hello! How can I assist you today?\n",
+		},
+		{
+			name:     "preserves heimdall inline notification tail",
+			input:    "Hello!\n[Heimdall]: 🔄 Repository Graph: Searching repository knowledge graph...",
+			expected: "Hello!\n[Heimdall]: 🔄 Repository Graph: Searching repository knowledge graph...\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeAssistantResponse(tt.input)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestHandler_OpenAI_V1Streaming_SuppressesHeimdallNotificationChunks(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	chatReq := ChatRequest{
+		Model:  "test-model",
+		Stream: true,
+		Messages: []ChatMessage{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyStr := string(bodyBytes)
+
+	assert.NotContains(t, bodyStr, `[Heimdall]:`, "OpenAI-compatible stream should contain only assistant content chunks")
+	assert.Contains(t, bodyStr, `"object":"chat.completion.chunk"`)
+	assert.Contains(t, bodyStr, `data: [DONE]`)
 }
 
 func TestExtractNonJSONAnswer(t *testing.T) {

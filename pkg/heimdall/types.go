@@ -44,8 +44,20 @@ type ModelInfo struct {
 
 // ChatMessage represents a message in the chat format (OpenAI-compatible).
 type ChatMessage struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
-	Content string `json:"content"`
+	Role      string             `json:"role"` // "system", "user", "assistant"
+	Content   string             `json:"content"`
+	ToolCalls []ChatToolCallWire `json:"tool_calls,omitempty"`
+}
+
+type ChatToolCallWire struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"`
+	Function ChatToolFunctionWire `json:"function"`
+}
+
+type ChatToolFunctionWire struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // ChatRequest is the request format for chat completions.

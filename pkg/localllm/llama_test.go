@@ -107,6 +107,70 @@ func TestResolveEmbeddingContextAndBatch(t *testing.T) {
 	}
 }
 
+func TestDefaultGenerationOptions(t *testing.T) {
+	opts := DefaultGenerationOptions("/tmp/gemma.gguf")
+
+	if opts.ModelPath != "/tmp/gemma.gguf" {
+		t.Fatalf("ModelPath = %q, want /tmp/gemma.gguf", opts.ModelPath)
+	}
+	if opts.ContextSize != 2048 {
+		t.Fatalf("ContextSize = %d, want 2048", opts.ContextSize)
+	}
+	if opts.BatchSize != 512 {
+		t.Fatalf("BatchSize = %d, want 512", opts.BatchSize)
+	}
+	if opts.Threads < 4 {
+		t.Fatalf("Threads = %d, want >= 4", opts.Threads)
+	}
+	if opts.GPULayers != -1 {
+		t.Fatalf("GPULayers = %d, want -1", opts.GPULayers)
+	}
+}
+
+func TestSplitVisibleTextForStopTokens(t *testing.T) {
+	stopTokens := []string{"<|im_end|>", "</s>"}
+	longest := longestStopTokenLength(stopTokens)
+
+	t.Run("holds back suffix that may become a stop token", func(t *testing.T) {
+		visible, remaining, stop := splitVisibleTextForStopTokens("Hello<|im_", stopTokens, longest)
+		if stop {
+			t.Fatal("expected stop=false")
+		}
+		if visible != "Hello" {
+			t.Fatalf("visible=%q want=%q", visible, "Hello")
+		}
+		if remaining != "<|im_" {
+			t.Fatalf("remaining=%q want=%q", remaining, "<|im_")
+		}
+	})
+
+	t.Run("stops when full marker completes across chunks", func(t *testing.T) {
+		visible, remaining, stop := splitVisibleTextForStopTokens("<|im_end|> trailing", stopTokens, longest)
+		if !stop {
+			t.Fatal("expected stop=true")
+		}
+		if visible != "" {
+			t.Fatalf("visible=%q want empty", visible)
+		}
+		if remaining != "" {
+			t.Fatalf("remaining=%q want empty", remaining)
+		}
+	})
+
+	t.Run("preserves text before completed stop marker", func(t *testing.T) {
+		visible, remaining, stop := splitVisibleTextForStopTokens("Hello<|im_end|>more", stopTokens, longest)
+		if !stop {
+			t.Fatal("expected stop=true")
+		}
+		if visible != "Hello" {
+			t.Fatalf("visible=%q want=%q", visible, "Hello")
+		}
+		if remaining != "" {
+			t.Fatalf("remaining=%q want empty", remaining)
+		}
+	})
+}
+
 func TestResolveGenerationContextAndBatch(t *testing.T) {
 	tests := []struct {
 		name      string

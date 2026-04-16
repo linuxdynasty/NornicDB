@@ -66,12 +66,12 @@ RETURN myplugin.analyze(node) AS result
 
 ### Heimdall Plugins
 
-Provide SLM-invokable actions for subsystem management:
+Provide SLM-invokable actions for coding, repository understanding, Graph-RAG, and context management:
 
 ```
-User: "check system metrics"
-SLM → Invokes: heimdall_watcher_metrics
-Result: CPU 45%, Memory 2.3GB, Queries 1.2K/s
+User: "map this repository before we make a change"
+SLM → Invokes: heimdall_watcher_repo_map
+Result: Repository graph structure, labels, and likely integration points
 ```
 
 ## Configuration
@@ -82,7 +82,7 @@ Result: CPU 45%, Memory 2.3GB, Queries 1.2K/s
 # Function plugin directory (APOC-style)
 NORNICDB_PLUGINS_DIR=/opt/nornicdb/plugins
 
-# Heimdall plugin directory (subsystem management)
+# Heimdall plugin directory (coding-agent plugins)
 NORNICDB_HEIMDALL_PLUGINS_DIR=/opt/nornicdb/heimdall-plugins
 
 # Enable Heimdall (required for Heimdall plugins; env overrides config file)
@@ -199,7 +199,7 @@ RETURN myplugin.greet("World") AS greeting
 
 ### Heimdall Plugin
 
-Provides SLM-invokable subsystem management actions.
+Provides SLM-invokable coding actions.
 
 **Minimal Example:**
 
@@ -241,18 +241,18 @@ func (p *MySubsystem) RecentEvents(limit int) []heimdall.SubsystemEvent { return
 // Actions (invoked by SLM)
 func (p *MySubsystem) Actions() map[string]heimdall.ActionFunc {
     return map[string]heimdall.ActionFunc{
-        "check": {
-            Description: "Check subsystem status",
-            Category:    "monitoring",
-            Handler:     p.check,
+        "analyze": {
+            Description: "Analyze repository state for a coding task",
+            Category:    "coding",
+            Handler:     p.analyze,
         },
     }
 }
 
-func (p *MySubsystem) check(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+func (p *MySubsystem) analyze(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
     return &heimdall.ActionResult{
         Success: true,
-        Message: "All systems operational",
+        Message: "Repository context analyzed",
     }, nil
 }
 
@@ -269,9 +269,9 @@ go build -buildmode=plugin -o mysubsystem.so ./my-subsystem
 **Use:**
 
 ```
-User: "check my subsystem"
-SLM → heimdall.mysubsystem.check
-Result: "All systems operational"
+User: "analyze this repository area"
+SLM → heimdall.mysubsystem.analyze
+Result: "Repository context analyzed"
 ```
 
 ## Built-In Plugins
@@ -293,15 +293,16 @@ Provides Neo4j-compatible APOC functions:
 ### Watcher Plugin
 
 **Type:** Heimdall  
-**Actions:** 11  
+**Actions:** 6  
 **Location:** `plugins/heimdall/built-plugins/watcher.so`
 
-Provides SLM monitoring and management:
-- System status (`heimdall_watcher_status`)
-- Health checks (`heimdall_watcher_health`)
-- Metrics collection (`heimdall_watcher_metrics`)
-- Configuration management
-- Event tracking
+Provides coding-agent orchestration:
+- Repository mapping (`heimdall_watcher_repo_map`)
+- Graph-RAG discovery (`heimdall_watcher_discover`)
+- Targeted Cypher inspection (`heimdall_watcher_query`)
+- Graph coverage summary (`heimdall_watcher_db_stats`)
+- Coding-agent prompt shaping and synthesis
+- Long-context summary persistence strategy for re-retrieval
 
 ## Platform Support
 

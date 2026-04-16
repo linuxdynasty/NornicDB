@@ -20,6 +20,8 @@ import (
 // Endpoints:
 //   - GET  /api/bifrost/status           - Heimdall and Bifrost status
 //   - POST /api/bifrost/chat/completions - Chat with Heimdall
+//   - GET  /v1/models                    - OpenAI-compatible single-model list
+//   - POST /v1/chat/completions          - OpenAI-compatible alias for Bifrost chat
 //   - GET  /api/bifrost/events           - SSE stream for real-time events
 type Handler struct {
 	manager        *Manager
@@ -28,6 +30,75 @@ type Handler struct {
 	database       DatabaseRouter
 	metrics        MetricsReader
 	inMemoryRunner InMemoryToolRunner // optional: e.g. MCP store/recall/discover for agentic loop
+}
+
+var leakedChatTemplateMarker = regexp.MustCompile(`(?s)<\|im_(?:start|end)\|>`)
+
+func sanitizeAssistantResponse(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if idx := leakedChatTemplateMarker.FindStringIndex(content); idx != nil {
+		content = strings.TrimSpace(content[:idx[0]])
+	}
+	if idx := strings.Index(strings.ToLower(content), "<|start_of_turn|>"); idx >= 0 {
+		content = strings.TrimSpace(content[:idx])
+	}
+	content = strings.TrimRight(content, "\r\n")
+	return content + "\n"
+}
+
+func parseActionEnvelope(response string) *ParsedAction {
+	response = strings.TrimSpace(response)
+	start := strings.Index(response, "{")
+	if start == -1 {
+		return nil
+	}
+	end := strings.LastIndex(response, "}")
+	if end == -1 || end <= start {
+		return nil
+	}
+	jsonStr := response[start : end+1]
+	var parsed ParsedAction
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(parsed.Action) == "" {
+		return nil
+	}
+	if parsed.Params == nil {
+		parsed.Params = make(map[string]interface{})
+	}
+	return &parsed
+}
+
+func buildPassThroughToolCall(action *ParsedAction) ChatToolCallWire {
+	arguments := "{}"
+	if action != nil && action.Params != nil {
+		if data, err := json.Marshal(action.Params); err == nil {
+			arguments = string(data)
+		}
+	}
+	name := ""
+	if action != nil {
+		name = action.Action
+	}
+	return ChatToolCallWire{
+		ID:   "call_" + generateID(),
+		Type: "function",
+		Function: ChatToolFunctionWire{
+			Name:      name,
+			Arguments: arguments,
+		},
+	}
+}
+
+func (h *Handler) announcedModel() string {
+	if strings.TrimSpace(h.config.Model) != "" {
+		return strings.TrimSpace(h.config.Model)
+	}
+	return "nornicdb-heimdall"
 }
 
 // NewHandler creates a Bifrost HTTP handler.
@@ -69,7 +140,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/bifrost/status":
 		h.handleStatus(w, r)
+	case r.URL.Path == "/v1/models":
+		h.handleModels(w, r)
 	case r.URL.Path == "/api/bifrost/chat/completions":
+		h.handleChatCompletions(w, r)
+	case r.URL.Path == "/v1/chat/completions":
 		h.handleChatCompletions(w, r)
 	case r.URL.Path == "/api/bifrost/events":
 		h.handleEvents(w, r)
@@ -104,12 +179,33 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok",
-		"model":  h.config.Model,
+		"model":  h.announcedModel(),
 		"heimdall": map[string]interface{}{
 			"enabled": h.config.Enabled,
 			"stats":   stats,
 		},
 		"bifrost": bifrostStats,
+	})
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	model := h.announcedModel()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{
+				"id":       model,
+				"object":   "model",
+				"created":  time.Now().Unix(),
+				"owned_by": "nornicdb",
+			},
+		},
 	})
 }
 
@@ -455,10 +551,8 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Default model if not specified (BYOM: only one model loaded)
-	if req.Model == "" {
-		req.Model = h.config.Model
-	}
+	// Ignore requested model and normalize to the single announced model.
+	req.Model = h.announcedModel()
 
 	// Extract user message for lifecycle context
 	userMessage := ""
@@ -543,6 +637,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		requestID:              requestID,
 		database:               h.database,
 		metrics:                h.metrics,
+		compatMode:             r.URL.Path == "/v1/chat/completions",
 		principalRoles:         PrincipalRolesFromContext(r.Context()),
 		databaseAccessMode:     DatabaseAccessModeFromContext(r.Context()),
 		resolvedAccessResolver: ResolvedAccessResolverFromContext(r.Context()),
@@ -567,6 +662,7 @@ type requestLifecycle struct {
 	requestID     string
 	database      DatabaseRouter
 	metrics       MetricsReader
+	compatMode    bool
 	StreamWriter  http.ResponseWriter // optional: for streaming notifications during agentic loop
 	StreamFlusher http.Flusher        // optional: flush after each SSE chunk
 	StreamModel   string              // optional: model name for SSE chunk payloads
@@ -578,6 +674,9 @@ type requestLifecycle struct {
 
 // sendStreamNotifications writes queued notifications as SSE chunks (used when streaming with tools).
 func (h *Handler) sendStreamNotifications(lifecycle *requestLifecycle, notifs []QueuedNotification) {
+	if lifecycle.compatMode {
+		return
+	}
 	if lifecycle.StreamWriter == nil || lifecycle.StreamFlusher == nil || lifecycle.StreamModel == "" {
 		return
 	}
@@ -773,6 +872,9 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			return response, nil
 		}
 		if actionError != "" {
+			if lifecycle.compatMode && parseActionEnvelope(response) != nil {
+				return response, nil
+			}
 			return actionError, nil
 		}
 		if parsedAction == nil {
@@ -853,6 +955,31 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 		http.Error(w, fmt.Sprintf("Generation error: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if lifecycle.compatMode {
+		if passThrough := parseActionEnvelope(finalResponse); passThrough != nil {
+			if _, ok := GetHeimdallAction(passThrough.Action); !ok {
+				resp := ChatResponse{
+					ID:      lifecycle.requestID,
+					Object:  "chat.completion",
+					Model:   model,
+					Created: time.Now().Unix(),
+					Choices: []ChatChoice{{
+						Index: 0,
+						Message: &ChatMessage{
+							Role:      "assistant",
+							Content:   "",
+							ToolCalls: []ChatToolCallWire{buildPassThroughToolCall(passThrough)},
+						},
+						FinishReason: "tool_calls",
+					}},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
+	}
+	finalResponse = sanitizeAssistantResponse(finalResponse)
 
 	log.Printf("[Bifrost] Agentic loop finished: %s", finalResponse)
 
@@ -945,31 +1072,9 @@ func (h *Handler) handleStreamingWithTools(w http.ResponseWriter, ctx context.Co
 // Format: {"action": "heimdall_watcher_status", "params": {}}
 // Returns (parsedAction, errorMessage). If errorMessage is set, action is invalid.
 func (h *Handler) tryParseAction(response string) (*ParsedAction, string) {
-	response = strings.TrimSpace(response)
-
-	// Find JSON in response
-	start := strings.Index(response, "{")
-	if start == -1 {
-		log.Printf("[Bifrost] tryParseAction: no JSON start found")
-		return nil, ""
-	}
-	end := strings.LastIndex(response, "}")
-	if end == -1 || end <= start {
-		log.Printf("[Bifrost] tryParseAction: no JSON end found")
-		return nil, ""
-	}
-
-	jsonStr := response[start : end+1]
-	log.Printf("[Bifrost] tryParseAction: parsing JSON: %s", jsonStr)
-
-	var parsed ParsedAction
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
-		log.Printf("[Bifrost] tryParseAction: JSON parse error: %v", err)
-		return nil, ""
-	}
-
-	if parsed.Action == "" {
-		log.Printf("[Bifrost] tryParseAction: no action field")
+	parsed := parseActionEnvelope(response)
+	if parsed == nil {
+		log.Printf("[Bifrost] tryParseAction: no parseable action envelope found")
 		return nil, ""
 	}
 
@@ -983,7 +1088,7 @@ func (h *Handler) tryParseAction(response string) (*ParsedAction, string) {
 	}
 
 	log.Printf("[Bifrost] tryParseAction: action FOUND: %s", parsed.Action)
-	return &parsed, ""
+	return parsed, ""
 }
 
 // handleStreamingResponse uses Server-Sent Events (SSE) for streaming with lifecycle hooks.
@@ -1006,38 +1111,42 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 
 	// === Send queued notifications from PrePrompt hooks inline ===
 	// This ensures proper ordering - notifications appear before the AI response
-	notifications := lifecycle.promptCtx.DrainNotifications()
-	for _, notif := range notifications {
-		icon := "ℹ️"
-		switch notif.Type {
-		case "error":
-			icon = "❌"
-		case "warning":
-			icon = "⚠️"
-		case "success":
-			icon = "✅"
-		case "progress":
-			icon = "🔄"
-		}
+	if lifecycle.compatMode {
+		lifecycle.promptCtx.DrainNotifications()
+	} else {
+		notifications := lifecycle.promptCtx.DrainNotifications()
+		for _, notif := range notifications {
+			icon := "ℹ️"
+			switch notif.Type {
+			case "error":
+				icon = "❌"
+			case "warning":
+				icon = "⚠️"
+			case "success":
+				icon = "✅"
+			case "progress":
+				icon = "🔄"
+			}
 
-		notifChunk := ChatResponse{
-			ID:      id,
-			Object:  "chat.completion.chunk",
-			Model:   model,
-			Created: time.Now().Unix(),
-			Choices: []ChatChoice{
-				{
-					Index: 0,
-					Delta: &ChatMessage{
-						Role:    "heimdall",
-						Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+			notifChunk := ChatResponse{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Model:   model,
+				Created: time.Now().Unix(),
+				Choices: []ChatChoice{
+					{
+						Index: 0,
+						Delta: &ChatMessage{
+							Role:    "heimdall",
+							Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+						},
 					},
 				},
-			},
+			}
+			data, _ := json.Marshal(notifChunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 		}
-		data, _ := json.Marshal(notifChunk)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
 	}
 
 	// Collect full response to check for actions
@@ -1090,12 +1199,36 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 
 	// Check if response contains an action command
 	response := fullResponse.String()
+	response = sanitizeAssistantResponse(response)
 	log.Printf("[Bifrost] Streaming complete, checking for action: %s", response)
 
 	parsedAction, actionError := h.tryParseAction(response)
 
 	// Handle action not found error
 	if actionError != "" {
+		if lifecycle.compatMode {
+			if passThrough := parseActionEnvelope(response); passThrough != nil {
+				chunk := ChatResponse{
+					ID:      id,
+					Object:  "chat.completion.chunk",
+					Model:   model,
+					Created: time.Now().Unix(),
+					Choices: []ChatChoice{{
+						Index: 0,
+						Delta: &ChatMessage{
+							Role:      "assistant",
+							ToolCalls: []ChatToolCallWire{buildPassThroughToolCall(passThrough)},
+						},
+						FinishReason: "tool_calls",
+					}},
+				}
+				data, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+		}
 		fmt.Fprintf(w, "data: %s\n\n", actionError)
 		flusher.Flush()
 		fmt.Fprintf(w, "data: [DONE]\n\n")

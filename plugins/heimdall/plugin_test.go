@@ -2,6 +2,8 @@ package heimdall
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/heimdall"
@@ -18,6 +20,67 @@ func newActionCtx(params map[string]interface{}) heimdall.ActionContext {
 	}
 }
 
+type memoryDBRouter struct {
+	summary string
+	facts   []string
+}
+
+func (m *memoryDBRouter) DefaultDatabaseName() string { return "default" }
+
+func (m *memoryDBRouter) ResolveDatabase(nameOrAlias string) (string, error) {
+	if nameOrAlias == "" {
+		return "default", nil
+	}
+	return nameOrAlias, nil
+}
+
+func (m *memoryDBRouter) ListDatabases() []string { return []string{"default"} }
+
+func (m *memoryDBRouter) Query(ctx context.Context, database string, cypher string, params map[string]interface{}) ([]map[string]interface{}, error) {
+	_ = ctx
+	_ = database
+	switch {
+	case strings.Contains(cypher, "SET m.summary"):
+		if summary, ok := params["summary"].(string); ok {
+			m.summary = summary
+		}
+		return []map[string]interface{}{{"summary": m.summary}}, nil
+	case strings.Contains(cypher, "CREATE (f:HeimdallSessionFact"):
+		if fact, ok := params["fact"].(string); ok {
+			m.facts = append(m.facts, fact)
+		}
+		return []map[string]interface{}{{"fact": params["fact"]}}, nil
+	case strings.Contains(cypher, "RETURN m.summary AS summary"):
+		if m.summary == "" {
+			return nil, nil
+		}
+		return []map[string]interface{}{{"summary": m.summary}}, nil
+	case strings.Contains(cypher, "RETURN f.fact AS fact"):
+		rows := make([]map[string]interface{}, 0, len(m.facts))
+		for i := len(m.facts) - 1; i >= 0; i-- {
+			rows = append(rows, map[string]interface{}{"fact": m.facts[i]})
+		}
+		return rows, nil
+	default:
+		return nil, fmt.Errorf("unexpected query: %s", cypher)
+	}
+}
+
+func (m *memoryDBRouter) Stats(database string) (heimdall.DatabaseStats, error) {
+	_ = database
+	return heimdall.DatabaseStats{}, nil
+}
+
+func (m *memoryDBRouter) Discover(ctx context.Context, database string, query string, nodeTypes []string, limit int, depth int) (*heimdall.DiscoverResult, error) {
+	_ = ctx
+	_ = database
+	_ = query
+	_ = nodeTypes
+	_ = limit
+	_ = depth
+	return &heimdall.DiscoverResult{}, nil
+}
+
 // TestWatcherPlugin_Interface verifies plugin implements HeimdallPlugin
 func TestWatcherPlugin_Interface(t *testing.T) {
 	var _ heimdall.HeimdallPlugin = &WatcherPlugin{}
@@ -30,7 +93,7 @@ func TestWatcherPlugin_Identity(t *testing.T) {
 	assert.Equal(t, "watcher", p.Name())
 	assert.Equal(t, "1.0.0", p.Version())
 	assert.Equal(t, heimdall.PluginTypeHeimdall, p.Type())
-	assert.Contains(t, p.Description(), "Watcher")
+	assert.Contains(t, p.Description(), "coding agent")
 }
 
 // TestWatcherPlugin_Lifecycle tests the full lifecycle
@@ -78,6 +141,7 @@ func TestWatcherPlugin_Actions(t *testing.T) {
 	expectedActions := []string{
 		"help",                 // List available actions
 		"status",               // Get status
+		"repo_map",             // Repository structure summary
 		"autocomplete_suggest", // Cypher schema suggestions
 		"discover",             // Semantic search (GRAPH-RAG)
 		"query",                // Read-only Cypher
@@ -116,7 +180,7 @@ func TestWatcherPlugin_HelpAction(t *testing.T) {
 	require.NotNil(t, result)
 
 	assert.True(t, result.Success)
-	assert.Contains(t, result.Message, "Available actions")
+	assert.Contains(t, result.Message, "Available Heimdall coding-agent actions")
 	assert.NotNil(t, result.Data)
 	_, hasCatalog := result.Data["catalog"]
 	assert.True(t, hasCatalog, "result.Data should have catalog key")
@@ -143,17 +207,13 @@ func TestWatcherPlugin_StatusAction(t *testing.T) {
 	require.NotNil(t, result)
 
 	assert.True(t, result.Success)
-	assert.Contains(t, result.Message, "NornicDB Status")
+	assert.Contains(t, result.Message, "Coding plugin status")
 
-	// Check nested heimdall data
-	heimdallData, ok := result.Data["heimdall"].(map[string]interface{})
-	require.True(t, ok, "result.Data should have heimdall key")
-	assert.NotNil(t, heimdallData["health"])
-	assert.NotNil(t, heimdallData["metrics"])
-	assert.NotNil(t, heimdallData["config"])
-
-	// Check runtime data is present
-	assert.NotNil(t, result.Data["runtime"])
+	codingPluginData, ok := result.Data["coding_plugin"].(map[string]interface{})
+	require.True(t, ok, "result.Data should have coding_plugin key")
+	assert.Equal(t, heimdall.StatusRunning, codingPluginData["status"])
+	assert.NotNil(t, codingPluginData["config"])
+	assert.NotNil(t, codingPluginData["summary"])
 }
 
 // TestWatcherPlugin_MetricsAction tests the metrics action
@@ -176,22 +236,16 @@ func TestWatcherPlugin_MetricsAction(t *testing.T) {
 
 	actionCtx := newActionCtx(map[string]interface{}{})
 
-	result, err := p.actionMetrics(actionCtx)
+	result, err := p.actionDBStats(actionCtx)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
 	assert.True(t, result.Success)
-	assert.Contains(t, result.Message, "NornicDB Metrics")
+	assert.Contains(t, result.Message, "CONTEXT STRATEGY")
 
-	// Check heimdall metrics are present
-	heimdallMetrics, ok := result.Data["heimdall"].(map[string]interface{})
-	require.True(t, ok, "result.Data should have heimdall key")
-	requests, ok := heimdallMetrics["requests"].(int64)
-	require.True(t, ok, "heimdall metrics should have requests")
-	assert.GreaterOrEqual(t, requests, int64(5))
-
-	// Check runtime metrics are present
-	assert.NotNil(t, result.Data["runtime"])
+	contextStrategy, ok := result.Data["context_strategy"].(map[string]interface{})
+	require.True(t, ok, "result.Data should have context_strategy key")
+	assert.Equal(t, "summarize_and_rag", contextStrategy["history_strategy"])
 }
 
 // TestWatcherPlugin_EventsAction tests the events action
@@ -212,16 +266,7 @@ func TestWatcherPlugin_EventsAction(t *testing.T) {
 		_, _ = p.actionHello(actionCtx)
 	}
 
-	actionCtx := newActionCtx(map[string]interface{}{
-		"limit": 10,
-	})
-
-	result, err := p.actionEvents(actionCtx)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	assert.True(t, result.Success)
-	events := result.Data["events"].([]heimdall.SubsystemEvent)
+	events := p.RecentEvents(10)
 	assert.NotEmpty(t, events)
 }
 
@@ -240,13 +285,10 @@ func TestWatcherPlugin_ConfigureAction(t *testing.T) {
 	require.NoError(t, p.Start())
 
 	t.Run("valid config update", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{
+		err := p.Configure(map[string]interface{}{
 			"max_tokens": 1024,
 		})
-
-		result, err := p.actionSetConfig(actionCtx)
 		require.NoError(t, err)
-		assert.True(t, result.Success)
 
 		// Verify config was updated
 		config := p.Config()
@@ -254,14 +296,11 @@ func TestWatcherPlugin_ConfigureAction(t *testing.T) {
 	})
 
 	t.Run("invalid config value", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{
+		err := p.Configure(map[string]interface{}{
 			"max_tokens": 10000, // Too high
 		})
-
-		result, err := p.actionSetConfig(actionCtx)
-		require.NoError(t, err) // Handler doesn't return error, sets Success=false
-		assert.False(t, result.Success)
-		assert.Contains(t, result.Message, "error")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid max_tokens")
 	})
 }
 
@@ -279,22 +318,24 @@ func TestWatcherPlugin_BroadcastAction(t *testing.T) {
 
 	t.Run("with message", func(t *testing.T) {
 		actionCtx := newActionCtx(map[string]interface{}{
-			"message": "Test broadcast message",
+			"limit": 5,
 		})
 
-		result, err := p.actionBroadcast(actionCtx)
+		result, err := p.actionRepoMap(actionCtx)
 		require.NoError(t, err)
-		assert.True(t, result.Success)
-		assert.Contains(t, result.Message, "broadcast")
+		assert.False(t, result.Success)
+		assert.Contains(t, result.Message, "database not available")
 	})
 
 	t.Run("missing message", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{})
+		actionCtx := newActionCtx(map[string]interface{}{
+			"cypher": strings.Repeat("a", 10001),
+		})
 
-		result, err := p.actionBroadcast(actionCtx)
+		result, err := p.actionQuery(actionCtx)
 		require.NoError(t, err)
 		assert.False(t, result.Success)
-		assert.Contains(t, result.Message, "Missing")
+		assert.Contains(t, result.Message, "query too long")
 	})
 }
 
@@ -312,28 +353,22 @@ func TestWatcherPlugin_NotifyAction(t *testing.T) {
 
 	t.Run("full notification", func(t *testing.T) {
 		actionCtx := newActionCtx(map[string]interface{}{
-			"type":    "success",
-			"title":   "Test Title",
-			"message": "Test notification message",
+			"query": "plugin loading",
 		})
 
-		result, err := p.actionNotify(actionCtx)
+		result, err := p.actionDiscover(actionCtx)
 		require.NoError(t, err)
-		assert.True(t, result.Success)
-		assert.Equal(t, "success", result.Data["type"])
-		assert.Equal(t, "Test Title", result.Data["title"])
+		assert.False(t, result.Success)
+		assert.Contains(t, result.Message, "database not available")
 	})
 
 	t.Run("missing message", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{
-			"type":  "error",
-			"title": "Error",
-		})
+		actionCtx := newActionCtx(map[string]interface{}{})
 
-		result, err := p.actionNotify(actionCtx)
+		result, err := p.actionDiscover(actionCtx)
 		require.NoError(t, err)
 		assert.False(t, result.Success)
-		assert.Contains(t, result.Message, "Missing")
+		assert.Contains(t, result.Message, "query parameter required")
 	})
 }
 
@@ -369,4 +404,90 @@ func TestWatcherPlugin_Concurrency(t *testing.T) {
 	// Verify metrics are consistent
 	metrics := p.Metrics()
 	assert.GreaterOrEqual(t, metrics["requests"].(int64), int64(1000))
+}
+
+func TestWatcherPlugin_CaptureSessionMemory(t *testing.T) {
+	p := &WatcherPlugin{}
+
+	ctx := heimdall.SubsystemContext{
+		Config: heimdall.Config{
+			Model:       "test-model",
+			MaxTokens:   512,
+			Temperature: 0.1,
+		},
+	}
+	require.NoError(t, p.Initialize(ctx))
+	require.NoError(t, p.Start())
+
+	result := &heimdall.ActionResult{
+		Success: true,
+		Message: "Repository graph map: 20 nodes, 10 relationships, 3 label groups",
+		Data: map[string]interface{}{
+			"database":           "default",
+			"node_count":         20,
+			"relationship_count": 10,
+		},
+	}
+
+	p.captureSessionMemory("heimdall_watcher_repo_map", map[string]interface{}{}, result)
+
+	assert.NotEmpty(t, p.summary)
+	assert.NotEmpty(t, p.facts)
+	assert.Contains(t, p.summary, "Recent coding session facts")
+	assert.Contains(t, strings.Join(p.facts, "\n"), "Repository node count observed: 20")
+	assert.Contains(t, strings.Join(p.facts, "\n"), "Database in focus: default")
+}
+
+func TestWatcherPlugin_BuildSessionMemoryContext(t *testing.T) {
+	p := &WatcherPlugin{}
+	p.summary = "Recent coding session facts:\n- Updated plugin summary"
+	p.facts = []string{
+		"Query investigated: plugin loading",
+		"Successful action: heimdall_watcher_discover",
+		"Database in focus: default",
+	}
+
+	contextBlock := p.buildSessionMemoryContext("show plugin loading flow")
+	assert.Contains(t, contextBlock, "SUMMARIZED CODING SESSION MEMORY")
+	assert.Contains(t, contextBlock, "Updated plugin summary")
+	assert.Contains(t, contextBlock, "plugin loading")
+}
+
+func TestWatcherPlugin_GraphBackedSessionMemory(t *testing.T) {
+	db := &memoryDBRouter{}
+	p := &WatcherPlugin{}
+
+	ctx := heimdall.SubsystemContext{
+		Config: heimdall.Config{
+			Model:       "test-model",
+			MaxTokens:   512,
+			Temperature: 0.1,
+		},
+		Database: db,
+	}
+	require.NoError(t, p.Initialize(ctx))
+	require.NoError(t, p.Start())
+
+	result := &heimdall.ActionResult{
+		Success: true,
+		Message: "Repository graph map: 7 nodes, 5 relationships, 2 label groups",
+		Data: map[string]interface{}{
+			"database":           "default",
+			"node_count":         7,
+			"relationship_count": 5,
+		},
+	}
+
+	p.captureSessionMemory("heimdall_watcher_repo_map", map[string]interface{}{"query": "plugin graph"}, result)
+	assert.NotEmpty(t, db.summary)
+	assert.NotEmpty(t, db.facts)
+
+	p.summary = ""
+	p.facts = nil
+	p.refreshSessionMemoryFromGraph("plugin graph")
+
+	assert.NotEmpty(t, p.summary)
+	assert.NotEmpty(t, p.facts)
+	assert.Contains(t, p.summary, "Recent coding session facts")
+	assert.Contains(t, strings.Join(p.facts, "\n"), "plugin graph")
 }

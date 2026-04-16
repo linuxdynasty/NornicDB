@@ -253,8 +253,16 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/bifrost/status", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		serveHeimdall(w, r)
 	}, auth.PermRead))
+	// OpenAI-compatible models endpoint - read access required
+	mux.HandleFunc("/v1/models", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		serveHeimdall(w, r)
+	}, auth.PermRead))
 	// Chat completions - write access required (modifies state/generates content)
 	mux.HandleFunc("/api/bifrost/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		serveHeimdall(w, r)
+	}, auth.PermWrite))
+	// OpenAI-compatible chat completions alias - write access required
+	mux.HandleFunc("/v1/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		serveHeimdall(w, r)
 	}, auth.PermWrite))
 	// Autocomplete - read access required (queries schema, generates suggestions)
