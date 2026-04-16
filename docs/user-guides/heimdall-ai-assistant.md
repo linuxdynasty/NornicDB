@@ -202,22 +202,171 @@ what labels exist in the database
 
 ## API Endpoints
 
-Bifrost provides OpenAI-compatible HTTP endpoints:
+Heimdall exposes two sets of HTTP endpoints. The **Bifrost** paths are the native API; the **`/v1`** paths are OpenAI-compatible aliases that behave identically. All endpoints require authentication (Basic Auth or Bearer token).
+
+### Endpoint Reference
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/bifrost/status` | Read | Heimdall & Bifrost status |
+| `POST` | `/api/bifrost/chat/completions` | Write | Chat completions (native) |
+| `POST` | `/api/bifrost/autocomplete` | Read | Cypher query autocomplete |
+| `GET` | `/api/bifrost/events` | Read | SSE stream for real-time events |
+| `GET` | `/v1/models` | Read | OpenAI-compatible model list |
+| `POST` | `/v1/chat/completions` | Write | OpenAI-compatible chat completions |
+
+The `/v1/chat/completions` and `/api/bifrost/chat/completions` endpoints are identical — same request format, same response format, same streaming behavior. The `/v1` routes exist so that any tool expecting an OpenAI-compatible API can point at NornicDB directly.
+
+### Request & Response Format
+
+Requests and responses follow the [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat) format:
+
+**Request body:**
+
+```json
+{
+  "model": "heimdall",
+  "messages": [
+    {"role": "user", "content": "count all nodes"}
+  ],
+  "stream": false,
+  "max_tokens": 1024,
+  "temperature": 0.5,
+  "tools": []
+}
+```
+
+The `model` field is accepted but ignored — Heimdall always uses the configured backend model. The `/v1/models` endpoint returns the announced model name (the configured `NORNICDB_HEIMDALL_MODEL`, or `"nornicdb-heimdall"` when unset).
+
+**Response body** (non-streaming):
+
+```json
+{
+  "id": "req-abc123",
+  "object": "chat.completion",
+  "model": "nornicdb-heimdall",
+  "created": 1713200000,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The database contains 42 nodes."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 128, "completion_tokens": 32, "total_tokens": 160 }
+}
+```
+
+**Streaming** (`"stream": true`) returns Server-Sent Events with `chat.completion.chunk` objects — the same SSE format as OpenAI's streaming API.
+
+**Tool calling** is supported. When Heimdall's backend supports native tool calling (OpenAI, Ollama), the response may include `tool_calls` in the assistant message. You can pass `tools` in the request body using the standard OpenAI tool definition format.
+
+### curl Examples
 
 ```bash
 # Check status
-curl http://localhost:7474/api/bifrost/status
+curl http://localhost:7474/api/bifrost/status \
+  -u admin:password123
 
-# Chat (single message)
+# Chat (Bifrost path)
 curl -X POST http://localhost:7474/api/bifrost/chat/completions \
+  -u admin:password123 \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "get status"}]}'
+
+# Chat (OpenAI-compatible path — identical behavior)
+curl -X POST http://localhost:7474/v1/chat/completions \
+  -u admin:password123 \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "get status"}]}'
 
 # Stream response
-curl -X POST http://localhost:7474/api/bifrost/chat/completions \
+curl -X POST http://localhost:7474/v1/chat/completions \
+  -u admin:password123 \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "hello"}], "stream": true}'
+
+# List models
+curl http://localhost:7474/v1/models -u admin:password123
 ```
+
+### Using with OpenAI-Compatible Clients
+
+Because the `/v1` endpoints follow the OpenAI API contract, you can use any OpenAI-compatible client library by pointing `base_url` at your NornicDB instance:
+
+**Python (openai SDK):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:7474/v1",
+    api_key="admin:password123",  # Basic auth as api_key
+)
+
+response = client.chat.completions.create(
+    model="heimdall",  # model name is accepted but ignored
+    messages=[{"role": "user", "content": "show database statistics"}],
+)
+print(response.choices[0].message.content)
+```
+
+**Node.js (openai SDK):**
+
+```typescript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:7474/v1",
+  apiKey: "admin:password123",
+});
+
+const response = await client.chat.completions.create({
+  model: "heimdall",
+  messages: [{ role: "user", content: "count all nodes" }],
+});
+console.log(response.choices[0].message.content);
+```
+
+### Using with Continue IDE
+
+[Continue](https://continue.dev) is an open-source AI code assistant for VS Code and JetBrains. Because Heimdall exposes OpenAI-compatible endpoints, you can configure Continue to use it as a model provider.
+
+Create or edit `~/.continue/config.yaml`:
+
+```yaml
+name: Local Config
+version: 1.0.0
+schema: v1
+models:
+  - name: Heimdall
+    provider: openai
+    model: heimdall
+    apiBase: http://localhost:7474/v1
+    apiKey: hwe23g12rpi-i-1b4.13498...
+    roles:
+      - chat
+      - edit
+      - apply
+    defaultCompletionOptions:
+      temperature: 0.5
+      maxTokens: 1024
+```
+
+> **Authentication:** If NornicDB requires auth (the default), set the API key in Continue's settings `apiKey`. Use the token generated by either the API or UI (secuity tab). NornicDB (or your credentials) as the API key value — Continue sends it as a Bearer token. Alternatively, start NornicDB with `--no-auth` for local development.
+
+> **Model name:** The `model` field is sent in requests but Heimdall ignores it and always uses the configured backend. Set it to `heimdall` (or any value) for clarity.
+
+### Using with Other AI Tools
+
+Any tool that supports "OpenAI-compatible" APIs can connect to Heimdall. Set:
+
+- **API Base URL:** `http://localhost:7474/v1`
+- **Model:** `heimdall` (or any string — it's ignored)
+- **API Key:** Your NornicDB credentials (or leave empty with `--no-auth`)
 
 ## Docker Deployment
 
