@@ -1108,6 +1108,48 @@ func TestHandler_OpenAI_V1Streaming_PassThroughUnknownActionAsToolCall(t *testin
 	assert.NotContains(t, bodyStr, `Sorry, I don't know how to perform the action`)
 }
 
+func TestHandler_ChatCompletionRequest_StoresExternalToolsInPromptContext(t *testing.T) {
+	mockGen := NewMockGenerator("/test/model.gguf")
+	mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
+		return "tool-aware answer", nil
+	}
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	chatReq := ChatRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "use the external repo tool"},
+		},
+		Tools: []ChatToolDefinition{
+			{
+				Type: "function",
+				Function: ChatToolDefinitionFunction{
+					Name:        "mcp__repo__search",
+					Description: "Search the repository graph",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var chatResp ChatResponse
+	err := json.NewDecoder(resp.Body).Decode(&chatResp)
+	require.NoError(t, err)
+	assert.Equal(t, "tool-aware answer\n", chatResp.Choices[0].Message.Content)
+}
+
 // =============================================================================
 // trimAgenticResponse / extractNonJSONAnswer (prompt-based agentic loop helpers)
 // =============================================================================

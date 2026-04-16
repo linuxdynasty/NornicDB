@@ -13,6 +13,7 @@ package heimdall
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -60,15 +61,27 @@ type ChatToolFunctionWire struct {
 	Arguments string `json:"arguments"`
 }
 
+type ChatToolDefinition struct {
+	Type     string                     `json:"type,omitempty"`
+	Function ChatToolDefinitionFunction `json:"function"`
+}
+
+type ChatToolDefinitionFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
 // ChatRequest is the request format for chat completions.
 // Compatible with OpenAI/Ollama API format.
 type ChatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature float32       `json:"temperature,omitempty"`
-	TopP        float32       `json:"top_p,omitempty"`
+	Model       string               `json:"model"`
+	Messages    []ChatMessage        `json:"messages"`
+	Tools       []ChatToolDefinition `json:"tools,omitempty"`
+	Stream      bool                 `json:"stream,omitempty"`
+	MaxTokens   int                  `json:"max_tokens,omitempty"`
+	Temperature float32              `json:"temperature,omitempty"`
+	TopP        float32              `json:"top_p,omitempty"`
 }
 
 // ChatResponse is the response format for chat completions.
@@ -378,6 +391,10 @@ type PromptContext struct {
 	// Messages is the full conversation history
 	Messages []ChatMessage
 
+	// ExternalTools are tool definitions provided by the client (e.g. Continue/OpenAI tools).
+	// These are exposed to the underlying model in addition to Heimdall's built-in actions.
+	ExternalTools []MCPTool
+
 	// AdditionalInstructions are appended after ActionPrompt.
 	// Plugins add context, constraints, or guidance here.
 	AdditionalInstructions string
@@ -640,6 +657,12 @@ Your role is to help users manage the database by executing actions and running 
 	sb.WriteString(CypherPrimer)
 	sb.WriteString("\n")
 
+	if len(p.ExternalTools) > 0 {
+		sb.WriteString("EXTERNAL CLIENT TOOLS (available to call when needed):\n")
+		sb.WriteString(p.externalToolsPrompt())
+		sb.WriteString("\n")
+	}
+
 	// === RESPONSE MODES ===
 	sb.WriteString(`RESPONSE MODES:
 
@@ -678,6 +701,33 @@ IMPORTANT: Prefer a direct answer when context has the information. Always compl
 	return sb.String()
 }
 
+func (p *PromptContext) externalToolsPrompt() string {
+	if len(p.ExternalTools) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, tool := range p.ExternalTools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		desc := strings.TrimSpace(tool.Description)
+		if desc == "" {
+			desc = "No description provided"
+		}
+		sb.WriteString("- ")
+		sb.WriteString(name)
+		sb.WriteString(": ")
+		sb.WriteString(desc)
+		if len(tool.InputSchema) > 0 {
+			sb.WriteString(" | inputSchema: ")
+			sb.Write(tool.InputSchema)
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
 // buildFullPromptForTools is like buildFullPrompt but for native tool-calling providers.
 // Instructs the model to answer in natural language when context has the answer; use tools only when needed.
 func (p *PromptContext) buildFullPromptForTools() string {
@@ -691,6 +741,11 @@ Your role is to help users by answering from context or by using tools when an a
 	sb.WriteString("AVAILABLE ACTIONS (invoke via tools when needed):\n")
 	sb.WriteString(p.ActionPrompt)
 	sb.WriteString("\n")
+	if len(p.ExternalTools) > 0 {
+		sb.WriteString("EXTERNAL CLIENT TOOLS (these were provided by the caller and are also available):\n")
+		sb.WriteString(p.externalToolsPrompt())
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString(CypherPrimer)
 	sb.WriteString("\n")

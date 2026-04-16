@@ -94,6 +94,51 @@ func buildPassThroughToolCall(action *ParsedAction) ChatToolCallWire {
 	}
 }
 
+func chatRequestToolsToMCPTools(defs []ChatToolDefinition) []MCPTool {
+	if len(defs) == 0 {
+		return nil
+	}
+	tools := make([]MCPTool, 0, len(defs))
+	for _, def := range defs {
+		if strings.TrimSpace(def.Type) != "" && def.Type != "function" {
+			continue
+		}
+		name := strings.TrimSpace(def.Function.Name)
+		if name == "" {
+			continue
+		}
+		schema := def.Function.Parameters
+		if len(schema) == 0 {
+			schema = DefaultActionInputSchema
+		}
+		tools = append(tools, MCPTool{
+			Name:        name,
+			Description: strings.TrimSpace(def.Function.Description),
+			InputSchema: schema,
+		})
+	}
+	return tools
+}
+
+func mergeMCPTools(groups ...[]MCPTool) []MCPTool {
+	merged := make([]MCPTool, 0)
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, tool := range group {
+			name := strings.TrimSpace(tool.Name)
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			merged = append(merged, tool)
+		}
+	}
+	return merged
+}
+
 func (h *Handler) announcedModel() string {
 	if strings.TrimSpace(h.config.Model) != "" {
 		return strings.TrimSpace(h.config.Model)
@@ -566,13 +611,14 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Create PromptContext with immutable ActionPrompt
 	requestID := generateID()
 	promptCtx := &PromptContext{
-		RequestID:    requestID,
-		RequestTime:  time.Now(),
-		ActionPrompt: ActionPrompt(), // IMMUTABLE - always first
-		UserMessage:  userMessage,
-		Messages:     req.Messages,
-		Examples:     nil, // Plugins add examples via PrePrompt hooks
-		PluginData:   make(map[string]interface{}),
+		RequestID:     requestID,
+		RequestTime:   time.Now(),
+		ActionPrompt:  ActionPrompt(), // IMMUTABLE - always first
+		UserMessage:   userMessage,
+		Messages:      req.Messages,
+		ExternalTools: chatRequestToolsToMCPTools(req.Tools),
+		Examples:      nil, // Plugins add examples via PrePrompt hooks
+		PluginData:    make(map[string]interface{}),
 	}
 	// Set Bifrost for notifications (fire-and-forget SSE messages)
 	promptCtx.SetBifrost(h.bifrost)
@@ -717,14 +763,14 @@ func (h *Handler) sendStreamNotifications(lifecycle *requestLifecycle, notifs []
 // For tool-capable providers (OpenAI/Ollama) uses GenerateWithTools; for local GGUF uses prompt-based multi-round.
 // When inMemoryRunner is set (e.g. MCP server), its tools (store, recall, discover, etc.) are included so the LLM can manage memories in process.
 func (h *Handler) runAgenticLoop(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (finalResponse string, err error) {
-	tools := ActionsAsMCPTools()
+	tools := mergeMCPTools(ActionsAsMCPTools(), lifecycle.promptCtx.ExternalTools)
 	if h.inMemoryRunner != nil {
-		tools = append(tools, h.inMemoryRunner.ToolDefinitions()...)
+		tools = mergeMCPTools(tools, h.inMemoryRunner.ToolDefinitions())
 	}
 	if h.manager.SupportsTools() && len(tools) > 0 {
 		return h.runAgenticLoopWithTools(ctx, lifecycle, systemPrompt, userMessage, tools, params)
 	}
-	return h.runAgenticLoopPromptBased(ctx, lifecycle, systemPrompt, userMessage, params)
+	return h.runAgenticLoopPromptBased(ctx, lifecycle, systemPrompt, userMessage, tools, params)
 }
 
 // runAgenticLoopWithTools uses native tool calling (OpenAI/Ollama). Execute toolCalls, append results, repeat.
@@ -856,9 +902,27 @@ func logToolResult(requestID, action string, duration time.Duration, err error) 
 }
 
 // runAgenticLoopPromptBased uses prompt-based multi-round for local GGUF (or any provider without native tools).
-func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (string, error) {
+func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, tools []MCPTool, params GenerateParams) (string, error) {
 	answerFromContextHint := "If the ADDITIONAL CONTEXT above contains KNOWLEDGE FROM GRAPH DATABASE, answer from it in one short sentence. Otherwise output one line: {\"action\": \"<name>\", \"params\": {...}} or a direct answer.\n\nAssistant: "
-	prompt := systemPrompt + "\n\nUser: " + userMessage + "\n\n" + answerFromContextHint
+	prompt := systemPrompt
+	if len(tools) > 0 {
+		prompt += "\n\nTOOLS AVAILABLE TO YOU:\n"
+		for _, tool := range tools {
+			name := strings.TrimSpace(tool.Name)
+			if name == "" {
+				continue
+			}
+			prompt += "- " + name
+			if desc := strings.TrimSpace(tool.Description); desc != "" {
+				prompt += ": " + desc
+			}
+			if len(tool.InputSchema) > 0 {
+				prompt += " | inputSchema: " + string(tool.InputSchema)
+			}
+			prompt += "\n"
+		}
+	}
+	prompt += "\nUser: " + userMessage + "\n\n" + answerFromContextHint
 	var lastResponse string
 	for round := 0; round < MaxAgenticRounds; round++ {
 		response, err := h.manager.Generate(ctx, prompt, params)

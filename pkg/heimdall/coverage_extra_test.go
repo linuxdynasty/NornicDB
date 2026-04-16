@@ -1123,7 +1123,7 @@ func TestHeimdallCoverage_PromptStreamingAndPluginLoading(t *testing.T) {
 			metrics:   &mockMetricsReader{},
 		}
 
-		final, err := handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "do prompt action", DefaultGenerateParams())
+		final, err := handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "do prompt action", nil, DefaultGenerateParams())
 		require.NoError(t, err)
 		assert.Equal(t, "final prompt answer", final)
 
@@ -1371,11 +1371,11 @@ var Plugin = &pluginImpl{}
 			metrics:   &mockMetricsReader{},
 		}
 
-		final, err := handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "please fail then answer", DefaultGenerateParams())
+		final, err := handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "please fail then answer", nil, DefaultGenerateParams())
 		require.NoError(t, err)
 		assert.Equal(t, "answer after failure", final)
 
-		final, err = handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "unknown action", DefaultGenerateParams())
+		final, err = handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "unknown action", nil, DefaultGenerateParams())
 		require.NoError(t, err)
 		assert.Contains(t, final, "don't know how to perform the action")
 
@@ -1384,10 +1384,27 @@ var Plugin = &pluginImpl{}
 			raw:   map[string]interface{}{"saved": true},
 		}
 		handler.inMemoryRunner = runner
-		final, err = handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "use memory", DefaultGenerateParams())
+		final, err = handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "use memory", nil, DefaultGenerateParams())
 		require.NoError(t, err)
 		assert.Equal(t, "memory answer", final)
 		assert.True(t, runner.called)
+
+		capturedPrompt := ""
+		mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
+			capturedPrompt = prompt
+			return "external tool answer", nil
+		}
+		lifecycle.promptCtx.ExternalTools = []MCPTool{{
+			Name:        "mcp__continue__searchRepo",
+			Description: "Search repository context provided by Continue",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+		}}
+		final, err = handler.runAgenticLoopPromptBased(context.Background(), lifecycle, "system", "use continue tool", lifecycle.promptCtx.ExternalTools, DefaultGenerateParams())
+		require.NoError(t, err)
+		assert.Equal(t, "external tool answer", final)
+		assert.Contains(t, capturedPrompt, "TOOLS AVAILABLE TO YOU:")
+		assert.Contains(t, capturedPrompt, "mcp__continue__searchRepo")
+		assert.Contains(t, capturedPrompt, "Search repository context provided by Continue")
 
 		setupHeimdallCoverageGlobals(t)
 		abortPlugin := &coverageLifecyclePlugin{
