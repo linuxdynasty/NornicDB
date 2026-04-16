@@ -633,6 +633,99 @@ ORDER BY cc.change_id
 	}, impactsRes.Rows)
 }
 
+func TestE2E_UnwindMergeChainBatch_MultiLabelEntityFactShape_Deterministic(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE CONSTRAINT commit_hash_unique IF NOT EXISTS FOR (c:Commit) REQUIRE c.hash IS UNIQUE`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, strings.TrimSpace(`
+UNWIND $rows AS row
+MERGE (e:Entity:CodeEntity {entity_id: row.entity_id})
+SET e.entity_type = row.entity_type,
+    e.repo_id = row.repo_id,
+    e.display_name = coalesce(row.name, row.path, row.file_path, row.entity_id)
+MERGE (ck:FactKey:CodeKey {
+    subject_entity_id: row.entity_id,
+    predicate: row.predicate,
+    entity_id: row.entity_id,
+    relation_type: row.relation_type
+})
+SET ck.fact_key = row.code_key,
+    ck.repo_id = row.repo_id,
+    ck.subject_entity_type = row.entity_type
+MERGE (cs:FactVersion:CodeState {state_id: row.state_id})
+SET cs.fact_key = row.code_key,
+    cs.code_key = row.code_key,
+    cs.tx_id = row.tx_id,
+    cs.commit_hash = row.commit_hash,
+    cs.valid_from = datetime(row.valid_from_iso),
+    cs.asserted_at = datetime(row.asserted_at_iso),
+    cs.asserted_by = row.asserted_by,
+    cs.entity_id = row.entity_id,
+    cs.entity_type = row.entity_type,
+    cs.predicate = row.predicate
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+MERGE (e)-[:HAS_FACT]->(ck)
+MERGE (ck)-[:HAS_STATE]->(cs)
+MERGE (cs)-[:ABOUT]->(e)
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)
+`), map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"code_key":        "repo_fact|constant|symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex",
+				"repo_id":         "git-to-graph",
+				"entity_id":       "symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex",
+				"entity_type":     "symbol",
+				"predicate":       "constant",
+				"relation_type":   "constant",
+				"file_path":       "internal/parser/parser.go",
+				"name":            "BackendRegex",
+				"valid_from_iso":  "2026-03-20T20:22:20Z",
+				"asserted_at_iso": "2026-03-20T20:22:20Z",
+				"asserted_by":     "TJ Sweet",
+				"commit_hash":     "5671c64fcba850a6fd01ef68f2b9d592389f41c1",
+				"tx_id":           "tx-5671c64f-000001",
+				"state_id":        "cs-abc06cfadc471a5c6951ee4edaba15b3f23c5bbc",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch)
+
+	entityRes, err := exec.Execute(ctx, `
+MATCH (e:Entity:CodeEntity {entity_id: 'symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex'})
+RETURN e.repo_id, e.entity_type
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{"git-to-graph", "symbol"}}, entityRes.Rows)
+
+	stateRes, err := exec.Execute(ctx, `
+MATCH (e:Entity:CodeEntity)-[:HAS_FACT]->(ck:FactKey:CodeKey)-[:HAS_STATE]->(cs:FactVersion:CodeState)
+RETURN e.entity_id, ck.fact_key, cs.state_id, cs.commit_hash
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{
+		"symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex",
+		"repo_fact|constant|symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex",
+		"cs-abc06cfadc471a5c6951ee4edaba15b3f23c5bbc",
+		"5671c64fcba850a6fd01ef68f2b9d592389f41c1",
+	}}, stateRes.Rows)
+
+	aboutRes, err := exec.Execute(ctx, `MATCH (:FactVersion:CodeState)-[:ABOUT]->(:Entity:CodeEntity) RETURN count(*)`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{int64(1)}}, aboutRes.Rows)
+
+	touchedRes, err := exec.Execute(ctx, `MATCH (:Commit)-[:TOUCHED]->(:FactKey:CodeKey) RETURN count(*)`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{{int64(1)}}, touchedRes.Rows)
+}
+
 func TestE2E_UnwindCompoundBatch_NAryThreeStage_Deterministic(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

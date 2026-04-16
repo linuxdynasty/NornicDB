@@ -54,8 +54,8 @@ func mergeCreateConflict(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "already exists")
 }
 
-func mergeLookupCacheKey(label, prop string, val interface{}) string {
-	return unwindMergeKey(label, map[string]interface{}{prop: val})
+func mergeLookupCacheKey(labels []string, prop string, val interface{}) string {
+	return unwindMergeKey(unwindMergeLabelsKey(labels), map[string]interface{}{prop: val})
 }
 
 func cloneNodePropertiesMap(in map[string]interface{}) map[string]interface{} {
@@ -70,12 +70,11 @@ func (e *StorageExecutor) findMergeNodeInCache(labels []string, props map[string
 	if len(labels) == 0 || len(props) == 0 {
 		return nil
 	}
-	label := labels[0]
 
 	e.nodeLookupCacheMu.RLock()
 	defer e.nodeLookupCacheMu.RUnlock()
 	for prop, val := range props {
-		if cached, ok := e.nodeLookupCache[mergeLookupCacheKey(label, prop, val)]; ok {
+		if cached, ok := e.nodeLookupCache[mergeLookupCacheKey(labels, prop, val)]; ok {
 			if mergeNodeMatches(cached, labels, props) {
 				return cached
 			}
@@ -88,11 +87,10 @@ func (e *StorageExecutor) cacheMergeNode(labels []string, props map[string]inter
 	if node == nil || len(labels) == 0 || len(props) == 0 {
 		return
 	}
-	label := labels[0]
 	e.nodeLookupCacheMu.Lock()
 	defer e.nodeLookupCacheMu.Unlock()
 	for prop, val := range props {
-		e.nodeLookupCache[mergeLookupCacheKey(label, prop, val)] = node
+		e.nodeLookupCache[mergeLookupCacheKey(labels, prop, val)] = node
 	}
 }
 

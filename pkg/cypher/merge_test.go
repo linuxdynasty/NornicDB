@@ -396,6 +396,39 @@ func TestFindMergeNode_UsesPropertyIndexLookup(t *testing.T) {
 	require.Equal(t, storage.NodeID("orig-idx-1"), found.ID)
 }
 
+func TestFindMergeNode_RequiresFullMultiLabelMatch(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "single-label",
+		Labels: []string{"FileChunk"},
+		Properties: map[string]interface{}{
+			"id": "chunk-1",
+		},
+	})
+	require.NoError(t, err)
+
+	found, err := exec.findMergeNode(store, []string{"FileChunk", "Node"}, map[string]interface{}{"id": "chunk-1"})
+	require.NoError(t, err)
+	require.Nil(t, found)
+
+	dualID, err := store.CreateNode(&storage.Node{
+		ID:     "dual-label",
+		Labels: []string{"FileChunk", "Node"},
+		Properties: map[string]interface{}{
+			"id": "chunk-1",
+		},
+	})
+	require.NoError(t, err)
+
+	found, err = exec.findMergeNode(store, []string{"FileChunk", "Node"}, map[string]interface{}{"id": "chunk-1"})
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, dualID, found.ID)
+}
+
 func TestExecuteCompoundMatchMerge_OptionalAndContextRelationshipBranches(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

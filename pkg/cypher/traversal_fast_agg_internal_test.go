@@ -276,3 +276,66 @@ func TestTryFastChainedAgg_CustomerSupplierDistinctOrders_MultiRow(t *testing.T)
 	assert.Equal(t, int64(2), got["Exotic Liquids"])
 	assert.Equal(t, int64(1), got["New Orleans Cajun Delights"])
 }
+
+func TestTryFastChainedAgg_UsesProjectedBoundaryProperties(t *testing.T) {
+	store := storage.NewNamespacedEngine(newTestMemoryEngine(t), "test")
+	exec := NewStorageExecutor(store)
+
+	customerID, err := store.CreateNode(&storage.Node{ID: "cust-1", Labels: []string{"Customer"}, Properties: map[string]interface{}{"buyer": "CustCo"}})
+	require.NoError(t, err)
+	orderID, err := store.CreateNode(&storage.Node{ID: "ord-1", Labels: []string{"Order"}, Properties: map[string]interface{}{"code": "001"}})
+	require.NoError(t, err)
+	supplierID, err := store.CreateNode(&storage.Node{ID: "sup-1", Labels: []string{"Supplier"}, Properties: map[string]interface{}{"display": "SupplyCo", "vendor": "SupplyCo"}})
+	require.NoError(t, err)
+	productID, err := store.CreateNode(&storage.Node{ID: "prod-1", Labels: []string{"Product"}, Properties: map[string]interface{}{"sku": "chai"}})
+	require.NoError(t, err)
+	categoryID, err := store.CreateNode(&storage.Node{ID: "cat-1", Labels: []string{"Category"}, Properties: map[string]interface{}{"bucket": "Beverages"}})
+	require.NoError(t, err)
+
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e-purchased", Type: "PURCHASED", StartNode: customerID, EndNode: orderID, Properties: map[string]interface{}{}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e-orders", Type: "ORDERS", StartNode: orderID, EndNode: productID, Properties: map[string]interface{}{}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e-supplies", Type: "SUPPLIES", StartNode: supplierID, EndNode: productID, Properties: map[string]interface{}{}}))
+	require.NoError(t, store.CreateEdge(&storage.Edge{ID: "e-partof", Type: "PART_OF", StartNode: productID, EndNode: categoryID, Properties: map[string]interface{}{}}))
+
+	supplierCategory := exec.parseTraversalPattern("(s:Supplier)-[:SUPPLIES]->(p:Product)-[:PART_OF]->(c:Category)")
+	require.NotNil(t, supplierCategory)
+	rows, ok, err := exec.tryFastRelationshipAggregations(supplierCategory, []returnItem{
+		{expr: "s.display"},
+		{expr: "c.bucket"},
+		{expr: "count(p)"},
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "SupplyCo", rows[0][0])
+	assert.Equal(t, "Beverages", rows[0][1])
+	assert.Equal(t, int64(1), rows[0][2])
+
+	customerCategory := exec.parseTraversalPattern("(c:Customer)-[:PURCHASED]->(o:Order)-[:ORDERS]->(p:Product)-[:PART_OF]->(cat:Category)")
+	require.NotNil(t, customerCategory)
+	rows, ok, err = exec.tryFastRelationshipAggregations(customerCategory, []returnItem{
+		{expr: "c.buyer"},
+		{expr: "cat.bucket"},
+		{expr: "count(DISTINCT o)"},
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "CustCo", rows[0][0])
+	assert.Equal(t, "Beverages", rows[0][1])
+	assert.Equal(t, int64(1), rows[0][2])
+
+	customerSupplier := exec.parseTraversalPattern("(c:Customer)-[:PURCHASED]->(o:Order)-[:ORDERS]->(p:Product)<-[:SUPPLIES]-(s:Supplier)")
+	require.NotNil(t, customerSupplier)
+	rows, ok, err = exec.tryFastRelationshipAggregations(customerSupplier, []returnItem{
+		{expr: "c.buyer"},
+		{expr: "s.vendor"},
+		{expr: "count(DISTINCT o)"},
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "CustCo", rows[0][0])
+	assert.Equal(t, "SupplyCo", rows[0][1])
+	assert.Equal(t, int64(1), rows[0][2])
+}

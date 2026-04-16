@@ -41,6 +41,25 @@ func (e *StorageExecutor) evaluateCoalesceInContext(expr string, nodeMap map[str
 					return propVal
 				}
 			}
+			if edge, ok := edgeMap[varName]; ok && edge != nil {
+				if propVal := edge.Properties[propName]; propVal != nil {
+					return propVal
+				}
+			}
+			if computedValues != nil {
+				if raw, ok := computedValues[varName]; ok && raw != nil {
+					if valueMap, ok := raw.(map[string]interface{}); ok {
+						if propVal, ok := valueMap[propName]; ok && propVal != nil {
+							return propVal
+						}
+						if props, ok := valueMap["properties"].(map[string]interface{}); ok {
+							if propVal, ok := props[propName]; ok && propVal != nil {
+								return propVal
+							}
+						}
+					}
+				}
+			}
 			continue
 		}
 

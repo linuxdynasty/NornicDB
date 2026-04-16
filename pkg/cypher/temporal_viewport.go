@@ -76,6 +76,19 @@ func nodeVisibleInTemporalViewport(node *storage.Node, viewport TemporalViewport
 	return checker.IsCurrentTemporalNode(node, viewport.AsOf)
 }
 
+func filterNodesByRequiredLabels(nodes []*storage.Node, labels []string) []*storage.Node {
+	if len(labels) <= 1 {
+		return nodes
+	}
+	filtered := make([]*storage.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if mergeNodeHasLabels(node, labels) {
+			filtered = append(filtered, node)
+		}
+	}
+	return filtered
+}
+
 func (e *StorageExecutor) loadNodesWithTemporalViewport(ctx context.Context, labels []string) ([]*storage.Node, error) {
 	store := e.getStorage(ctx)
 	var (
@@ -90,6 +103,7 @@ func (e *StorageExecutor) loadNodesWithTemporalViewport(ctx context.Context, lab
 	if err != nil {
 		return nil, err
 	}
+	nodes = filterNodesByRequiredLabels(nodes, labels)
 	if viewport, ok := TemporalViewportFromContext(ctx); ok && viewport.Enabled() {
 		if checker, canCheck := store.(temporalCurrentNodeChecker); canCheck {
 			nodes, err = filterNodesByTemporalViewport(nodes, viewport, checker)

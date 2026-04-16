@@ -3372,3 +3372,38 @@ func TestCompoundOptionalMatchAndFindRelatedNodes_Branches(t *testing.T) {
 		t.Fatalf("both-direction wrong-type related len = %d, want 0", len(bothRelated))
 	}
 }
+
+func TestFindRelatedNodes_RequiresAllTargetLabels(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, "CREATE (a:Person {name:'alice'})", nil)
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE (b:Person {name:'bob'})", nil)
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	_, err = e.Execute(ctx, "CREATE (c:Person:Engineer {name:'carol'})", nil)
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+	_, err = e.Execute(ctx, "MATCH (a:Person {name:'alice'}), (b:Person {name:'bob'}), (c:Person:Engineer {name:'carol'}) CREATE (a)-[:KNOWS]->(b) CREATE (a)-[:KNOWS]->(c)", nil)
+	if err != nil {
+		t.Fatalf("create relationships: %v", err)
+	}
+
+	res, err := e.Execute(ctx, "MATCH (a:Person {name:'alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person:Engineer) RETURN b.name ORDER BY b.name", nil)
+	if err != nil {
+		t.Fatalf("optional match: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(res.Rows))
+	}
+	if got := res.Rows[0][0]; got != "carol" {
+		t.Fatalf("target name = %#v, want carol", got)
+	}
+}

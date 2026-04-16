@@ -19,17 +19,7 @@ func (e *StorageExecutor) tryFastRelationshipAggregations(matches *TraversalMatc
 	}
 
 	if matches.IsChained {
-		switch len(matches.Segments) {
-		case 2:
-			return e.tryFastSupplierCategoryCount(matches, returnItems)
-		case 3:
-			if rows, ok, err := e.tryFastCustomerCategoryDistinctOrders(matches, returnItems); ok || err != nil {
-				return rows, ok, err
-			}
-			return e.tryFastCustomerSupplierDistinctOrders(matches, returnItems)
-		default:
-			return nil, false, nil
-		}
+		return e.tryFastChainedRelationshipAggregation(matches, returnItems)
 	}
 
 	return e.tryFastSingleHopAgg(matches, returnItems)
@@ -100,14 +90,8 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 		return nil, false, err
 	}
 
-	requiredGroupLabel := ""
-	if len(matches.StartNode.labels) == 1 {
-		requiredGroupLabel = matches.StartNode.labels[0]
-	}
-	requiredOtherLabel := ""
-	if len(matches.EndNode.labels) == 1 {
-		requiredOtherLabel = matches.EndNode.labels[0]
-	}
+	requiredGroupLabels := append([]string(nil), matches.StartNode.labels...)
+	requiredOtherLabels := append([]string(nil), matches.EndNode.labels...)
 
 	type aggSpec struct {
 		kind     string // "count", "sumEdgeProp", "avgNodeProp", "collectNodeProp"
@@ -204,7 +188,7 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 			needOtherNodeProps = true
 		}
 	}
-	needOtherLabelOnly := requiredOtherLabel != "" && !needOtherNodeProps
+	needOtherLabelOnly := len(requiredOtherLabels) > 0 && !needOtherNodeProps
 	needOtherNodes := needOtherNodeProps
 
 	// Collect the IDs we need to fetch for label/property filtering.
@@ -224,7 +208,7 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 			otherID = edge.EndNode
 		}
 
-		if requiredGroupLabel != "" {
+		if len(requiredGroupLabels) > 0 {
 			if _, ok := groupSeenForLabel[groupID]; !ok {
 				groupSeenForLabel[groupID] = struct{}{}
 				groupIDsForLabel = append(groupIDsForLabel, groupID)
@@ -240,7 +224,7 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 	}
 
 	var groupNodesForLabel map[storage.NodeID]*storage.Node
-	if requiredGroupLabel != "" {
+	if len(requiredGroupLabels) > 0 {
 		groupNodesForLabel, _, err = e.batchGetNodesFast(groupIDsForLabel)
 		if err != nil {
 			return nil, false, err
@@ -254,10 +238,10 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 		if err != nil {
 			return nil, false, err
 		}
-	} else if needOtherLabelOnly {
+	} else if needOtherLabelOnly && len(requiredOtherLabels) == 1 {
 		engine, _ := e.storageFast()
 		if idx, ok := engine.(storage.LabelIndexEngine); ok {
-			otherHasLabel, err = idx.HasLabelBatch(otherIDs, requiredOtherLabel)
+			otherHasLabel, err = idx.HasLabelBatch(otherIDs, requiredOtherLabels[0])
 			if err != nil {
 				return nil, false, err
 			}
@@ -271,37 +255,21 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 	}
 
 	groupLabelOK := func(nodeID storage.NodeID) bool {
-		if requiredGroupLabel == "" {
+		if len(requiredGroupLabels) == 0 {
 			return true
 		}
 		n := groupNodesForLabel[nodeID]
-		if n == nil {
-			return false
-		}
-		for _, lbl := range n.Labels {
-			if lbl == requiredGroupLabel {
-				return true
-			}
-		}
-		return false
+		return n != nil && mergeNodeHasLabels(n, requiredGroupLabels)
 	}
 	otherLabelOK := func(nodeID storage.NodeID) bool {
-		if requiredOtherLabel == "" {
+		if len(requiredOtherLabels) == 0 {
 			return true
 		}
 		if otherHasLabel != nil {
 			return otherHasLabel[nodeID]
 		}
 		n := otherNodes[nodeID]
-		if n == nil {
-			return false
-		}
-		for _, lbl := range n.Labels {
-			if lbl == requiredOtherLabel {
-				return true
-			}
-		}
-		return false
+		return n != nil && mergeNodeHasLabels(n, requiredOtherLabels)
 	}
 
 	// Aggregate in a single pass, using pre-fetched nodes for label/prop filtering.
@@ -451,462 +419,302 @@ func (e *StorageExecutor) tryFastSingleHopAgg(matches *TraversalMatch, returnIte
 	return rows, true, nil
 }
 
-func (e *StorageExecutor) tryFastSupplierCategoryCount(matches *TraversalMatch, returnItems []returnItem) (rows [][]interface{}, ok bool, err error) {
-	// MATCH (s:Supplier)-[:SUPPLIES]->(p:Product)-[:PART_OF]->(c:Category)
-	// RETURN s.companyName, c.categoryName, count(p) as products
-	if len(matches.Segments) != 2 || len(returnItems) != 3 {
+type chainedAggregationPlan struct {
+	kind      string
+	leftVar   string
+	leftProp  string
+	rightVar  string
+	rightProp string
+	countVar  string
+	distinct  bool
+}
+
+func parseTraversalPropertyProjection(expr string) (variable, property string, ok bool) {
+	expr = strings.TrimSpace(expr)
+	dot := strings.IndexByte(expr, '.')
+	if dot <= 0 || dot >= len(expr)-1 {
+		return "", "", false
+	}
+	variable = strings.TrimSpace(expr[:dot])
+	property = normalizePropertyKey(strings.TrimSpace(expr[dot+1:]))
+	if variable == "" || property == "" {
+		return "", "", false
+	}
+	return variable, property, true
+}
+
+func traversalNodesHaveNoProperties(segments []TraversalSegment) bool {
+	for _, seg := range segments {
+		if len(seg.FromNode.properties) != 0 || len(seg.ToNode.properties) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func buildChainedAggregationPlan(matches *TraversalMatch, returnItems []returnItem) (chainedAggregationPlan, bool) {
+	if matches == nil || len(returnItems) != 3 || len(matches.Segments) < 2 || len(matches.Segments) > 3 {
+		return chainedAggregationPlan{}, false
+	}
+	for _, seg := range matches.Segments {
+		if seg.Relationship.MinHops != 1 || seg.Relationship.MaxHops != 1 || len(seg.Relationship.Types) != 1 {
+			return chainedAggregationPlan{}, false
+		}
+	}
+	if !traversalNodesHaveNoProperties(matches.Segments) {
+		return chainedAggregationPlan{}, false
+	}
+
+	leftVar, leftProp, ok := parseTraversalPropertyProjection(returnItems[0].expr)
+	if !ok {
+		return chainedAggregationPlan{}, false
+	}
+	rightVar, rightProp, ok := parseTraversalPropertyProjection(returnItems[1].expr)
+	if !ok {
+		return chainedAggregationPlan{}, false
+	}
+	agg := ParseAggregation(returnItems[2].expr)
+	if agg == nil || !strings.EqualFold(agg.Function, "COUNT") || agg.IsStar || agg.Property != "" || agg.Variable == "" {
+		return chainedAggregationPlan{}, false
+	}
+
+	plan := chainedAggregationPlan{
+		leftVar:   leftVar,
+		leftProp:  leftProp,
+		rightVar:  rightVar,
+		rightProp: rightProp,
+		countVar:  agg.Variable,
+		distinct:  agg.Distinct,
+	}
+
+	seg0 := matches.Segments[0]
+	switch len(matches.Segments) {
+	case 2:
+		seg1 := matches.Segments[1]
+		if seg0.Relationship.Direction != "outgoing" || seg1.Relationship.Direction != "outgoing" {
+			return chainedAggregationPlan{}, false
+		}
+		if plan.leftVar != seg0.FromNode.variable || plan.rightVar != seg1.ToNode.variable || plan.countVar != seg0.ToNode.variable || plan.distinct {
+			return chainedAggregationPlan{}, false
+		}
+		plan.kind = "two-hop-boundary-count"
+	case 3:
+		seg1 := matches.Segments[1]
+		seg2 := matches.Segments[2]
+		if seg0.Relationship.Direction != "outgoing" || seg1.Relationship.Direction != "outgoing" {
+			return chainedAggregationPlan{}, false
+		}
+		if plan.leftVar != seg0.FromNode.variable || plan.rightVar != seg2.ToNode.variable || plan.countVar != seg0.ToNode.variable || !plan.distinct {
+			return chainedAggregationPlan{}, false
+		}
+		switch seg2.Relationship.Direction {
+		case "outgoing":
+			plan.kind = "three-hop-linear-distinct"
+		case "incoming":
+			plan.kind = "three-hop-converging-distinct"
+		default:
+			return chainedAggregationPlan{}, false
+		}
+	default:
+		return chainedAggregationPlan{}, false
+	}
+
+	return plan, true
+}
+
+func chainedNodeHasLabels(node *storage.Node, labels []string) bool {
+	if len(labels) == 0 {
+		return true
+	}
+	return node != nil && mergeNodeHasLabels(node, labels)
+}
+
+func appendUniqueNodeID(ids []storage.NodeID, seen map[storage.NodeID]struct{}, id storage.NodeID) []storage.NodeID {
+	if _, ok := seen[id]; ok {
+		return ids
+	}
+	seen[id] = struct{}{}
+	return append(ids, id)
+}
+
+func (e *StorageExecutor) tryFastChainedRelationshipAggregation(matches *TraversalMatch, returnItems []returnItem) (rows [][]interface{}, ok bool, err error) {
+	plan, ok := buildChainedAggregationPlan(matches, returnItems)
+	if !ok {
 		return nil, false, nil
 	}
 
 	seg0 := matches.Segments[0]
 	seg1 := matches.Segments[1]
-	if seg0.Relationship.MinHops != 1 || seg0.Relationship.MaxHops != 1 ||
-		seg1.Relationship.MinHops != 1 || seg1.Relationship.MaxHops != 1 {
-		return nil, false, nil
+	requiredLeftLabels := append([]string(nil), seg0.FromNode.labels...)
+	requiredCountLabels := append([]string(nil), seg0.ToNode.labels...)
+	requiredJoinLabels := append([]string(nil), seg1.ToNode.labels...)
+
+	type pairKey struct {
+		left  storage.NodeID
+		right storage.NodeID
 	}
-	if len(seg0.Relationship.Types) != 1 || len(seg1.Relationship.Types) != 1 {
-		return nil, false, nil
+	type tripKey struct {
+		left    storage.NodeID
+		right   storage.NodeID
+		counted storage.NodeID
 	}
-	if seg0.Relationship.Direction != "outgoing" || seg1.Relationship.Direction != "outgoing" {
-		return nil, false, nil
-	}
-	if len(seg0.FromNode.properties) != 0 || len(seg0.ToNode.properties) != 0 || len(seg1.ToNode.properties) != 0 {
+
+	leftToRightCounts := make(map[pairKey]int64)
+	var rightNodes map[storage.NodeID]*storage.Node
+
+	switch plan.kind {
+	case "two-hop-boundary-count":
+		edges0, _, err := e.getEdgesByTypeFast(seg0.Relationship.Types[0])
+		if err != nil {
+			return nil, false, err
+		}
+		edges1, _, err := e.getEdgesByTypeFast(seg1.Relationship.Types[0])
+		if err != nil {
+			return nil, false, err
+		}
+
+		countNodeToRight := make(map[storage.NodeID][]storage.NodeID, len(edges1))
+		countIDs := make([]storage.NodeID, 0, len(edges1))
+		countSeen := make(map[storage.NodeID]struct{}, len(edges1))
+		rightIDs := make([]storage.NodeID, 0, len(edges1))
+		rightSeen := make(map[storage.NodeID]struct{}, len(edges1))
+		for _, edge := range edges1 {
+			countNodeToRight[edge.StartNode] = append(countNodeToRight[edge.StartNode], edge.EndNode)
+			countIDs = appendUniqueNodeID(countIDs, countSeen, edge.StartNode)
+			rightIDs = appendUniqueNodeID(rightIDs, rightSeen, edge.EndNode)
+		}
+		countNodes, _, err := e.batchGetNodesFast(countIDs)
+		if err != nil {
+			return nil, false, err
+		}
+		rightNodes, _, err = e.batchGetNodesFast(rightIDs)
+		if err != nil {
+			return nil, false, err
+		}
+
+		leftIDs := make([]storage.NodeID, 0, len(edges0))
+		leftSeen := make(map[storage.NodeID]struct{}, len(edges0))
+		for _, edge := range edges0 {
+			leftIDs = appendUniqueNodeID(leftIDs, leftSeen, edge.StartNode)
+			if !chainedNodeHasLabels(countNodes[edge.EndNode], requiredCountLabels) {
+				continue
+			}
+			for _, rightID := range countNodeToRight[edge.EndNode] {
+				if !chainedNodeHasLabels(rightNodes[rightID], requiredJoinLabels) {
+					continue
+				}
+				leftToRightCounts[pairKey{left: edge.StartNode, right: rightID}]++
+			}
+		}
+	case "three-hop-linear-distinct", "three-hop-converging-distinct":
+		seg2 := matches.Segments[2]
+		requiredRightLabels := append([]string(nil), seg2.ToNode.labels...)
+
+		edges0, _, err := e.getEdgesByTypeFast(seg0.Relationship.Types[0])
+		if err != nil {
+			return nil, false, err
+		}
+		edges1, _, err := e.getEdgesByTypeFast(seg1.Relationship.Types[0])
+		if err != nil {
+			return nil, false, err
+		}
+		edges2, _, err := e.getEdgesByTypeFast(seg2.Relationship.Types[0])
+		if err != nil {
+			return nil, false, err
+		}
+
+		countNodeToLeft := make(map[storage.NodeID]storage.NodeID, len(edges0))
+		countIDs := make([]storage.NodeID, 0, len(edges0))
+		countSeen := make(map[storage.NodeID]struct{}, len(edges0))
+		for _, edge := range edges0 {
+			countNodeToLeft[edge.EndNode] = edge.StartNode
+			countIDs = appendUniqueNodeID(countIDs, countSeen, edge.EndNode)
+		}
+
+		joinNodeToRight := make(map[storage.NodeID][]storage.NodeID, len(edges2))
+		joinIDs := make([]storage.NodeID, 0, len(edges2))
+		joinSeen := make(map[storage.NodeID]struct{}, len(edges2))
+		rightIDs := make([]storage.NodeID, 0, len(edges2))
+		rightSeen := make(map[storage.NodeID]struct{}, len(edges2))
+		for _, edge := range edges2 {
+			joinID := edge.StartNode
+			rightID := edge.EndNode
+			if plan.kind == "three-hop-converging-distinct" {
+				joinID = edge.EndNode
+				rightID = edge.StartNode
+			}
+			joinNodeToRight[joinID] = append(joinNodeToRight[joinID], rightID)
+			joinIDs = appendUniqueNodeID(joinIDs, joinSeen, joinID)
+			rightIDs = appendUniqueNodeID(rightIDs, rightSeen, rightID)
+		}
+
+		countNodes, _, err := e.batchGetNodesFast(countIDs)
+		if err != nil {
+			return nil, false, err
+		}
+		joinNodes, _, err := e.batchGetNodesFast(joinIDs)
+		if err != nil {
+			return nil, false, err
+		}
+		rightNodes, _, err = e.batchGetNodesFast(rightIDs)
+		if err != nil {
+			return nil, false, err
+		}
+
+		seen := make(map[tripKey]struct{}, 4096)
+		for _, edge := range edges1 {
+			countID := edge.StartNode
+			joinID := edge.EndNode
+			leftID, found := countNodeToLeft[countID]
+			if !found {
+				continue
+			}
+			if !chainedNodeHasLabels(countNodes[countID], requiredCountLabels) || !chainedNodeHasLabels(joinNodes[joinID], requiredJoinLabels) {
+				continue
+			}
+			for _, rightID := range joinNodeToRight[joinID] {
+				if !chainedNodeHasLabels(rightNodes[rightID], requiredRightLabels) {
+					continue
+				}
+				trip := tripKey{left: leftID, right: rightID, counted: countID}
+				if _, exists := seen[trip]; exists {
+					continue
+				}
+				seen[trip] = struct{}{}
+				leftToRightCounts[pairKey{left: leftID, right: rightID}]++
+			}
+		}
+	default:
 		return nil, false, nil
 	}
 
-	sVar := seg0.FromNode.variable
-	pVar := seg0.ToNode.variable
-	cVar := seg1.ToNode.variable
-	if sVar == "" || pVar == "" || cVar == "" {
-		return nil, false, nil
+	leftIDs := make([]storage.NodeID, 0, len(leftToRightCounts))
+	rightIDs := make([]storage.NodeID, 0, len(leftToRightCounts))
+	leftSeen := make(map[storage.NodeID]struct{}, len(leftToRightCounts))
+	rightSeen := make(map[storage.NodeID]struct{}, len(leftToRightCounts))
+	for key := range leftToRightCounts {
+		leftIDs = appendUniqueNodeID(leftIDs, leftSeen, key.left)
+		rightIDs = appendUniqueNodeID(rightIDs, rightSeen, key.right)
 	}
-
-	m := exprMatcher{}
-	if m.key(returnItems[0].expr) != m.key(sVar+".companyName") {
-		return nil, false, nil
-	}
-	if m.key(returnItems[1].expr) != m.key(cVar+".categoryName") {
-		return nil, false, nil
-	}
-	if m.key(returnItems[2].expr) != m.key("count("+pVar+")") {
-		return nil, false, nil
-	}
-
-	suppliesEdges, _, err := e.getEdgesByTypeFast(seg0.Relationship.Types[0])
+	leftNodes, _, err := e.batchGetNodesFast(leftIDs)
 	if err != nil {
 		return nil, false, err
 	}
-	partOfEdges, _, err := e.getEdgesByTypeFast(seg1.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-
-	requiredSupplierLabel := ""
-	if len(seg0.FromNode.labels) == 1 {
-		requiredSupplierLabel = seg0.FromNode.labels[0]
-	}
-	requiredProductLabel := ""
-	if len(seg0.ToNode.labels) == 1 {
-		requiredProductLabel = seg0.ToNode.labels[0]
-	}
-	requiredCategoryLabel := ""
-	if len(seg1.ToNode.labels) == 1 {
-		requiredCategoryLabel = seg1.ToNode.labels[0]
-	}
-
-	// product -> categories (allow multiple for correctness)
-	productToCats := make(map[storage.NodeID][]storage.NodeID)
-	for _, edge := range partOfEdges {
-		productID := edge.StartNode
-		categoryID := edge.EndNode
-		productToCats[productID] = append(productToCats[productID], categoryID)
-	}
-
-	// Fetch nodes referenced by the join so we can enforce labels without scanning by label.
-	productIDs := make([]storage.NodeID, 0, len(productToCats))
-	productSeen := make(map[storage.NodeID]struct{}, len(productToCats))
-	categoryIDs := make([]storage.NodeID, 0, 64)
-	categorySeen := make(map[storage.NodeID]struct{}, 64)
-	for pid, cats := range productToCats {
-		if _, ok := productSeen[pid]; !ok {
-			productSeen[pid] = struct{}{}
-			productIDs = append(productIDs, pid)
-		}
-		for _, cid := range cats {
-			if _, ok := categorySeen[cid]; !ok {
-				categorySeen[cid] = struct{}{}
-				categoryIDs = append(categoryIDs, cid)
-			}
-		}
-	}
-	var products map[storage.NodeID]*storage.Node
-	var productHasLabel map[storage.NodeID]bool
-	if requiredProductLabel != "" {
-		engine, _ := e.storageFast()
-		if idx, ok := engine.(storage.LabelIndexEngine); ok {
-			productHasLabel, err = idx.HasLabelBatch(productIDs, requiredProductLabel)
-			if err != nil {
-				return nil, false, err
-			}
-		}
-	}
-	if requiredProductLabel == "" || productHasLabel == nil {
-		products, _, err = e.batchGetNodesFast(productIDs)
+	if rightNodes == nil {
+		rightNodes, _, err = e.batchGetNodesFast(rightIDs)
 		if err != nil {
 			return nil, false, err
 		}
 	}
-	categories, _, err := e.batchGetNodesFast(categoryIDs)
-	if err != nil {
-		return nil, false, err
-	}
 
-	hasLabel := func(node *storage.Node, want string) bool {
-		if want == "" || node == nil {
-			return want == ""
-		}
-		for _, lbl := range node.Labels {
-			if lbl == want {
-				return true
-			}
-		}
-		return false
-	}
-
-	var suppliersForLabel map[storage.NodeID]*storage.Node
-	if requiredSupplierLabel != "" {
-		supplierIDs := make([]storage.NodeID, 0, 64)
-		supplierSeen := make(map[storage.NodeID]struct{}, 64)
-		for _, edge := range suppliesEdges {
-			if _, ok := supplierSeen[edge.StartNode]; ok {
-				continue
-			}
-			supplierSeen[edge.StartNode] = struct{}{}
-			supplierIDs = append(supplierIDs, edge.StartNode)
-		}
-		suppliersForLabel, _, err = e.batchGetNodesFast(supplierIDs)
-		if err != nil {
-			return nil, false, err
-		}
-	}
-
-	type key struct {
-		supplier storage.NodeID
-		category storage.NodeID
-	}
-	counts := make(map[key]int64)
-	for _, edge := range suppliesEdges {
-		supplierID := edge.StartNode
-		productID := edge.EndNode
-		if requiredSupplierLabel != "" && !hasLabel(suppliersForLabel[supplierID], requiredSupplierLabel) {
+	rows = make([][]interface{}, 0, len(leftToRightCounts))
+	for key, count := range leftToRightCounts {
+		leftNode := leftNodes[key.left]
+		rightNode := rightNodes[key.right]
+		if !chainedNodeHasLabels(leftNode, requiredLeftLabels) || rightNode == nil {
 			continue
 		}
-
-		if requiredProductLabel != "" {
-			if productHasLabel != nil {
-				if !productHasLabel[productID] {
-					continue
-				}
-			} else {
-				pNode := products[productID]
-				if !hasLabel(pNode, requiredProductLabel) {
-					continue
-				}
-			}
-		}
-		for _, categoryID := range productToCats[productID] {
-			cNode := categories[categoryID]
-			if !hasLabel(cNode, requiredCategoryLabel) {
-				continue
-			}
-			counts[key{supplier: supplierID, category: categoryID}]++
-		}
-	}
-
-	// Materialize rows.
-	supplierIDs := make([]storage.NodeID, 0, len(counts))
-	supplierSeen := make(map[storage.NodeID]struct{})
-	for k := range counts {
-		if _, ok := supplierSeen[k.supplier]; !ok {
-			supplierSeen[k.supplier] = struct{}{}
-			supplierIDs = append(supplierIDs, k.supplier)
-		}
-	}
-
-	suppliers, _, err := e.batchGetNodesFast(supplierIDs)
-	if err != nil {
-		return nil, false, err
-	}
-
-	rows = make([][]interface{}, 0, len(counts))
-	for k, count := range counts {
-		s := suppliers[k.supplier]
-		c := categories[k.category]
-		if s == nil || c == nil {
-			continue
-		}
-		rows = append(rows, []interface{}{s.Properties["companyName"], c.Properties["categoryName"], count})
-	}
-
-	return rows, true, nil
-}
-
-func (e *StorageExecutor) tryFastCustomerCategoryDistinctOrders(matches *TraversalMatch, returnItems []returnItem) (rows [][]interface{}, ok bool, err error) {
-	// MATCH (c:Customer)-[:PURCHASED]->(o:Order)-[:ORDERS]->(p:Product)-[:PART_OF]->(cat:Category)
-	// RETURN c.companyName, cat.categoryName, count(DISTINCT o) as orders
-	if len(matches.Segments) != 3 || len(returnItems) != 3 {
-		return nil, false, nil
-	}
-
-	seg0 := matches.Segments[0]
-	seg1 := matches.Segments[1]
-	seg2 := matches.Segments[2]
-	if seg0.Relationship.Direction != "outgoing" || seg1.Relationship.Direction != "outgoing" || seg2.Relationship.Direction != "outgoing" {
-		return nil, false, nil
-	}
-	if len(seg0.Relationship.Types) != 1 || len(seg1.Relationship.Types) != 1 || len(seg2.Relationship.Types) != 1 {
-		return nil, false, nil
-	}
-
-	cVar := seg0.FromNode.variable
-	oVar := seg0.ToNode.variable
-	pVar := seg1.ToNode.variable
-	catVar := seg2.ToNode.variable
-	if cVar == "" || oVar == "" || pVar == "" || catVar == "" {
-		return nil, false, nil
-	}
-
-	m := exprMatcher{}
-	if m.key(returnItems[0].expr) != m.key(cVar+".companyName") {
-		return nil, false, nil
-	}
-	if m.key(returnItems[1].expr) != m.key(catVar+".categoryName") {
-		return nil, false, nil
-	}
-	// Accept "count(DISTINCT o)" with flexible whitespace/case.
-	if m.key(returnItems[2].expr) != m.key("count(distinct "+oVar+")") {
-		return nil, false, nil
-	}
-
-	purchasedEdges, _, err := e.getEdgesByTypeFast(seg0.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-	ordersEdges, _, err := e.getEdgesByTypeFast(seg1.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-	partOfEdges, _, err := e.getEdgesByTypeFast(seg2.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-
-	// order -> customer
-	orderToCustomer := make(map[storage.NodeID]storage.NodeID, len(purchasedEdges))
-	for _, edge := range purchasedEdges {
-		orderToCustomer[edge.EndNode] = edge.StartNode
-	}
-
-	// product -> categories
-	productToCats := make(map[storage.NodeID][]storage.NodeID, len(partOfEdges))
-	for _, edge := range partOfEdges {
-		productToCats[edge.StartNode] = append(productToCats[edge.StartNode], edge.EndNode)
-	}
-
-	type pairKey struct {
-		customer storage.NodeID
-		category storage.NodeID
-	}
-	type tripKey struct {
-		customer storage.NodeID
-		category storage.NodeID
-		order    storage.NodeID
-	}
-	seen := make(map[tripKey]struct{}, 4096)
-	counts := make(map[pairKey]int64)
-
-	for _, edge := range ordersEdges {
-		orderID := edge.StartNode
-		productID := edge.EndNode
-		customerID, ok := orderToCustomer[orderID]
-		if !ok {
-			continue
-		}
-		for _, categoryID := range productToCats[productID] {
-			k3 := tripKey{customer: customerID, category: categoryID, order: orderID}
-			if _, ok := seen[k3]; ok {
-				continue
-			}
-			seen[k3] = struct{}{}
-			k2 := pairKey{customer: customerID, category: categoryID}
-			counts[k2]++
-		}
-	}
-
-	// Materialize rows.
-	customerIDs := make([]storage.NodeID, 0, len(counts))
-	categoryIDs := make([]storage.NodeID, 0, len(counts))
-	customerSeen := make(map[storage.NodeID]struct{})
-	categorySeen := make(map[storage.NodeID]struct{})
-	for k := range counts {
-		if _, ok := customerSeen[k.customer]; !ok {
-			customerSeen[k.customer] = struct{}{}
-			customerIDs = append(customerIDs, k.customer)
-		}
-		if _, ok := categorySeen[k.category]; !ok {
-			categorySeen[k.category] = struct{}{}
-			categoryIDs = append(categoryIDs, k.category)
-		}
-	}
-
-	customers, _, err := e.batchGetNodesFast(customerIDs)
-	if err != nil {
-		return nil, false, err
-	}
-	categories, _, err := e.batchGetNodesFast(categoryIDs)
-	if err != nil {
-		return nil, false, err
-	}
-
-	rows = make([][]interface{}, 0, len(counts))
-	for k, count := range counts {
-		c := customers[k.customer]
-		cat := categories[k.category]
-		if c == nil || cat == nil {
-			continue
-		}
-		rows = append(rows, []interface{}{c.Properties["companyName"], cat.Properties["categoryName"], count})
-	}
-
-	return rows, true, nil
-}
-
-func (e *StorageExecutor) tryFastCustomerSupplierDistinctOrders(matches *TraversalMatch, returnItems []returnItem) (rows [][]interface{}, ok bool, err error) {
-	// MATCH (c:Customer)-[:PURCHASED]->(o:Order)-[:ORDERS]->(p:Product)<-[:SUPPLIES]-(s:Supplier)
-	// RETURN c.companyName, s.companyName, count(DISTINCT o) as orders
-	if len(matches.Segments) != 3 || len(returnItems) != 3 {
-		return nil, false, nil
-	}
-
-	seg0 := matches.Segments[0]
-	seg1 := matches.Segments[1]
-	seg2 := matches.Segments[2]
-	if seg0.Relationship.Direction != "outgoing" || seg1.Relationship.Direction != "outgoing" || seg2.Relationship.Direction != "incoming" {
-		return nil, false, nil
-	}
-	if len(seg0.Relationship.Types) != 1 || len(seg1.Relationship.Types) != 1 || len(seg2.Relationship.Types) != 1 {
-		return nil, false, nil
-	}
-
-	cVar := seg0.FromNode.variable
-	oVar := seg0.ToNode.variable
-	pVar := seg1.ToNode.variable
-	sVar := seg2.ToNode.variable
-	if cVar == "" || oVar == "" || pVar == "" || sVar == "" {
-		return nil, false, nil
-	}
-
-	m := exprMatcher{}
-	if m.key(returnItems[0].expr) != m.key(cVar+".companyName") {
-		return nil, false, nil
-	}
-	if m.key(returnItems[1].expr) != m.key(sVar+".companyName") {
-		return nil, false, nil
-	}
-	if m.key(returnItems[2].expr) != m.key("count(distinct "+oVar+")") {
-		return nil, false, nil
-	}
-
-	purchasedEdges, _, err := e.getEdgesByTypeFast(seg0.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-	ordersEdges, _, err := e.getEdgesByTypeFast(seg1.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-	suppliesEdges, _, err := e.getEdgesByTypeFast(seg2.Relationship.Types[0])
-	if err != nil {
-		return nil, false, err
-	}
-
-	// order -> customer
-	orderToCustomer := make(map[storage.NodeID]storage.NodeID, len(purchasedEdges))
-	for _, edge := range purchasedEdges {
-		orderToCustomer[edge.EndNode] = edge.StartNode
-	}
-
-	// product -> suppliers
-	productToSuppliers := make(map[storage.NodeID][]storage.NodeID, len(suppliesEdges))
-	for _, edge := range suppliesEdges {
-		supplierID := edge.StartNode
-		productID := edge.EndNode
-		productToSuppliers[productID] = append(productToSuppliers[productID], supplierID)
-	}
-
-	type pairKey struct {
-		customer storage.NodeID
-		supplier storage.NodeID
-	}
-	type tripKey struct {
-		customer storage.NodeID
-		supplier storage.NodeID
-		order    storage.NodeID
-	}
-	seen := make(map[tripKey]struct{}, 4096)
-	counts := make(map[pairKey]int64)
-
-	for _, edge := range ordersEdges {
-		orderID := edge.StartNode
-		productID := edge.EndNode
-		customerID, ok := orderToCustomer[orderID]
-		if !ok {
-			continue
-		}
-		for _, supplierID := range productToSuppliers[productID] {
-			k3 := tripKey{customer: customerID, supplier: supplierID, order: orderID}
-			if _, ok := seen[k3]; ok {
-				continue
-			}
-			seen[k3] = struct{}{}
-			k2 := pairKey{customer: customerID, supplier: supplierID}
-			counts[k2]++
-		}
-	}
-
-	// Materialize rows.
-	customerIDs := make([]storage.NodeID, 0, len(counts))
-	supplierIDs := make([]storage.NodeID, 0, len(counts))
-	customerSeen := make(map[storage.NodeID]struct{})
-	supplierSeen := make(map[storage.NodeID]struct{})
-	for k := range counts {
-		if _, ok := customerSeen[k.customer]; !ok {
-			customerSeen[k.customer] = struct{}{}
-			customerIDs = append(customerIDs, k.customer)
-		}
-		if _, ok := supplierSeen[k.supplier]; !ok {
-			supplierSeen[k.supplier] = struct{}{}
-			supplierIDs = append(supplierIDs, k.supplier)
-		}
-	}
-
-	customers, _, err := e.batchGetNodesFast(customerIDs)
-	if err != nil {
-		return nil, false, err
-	}
-	suppliers, _, err := e.batchGetNodesFast(supplierIDs)
-	if err != nil {
-		return nil, false, err
-	}
-
-	rows = make([][]interface{}, 0, len(counts))
-	for k, count := range counts {
-		c := customers[k.customer]
-		s := suppliers[k.supplier]
-		if c == nil || s == nil {
-			continue
-		}
-		rows = append(rows, []interface{}{c.Properties["companyName"], s.Properties["companyName"], count})
+		rows = append(rows, []interface{}{leftNode.Properties[plan.leftProp], rightNode.Properties[plan.rightProp], count})
 	}
 
 	return rows, true, nil

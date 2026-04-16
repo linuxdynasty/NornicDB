@@ -45,9 +45,9 @@ func (e *StorageExecutor) executeMatchWithUnwind(ctx context.Context, cypher str
 	var err error
 
 	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage error: %w", err)
@@ -718,9 +718,9 @@ func (e *StorageExecutor) executeChainedMatch(ctx context.Context, pattern strin
 
 			var nodes []*storage.Node
 			if len(nodePattern.labels) > 0 {
-				nodes, _ = e.storage.GetNodesByLabel(nodePattern.labels[0])
+				nodes, _ = e.loadNodesWithTemporalViewport(ctx, nodePattern.labels)
 			} else {
-				nodes, _ = e.storage.AllNodes()
+				nodes, _ = e.loadNodesWithTemporalViewport(ctx, nil)
 			}
 
 			if len(nodePattern.properties) > 0 {
@@ -925,18 +925,9 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 					return nil
 				}
 
-				// Check label filter
-				if len(labels) > 0 {
-					hasLabel := false
-					for _, nodeLabel := range node.Labels {
-						if nodeLabel == labels[0] {
-							hasLabel = true
-							break
-						}
-					}
-					if !hasLabel {
-						return nil // Skip this node
-					}
+				// Check label filter.
+				if len(labels) > 0 && !mergeNodeHasLabels(node, labels) {
+					return nil // Skip this node
 				}
 				if whereFilter != nil && !whereFilter(node) {
 					return nil
@@ -983,6 +974,9 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	hideSystemNodes := shouldHideSystemNodes(store)
 	filteredNodes := make([]*storage.Node, 0, len(nodes))
 	for _, node := range nodes {
+		if len(labels) > 0 && !mergeNodeHasLabels(node, labels) {
+			continue
+		}
 		if !hideSystemNodes || !isSystemNode(node) {
 			filteredNodes = append(filteredNodes, node)
 		}
@@ -1062,47 +1056,12 @@ func (e *StorageExecutor) executeCartesianProductMatch(
 		var err error
 
 		if len(nodeInfo.labels) > 0 {
-			nodes, err = e.storage.GetNodesByLabel(nodeInfo.labels[0])
-			if err != nil {
-				return nil, fmt.Errorf("storage error: %w", err)
-			}
-			if viewport, ok := TemporalViewportFromContext(ctx); ok {
-				if checker, canCheck := e.storage.(temporalCurrentNodeChecker); canCheck {
-					nodes, err = filterNodesByTemporalViewport(nodes, viewport, checker)
-					if err != nil {
-						return nil, err
-					}
-				}
-			}
-			// Filter by additional labels if present
-			if len(nodeInfo.labels) > 1 {
-				var filtered []*storage.Node
-				for _, node := range nodes {
-					hasAll := true
-					for _, reqLabel := range nodeInfo.labels[1:] {
-						found := false
-						for _, nodeLabel := range node.Labels {
-							if nodeLabel == reqLabel {
-								found = true
-								break
-							}
-						}
-						if !found {
-							hasAll = false
-							break
-						}
-					}
-					if hasAll {
-						filtered = append(filtered, node)
-					}
-				}
-				nodes = filtered
-			}
+			nodes, err = e.loadNodesWithTemporalViewport(ctx, nodeInfo.labels)
 		} else {
-			nodes, err = e.storage.AllNodes()
-			if err != nil {
-				return nil, fmt.Errorf("storage error: %w", err)
-			}
+			nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("storage error: %w", err)
 		}
 
 		// Filter by properties if specified in pattern

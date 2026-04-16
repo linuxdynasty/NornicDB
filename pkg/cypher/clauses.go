@@ -836,7 +836,7 @@ type unwindSimpleSetAssignment struct {
 
 type unwindMergeChainNodePlan struct {
 	mergeVar            string
-	label               string
+	labels              []string
 	matchAssignments    []unwindSimpleSetAssignment
 	setAssignments      []unwindSimpleSetAssignment
 	onCreateAssignments []unwindSimpleSetAssignment
@@ -845,7 +845,7 @@ type unwindMergeChainNodePlan struct {
 
 type unwindMergeChainLookupPlan struct {
 	varName          string
-	label            string
+	labels           []string
 	matchAssignments []unwindSimpleSetAssignment
 	optional         bool
 }
@@ -947,52 +947,62 @@ func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAss
 	return out, true
 }
 
-func parseSimpleUnwindMergeClause(mergePart string) (string, string, []unwindSimpleSetAssignment, bool) {
+func parseSimpleUnwindMergeClause(mergePart string) (string, []string, []unwindSimpleSetAssignment, bool) {
 	return parseUnwindNodePatternClause(mergePart, "MERGE")
 }
 
-func parseUnwindNodePatternClause(clause string, keyword string) (string, string, []unwindSimpleSetAssignment, bool) {
+func parseUnwindNodePatternClause(clause string, keyword string) (string, []string, []unwindSimpleSetAssignment, bool) {
 	trimmed := strings.TrimSpace(clause)
 	if !startsWithKeywordFold(trimmed, keyword) {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	rest := strings.TrimSpace(trimmed[len(keyword):])
 	if !strings.HasPrefix(rest, "(") {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	parenEnd := findMatchingParen(rest, 0)
 	if parenEnd < 0 || strings.TrimSpace(rest[parenEnd+1:]) != "" {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	nodePattern := strings.TrimSpace(rest[1:parenEnd])
 	braceStart := strings.Index(nodePattern, "{")
 	if braceStart < 0 {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	exec := &StorageExecutor{}
 	braceEnd := exec.findMatchingBrace(nodePattern, braceStart)
 	if braceEnd < 0 || strings.TrimSpace(nodePattern[braceEnd+1:]) != "" {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	head := strings.TrimSpace(nodePattern[:braceStart])
 	propMap := strings.TrimSpace(nodePattern[braceStart+1 : braceEnd])
 	if head == "" || propMap == "" {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
 	parts := strings.Split(head, ":")
-	if len(parts) != 2 {
-		return "", "", nil, false
+	if len(parts) < 2 {
+		return "", nil, nil, false
 	}
 	mergeVar := strings.TrimSpace(parts[0])
-	label := strings.TrimSpace(parts[1])
-	if !isSimpleIdentifier(mergeVar) || !isSimpleIdentifier(label) {
-		return "", "", nil, false
+	if !isSimpleIdentifier(mergeVar) {
+		return "", nil, nil, false
+	}
+	labels := make([]string, 0, len(parts)-1)
+	for i := 1; i < len(parts); i++ {
+		label := strings.TrimSpace(parts[i])
+		if !isSimpleIdentifier(label) {
+			return "", nil, nil, false
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return "", nil, nil, false
 	}
 	assignments, ok := parseUnwindSimpleMergeMatchAssignments(propMap)
 	if !ok {
-		return "", "", nil, false
+		return "", nil, nil, false
 	}
-	return mergeVar, label, assignments, true
+	return mergeVar, labels, assignments, true
 }
 
 func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
@@ -1001,16 +1011,25 @@ func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
 	if optional {
 		keyword = "OPTIONAL MATCH"
 	}
-	varName, label, assignments, ok := parseUnwindNodePatternClause(clause, keyword)
+	varName, labels, assignments, ok := parseUnwindNodePatternClause(clause, keyword)
 	if !ok {
 		return unwindMergeChainLookupPlan{}, false
 	}
 	return unwindMergeChainLookupPlan{
 		varName:          varName,
-		label:            label,
+		labels:           labels,
 		matchAssignments: assignments,
 		optional:         optional,
 	}, true
+}
+
+func unwindMergeLabelsKey(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	sorted := append([]string(nil), labels...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, ":")
 }
 
 func parseUnwindWithClause(clause string) (unwindMergeChainWithPlan, bool) {
@@ -1382,11 +1401,11 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 			}
 			return unwindMergeChainPlan{}
 		}
-		mergeVar, label, assignments, ok := parseSimpleUnwindMergeClause(clause)
+		mergeVar, labels, assignments, ok := parseSimpleUnwindMergeClause(clause)
 		if ok {
 			nodePlan := &unwindMergeChainNodePlan{
 				mergeVar:         mergeVar,
-				label:            label,
+				labels:           labels,
 				matchAssignments: assignments,
 			}
 			for i+1 < len(clauses) {
@@ -1600,11 +1619,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				for _, assignment := range nodePlan.matchAssignments {
 					matchProps[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 				}
-				lookupKey := unwindMergeKey(nodePlan.label, matchProps)
+				lookupKey := unwindMergeKey(unwindMergeLabelsKey(nodePlan.labels), matchProps)
 				node := lookupCache[lookupKey]
 				if !lookupKnown[lookupKey] {
 					var err error
-					node, err = e.findMergeNode(store, []string{nodePlan.label}, matchProps)
+					node, err = e.findMergeNode(store, nodePlan.labels, matchProps)
 					if err != nil {
 						return nil, true, err
 					}
@@ -1614,7 +1633,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				if node == nil {
 					node = &storage.Node{
 						ID:         storage.NodeID(e.generateID()),
-						Labels:     []string{nodePlan.label},
+						Labels:     append([]string(nil), nodePlan.labels...),
 						Properties: cloneNodePropertiesMap(matchProps),
 					}
 					for _, assignment := range nodePlan.setAssignments {
@@ -1629,7 +1648,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					}
 					node.ID = actualID
 					lookupCache[lookupKey] = node
-					e.cacheMergeNode([]string{nodePlan.label}, matchProps, node)
+					e.cacheMergeNode(nodePlan.labels, matchProps, node)
 					result.Stats.NodesCreated++
 					notifyOnce(node.ID)
 				} else {
@@ -1652,7 +1671,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						if err := store.UpdateNode(node); err != nil {
 							return nil, true, fmt.Errorf("UNWIND MERGE chain update failed: %w", err)
 						}
-						e.cacheMergeNode([]string{nodePlan.label}, matchProps, node)
+						e.cacheMergeNode(nodePlan.labels, matchProps, node)
 						notifyOnce(node.ID)
 					}
 				}
@@ -1666,11 +1685,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				for _, assignment := range lookupPlan.matchAssignments {
 					matchProps[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 				}
-				lookupKey := unwindMergeKey(lookupPlan.label, matchProps)
+				lookupKey := unwindMergeKey(unwindMergeLabelsKey(lookupPlan.labels), matchProps)
 				node := lookupCache[lookupKey]
 				if !lookupKnown[lookupKey] {
 					var err error
-					node, err = e.findMergeNode(store, []string{lookupPlan.label}, matchProps)
+					node, err = e.findMergeNode(store, lookupPlan.labels, matchProps)
 					if err != nil {
 						return nil, true, err
 					}
@@ -2856,13 +2875,13 @@ type joinedRow struct {
 
 // optionalRelPattern holds parsed relationship info for OPTIONAL MATCH
 type optionalRelPattern struct {
-	sourceVar   string
-	relType     string
-	relVar      string
-	targetVar   string
-	targetLabel string
-	targetProps map[string]interface{}
-	direction   string // "out", "in", "both"
+	sourceVar    string
+	relType      string
+	relVar       string
+	targetVar    string
+	targetLabels []string
+	targetProps  map[string]interface{}
+	direction    string // "out", "in", "both"
 }
 
 // optionalRelResult holds a node and its connecting edge for OPTIONAL MATCH
@@ -3184,7 +3203,7 @@ func (e *StorageExecutor) parseOptionalRelPattern(pattern string) optionalRelPat
 					result.targetVar = targetInfo.variable
 				}
 				if len(targetInfo.labels) > 0 {
-					result.targetLabel = targetInfo.labels[0]
+					result.targetLabels = append([]string(nil), targetInfo.labels...)
 				}
 				if len(targetInfo.properties) > 0 {
 					result.targetProps = targetInfo.properties
@@ -3241,18 +3260,9 @@ func (e *StorageExecutor) findRelatedNodes(sourceNode *storage.Node, pattern opt
 			continue
 		}
 
-		// Check target label if specified
-		if pattern.targetLabel != "" {
-			hasLabel := false
-			for _, label := range targetNode.Labels {
-				if label == pattern.targetLabel {
-					hasLabel = true
-					break
-				}
-			}
-			if !hasLabel {
-				continue
-			}
+		// Check target labels if specified.
+		if len(pattern.targetLabels) > 0 && !mergeNodeHasLabels(targetNode, pattern.targetLabels) {
+			continue
 		}
 
 		// Check target properties if specified

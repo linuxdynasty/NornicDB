@@ -23,9 +23,11 @@ func (e *StorageExecutor) tryFastRevenueByProduct(matches *TraversalMatch, withC
 	if matches.Relationship.Direction != "incoming" {
 		return nil, false, nil
 	}
-	if len(matches.StartNode.labels) != 1 || matches.StartNode.labels[0] != "Product" {
+	if !sliceContains(matches.StartNode.labels, "Product") {
 		return nil, false, nil
 	}
+	requiredProductLabels := append([]string(nil), matches.StartNode.labels...)
+	requiredOrderLabels := append([]string(nil), matches.EndNode.labels...)
 
 	pVar := matches.StartNode.variable
 	rVar := matches.Relationship.Variable
@@ -76,26 +78,46 @@ func (e *StorageExecutor) tryFastRevenueByProduct(matches *TraversalMatch, withC
 	// Collect product IDs first so we can batch fetch unitPrice/productName.
 	productSeen := make(map[storage.NodeID]struct{}, 1024)
 	productIDs := make([]storage.NodeID, 0, 1024)
+	orderSeen := make(map[storage.NodeID]struct{}, 1024)
+	orderIDs := make([]storage.NodeID, 0, 1024)
 	for _, edge := range edgeList {
 		productID := edge.EndNode
-		if _, ok := productSeen[productID]; ok {
+		if _, ok := productSeen[productID]; !ok {
+			productSeen[productID] = struct{}{}
+			productIDs = append(productIDs, productID)
+		}
+		orderID := edge.StartNode
+		if _, ok := orderSeen[orderID]; ok {
 			continue
 		}
-		productSeen[productID] = struct{}{}
-		productIDs = append(productIDs, productID)
+		orderSeen[orderID] = struct{}{}
+		orderIDs = append(orderIDs, orderID)
 	}
 
 	products, _, err := e.batchGetNodesFast(productIDs)
 	if err != nil {
 		return nil, false, err
 	}
+	var orders map[storage.NodeID]*storage.Node
+	if len(requiredOrderLabels) > 0 {
+		orders, _, err = e.batchGetNodesFast(orderIDs)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 
 	revenueByProduct := make(map[storage.NodeID]float64, len(productIDs))
 	for _, edge := range edgeList {
 		productID := edge.EndNode
 		pNode := products[productID]
-		if pNode == nil {
+		if pNode == nil || !mergeNodeHasLabels(pNode, requiredProductLabels) {
 			continue
+		}
+		if len(requiredOrderLabels) > 0 {
+			orderNode := orders[edge.StartNode]
+			if orderNode == nil || !mergeNodeHasLabels(orderNode, requiredOrderLabels) {
+				continue
+			}
 		}
 		unitPriceRaw, ok := pNode.Properties["unitPrice"]
 		if !ok {

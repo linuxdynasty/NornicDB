@@ -2897,6 +2897,26 @@ func TestEvaluateExpressionFromValues_MaterializesTemporalExpressions(t *testing
 	require.Equal(t, "2026-03-21T01:02:03Z", exec.evaluateExpressionFromValues("CASE WHEN row.asserted_at_iso IS NULL THEN null ELSE datetime(row.asserted_at_iso) END", values))
 }
 
+func TestEvaluateCoalesceInContext_ResolvesComputedMapProperties(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	values := map[string]interface{}{
+		"row": map[string]interface{}{
+			"name":      "BackendRegex",
+			"file_path": "internal/parser/parser.go",
+			"entity_id": "symbol::git-to-graph::symbol::internal/parser/parser.go::constant::BackendRegex",
+		},
+	}
+
+	require.Equal(
+		t,
+		"BackendRegex",
+		exec.evaluateCoalesceInContext("coalesce(row.name, row.path, row.file_path, row.entity_id)", nil, nil, values),
+	)
+}
+
 func TestExecuteMatchWithClause_ChainedWithAndStorageFailureBranches(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")

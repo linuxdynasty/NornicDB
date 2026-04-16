@@ -174,9 +174,9 @@ func (e *StorageExecutor) evaluateMatchClauseNodes(ctx context.Context, clause s
 	var nodes []*storage.Node
 	var err error
 	if len(pattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(pattern.labels[0])
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, pattern.labels)
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = e.loadNodesWithTemporalViewport(ctx, nil)
 	}
 	if err != nil {
 		return nil, "", err
