@@ -538,7 +538,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 						callParams[k] = v
 					}
 					callParams[variable] = item
-					mutationResult, err = e.Execute(ctx, fullQuery, callParams)
+					mutationResult, err = e.executeInternal(ctx, fullQuery, callParams)
 				} else {
 					// Replace variable references ONLY in the mutation clause
 					mutationQuerySubstituted := e.replaceVariableInMutationQuery(mutationPart, variable, item)
@@ -556,12 +556,12 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 						// are better handled by the regular executor route so MATCH bindings are
 						// preserved for downstream relationship merges.
 						if findKeywordIndexInContext(trimmed, "MATCH") > 0 || complexMergeChain {
-							mutationResult, err = e.Execute(ctx, substitutedFull, params)
+							mutationResult, err = e.executeInternal(ctx, substitutedFull, params)
 						} else {
 							mutationResult, err = e.executeMergeWithContext(ctx, trimmed, make(map[string]*storage.Node), make(map[string]*storage.Edge))
 						}
 					} else {
-						mutationResult, err = e.Execute(ctx, substitutedFull, params)
+						mutationResult, err = e.executeInternal(ctx, substitutedFull, params)
 					}
 				}
 				if err != nil {

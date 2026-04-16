@@ -941,6 +941,110 @@ func (tx *BadgerTransaction) GetEdgesByType(edgeType string) ([]*Edge, error) {
 	}), nil
 }
 
+// GetNodesByLabel returns nodes with the given label including pending transaction writes.
+func (tx *BadgerTransaction) GetNodesByLabel(label string) ([]*Node, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.getNodesByLabelLocked(label)
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingNodesLocked(committed, func(node *Node) bool {
+		if node == nil {
+			return false
+		}
+		for _, nodeLabel := range node.Labels {
+			if nodeLabel == label {
+				return true
+			}
+		}
+		return false
+	}), nil
+}
+
+// GetFirstNodeByLabel returns the first visible node with the given label.
+func (tx *BadgerTransaction) GetFirstNodeByLabel(label string) (*Node, error) {
+	nodes, err := tx.GetNodesByLabel(label)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, ErrNotFound
+	}
+	return nodes[0], nil
+}
+
+// AllNodes returns all visible nodes including pending transaction writes.
+func (tx *BadgerTransaction) AllNodes() ([]*Node, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if err := tx.ensureLifecycleActiveLocked(); err != nil {
+		return nil, err
+	}
+
+	committed, err := tx.engine.AllNodes()
+	if err != nil {
+		return nil, err
+	}
+	return tx.mergePendingNodesLocked(committed, func(node *Node) bool {
+		return node != nil
+	}), nil
+}
+
+func (tx *BadgerTransaction) GetAllNodes() []*Node {
+	nodes, err := tx.AllNodes()
+	if err != nil {
+		return nil
+	}
+	return nodes
+}
+
+func (tx *BadgerTransaction) HasPendingNodeMutations() bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return len(tx.pendingNodes) > 0 || len(tx.deletedNodes) > 0
+}
+
+func (tx *BadgerTransaction) mergePendingNodesLocked(committed []*Node, includePending func(*Node) bool) []*Node {
+	merged := make([]*Node, 0, len(committed)+len(tx.pendingNodes))
+	seen := make(map[NodeID]struct{}, len(committed)+len(tx.pendingNodes))
+
+	for _, node := range committed {
+		if node == nil {
+			continue
+		}
+		if _, deleted := tx.deletedNodes[node.ID]; deleted {
+			continue
+		}
+		if pending, exists := tx.pendingNodes[node.ID]; exists {
+			if includePending(pending) {
+				merged = append(merged, copyNode(pending))
+				seen[node.ID] = struct{}{}
+			}
+			continue
+		}
+		if includePending(node) {
+			merged = append(merged, copyNode(node))
+			seen[node.ID] = struct{}{}
+		}
+	}
+
+	for id, node := range tx.pendingNodes {
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		if includePending(node) {
+			merged = append(merged, copyNode(node))
+		}
+	}
+
+	return merged
+}
+
 func (tx *BadgerTransaction) mergePendingEdgesLocked(committed []*Edge, includePending func(*Edge) bool) []*Edge {
 	merged := make([]*Edge, 0, len(committed)+len(tx.pendingEdges))
 	seen := make(map[EdgeID]struct{}, len(committed)+len(tx.pendingEdges))

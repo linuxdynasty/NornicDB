@@ -1893,11 +1893,50 @@ func (w *transactionStorageWrapper) UpdateEdge(edge *storage.Edge) error {
 }
 
 func (w *transactionStorageWrapper) GetNodesByLabel(label string) ([]*storage.Node, error) {
-	return w.underlying.GetNodesByLabel(label)
+	nodes, err := w.tx.GetNodesByLabel(label)
+	if err != nil {
+		return nil, err
+	}
+	if w.namespace == "" {
+		return nodes, nil
+	}
+	return w.toUserNodes(nodes), nil
 }
 
 func (w *transactionStorageWrapper) GetFirstNodeByLabel(label string) (*storage.Node, error) {
-	return w.underlying.GetFirstNodeByLabel(label)
+	node, err := w.tx.GetFirstNodeByLabel(label)
+	if err != nil {
+		return nil, err
+	}
+	if w.namespace == "" {
+		return node, nil
+	}
+	return w.toUserNode(node), nil
+}
+
+func (w *transactionStorageWrapper) ForEachNodeIDByLabel(label string, visit func(storage.NodeID) bool) error {
+	if visit == nil {
+		return nil
+	}
+	if !w.tx.HasPendingNodeMutations() {
+		if lookup, ok := w.underlying.(storage.LabelNodeIDLookupEngine); ok {
+			return lookup.ForEachNodeIDByLabel(label, visit)
+		}
+	}
+
+	nodes, err := w.GetNodesByLabel(label)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if !visit(node.ID) {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (w *transactionStorageWrapper) GetOutgoingEdges(nodeID storage.NodeID) ([]*storage.Edge, error) {
@@ -1977,7 +2016,14 @@ func (w *transactionStorageWrapper) GetEdgesBetweenVisibleAt(startID, endID stor
 }
 
 func (w *transactionStorageWrapper) AllNodes() ([]*storage.Node, error) {
-	return w.underlying.AllNodes()
+	nodes, err := w.tx.AllNodes()
+	if err != nil {
+		return nil, err
+	}
+	if w.namespace == "" {
+		return nodes, nil
+	}
+	return w.toUserNodes(nodes), nil
 }
 
 func (w *transactionStorageWrapper) AllEdges() ([]*storage.Edge, error) {
@@ -1985,7 +2031,11 @@ func (w *transactionStorageWrapper) AllEdges() ([]*storage.Edge, error) {
 }
 
 func (w *transactionStorageWrapper) GetAllNodes() []*storage.Node {
-	return w.underlying.GetAllNodes()
+	nodes := w.tx.GetAllNodes()
+	if w.namespace == "" {
+		return nodes
+	}
+	return w.toUserNodes(nodes)
 }
 
 func (w *transactionStorageWrapper) GetInDegree(nodeID storage.NodeID) int {
@@ -2125,6 +2175,14 @@ func (w *transactionStorageWrapper) toUserEdges(edges []*storage.Edge) []*storag
 	out := make([]*storage.Edge, 0, len(edges))
 	for _, edge := range edges {
 		out = append(out, w.toUserEdge(edge))
+	}
+	return out
+}
+
+func (w *transactionStorageWrapper) toUserNodes(nodes []*storage.Node) []*storage.Node {
+	out := make([]*storage.Node, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, w.toUserNode(node))
 	}
 	return out
 }
