@@ -5,7 +5,47 @@ import Security
 import Yams
 
 private let defaultQwenHeimdallFileName = "qwen3-0.6b-instruct.gguf"
-private let defaultQwenHeimdallDownloadURL = "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
+private let defaultQwenHeimdallDownloadURL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+private let ggufMagicHeader = Data([0x47, 0x47, 0x55, 0x46])
+
+private func shellQuoted(_ value: String) -> String {
+    return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+private func isValidGGUFFile(atPath path: String) -> Bool {
+    guard FileManager.default.fileExists(atPath: path) else {
+        return false
+    }
+
+    let url = URL(fileURLWithPath: path)
+    guard let handle = try? FileHandle(forReadingFrom: url) else {
+        return false
+    }
+    defer {
+        try? handle.close()
+    }
+
+    guard let header = try? handle.read(upToCount: ggufMagicHeader.count),
+          header == ggufMagicHeader else {
+        return false
+    }
+
+    return true
+}
+
+@discardableResult
+private func removeInvalidGGUFFile(atPath path: String) -> Bool {
+    guard FileManager.default.fileExists(atPath: path), !isValidGGUFFile(atPath: path) else {
+        return false
+    }
+
+    try? FileManager.default.removeItem(atPath: path)
+    return true
+}
+
+private func modelDownloadFailureMessage(modelsPath: String) -> String {
+    return "Model download failed. Please download manually and place in \(modelsPath)"
+}
 
 private func appDisplayVersion() -> String {
     if let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
@@ -823,25 +863,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             
             // Execute download script
             DispatchQueue.global(qos: .userInitiated).async {
+                let modelsPath = self.configManager.modelsPath
+                let bgePath = "\(modelsPath)/bge-m3.gguf"
+                let bgeRerankerPath = "\(modelsPath)/bge-reranker-v2-m3-Q4_K_M.gguf"
+                let qwenPath = "\(modelsPath)/\(defaultQwenHeimdallFileName)"
                 let task = Process()
                 task.launchPath = "/bin/bash"
-                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf && curl -L -o models/\(defaultQwenHeimdallFileName) \(defaultQwenHeimdallDownloadURL)"]
+                task.arguments = ["-c", "mkdir -p \(shellQuoted(modelsPath)) && curl -fL -o \(shellQuoted(bgePath)) https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -fL -o \(shellQuoted(bgeRerankerPath)) https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf && curl -fL -o \(shellQuoted(qwenPath)) \(shellQuoted(defaultQwenHeimdallDownloadURL))"]
                 
                 // Create models directory first
-                try? FileManager.default.createDirectory(atPath: "/usr/local/var/nornicdb/models", withIntermediateDirectories: true, attributes: nil)
+                try? FileManager.default.createDirectory(atPath: modelsPath, withIntermediateDirectories: true, attributes: nil)
                 
                 task.launch()
                 task.waitUntilExit()
                 
                 DispatchQueue.main.async {
                     let result = NSAlert()
-                    if task.terminationStatus == 0 {
+                    let downloadsValid = isValidGGUFFile(atPath: bgePath)
+                        && isValidGGUFFile(atPath: bgeRerankerPath)
+                        && isValidGGUFFile(atPath: qwenPath)
+                    if task.terminationStatus == 0 && downloadsValid {
                         result.messageText = "Download Complete"
                         result.informativeText = "Models downloaded successfully!\n\nYou can now select them in Settings → Models tab."
                         result.alertStyle = .informational
                     } else {
+                        _ = removeInvalidGGUFFile(atPath: bgePath)
+                        _ = removeInvalidGGUFFile(atPath: bgeRerankerPath)
+                        _ = removeInvalidGGUFFile(atPath: qwenPath)
                         result.messageText = "Download Failed"
-                        result.informativeText = "Failed to download models. Please check your internet connection and try again."
+                        result.informativeText = modelDownloadFailureMessage(modelsPath: modelsPath)
                         result.alertStyle = .warning
                     }
                     result.addButton(withTitle: "OK")
@@ -857,7 +907,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
     
     @objc func openModelsFolder() {
-        let modelsPath = "/usr/local/var/nornicdb/models"
+        let modelsPath = configManager.modelsPath
         
         // Create directory if it doesn't exist
         try? FileManager.default.createDirectory(atPath: modelsPath, withIntermediateDirectories: true, attributes: nil)
@@ -1192,7 +1242,7 @@ class ConfigManager: ObservableObject {
         }
         return max(1, embeddingChunkSize)
     }
-    private let modelsPath = "/usr/local/var/nornicdb/models"
+    let modelsPath = "/usr/local/var/nornicdb/models"
     
     func isFirstRun() -> Bool {
         return FileManager.default.fileExists(atPath: firstRunPath)
@@ -1405,7 +1455,9 @@ class ConfigManager: ObservableObject {
             return
         }
         
-        availableModels = files.filter { $0.hasSuffix(".gguf") }.sorted()
+        availableModels = files.filter {
+            $0.hasSuffix(".gguf") && isValidGGUFFile(atPath: "\(modelsPath)/\($0)")
+        }.sorted()
     }
 
     private func normalizeModelName(_ raw: String, fallback: String) -> String {
@@ -1594,7 +1646,7 @@ private func launchAgentEnvironmentVariables(config: ConfigManager, homeDir: Str
         "NORNICDB_SEARCH_RERANK_MODEL": config.searchRerankModel,
         "NORNICDB_MEMORY_DECAY_ENABLED": config.memoryDecayEnabled ? "true" : "false",
         "NORNICDB_AUTO_TLP_ENABLED": config.autoTLPEnabled ? "true" : "false",
-        "NORNICDB_MODELS_DIR": "/usr/local/var/nornicdb/models",
+        "NORNICDB_MODELS_DIR": config.modelsPath,
         "NORNICDB_PLUGINS_DIR": "/usr/local/share/nornicdb/plugins",
         "NORNICDB_HEIMDALL_PLUGINS_DIR": "/usr/local/share/nornicdb/plugins/heimdall",
     ]
@@ -3367,7 +3419,7 @@ struct FirstRunWizard: View {
                             Spacer()
                             
                             Button(action: {
-                                let modelsPath = "/usr/local/var/nornicdb/models"
+                                let modelsPath = config.modelsPath
                                 try? FileManager.default.createDirectory(atPath: modelsPath, withIntermediateDirectories: true, attributes: nil)
                                 NSWorkspace.shared.open(URL(fileURLWithPath: modelsPath))
                             }) {
@@ -3532,16 +3584,16 @@ struct FirstRunWizard: View {
     }
     
     private func checkModelFiles() {
-        let modelsPath = "/usr/local/var/nornicdb/models"
+        let modelsPath = config.modelsPath
         let fileManager = FileManager.default
         
         let bgePath = "\(modelsPath)/bge-m3.gguf"
         let bgeRerankerPath = "\(modelsPath)/bge-reranker-v2-m3-Q4_K_M.gguf"
         let qwenPath = "\(modelsPath)/\(defaultQwenHeimdallFileName)"
         
-        bgeModelExists = fileManager.fileExists(atPath: bgePath)
-        bgeRerankerModelExists = fileManager.fileExists(atPath: bgeRerankerPath)
-        qwenModelExists = fileManager.fileExists(atPath: qwenPath)
+        bgeModelExists = fileManager.fileExists(atPath: bgePath) && isValidGGUFFile(atPath: bgePath)
+        bgeRerankerModelExists = fileManager.fileExists(atPath: bgeRerankerPath) && isValidGGUFFile(atPath: bgeRerankerPath)
+        qwenModelExists = fileManager.fileExists(atPath: qwenPath) && isValidGGUFFile(atPath: qwenPath)
         
         print("Checking models:")
         print("  BGE: \(bgePath) - exists: \(bgeModelExists)")
@@ -3554,19 +3606,23 @@ struct FirstRunWizard: View {
         downloadProgress = "Downloading BGE-M3 model (~400MB)..."
         
         DispatchQueue.global(qos: .userInitiated).async {
+            let modelsPath = config.modelsPath
+            let modelPath = "\(modelsPath)/bge-m3.gguf"
             let task = Process()
             task.launchPath = "/bin/bash"
-            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf"]
+            task.arguments = ["-c", "mkdir -p \(shellQuoted(modelsPath)) && curl -fL -o \(shellQuoted(modelPath)) https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf"]
             
             task.launch()
             task.waitUntilExit()
             
             DispatchQueue.main.async {
-                if task.terminationStatus == 0 {
+                if task.terminationStatus == 0 && isValidGGUFFile(atPath: modelPath) {
                     downloadProgress = "BGE-M3 downloaded successfully!"
                     bgeModelExists = true
                 } else {
-                    downloadProgress = "Download failed. You can download manually later."
+                    _ = removeInvalidGGUFFile(atPath: modelPath)
+                    downloadProgress = modelDownloadFailureMessage(modelsPath: modelsPath)
+                    bgeModelExists = false
                 }
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -3582,19 +3638,23 @@ struct FirstRunWizard: View {
         downloadProgress = "Downloading qwen3-0.6b model (~350MB)..."
         
         DispatchQueue.global(qos: .userInitiated).async {
+            let modelsPath = config.modelsPath
+            let modelPath = "\(modelsPath)/\(defaultQwenHeimdallFileName)"
             let task = Process()
             task.launchPath = "/bin/bash"
-            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/\(defaultQwenHeimdallFileName) \(defaultQwenHeimdallDownloadURL)"]
+            task.arguments = ["-c", "mkdir -p \(shellQuoted(modelsPath)) && curl -fL -o \(shellQuoted(modelPath)) \(shellQuoted(defaultQwenHeimdallDownloadURL))"]
             
             task.launch()
             task.waitUntilExit()
             
             DispatchQueue.main.async {
-                if task.terminationStatus == 0 {
+                if task.terminationStatus == 0 && isValidGGUFFile(atPath: modelPath) {
                     downloadProgress = "qwen3-0.6b downloaded successfully!"
                     qwenModelExists = true
                 } else {
-                    downloadProgress = "Download failed. You can download manually later."
+                    _ = removeInvalidGGUFFile(atPath: modelPath)
+                    downloadProgress = modelDownloadFailureMessage(modelsPath: modelsPath)
+                    qwenModelExists = false
                 }
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -3610,19 +3670,23 @@ struct FirstRunWizard: View {
         downloadProgress = "Downloading BGE reranker model (~440MB)..."
 
         DispatchQueue.global(qos: .userInitiated).async {
+            let modelsPath = config.modelsPath
+            let modelPath = "\(modelsPath)/bge-reranker-v2-m3-Q4_K_M.gguf"
             let task = Process()
             task.launchPath = "/bin/bash"
-            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf"]
+            task.arguments = ["-c", "mkdir -p \(shellQuoted(modelsPath)) && curl -fL -o \(shellQuoted(modelPath)) https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf"]
 
             task.launch()
             task.waitUntilExit()
 
             DispatchQueue.main.async {
-                if task.terminationStatus == 0 {
+                if task.terminationStatus == 0 && isValidGGUFFile(atPath: modelPath) {
                     downloadProgress = "BGE reranker downloaded successfully!"
                     bgeRerankerModelExists = true
                 } else {
-                    downloadProgress = "Download failed. You can download manually later."
+                    _ = removeInvalidGGUFFile(atPath: modelPath)
+                    downloadProgress = modelDownloadFailureMessage(modelsPath: modelsPath)
+                    bgeRerankerModelExists = false
                 }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
