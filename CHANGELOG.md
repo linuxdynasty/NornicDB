@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.42] Go - 2026-04-16
+
+### Added
+
+- **Heimdall tool coverage and documentation**:
+  - exposed local chat tool routing more consistently so the OpenAI compatible endpoint can surface the user's tools from an agent into injected actions in chat flows.
+  - added and refreshed Heimdall, knowledge-layer, and compliance documentation, including new guides for the Heimdall AI assistant and knowledge-layer persistence planning.
+
+- **Regression coverage for transactional and constraint edge cases**:
+  - added regression coverage for constraint handling in Bolt/Cypher paths.
+  - added targeted tests for async flush race conditions and complex `UNWIND`/`MERGE` fallback behavior.
+
+### Changed
+
+- **Heimdall local chat behavior**:
+  - hardened action parsing, tool forwarding, and local chat prompt behavior so action envelopes are handled more predictably.
+  - simplified the watcher hello/search tool flow and aligned injected action naming with the current plugin surface.
+
+- **Cypher hot paths and fallback routing**:
+  - generalized hot-path execution to support broader n-ary and generic query shapes.
+  - refined `UNWIND` + `MERGE` fallback routing so complex query shapes are handed off to the full executor more consistently.
+  - preserved transaction-visible lookups in fallback execution paths to keep behavior aligned with in-transaction state.
+
+- **Documentation and release content**:
+  - folded older planning material into the current docs set and refreshed migration, AI-agent, and deployment-facing documentation.
+
+### Fixed
+
+- **MERGE cache and transaction correctness**:
+  - fixed stale `MERGE` cache invalidation after implicit transaction aborts.
+  - fixed async flush timing so MVCC heads do not advance while a transaction still depends on its visible state.
+
+- **Installer and model download reliability**:
+  - updated installer/download locations and added validation so failed model downloads are not accepted as valid artifacts.
+  - improved macOS model download handling to verify downloaded files before treating them as usable GGUF models.
+
+- **Heimdall local chat stability**:
+  - fixed local chat template replay and unknown tool-call forwarding behavior.
+  - hardened Heimdall test races and related local chat execution edge cases.
+
+### Tests
+
+- Added and expanded coverage for:
+  - async engine flush/count race handling
+  - `UNWIND`/`MERGE` fallback and optional lookup regression paths
+  - constraint regressions across Bolt and Cypher execution
+  - Heimdall local chat tool execution and race-sensitive paths
+
+### Technical Details
+
+- **Range covered**: `v1.0.41..HEAD`
+- **Commits in range**: 19 (non-merge)
+- **Repository delta**: 48 files changed, +5,437 / -3,007 lines
+- **Primary focus areas**: Cypher fallback correctness, transaction visibility and async flush safety, Heimdall local chat/tool handling, installer download validation, and documentation consolidation.
+
 ## [v1.0.41] "Blue Orchid" - 2026-04-15
 
 ### Added
