@@ -222,7 +222,7 @@ type HeimdallInvoker interface {
 	//   result, err := ctx.Heimdall.InvokeAction("heimdall_anomaly_detect", map[string]interface{}{
 	//       "threshold": 0.8,
 	//   })
-	InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
+	InvokeAction(ctx context.Context, action string, params map[string]interface{}) (*ActionResult, error)
 
 	// SendPrompt sends a natural language prompt to the SLM for processing.
 	// The SLM will interpret the prompt and may invoke registered actions.
@@ -230,7 +230,7 @@ type HeimdallInvoker interface {
 	//
 	// Example:
 	//   result, err := ctx.Heimdall.SendPrompt("Analyze recent error patterns")
-	SendPrompt(prompt string) (*ActionResult, error)
+	SendPrompt(ctx context.Context, prompt string) (*ActionResult, error)
 
 	// InvokeActionAsync invokes an action without waiting for result.
 	// Use this for fire-and-forget scenarios where you don't need the result.
@@ -247,19 +247,22 @@ type HeimdallInvoker interface {
 	//
 	// Example:
 	//   result, err := ctx.Heimdall.SendRawPrompt("Answer this question: How many nodes?")
-	SendRawPrompt(prompt string) (*ActionResult, error)
+	SendRawPrompt(ctx context.Context, prompt string) (*ActionResult, error)
 }
 
 // NoOpHeimdallInvoker is a no-op implementation when Heimdall is not available.
 type NoOpHeimdallInvoker struct{}
 
-func (n *NoOpHeimdallInvoker) InvokeAction(action string, params map[string]interface{}) (*ActionResult, error) {
+func (n *NoOpHeimdallInvoker) InvokeAction(ctx context.Context, action string, params map[string]interface{}) (*ActionResult, error) {
+	_ = ctx
 	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
 }
-func (n *NoOpHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
+func (n *NoOpHeimdallInvoker) SendPrompt(ctx context.Context, prompt string) (*ActionResult, error) {
+	_ = ctx
 	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
 }
-func (n *NoOpHeimdallInvoker) SendRawPrompt(prompt string) (*ActionResult, error) {
+func (n *NoOpHeimdallInvoker) SendRawPrompt(ctx context.Context, prompt string) (*ActionResult, error) {
+	_ = ctx
 	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
 }
 func (n *NoOpHeimdallInvoker) InvokeActionAsync(action string, params map[string]interface{}) {}
@@ -288,19 +291,19 @@ func NewLiveHeimdallInvoker(manager *SubsystemManager, generator Generator, bifr
 }
 
 // InvokeAction directly invokes a registered action.
-func (h *LiveHeimdallInvoker) InvokeAction(action string, params map[string]interface{}) (*ActionResult, error) {
-	ctx := ActionContext{
-		Context:  context.Background(),
+func (h *LiveHeimdallInvoker) InvokeAction(ctx context.Context, action string, params map[string]interface{}) (*ActionResult, error) {
+	actionCtx := ActionContext{
+		Context:  ctx,
 		Params:   params,
 		Bifrost:  h.bifrost,
 		Database: h.database,
 		Metrics:  h.metrics,
 	}
-	return ExecuteAction(action, ctx)
+	return ExecuteAction(action, actionCtx)
 }
 
 // SendPrompt sends a prompt to the SLM and processes the response.
-func (h *LiveHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
+func (h *LiveHeimdallInvoker) SendPrompt(ctx context.Context, prompt string) (*ActionResult, error) {
 	if h.generator == nil {
 		return &ActionResult{Success: false, Message: "SLM not available"}, nil
 	}
@@ -310,14 +313,14 @@ func (h *LiveHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
 	fullPrompt := actionPrompt + "\n\nUser: " + prompt
 
 	// Generate response from SLM
-	response, err := h.generator.Generate(context.Background(), fullPrompt, DefaultGenerateParams())
+	response, err := h.generator.Generate(ctx, fullPrompt, DefaultGenerateParams())
 	if err != nil {
 		return &ActionResult{Success: false, Message: fmt.Sprintf("SLM error: %v", err)}, nil
 	}
 
 	// Try to parse as action
 	if parsedAction := tryParseActionResponse(response); parsedAction != nil {
-		return h.InvokeAction(parsedAction.Action, parsedAction.Params)
+		return h.InvokeAction(ctx, parsedAction.Action, parsedAction.Params)
 	}
 
 	// Return raw response if not an action
@@ -330,13 +333,13 @@ func (h *LiveHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
 // SendRawPrompt sends a prompt directly to the SLM without action routing context.
 // This is used for synthesis where we just want the LLM to answer a question,
 // not try to parse and route actions.
-func (h *LiveHeimdallInvoker) SendRawPrompt(prompt string) (*ActionResult, error) {
+func (h *LiveHeimdallInvoker) SendRawPrompt(ctx context.Context, prompt string) (*ActionResult, error) {
 	if h.generator == nil {
 		return &ActionResult{Success: false, Message: "SLM not available"}, nil
 	}
 
 	// Generate response from SLM directly - no action routing prefix
-	response, err := h.generator.Generate(context.Background(), prompt, DefaultGenerateParams())
+	response, err := h.generator.Generate(ctx, prompt, DefaultGenerateParams())
 	if err != nil {
 		return &ActionResult{Success: false, Message: fmt.Sprintf("SLM error: %v", err)}, nil
 	}
@@ -350,7 +353,7 @@ func (h *LiveHeimdallInvoker) SendRawPrompt(prompt string) (*ActionResult, error
 // InvokeActionAsync invokes an action asynchronously, broadcasting results via Bifrost.
 func (h *LiveHeimdallInvoker) InvokeActionAsync(action string, params map[string]interface{}) {
 	go func() {
-		result, err := h.InvokeAction(action, params)
+		result, err := h.InvokeAction(context.Background(), action, params)
 		if h.bifrost != nil && h.bifrost.IsConnected() {
 			if err != nil {
 				h.bifrost.SendNotification("error", "Action Failed", err.Error())
@@ -364,7 +367,7 @@ func (h *LiveHeimdallInvoker) InvokeActionAsync(action string, params map[string
 // SendPromptAsync sends a prompt asynchronously, broadcasting results via Bifrost.
 func (h *LiveHeimdallInvoker) SendPromptAsync(prompt string) {
 	go func() {
-		result, err := h.SendPrompt(prompt)
+		result, err := h.SendPrompt(context.Background(), prompt)
 		if h.bifrost != nil && h.bifrost.IsConnected() {
 			if err != nil {
 				h.bifrost.SendNotification("error", "Prompt Failed", err.Error())

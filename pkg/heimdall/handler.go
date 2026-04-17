@@ -33,6 +33,7 @@ type Handler struct {
 }
 
 var leakedChatTemplateMarker = regexp.MustCompile(`(?s)<\|im_(?:start|end)\|>`)
+var actionEnvelopePrefix = regexp.MustCompile(`(?s)\{\s*"action"\s*:\s*"`)
 
 func sanitizeAssistantResponse(content string) string {
 	content = strings.TrimSpace(content)
@@ -55,11 +56,10 @@ func parseActionEnvelope(response string) *ParsedAction {
 	if start == -1 {
 		return nil
 	}
-	end := strings.LastIndex(response, "}")
-	if end == -1 || end <= start {
+	jsonStr := extractFirstJSONObject(response[start:])
+	if jsonStr == "" {
 		return nil
 	}
-	jsonStr := response[start : end+1]
 	var parsed ParsedAction
 	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		return nil
@@ -71,6 +71,42 @@ func parseActionEnvelope(response string) *ParsedAction {
 		parsed.Params = make(map[string]interface{})
 	}
 	return &parsed
+}
+
+// extractFirstJSONObject returns the first balanced JSON object from the input,
+// or an empty string if the input does not contain a complete object.
+func extractFirstJSONObject(s string) string {
+	if len(s) == 0 || s[0] != '{' {
+		return ""
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[:i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func looksLikeActionEnvelopePrefix(response string) bool {
+	response = strings.TrimSpace(response)
+	if response == "" {
+		return false
+	}
+	if parseActionEnvelope(response) != nil {
+		return true
+	}
+	start := strings.Index(response, "{")
+	if start == -1 {
+		return false
+	}
+	return actionEnvelopePrefix.MatchString(response[start:])
 }
 
 func buildPassThroughToolCall(action *ParsedAction) ChatToolCallWire {
@@ -611,6 +647,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Create PromptContext with immutable ActionPrompt
 	requestID := generateID()
 	promptCtx := &PromptContext{
+		Context:       r.Context(),
 		RequestID:     requestID,
 		RequestTime:   time.Now(),
 		ActionPrompt:  ActionPrompt(), // IMMUTABLE - always first
@@ -812,6 +849,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 			}
 			logToolCall(lifecycle.requestID, tc.Name, paramsMap)
 			preExecCtx := &PreExecuteContext{
+				Context:   ctx,
 				RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
 				Action: tc.Name, Params: paramsMap, PluginData: lifecycle.promptCtx.PluginData,
 				Database: lifecycle.database, Metrics: lifecycle.metrics,
@@ -848,7 +886,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 					hookResult.Message = "tool completed successfully"
 					hookResult.Data = map[string]interface{}{"result": raw}
 				}
-				postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
+				postExecCtx := &PostExecuteContext{Context: ctx, RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
 				CallPostExecuteHooks(postExecCtx)
 				h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
 			} else {
@@ -865,7 +903,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 				if execErr != nil {
 					toolContent = FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()})
 				} else {
-					postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
+					postExecCtx := &PostExecuteContext{Context: ctx, RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
 					CallPostExecuteHooks(postExecCtx)
 					h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
 					toolContent = FormatActionResultForModel(result)
@@ -945,6 +983,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			return response, nil
 		}
 		preExecCtx := &PreExecuteContext{
+			Context:   ctx,
 			RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
 			Action: parsedAction.Action, Params: parsedAction.Params, RawResponse: response, PluginData: lifecycle.promptCtx.PluginData,
 			Database: lifecycle.database, Metrics: lifecycle.metrics,
@@ -983,7 +1022,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 				hookResult.Message = "tool completed successfully"
 				hookResult.Data = map[string]interface{}{"result": raw}
 			}
-			CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
+			CallPostExecuteHooks(&PostExecuteContext{Context: ctx, RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
 		} else {
 			actCtx := ActionContext{
 				Context: ctx, UserMessage: userMessage, Params: paramsToUse,
@@ -999,7 +1038,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 				prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nOutput exactly one line: either {\"action\": \"<name>\", \"params\": {...}} or a brief direct answer. no repetition.\n\nAssistant: "
 				continue
 			}
-			CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
+			CallPostExecuteHooks(&PostExecuteContext{Context: ctx, RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
 			resultStr = FormatActionResultForModel(result)
 		}
 		prompt = prompt + response + "\n\nTool result: " + resultStr + "\n\nOutput exactly one line: either {\"action\": \"<name>\", \"params\": {...}} or a brief direct answer to the user. No thinking, no examples, no repetition.\n\nAssistant: "
@@ -1213,44 +1252,13 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 		}
 	}
 
-	// Collect full response to check for actions
+	// Collect the full response before deciding whether it is an action envelope.
+	// This keeps the legacy SSE path deterministic and prevents partial JSON/tool
+	// envelopes from leaking into the client stream.
 	var fullResponse strings.Builder
-	isActionResponse := false
 
-	// Stream tokens - but buffer action JSON responses instead of streaming
 	err := h.manager.GenerateStream(ctx, prompt, params, func(token string) error {
 		fullResponse.WriteString(token)
-
-		// Detect if this looks like an action JSON response
-		// If response starts with '{', buffer it instead of streaming
-		currentResponse := strings.TrimSpace(fullResponse.String())
-		if strings.HasPrefix(currentResponse, "{") {
-			isActionResponse = true
-		}
-
-		// Don't stream action JSON to user - we'll send the synthesized result instead
-		if isActionResponse {
-			return nil
-		}
-
-		chunk := ChatResponse{
-			ID:      id,
-			Object:  "chat.completion.chunk", // OpenAI API streaming format
-			Model:   model,
-			Created: time.Now().Unix(),
-			Choices: []ChatChoice{
-				{
-					Index: 0,
-					Delta: &ChatMessage{
-						Content: token,
-					},
-				},
-			},
-		}
-
-		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
 		return nil
 	})
 
@@ -1267,6 +1275,21 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 	log.Printf("[Bifrost] Streaming complete, checking for action: %s", response)
 
 	parsedAction, actionError := h.tryParseAction(response)
+	if parsedAction == nil && actionError == "" {
+		chunk := ChatResponse{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Model:   model,
+			Created: time.Now().Unix(),
+			Choices: []ChatChoice{{
+				Index: 0,
+				Delta: &ChatMessage{Content: response},
+			}},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
 
 	// Handle action not found error
 	if actionError != "" {
@@ -1480,6 +1503,7 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 				// Allow plugins to provide custom response formatting
 				if result != nil {
 					synthCtx := &SynthesisContext{
+						Context:      ctx,
 						RequestID:    lifecycle.requestID,
 						UserQuestion: prompt,
 						Action:       parsedAction.Action,

@@ -61,12 +61,12 @@ type HeimdallPlugin interface {
 The Watcher plugin is Heimdall's core guardian - it provides actions to monitor and control the SLM subsystem itself.
 
 **Actions:**
-- `heimdall.watcher.status` - Get current status and statistics
-- `heimdall.watcher.health` - Check health
-- `heimdall.watcher.config` - Get configuration
-- `heimdall.watcher.set_config` - Update configuration
-- `heimdall.watcher.metrics` - Get detailed metrics
-- `heimdall.watcher.events` - Get recent events
+- `heimdall_watcher_status` - Get current status and statistics
+- `heimdall_watcher_health` - Check health
+- `heimdall_watcher_config` - Get configuration
+- `heimdall_watcher_set_config` - Update configuration
+- `heimdall_watcher_metrics` - Get detailed metrics
+- `heimdall_watcher_events` - Get recent events
 
 ## Creating a Custom Heimdall Plugin
 
@@ -206,7 +206,7 @@ manager.RegisterPlugin(myplugin.Plugin, "", true) // built-in = true
 
 1. **User sends message via chat**: "Check the system health"
 
-2. **SLM interprets intent** and maps to action: `heimdall.watcher.health`
+2. **SLM interprets intent** and maps to action: `heimdall_watcher_health`
 
 3. **Action is executed** via the plugin:
    ```

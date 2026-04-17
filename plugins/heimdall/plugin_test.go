@@ -23,6 +23,7 @@ func newActionCtx(params map[string]interface{}) heimdall.ActionContext {
 type memoryDBRouter struct {
 	summary string
 	facts   []string
+	seen    map[string]struct{}
 }
 
 func (m *memoryDBRouter) DefaultDatabaseName() string { return "default" }
@@ -45,9 +46,15 @@ func (m *memoryDBRouter) Query(ctx context.Context, database string, cypher stri
 			m.summary = summary
 		}
 		return []map[string]interface{}{{"summary": m.summary}}, nil
-	case strings.Contains(cypher, "CREATE (f:HeimdallSessionFact"):
+	case strings.Contains(cypher, "MERGE (f:HeimdallSessionFact"):
+		if m.seen == nil {
+			m.seen = make(map[string]struct{})
+		}
 		if fact, ok := params["fact"].(string); ok {
-			m.facts = append(m.facts, fact)
+			if _, exists := m.seen[fact]; !exists {
+				m.seen[fact] = struct{}{}
+				m.facts = append(m.facts, fact)
+			}
 		}
 		return []map[string]interface{}{{"fact": params["fact"]}}, nil
 	case strings.Contains(cypher, "RETURN m.summary AS summary"):
@@ -61,6 +68,10 @@ func (m *memoryDBRouter) Query(ctx context.Context, database string, cypher stri
 			rows = append(rows, map[string]interface{}{"fact": m.facts[i]})
 		}
 		return rows, nil
+	case strings.Contains(cypher, "DETACH DELETE f"):
+		return nil, nil
+	case strings.Contains(cypher, "RETURN 1 AS one"):
+		return []map[string]interface{}{{"one": int64(1)}}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", cypher)
 	}
@@ -139,11 +150,12 @@ func TestWatcherPlugin_Actions(t *testing.T) {
 	actions := p.Actions()
 
 	expectedActions := []string{
+		"hello",                // Greeting/readiness check
 		"help",                 // List available actions
 		"status",               // Get status
 		"repo_map",             // Repository structure summary
 		"autocomplete_suggest", // Cypher schema suggestions
-		"discover",             // Semantic search (GRAPH-RAG)
+		"search",               // Semantic search (GRAPH-RAG)
 		"query",                // Read-only Cypher
 		"db_stats",             // Database statistics
 	}
@@ -339,6 +351,39 @@ func TestWatcherPlugin_BroadcastAction(t *testing.T) {
 	})
 }
 
+func TestWatcherPlugin_QueryReadOnlyGuard(t *testing.T) {
+	p := &WatcherPlugin{}
+
+	ctx := heimdall.SubsystemContext{
+		Config: heimdall.Config{Model: "test-model"},
+	}
+	require.NoError(t, p.Initialize(ctx))
+	require.NoError(t, p.Start())
+
+	blocked, err := p.actionQuery(newActionCtx(map[string]interface{}{
+		"cypher": "CREATE (:Thing {id: 1})",
+	}))
+	require.NoError(t, err)
+	require.False(t, blocked.Success)
+	require.Contains(t, blocked.Message, "read-only Cypher")
+
+	allowedDB := &memoryDBRouter{}
+	p.Initialize(heimdall.SubsystemContext{Config: heimdall.Config{Model: "test-model"}, Database: allowedDB})
+	require.NoError(t, p.Start())
+
+	allowed, err := p.actionQuery(heimdall.ActionContext{
+		Context: context.Background(),
+		Params: map[string]interface{}{
+			"cypher": "RETURN 1 AS one",
+		},
+		Bifrost:  &heimdall.NoOpBifrost{},
+		Database: allowedDB,
+	})
+	require.NoError(t, err)
+	require.True(t, allowed.Success)
+	require.Equal(t, 1, len(allowed.Data["rows"].([]map[string]interface{})))
+}
+
 // TestWatcherPlugin_NotifyAction tests the notify action
 func TestWatcherPlugin_NotifyAction(t *testing.T) {
 	p := &WatcherPlugin{}
@@ -404,6 +449,32 @@ func TestWatcherPlugin_Concurrency(t *testing.T) {
 	// Verify metrics are consistent
 	metrics := p.Metrics()
 	assert.GreaterOrEqual(t, metrics["requests"].(int64), int64(1000))
+	assert.LessOrEqual(t, len(p.RecentEvents(1000)), 100)
+}
+
+func TestWatcherPlugin_EventBufferConcurrentAccess(t *testing.T) {
+	p := &WatcherPlugin{}
+
+	ctx := heimdall.SubsystemContext{Config: heimdall.Config{Model: "test-model"}}
+	require.NoError(t, p.Initialize(ctx))
+	require.NoError(t, p.Start())
+
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			_, _ = p.actionHello(newActionCtx(map[string]interface{}{}))
+		}
+		close(stop)
+	}()
+
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+			_ = p.RecentEvents(25)
+		}
+	}
 }
 
 func TestWatcherPlugin_CaptureSessionMemory(t *testing.T) {
@@ -429,7 +500,7 @@ func TestWatcherPlugin_CaptureSessionMemory(t *testing.T) {
 		},
 	}
 
-	p.captureSessionMemory("heimdall_watcher_repo_map", map[string]interface{}{}, result)
+	p.captureSessionMemory(context.Background(), "heimdall_watcher_repo_map", map[string]interface{}{}, result)
 
 	assert.NotEmpty(t, p.summary)
 	assert.NotEmpty(t, p.facts)
@@ -443,7 +514,7 @@ func TestWatcherPlugin_BuildSessionMemoryContext(t *testing.T) {
 	p.summary = "Recent coding session facts:\n- Updated plugin summary"
 	p.facts = []string{
 		"Query investigated: plugin loading",
-		"Successful action: heimdall_watcher_discover",
+		"Successful action: heimdall_watcher_search",
 		"Database in focus: default",
 	}
 
@@ -478,13 +549,16 @@ func TestWatcherPlugin_GraphBackedSessionMemory(t *testing.T) {
 		},
 	}
 
-	p.captureSessionMemory("heimdall_watcher_repo_map", map[string]interface{}{"query": "plugin graph"}, result)
+	p.captureSessionMemory(context.Background(), "heimdall_watcher_repo_map", map[string]interface{}{"query": "plugin graph"}, result)
 	assert.NotEmpty(t, db.summary)
 	assert.NotEmpty(t, db.facts)
+	firstFactCount := len(db.facts)
+	p.captureSessionMemory(context.Background(), "heimdall_watcher_repo_map", map[string]interface{}{"query": "plugin graph"}, result)
+	assert.Equal(t, firstFactCount, len(db.facts))
 
 	p.summary = ""
 	p.facts = nil
-	p.refreshSessionMemoryFromGraph("plugin graph")
+	p.refreshSessionMemoryFromGraph(context.Background(), "plugin graph", db, "coding_session")
 
 	assert.NotEmpty(t, p.summary)
 	assert.NotEmpty(t, p.facts)

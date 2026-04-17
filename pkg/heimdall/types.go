@@ -370,6 +370,9 @@ func BuildPrompt(messages []ChatMessage) string {
 // Notifications: Plugins can send non-blocking SSE messages to the UI
 // via ctx.Notify() - these are fire-and-forget and won't block the request.
 type PromptContext struct {
+	// Context carries request cancellation and deadlines.
+	Context context.Context
+
 	// RequestID for tracking through the lifecycle
 	RequestID string
 
@@ -906,6 +909,9 @@ func (p *PromptContext) GetBudgetInfo() PromptBudgetInfo {
 // Notifications: Plugins can send non-blocking SSE messages to the UI
 // via ctx.Notify() - these are fire-and-forget and won't block the request.
 type PreExecuteContext struct {
+	// Context carries request cancellation and deadlines.
+	Context context.Context
+
 	// RequestID for tracking
 	RequestID string
 
@@ -1044,6 +1050,9 @@ type PreExecuteResult struct {
 // Notifications from PostExecute are queued and sent inline after the action result,
 // ensuring proper ordering in the streaming response.
 type PostExecuteContext struct {
+	// Context carries request cancellation and deadlines.
+	Context context.Context
+
 	// RequestID for tracking
 	RequestID string
 
@@ -1322,6 +1331,9 @@ type SynthesisHook interface {
 
 // SynthesisContext provides context for response synthesis.
 type SynthesisContext struct {
+	// Context carries request cancellation and deadlines.
+	Context context.Context
+
 	// RequestID for tracking
 	RequestID string
 

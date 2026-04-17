@@ -12,11 +12,11 @@
 //
 // # Actions Provided
 //
-//   - heimdall.watcher.help - List available coding-agent tools
-//   - heimdall.watcher.status - Get coding-agent status and current capabilities
-//   - heimdall.watcher.repo_map - Summarize repository structure from the graph
-//   - heimdall.watcher.discover - Search the graph for relevant code/domain context
-//   - heimdall.watcher.query - Run graph-backed Cypher for targeted investigation
+//   - heimdall_watcher_help - List available coding-agent tools
+//   - heimdall_watcher_status - Get coding-agent status and current capabilities
+//   - heimdall_watcher_repo_map - Summarize repository structure from the graph
+//   - heimdall_watcher_search - Search the graph for relevant code/domain context
+//   - heimdall_watcher_query - Run graph-backed Cypher for targeted investigation
 //
 // # Example Usage
 //
@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ var Plugin heimdall.HeimdallPlugin = &WatcherPlugin{}
 // - Maintains durable summarized conversation state for long context windows
 type WatcherPlugin struct {
 	mu       sync.RWMutex
+	eventMu  sync.RWMutex
 	ctx      heimdall.SubsystemContext
 	status   heimdall.SubsystemStatus
 	events   []heimdall.SubsystemEvent
@@ -111,7 +113,7 @@ func (p *WatcherPlugin) Initialize(ctx heimdall.SubsystemContext) error {
 		"response_style":   "implementation-first",
 	}
 
-	p.addEvent("info", "Heimdall coding agent initialized", nil)
+	p.addEvent("info", "\nHeimdall coding agent initialized\n", nil)
 	return nil
 }
 
@@ -121,7 +123,7 @@ func (p *WatcherPlugin) Start() error {
 
 	p.status = heimdall.StatusRunning
 	p.started = time.Now()
-	p.addEvent("info", "Heimdall coding agent active", nil)
+	p.addEvent("info", "\nHeimdall coding agent active\n", nil)
 	return nil
 }
 
@@ -130,7 +132,7 @@ func (p *WatcherPlugin) Stop() error {
 	defer p.mu.Unlock()
 
 	p.status = heimdall.StatusStopped
-	p.addEvent("info", "Heimdall coding agent paused", nil)
+	p.addEvent("info", "\nHeimdall coding agent paused\n", nil)
 	return nil
 }
 
@@ -139,7 +141,7 @@ func (p *WatcherPlugin) Shutdown() error {
 	defer p.mu.Unlock()
 
 	p.status = heimdall.StatusUninitialized
-	p.addEvent("info", "Heimdall coding agent shutdown", nil)
+	p.addEvent("info", "\nHeimdall coding agent shutdown\n", nil)
 	return nil
 }
 
@@ -291,6 +293,11 @@ var repoMapInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{
 
 func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 	return map[string]heimdall.ActionFunc{
+		"hello": {
+			Description: "Respond with a simple greeting to confirm Heimdall is available. Use for greetings, smoke tests, or a lightweight readiness check.",
+			Category:    "system",
+			Handler:     p.actionHello,
+		},
 		"help": {
 			Description: "List all available Heimdall coding-agent actions",
 			Category:    "system",
@@ -313,7 +320,7 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			InputSchema: autocompleteSuggestInputSchema,
 			Handler:     p.actionAutocompleteSuggest,
 		},
-		"discover": {
+		"search": {
 			Description: "Semantic search in the repository graph. Use for concepts, features, symbols, files, or implementation areas relevant to a coding task. Params: query (required), limit (optional), depth (optional).",
 			Category:    "coding",
 			InputSchema: discoverInputSchema,
@@ -399,18 +406,36 @@ func (p *WatcherPlugin) actionRepoMap(ctx heimdall.ActionContext) (*heimdall.Act
 	message := fmt.Sprintf("Repository graph map: %d nodes, %d relationships, %d label groups",
 		stats.NodeCount, stats.RelationshipCount, len(labels))
 	p.addEvent("info", "Repository graph map generated", map[string]interface{}{"database": dbName, "limit": limit})
+	p.mu.RLock()
+	config := p.configSnapshotLocked()
+	p.mu.RUnlock()
+
+	relTypeRows, err := ctx.Database.Query(ctx.Context, dbName, `
+		MATCH ()-[r]->()
+		RETURN type(r) AS relationship_type, count(*) AS count
+		ORDER BY count DESC, relationship_type ASC
+		LIMIT $limit
+	`, map[string]interface{}{"limit": limit})
+	if err != nil {
+		relTypeRows = nil
+	}
+	relTypes := make([]map[string]interface{}, 0, len(relTypeRows))
+	for _, row := range relTypeRows {
+		relTypes = append(relTypes, row)
+	}
 
 	return &heimdall.ActionResult{
 		Success: true,
 		Message: message,
 		Data: map[string]interface{}{
-			"database":           dbName,
-			"node_count":         stats.NodeCount,
-			"relationship_count": stats.RelationshipCount,
-			"label_counts":       stats.LabelCounts,
-			"top_label_groups":   labels,
-			"history_strategy":   p.config["history_strategy"],
-			"response_style":     p.config["response_style"],
+			"database":               dbName,
+			"node_count":             stats.NodeCount,
+			"relationship_count":     stats.RelationshipCount,
+			"label_counts":           stats.LabelCounts,
+			"top_label_groups":       labels,
+			"top_relationship_types": relTypes,
+			"history_strategy":       config["history_strategy"],
+			"response_style":         config["response_style"],
 		},
 	}, nil
 }
@@ -430,6 +455,7 @@ func (p *WatcherPlugin) actionAutocompleteSuggest(ctx heimdall.ActionContext) (*
 	}
 
 	var labels, properties, relTypes []string
+	var suggestions []string
 	if ctx.Database != nil {
 		dbName, _ := ctx.Params["database"].(string)
 		if dbName == "" {
@@ -461,6 +487,19 @@ func (p *WatcherPlugin) actionAutocompleteSuggest(ctx heimdall.ActionContext) (*
 				}
 			}
 		}
+		if len(labels) > 0 {
+			suggestions = append(suggestions, fmt.Sprintf("MATCH (n:%s) RETURN n LIMIT 25", labels[0]))
+		}
+		if len(relTypes) > 0 {
+			suggestions = append(suggestions, fmt.Sprintf("MATCH ()-[r:%s]->() RETURN r LIMIT 25", relTypes[0]))
+		}
+		if len(properties) > 0 {
+			suggestions = append(suggestions, fmt.Sprintf("MATCH (n) WHERE exists(n.%s) RETURN n LIMIT 25", properties[0]))
+		}
+	}
+	suggestion := ""
+	if len(suggestions) > 0 {
+		suggestion = suggestions[0]
 	}
 	schemaInfo := map[string]interface{}{
 		"labels":     labels,
@@ -471,9 +510,10 @@ func (p *WatcherPlugin) actionAutocompleteSuggest(ctx heimdall.ActionContext) (*
 		Success: true,
 		Message: "Autocomplete suggestions",
 		Data: map[string]interface{}{
-			"query":      query,
-			"schema":     schemaInfo,
-			"suggestion": "",
+			"query":       query,
+			"schema":      schemaInfo,
+			"suggestions": suggestions,
+			"suggestion":  suggestion,
 		},
 	}, nil
 }
@@ -556,6 +596,12 @@ func (p *WatcherPlugin) actionQuery(ctx heimdall.ActionContext) (*heimdall.Actio
 			Message: "query too long (max 10000 characters)",
 		}, nil
 	}
+	if err := validateReadOnlyCypher(cypher); err != nil {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
 	dbName := getDatabaseParam(ctx.Params)
 	if dbName == "" && ctx.Database != nil {
 		dbName = ctx.Database.DefaultDatabaseName()
@@ -609,12 +655,6 @@ func (p *WatcherPlugin) actionHello(ctx heimdall.ActionContext) (*heimdall.Actio
 	return &heimdall.ActionResult{
 		Success: true,
 		Message: greeting,
-		Data: map[string]interface{}{
-			"greeting":  greeting,
-			"timestamp": time.Now().Format(time.RFC3339),
-			"model":     p.config["model"],
-			"status":    string(p.status),
-		},
 	}, nil
 }
 
@@ -622,13 +662,18 @@ func (p *WatcherPlugin) actionStatus(ctx heimdall.ActionContext) (*heimdall.Acti
 	p.mu.Lock()
 	p.requests++
 	p.mu.Unlock()
+	config := p.Config()
+	statusValue := p.Status()
+	p.mu.RLock()
+	facts := append([]string(nil), p.facts...)
+	p.mu.RUnlock()
 
 	status := map[string]interface{}{
 		"coding_plugin": map[string]interface{}{
-			"status":  p.status,
-			"config":  p.Config(),
+			"status":  statusValue,
+			"config":  config,
 			"summary": p.Summary(),
-			"facts":   append([]string(nil), p.facts...),
+			"facts":   facts,
 		},
 	}
 
@@ -653,7 +698,7 @@ func (p *WatcherPlugin) actionStatus(ctx heimdall.ActionContext) (*heimdall.Acti
 	return &heimdall.ActionResult{
 		Success: true,
 		Message: fmt.Sprintf("Coding plugin status: %s, strategy=%v, scope=%v",
-			p.status, p.config["history_strategy"], p.config["summary_scope"]),
+			statusValue, config["history_strategy"], config["summary_scope"]),
 		Data: status,
 	}, nil
 }
@@ -663,6 +708,9 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 	p.mu.Lock()
 	p.requests++
 	p.mu.Unlock()
+	p.mu.RLock()
+	config := p.configSnapshotLocked()
+	p.mu.RUnlock()
 
 	stats := map[string]interface{}{}
 	var msgBuilder strings.Builder
@@ -711,14 +759,14 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 	}
 
 	stats["context_strategy"] = map[string]interface{}{
-		"history_strategy": p.config["history_strategy"],
-		"summary_scope":    p.config["summary_scope"],
-		"response_style":   p.config["response_style"],
+		"history_strategy": config["history_strategy"],
+		"summary_scope":    config["summary_scope"],
+		"response_style":   config["response_style"],
 	}
 	msgBuilder.WriteString("CONTEXT STRATEGY:\n")
-	msgBuilder.WriteString(fmt.Sprintf("  • History Strategy: %v\n", p.config["history_strategy"]))
-	msgBuilder.WriteString(fmt.Sprintf("  • Summary Scope: %v\n", p.config["summary_scope"]))
-	msgBuilder.WriteString(fmt.Sprintf("  • Response Style: %v\n", p.config["response_style"]))
+	msgBuilder.WriteString(fmt.Sprintf("  • History Strategy: %v\n", config["history_strategy"]))
+	msgBuilder.WriteString(fmt.Sprintf("  • Summary Scope: %v\n", config["summary_scope"]))
+	msgBuilder.WriteString(fmt.Sprintf("  • Response Style: %v\n", config["response_style"]))
 
 	return &heimdall.ActionResult{
 		Success: true,
@@ -743,8 +791,8 @@ func (p *WatcherPlugin) Summary() string {
 }
 
 func (p *WatcherPlugin) RecentEvents(limit int) []heimdall.SubsystemEvent {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.eventMu.RLock()
+	defer p.eventMu.RUnlock()
 
 	if limit <= 0 || limit > len(p.events) {
 		limit = len(p.events)
@@ -797,17 +845,19 @@ func coalesceString(values ...string) string {
 }
 
 func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	msgPreview := ctx.UserMessage
 	if len(msgPreview) > 50 {
 		msgPreview = msgPreview[:50] + "..."
 	}
 	log.Printf("[HeimdallCodingAgent] PrePrompt: request=%s user_msg=%q", ctx.RequestID, msgPreview)
 
+	p.mu.RLock()
+	config := p.configSnapshotLocked()
+	db := p.ctx.Database
+	p.mu.RUnlock()
+
 	ctx.NotifyProgress("Repository Graph", "Searching repository knowledge graph...")
-	ragContext := p.performGraphRAG(ctx)
+	ragContext := p.performGraphRAG(ctx, db)
 	if ragContext != "" {
 		ctx.AdditionalInstructions += ragContext
 		ctx.NotifyInfo("Repository Graph", "Found relevant repository context")
@@ -822,11 +872,13 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	ctx.PluginData["coding_agent_preprompt_time"] = time.Now()
 	ctx.PluginData["coding_agent_goroutines"] = runtime.NumGoroutine()
 	ctx.PluginData["coding_agent_memory_mb"] = m.Alloc / 1024 / 1024
-	ctx.PluginData["coding_agent_history_strategy"] = p.config["history_strategy"]
-	ctx.PluginData["coding_agent_summary_scope"] = p.config["summary_scope"]
-	p.refreshSessionMemoryFromGraph(ctx.UserMessage)
+	ctx.PluginData["coding_agent_history_strategy"] = config["history_strategy"]
+	ctx.PluginData["coding_agent_summary_scope"] = config["summary_scope"]
+	p.refreshSessionMemoryFromGraph(ctx.Context, ctx.UserMessage, db, fmt.Sprint(config["summary_scope"]))
+	p.mu.RLock()
 	ctx.PluginData["coding_agent_session_summary"] = p.summary
 	ctx.PluginData["coding_agent_session_facts"] = append([]string(nil), p.facts...)
+	p.mu.RUnlock()
 
 	retrievedMemory := p.buildSessionMemoryContext(ctx.UserMessage)
 	if retrievedMemory != "" {
@@ -839,7 +891,7 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	ctx.AdditionalInstructions += "- Prefer repository-aware reasoning before answering implementation questions.\n"
 	ctx.AdditionalInstructions += "- Do not skip repository retrieval for short meta-questions; map the codebase whenever that improves correctness.\n"
 	ctx.AdditionalInstructions += "- Use heimdall_watcher_repo_map first when you need to understand project structure or likely integration points.\n"
-	ctx.AdditionalInstructions += "- Use heimdall_watcher_discover for semantic lookup of features, files, symbols, files, and concepts.\n"
+	ctx.AdditionalInstructions += "- Use heimdall_watcher_search for semantic lookup of features, files, symbols, files, and concepts.\n"
 	ctx.AdditionalInstructions += "- Use heimdall_watcher_query only for targeted graph inspection when explicit Cypher is warranted.\n"
 	ctx.AdditionalInstructions += "- When the conversation becomes long, summarize the coding work so far, preserve the summary, and preserve key implementation facts so they can be re-retrieved via Graph-RAG.\n"
 	ctx.AdditionalInstructions += "- Summarize after major milestones, when tool-call history becomes noisy, before context pressure causes loss, and before switching tasks or subsystems.\n"
@@ -848,6 +900,10 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	ctx.AdditionalInstructions += "- When the graph context is sufficient, answer directly with implementation guidance.\n"
 
 	ctx.Examples = append(ctx.Examples,
+		heimdall.PromptExample{
+			UserSays:   "hello",
+			ActionJSON: `{"action": "heimdall_watcher_hello", "params": {}}`,
+		},
 		heimdall.PromptExample{
 			UserSays:   "map this repository before we change anything",
 			ActionJSON: `{"action": "heimdall_watcher_repo_map", "params": {}}`,
@@ -858,11 +914,11 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 		},
 		heimdall.PromptExample{
 			UserSays:   "find the code related to plugin loading",
-			ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "plugin loading"}}`,
+			ActionJSON: `{"action": "heimdall_watcher_search", "params": {"query": "plugin loading"}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "find the implementation for the heimdall plugin system",
-			ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "heimdall plugin system implementation"}}`,
+			ActionJSON: `{"action": "heimdall_watcher_search", "params": {"query": "heimdall plugin system implementation"}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "show graph coverage for this repository",
@@ -884,13 +940,13 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	return nil
 }
 
-func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
-	if p.ctx.Database == nil || len(ctx.UserMessage) < 5 {
+func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext, db heimdall.DatabaseRouter) string {
+	if db == nil || len(ctx.UserMessage) < 5 {
 		return ""
 	}
 
-	result, err := p.ctx.Database.Discover(
-		context.Background(),
+	result, err := db.Discover(
+		ctx.Context,
 		"",
 		ctx.UserMessage,
 		nil,
@@ -990,7 +1046,7 @@ func (p *WatcherPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(he
 	p.mu.Unlock()
 
 	log.Printf("[HeimdallCodingAgent] PreExecute: request=%s action=%s params=%v", ctx.RequestID, ctx.Action, ctx.Params)
-	ctx.NotifyInfo("Heimdall Coding Agent", fmt.Sprintf("Executing action: %s", ctx.Action))
+	ctx.NotifyInfo("\nHeimdall Coding Agent", fmt.Sprintf("Executing action: %s\n", ctx.Action))
 
 	p.addEvent("info", fmt.Sprintf("PreExecute: %s", ctx.Action), map[string]interface{}{
 		"request_id": ctx.RequestID,
@@ -1014,9 +1070,6 @@ func (p *WatcherPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(he
 }
 
 func (p *WatcherPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	log.Printf("[HeimdallCodingAgent] PostExecute: request=%s action=%s duration=%v", ctx.RequestID, ctx.Action, ctx.Duration)
 
 	if ctx.WasCancelled && ctx.CancellationInfo != nil {
@@ -1037,14 +1090,16 @@ func (p *WatcherPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
 	})
 
 	if ctx.Result != nil && !ctx.Result.Success {
+		p.mu.Lock()
 		p.errors++
+		p.mu.Unlock()
 	}
-	p.captureSessionMemory(ctx.Action, ctx.Params, ctx.Result)
+	p.captureSessionMemory(ctx.Context, ctx.Action, ctx.Params, ctx.Result)
 
 	if ctx.Result != nil && ctx.Result.Success {
-		ctx.NotifySuccess("Heimdall Coding Agent", fmt.Sprintf("Action completed in %.2fms", executionTime))
+		ctx.NotifySuccess("\nHeimdall Coding Agent", fmt.Sprintf("Action completed in %.2fms\n", executionTime))
 	} else if ctx.Result != nil {
-		ctx.NotifyError("Heimdall Coding Agent", fmt.Sprintf("Action failed: %s", ctx.Result.Message))
+		ctx.NotifyError("\nHeimdall Coding Agent", fmt.Sprintf("Action failed: %s\n", ctx.Result.Message))
 	}
 }
 
@@ -1059,7 +1114,10 @@ func (p *WatcherPlugin) Synthesize(ctx *heimdall.SynthesisContext, done func(res
 		return
 	}
 
-	if p.ctx.Heimdall == nil {
+	p.mu.RLock()
+	heimdallInvoker := p.ctx.Heimdall
+	p.mu.RUnlock()
+	if heimdallInvoker == nil {
 		log.Printf("[HeimdallCodingAgent] Heimdall invoker not available, using pre-formatted message")
 		if ctx.Result.Message != "" {
 			done(ctx.Result.Message)
@@ -1072,7 +1130,7 @@ func (p *WatcherPlugin) Synthesize(ctx *heimdall.SynthesisContext, done func(res
 	synthesisPrompt := p.buildSynthesisPrompt(ctx.UserQuestion, ctx.Result.Message, ctx.Result.Data)
 	log.Printf("[HeimdallCodingAgent] Generating LLM synthesis for user question: %s", ctx.UserQuestion)
 
-	result, err := p.ctx.Heimdall.SendRawPrompt(synthesisPrompt)
+	result, err := heimdallInvoker.SendRawPrompt(ctx.Context, synthesisPrompt)
 	if err != nil {
 		log.Printf("[HeimdallCodingAgent] LLM synthesis failed: %v, falling back to formatted message", err)
 		if ctx.Result.Message != "" {
@@ -1141,6 +1199,9 @@ func (p *WatcherPlugin) buildSynthesisPrompt(userQuestion, actionMessage string,
 }
 
 func (p *WatcherPlugin) addEvent(eventType, message string, data map[string]interface{}) {
+	p.eventMu.Lock()
+	defer p.eventMu.Unlock()
+
 	event := heimdall.SubsystemEvent{
 		Time:    time.Now(),
 		Type:    eventType,
@@ -1241,7 +1302,7 @@ func (p *WatcherPlugin) selectRelevantFacts(userMessage string, limit int) []str
 	return result
 }
 
-func (p *WatcherPlugin) captureSessionMemory(action string, params map[string]interface{}, result *heimdall.ActionResult) {
+func (p *WatcherPlugin) captureSessionMemory(ctx context.Context, action string, params map[string]interface{}, result *heimdall.ActionResult) {
 	if result == nil {
 		return
 	}
@@ -1258,14 +1319,19 @@ func (p *WatcherPlugin) captureSessionMemory(action string, params map[string]in
 	}
 
 	for _, fact := range newFacts {
-		p.appendFact(fact)
+		p.appendFactLocked(fact)
 	}
 
-	p.rebuildSummary()
-	p.persistSessionMemoryToGraph(action, newFacts)
+	p.rebuildSummaryLocked()
+	p.mu.RLock()
+	summary := p.summary
+	config := p.configSnapshotLocked()
+	db := p.ctx.Database
+	p.mu.RUnlock()
+	p.persistSessionMemoryToGraph(ctx, db, p.Name(), fmt.Sprint(config["summary_scope"]), summary, fmt.Sprint(config["history_strategy"]), fmt.Sprint(config["model"]), action, newFacts)
 }
 
-func (p *WatcherPlugin) appendFact(fact string) {
+func (p *WatcherPlugin) appendFactLocked(fact string) {
 	fact = strings.TrimSpace(fact)
 	if fact == "" {
 		return
@@ -1281,7 +1347,7 @@ func (p *WatcherPlugin) appendFact(fact string) {
 	}
 }
 
-func (p *WatcherPlugin) rebuildSummary() {
+func (p *WatcherPlugin) rebuildSummaryLocked() {
 	if len(p.facts) == 0 {
 		p.summary = ""
 		return
@@ -1353,15 +1419,14 @@ func tokenizeForMemory(value string) []string {
 	return terms
 }
 
-func (p *WatcherPlugin) persistSessionMemoryToGraph(action string, facts []string) {
-	if p.ctx.Database == nil {
+func (p *WatcherPlugin) persistSessionMemoryToGraph(ctx context.Context, db heimdall.DatabaseRouter, pluginName, scope, summary, historyStrategy, model, action string, facts []string) {
+	if db == nil {
 		return
 	}
-	dbName := p.ctx.Database.DefaultDatabaseName()
-	scope := fmt.Sprint(p.config["summary_scope"])
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	dbName := db.DefaultDatabaseName()
 
-	_, err := p.ctx.Database.Query(context.Background(), dbName, `
+	_, err := db.Query(ctx, dbName, `
 		MERGE (m:HeimdallSessionMemory {plugin: $plugin, scope: $scope})
 		SET m.summary = $summary,
 		    m.updated_at = $updated_at,
@@ -1369,12 +1434,12 @@ func (p *WatcherPlugin) persistSessionMemoryToGraph(action string, facts []strin
 		    m.model = $model
 		RETURN m.summary AS summary
 	`, map[string]interface{}{
-		"plugin":           p.Name(),
+		"plugin":           pluginName,
 		"scope":            scope,
-		"summary":          p.summary,
+		"summary":          summary,
 		"updated_at":       now,
-		"history_strategy": p.config["history_strategy"],
-		"model":            p.config["model"],
+		"history_strategy": historyStrategy,
+		"model":            model,
 	})
 	if err != nil {
 		log.Printf("[HeimdallCodingAgent] failed to persist session summary: %v", err)
@@ -1386,19 +1451,18 @@ func (p *WatcherPlugin) persistSessionMemoryToGraph(action string, facts []strin
 		if fact == "" {
 			continue
 		}
-		_, err := p.ctx.Database.Query(context.Background(), dbName, `
+		_, err := db.Query(ctx, dbName, `
 			MERGE (m:HeimdallSessionMemory {plugin: $plugin, scope: $scope})
-			CREATE (f:HeimdallSessionFact {
-				plugin: $plugin,
-				scope: $scope,
-				fact: $fact,
-				action: $action,
-				created_at: $created_at
-			})
+			MERGE (f:HeimdallSessionFact {plugin: $plugin, scope: $scope, fact: $fact, action: $action})
+			ON CREATE SET f.first_seen_at = $created_at,
+				f.created_at = $created_at,
+				f.hit_count = 1
+			SET f.last_seen_at = $created_at,
+				f.hit_count = coalesce(f.hit_count, 0) + 1
 			MERGE (m)-[:HAS_FACT]->(f)
 			RETURN f.fact AS fact
 		`, map[string]interface{}{
-			"plugin":     p.Name(),
+			"plugin":     pluginName,
 			"scope":      scope,
 			"fact":       fact,
 			"action":     action,
@@ -1408,16 +1472,29 @@ func (p *WatcherPlugin) persistSessionMemoryToGraph(action string, facts []strin
 			log.Printf("[HeimdallCodingAgent] failed to persist session fact: %v", err)
 		}
 	}
+
+	_, err = db.Query(ctx, dbName, `
+		MATCH (:HeimdallSessionMemory {plugin: $plugin, scope: $scope})-[:HAS_FACT]->(f:HeimdallSessionFact {plugin: $plugin, scope: $scope})
+		WITH f
+		ORDER BY coalesce(f.last_seen_at, f.created_at) DESC, f.fact ASC
+		SKIP 100
+		DETACH DELETE f
+	`, map[string]interface{}{
+		"plugin": pluginName,
+		"scope":  scope,
+	})
+	if err != nil {
+		log.Printf("[HeimdallCodingAgent] failed to prune session facts: %v", err)
+	}
 }
 
-func (p *WatcherPlugin) refreshSessionMemoryFromGraph(userMessage string) {
-	if p.ctx.Database == nil {
+func (p *WatcherPlugin) refreshSessionMemoryFromGraph(ctx context.Context, userMessage string, db heimdall.DatabaseRouter, scope string) {
+	if db == nil {
 		return
 	}
-	dbName := p.ctx.Database.DefaultDatabaseName()
-	scope := fmt.Sprint(p.config["summary_scope"])
+	dbName := db.DefaultDatabaseName()
 
-	summaryRows, err := p.ctx.Database.Query(context.Background(), dbName, `
+	summaryRows, err := db.Query(ctx, dbName, `
 		MATCH (m:HeimdallSessionMemory {plugin: $plugin, scope: $scope})
 		RETURN m.summary AS summary
 		LIMIT 1
@@ -1425,13 +1502,14 @@ func (p *WatcherPlugin) refreshSessionMemoryFromGraph(userMessage string) {
 		"plugin": p.Name(),
 		"scope":  scope,
 	})
+	loadedSummary := ""
 	if err == nil && len(summaryRows) > 0 {
 		if summary, ok := summaryRows[0]["summary"].(string); ok && strings.TrimSpace(summary) != "" {
-			p.summary = strings.TrimSpace(summary)
+			loadedSummary = strings.TrimSpace(summary)
 		}
 	}
 
-	factRows, err := p.ctx.Database.Query(context.Background(), dbName, `
+	factRows, err := db.Query(ctx, dbName, `
 		MATCH (:HeimdallSessionMemory {plugin: $plugin, scope: $scope})-[:HAS_FACT]->(f:HeimdallSessionFact {plugin: $plugin, scope: $scope})
 		RETURN f.fact AS fact
 		ORDER BY f.created_at DESC
@@ -1450,6 +1528,11 @@ func (p *WatcherPlugin) refreshSessionMemoryFromGraph(userMessage string) {
 			loadedFacts = append(loadedFacts, strings.TrimSpace(fact))
 		}
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if loadedSummary != "" {
+		p.summary = loadedSummary
+	}
 	if len(loadedFacts) > 0 {
 		p.facts = dedupeFacts(loadedFacts)
 		selected := p.selectRelevantFacts(userMessage, 10)
@@ -1458,8 +1541,37 @@ func (p *WatcherPlugin) refreshSessionMemoryFromGraph(userMessage string) {
 		}
 	}
 	if strings.TrimSpace(p.summary) == "" && len(p.facts) > 0 {
-		p.rebuildSummary()
+		p.rebuildSummaryLocked()
 	}
+}
+
+func (p *WatcherPlugin) configSnapshotLocked() map[string]interface{} {
+	result := make(map[string]interface{}, len(p.config))
+	for k, v := range p.config {
+		result[k] = v
+	}
+	return result
+}
+
+var readOnlyCypherPattern = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|DELETE|REMOVE|FOREACH|DETACH\s+DELETE|LOAD\s+CSV|DROP|ALTER|GRANT|DENY|REVOKE)\b`)
+
+func validateReadOnlyCypher(cypher string) error {
+	cleaned := stripCypherComments(cypher)
+	if readOnlyCypherPattern.MatchString(cleaned) {
+		return fmt.Errorf("query contains write operations; heimdall_watcher_query only allows read-only Cypher")
+	}
+	return nil
+}
+
+func stripCypherComments(query string) string {
+	lines := strings.Split(query, "\n")
+	for i, line := range lines {
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			line = line[:idx]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func dedupeFacts(facts []string) []string {

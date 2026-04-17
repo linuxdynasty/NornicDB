@@ -2,8 +2,6 @@ module github.com/orneryd/nornicdb
 
 go 1.26.0
 
-toolchain go1.26.3
-
 require (
 	cloud.google.com/go/kms v1.29.0
 	github.com/99designs/gqlgen v0.17.89

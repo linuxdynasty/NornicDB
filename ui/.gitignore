@@ -3,7 +3,6 @@ dist
 !dist/
 dist/*
 !dist/.gitkeep
-!dist/index.html
 !dist/assets/
 dist/assets/*
 !dist/assets/.gitkeep

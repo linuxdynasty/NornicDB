@@ -350,13 +350,13 @@ func TestHeimdallCoverage_ReflectPluginAndInvokers(t *testing.T) {
 	assert.Nil(t, fallback.RecentEvents(1))
 
 	noOp := &NoOpHeimdallInvoker{}
-	result, err := noOp.InvokeAction("anything", nil)
+	result, err := noOp.InvokeAction(context.Background(), "anything", nil)
 	require.NoError(t, err)
 	assert.False(t, result.Success)
-	result, err = noOp.SendPrompt("hello")
+	result, err = noOp.SendPrompt(context.Background(), "hello")
 	require.NoError(t, err)
 	assert.False(t, result.Success)
-	result, err = noOp.SendRawPrompt("hello")
+	result, err = noOp.SendRawPrompt(context.Background(), "hello")
 	require.NoError(t, err)
 	assert.False(t, result.Success)
 	noOp.InvokeActionAsync("ignored", nil)
@@ -379,12 +379,12 @@ func TestHeimdallCoverage_ReflectPluginAndInvokers(t *testing.T) {
 	invoker := NewLiveHeimdallInvoker(GetSubsystemManager(), nil, bifrost, &mockDBRouter{}, &mockMetricsReader{})
 	require.NotNil(t, invoker)
 
-	result, err = invoker.InvokeAction("heimdall_cov_echo", map[string]interface{}{"k": "v"})
+	result, err = invoker.InvokeAction(context.Background(), "heimdall_cov_echo", map[string]interface{}{"k": "v"})
 	require.NoError(t, err)
 	assert.True(t, result.Success)
-	result, err = invoker.SendPrompt("hello")
+	result, err = invoker.SendPrompt(context.Background(), "hello")
 	assert.Equal(t, "SLM not available", mustActionResultMessage(t, result, err))
-	result, err = invoker.SendRawPrompt("hello")
+	result, err = invoker.SendRawPrompt(context.Background(), "hello")
 	assert.Equal(t, "SLM not available", mustActionResultMessage(t, result, err))
 
 	mockGen := NewMockGenerator("/tmp/model.gguf")
@@ -396,12 +396,12 @@ func TestHeimdallCoverage_ReflectPluginAndInvokers(t *testing.T) {
 	}
 	invoker.generator = mockGen
 
-	result, err = invoker.SendPrompt("hello world")
+	result, err = invoker.SendPrompt(context.Background(), "hello world")
 	require.NoError(t, err)
 	assert.True(t, result.Success)
 	assert.Contains(t, result.Message, "echo:")
 
-	result, err = invoker.SendRawPrompt("direct raw")
+	result, err = invoker.SendRawPrompt(context.Background(), "direct raw")
 	require.NoError(t, err)
 	assert.Equal(t, "raw-response", result.Message)
 
@@ -1607,7 +1607,7 @@ func TestCoverageExtra_NoOpAsyncAndDefaultLogger(t *testing.T) {
 	noop.InvokeActionAsync("ignored", map[string]interface{}{"k": "v"})
 	noop.SendPromptAsync("ignored")
 
-	res, err := noop.InvokeAction("ignored", nil)
+	res, err := noop.InvokeAction(context.Background(), "ignored", nil)
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.False(t, res.Success)

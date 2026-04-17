@@ -1195,26 +1195,6 @@ func extractNonJSONAnswer(s string) string {
 	return after
 }
 
-// extractFirstJSONObject returns the first balanced {...} substring, or "" if not found.
-func extractFirstJSONObject(s string) string {
-	if len(s) == 0 || s[0] != '{' {
-		return ""
-	}
-	depth := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[:i+1]
-			}
-		}
-	}
-	return ""
-}
-
 func TestTrimAgenticResponse(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1263,6 +1243,46 @@ func TestSanitizeAssistantResponse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := sanitizeAssistantResponse(tt.input)
 			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestLooksLikeActionEnvelopePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "complete action json",
+			input:    `{"action": "heimdall_watcher_status", "params": {}}`,
+			expected: true,
+		},
+		{
+			name:     "partial action json",
+			input:    `{"action": "heimdall_watcher_hello", "params": {}`,
+			expected: true,
+		},
+		{
+			name:     "prefixed action json",
+			input:    "Okay\n\n{" + `"action": "heimdall_watcher_query", "params": {`,
+			expected: true,
+		},
+		{
+			name:     "plain assistant text",
+			input:    "Hello! How can I help?",
+			expected: false,
+		},
+		{
+			name:     "non action json",
+			input:    `{"message": "hello"}`,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, looksLikeActionEnvelopePrefix(tt.input))
 		})
 	}
 }

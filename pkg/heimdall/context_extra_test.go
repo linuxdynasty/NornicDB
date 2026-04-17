@@ -476,17 +476,17 @@ func TestDatabaseEvent_SystemEvents_NotClassified(t *testing.T) {
 func TestNoOpHeimdallInvoker(t *testing.T) {
 	invoker := &NoOpHeimdallInvoker{}
 
-	result, err := invoker.InvokeAction("any_action", map[string]interface{}{"key": "val"})
+	result, err := invoker.InvokeAction(context.Background(), "any_action", map[string]interface{}{"key": "val"})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.Success)
 	assert.Contains(t, result.Message, "not available")
 
-	result, err = invoker.SendPrompt("do something")
+	result, err = invoker.SendPrompt(context.Background(), "do something")
 	require.NoError(t, err)
 	assert.False(t, result.Success)
 
-	result, err = invoker.SendRawPrompt("just answer this")
+	result, err = invoker.SendRawPrompt(context.Background(), "just answer this")
 	require.NoError(t, err)
 	assert.False(t, result.Success)
 
