@@ -9,7 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [v1.0.42] Go - 2026-04-16
+## [v1.0.42-hotfix] Anthem Pt. 2 - 2026-04-17
+
+### Added
+
+- **Explicit Bolt host binding support**:
+  - added a dedicated Bolt host field so the Bolt listener can bind to the resolved server address instead of always falling back to the wildcard socket.
+
+- **Bind-address regression coverage**:
+  - added CLI/config/environment precedence tests for server bind resolution.
+  - added Bolt listener tests to verify loopback binding and secure default host behavior.
+
+### Changed
+
+- **Bind-address resolution precedence**:
+  - centralized bind-address resolution for `serve` startup so CLI flags, loaded config, and explicit protocol-specific environment variables are resolved consistently before HTTP and Bolt are started.
+  - aligned startup endpoint display output with the resolved address, while still presenting `localhost` for wildcard binds in user-facing logs.
+
+- **Dependency maintenance**:
+  - updated `github.com/hybridgroup/yzma` to `v1.12.0`.
+  - refreshed related Go module entries pulled in by the dependency update.
+  - updated UI dev dependencies: `postcss` to `8.5.10` and `typescript` to `6.0.3`.
+
+### Fixed
+
+- **Bolt listener exposure**:
+  - fixed the Bolt server so configured bind addresses now apply to the actual listener instead of only affecting user-facing startup messages.
+  - restored secure loopback binding as the default when no explicit override is provided.
+
+### Tests
+
+- Added and expanded coverage for:
+  - CLI `--address` precedence over config and environment sources
+  - config-file and explicit environment bind-address overrides
+  - Bolt listener binding to the configured host instead of wildcard interfaces
+
+### Technical Details
+
+- **Commit covered**: `adce4f9a9fc7b6aada07c0bfa2d737cd7a6efaca`
+- **Commits in release**: 1
+- **Repository delta**: 8 files changed, +194 / -26 lines
+- **Primary focus areas**: Bolt bind-address correctness, secure default listener behavior, regression coverage, and targeted Go/UI dependency maintenance.
+
+## [v1.0.42] Anthem - 2026-04-16
 
 ### Added
 
