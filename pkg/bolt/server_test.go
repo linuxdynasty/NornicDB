@@ -63,6 +63,9 @@ func (m *mockDBManager) DefaultDatabaseName() string {
 func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 
+	if config.Host != "127.0.0.1" {
+		t.Errorf("expected host 127.0.0.1, got %q", config.Host)
+	}
 	if config.Port != 7687 {
 		t.Errorf("expected port 7687, got %d", config.Port)
 	}
@@ -559,6 +562,36 @@ func TestListenAndServe(t *testing.T) {
 			// Server exited properly
 		case <-time.After(500 * time.Millisecond):
 			t.Error("server did not shut down")
+		}
+	})
+
+	t.Run("binds_configured_host", func(t *testing.T) {
+		config := &Config{Host: "127.0.0.1", Port: 0, MaxConnections: 10}
+		server := New(config, &mockExecutor{})
+
+		done := make(chan error, 1)
+		go func() {
+			done <- server.ListenAndServe()
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+
+		tcpAddr, ok := server.listener.Addr().(*net.TCPAddr)
+		if !ok {
+			t.Fatalf("expected TCP listener address, got %T", server.listener.Addr())
+		}
+		if !tcpAddr.IP.IsLoopback() {
+			t.Fatalf("expected loopback bind address, got %v", tcpAddr.IP)
+		}
+
+		if err := server.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("server did not shut down")
 		}
 	})
 

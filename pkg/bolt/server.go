@@ -472,6 +472,7 @@ func (r *BoltAuthResult) HasPermission(perm string) bool {
 //	config = bolt.DefaultConfig()
 //	config.Port = 7688 // Use different port
 type Config struct {
+	Host            string
 	Port            int
 	MaxConnections  int
 	ReadBufferSize  int
@@ -500,6 +501,7 @@ type Config struct {
 //	server := bolt.New(config, executor)
 func DefaultConfig() *Config {
 	return &Config{
+		Host:            "127.0.0.1",
 		Port:            7687,
 		MaxConnections:  100,
 		ReadBufferSize:  8192,
@@ -772,14 +774,26 @@ func (s *Server) SetResolvedAccessResolver(resolver func(roles []string, dbName 
 //
 // The server will print its listening address when started successfully.
 func (s *Server) ListenAndServe() error {
-	addr := fmt.Sprintf(":%d", s.config.Port)
+	host := strings.TrimSpace(s.config.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(s.config.Port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 	s.listener = listener
 
-	fmt.Printf("Bolt server listening on bolt://localhost:%d\n", s.config.Port)
+	announceHost := host
+	if host == "0.0.0.0" || host == "::" || host == "" {
+		announceHost = "localhost"
+	}
+	actualPort := s.config.Port
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok && tcpAddr.Port > 0 {
+		actualPort = tcpAddr.Port
+	}
+	fmt.Printf("Bolt server listening on bolt://%s:%d\n", announceHost, actualPort)
 
 	return s.serve()
 }
