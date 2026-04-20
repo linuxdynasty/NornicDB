@@ -1592,7 +1592,7 @@ This example uses NornicDB node labels to represent the four-layer decomposition
 
 #### Knowledge layer — no decay
 
-Knowledge facts are permanent. They are superseded by newer evidence through graph operations (creating a new fact node and marking the old one as superseded), not by time-based decay. The Ebbinghaus curve does not apply here.
+Knowledge facts are permanent. They are superseded by newer evidence through graph operations (creating a new fact node and marking the old one as superseded), not by time-based decay. The Ebbinghaus curve does not apply here. See the [Canonical Graph + Mutation Log Guide](../user-guides/canonical-graph-ledger.md) for the definitive model of versioned facts, validity windows, and append-only mutation logging that governs knowledge-layer persistence.
 
 ```cypher
 CREATE DECAY PROFILE knowledge_fact_retention
