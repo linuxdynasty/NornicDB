@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** April 15, 2026
-**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient archival deindexing for archived nodes and edges, and persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation.
+**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient archival deindexing for archived nodes and edges, persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation, evaluating scoring before query visibility so that invisible entities are suppressed from queries unless accessed through `reveal()`, and resolving promotion policies before decay profiles.
 
 ---
 
@@ -97,7 +97,7 @@ Promotion behavior is split into two object types: profiles and policies.
 
 Promotion profiles are named parameter bundles (multiplier, score floor, score cap, scope). They contain no logic and cannot be targeted to entities directly. They are referenced by name inside promotion policy APPLY blocks.
 
-Promotion policies contain logic — `FOR` targets, `APPLY` blocks, `WHEN` predicates, and optional `ON ACCESS` mutation blocks. Policies bind profiles to specific node labels, edge types, and property paths. Promotion policies apply scoring adjustments after decay profile resolution without changing the existing Cypher scoring API.
+Promotion policies contain logic — `FOR` targets, `APPLY` blocks, `WHEN` predicates, and optional `ON ACCESS` mutation blocks. Policies bind profiles to specific node labels, edge types, and property paths. Promotion policies are resolved first, before decay profile resolution. The promotion adjustments are applied to the base decay score to produce the final score without changing the existing Cypher scoring API.
 
 Required behavior:
 
@@ -113,7 +113,7 @@ Suggested fit in NornicDB:
 
 - a dedicated promotion subsystem with its own catalog and DDL for both profiles and policies
 - a separate accessMeta index that stores `ON ACCESS` mutation state per target node or edge as `map[string]interface{}`, serialized in msgpack alongside other data files for performance
-- shared runtime scoring that first resolves the decay profile, then evaluates the matching promotion policy
+- shared runtime scoring that first resolves the promotion policy, then resolves the decay profile, then applies promotion adjustments to the base decay score
 - property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to the node or edge's stored properties
 - diagnostics that explain which promotion policy matched, which profile was selected, and how it affected the final score
 
@@ -140,44 +140,51 @@ Suggested fit in NornicDB:
 
 ### 4.4 Runtime Resolution Layer
 
-The runtime resolution layer converts configuration and profiles into effective decay behavior and final score for a node, edge, or property.
+The runtime resolution layer converts configuration and profiles into effective decay behavior and final score for a node, edge, or property. Scoring happens before query visibility — a node or edge must be scored before it becomes visible to the query.
 
 Required behavior:
 
-- resolve decay profile during recall, reinforcement, recalc, archive, and ranking
-- evaluate the matching promotion policy during recall, reinforcement, recalc, archive, and ranking
+- evaluate the matching promotion policy first during recall, reinforcement, recalc, archive, and ranking, executing any `ON ACCESS` mutations before further scoring
+- resolve decay profile second during recall, reinforcement, recalc, archive, and ranking
 - resolve score start time from decay profile during score evaluation
+- compute the final score from promotion and decay resolution before determining query visibility
+- suppress nodes, edges, and properties from query results when their final score renders them invisible, unless the caller uses `reveal()` to bypass scoring-driven visibility
 - support explicit overrides and inheritance
 - allow property-level state without forcing entity-wide decay
 - resolve inline property entries from the active decay profile before falling back to entity defaults
-- evaluate the applicable promotion policy after decay profile resolution
 - expose final decay score through native Cypher functions without changing Neo4j-compatible node or relationship result shapes
+- expose raw stored entities through `reveal()` without decay-driven visibility filtering or property hiding
 - avoid duplicated logic across CLI, DB, and API code paths
 
 Suggested fit in NornicDB:
 
 - one shared resolver used by DB runtime, CLI decay tools, Cypher procedures, and background maintenance
 - one explanation format returned by diagnostics and admin endpoints
-- one shared scorer that computes base score from decay profile and final score from promotion policy evaluation
+- one shared scorer that evaluates promotion first, then computes base score from decay profile, then applies promotion adjustments to produce the final score
 - one shared MVCC-aware score-start resolver that interprets `CREATED`, `VERSION`, and `CUSTOM`
+- one `reveal()` bypass path that returns the raw stored entity, skipping scoring-driven visibility and property hiding
 
 ### 4.5 MVCC Interaction Layer
 
-MVCC visibility and decay scoring must remain separate concerns.
+MVCC version resolution and decay scoring are separate concerns, but scoring gates query visibility. MVCC determines which version of an entity exists at the transaction snapshot. Scoring then determines whether that version is visible to the query.
 
 Required behavior:
 
 - resolve the visible node, edge, or property version using the transaction snapshot
+- evaluate promotion policy and decay profile on the resolved version before exposing the entity to the query
 - evaluate the base decay score using the score start time resolved from decay profile
+- suppress entities whose final score falls below the archive threshold from query results, search hits, and traversal paths
 - support `CREATED`, where decay age begins at the entity's original creation timestamp
 - support `VERSION`, where decay age begins at the latest visible version timestamp under MVCC
+- allow `reveal()` to bypass scoring-driven visibility and return the MVCC-resolved version without suppression
 - never require new stored versions solely because a derived score changed over time
 
 Suggested fit in NornicDB:
 
-- visibility resolution remains owned by MVCC
+- version resolution remains owned by MVCC
 - score start-time choice remains owned by decay profile
 - the shared scorer consumes both the visible node or edge version and the profile-resolved score start time
+- query visibility is determined after scoring: MVCC resolves the version, scoring determines whether it appears
 
 ### 4.6 Archival and Deindex Layer
 
@@ -376,22 +383,26 @@ Minimum fields:
 
 ### 6.1 Resolution Rules
 
-Every decay-aware read or maintenance operation should resolve decay profile in this order:
+Scoring happens before query visibility. When a query touches a node or edge, the engine must resolve and apply promotion and decay scoring before deciding whether the entity is visible to the query. An entity whose final score falls below the archive threshold or whose decay profile renders it invisible must not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal(entity)` to bypass scoring-driven visibility.
 
-1. explicit no-decay rule
-2. property-level inline rule inside the applicable decay profile
-3. entity-level rule inside the applicable decay profile
-4. edge-type or label-targeted decay profile
-5. wildcard-targeted decay profile (`FOR (n:*)` or `FOR ()-[r:*]-()`)
-6. configured default decay profile
+The resolution order is: promotion first, then decay, then score-start resolution, then visibility determination.
 
-Then every decay-aware scoring operation should resolve the promotion policy in this order:
+Every scoring-aware read or maintenance operation should resolve the promotion policy first, in this order:
 
-7. property-level promotion policy entries that match the target
-8. entity-level promotion policy entries that match the target
-9. edge-type or label-targeted promotion policy
-10. wildcard-targeted promotion policy (`FOR (n:*)` or `FOR ()-[r:*]-()`)
-11. configured default promotion behavior, if any
+1. property-level promotion policy entries that match the target
+2. entity-level promotion policy entries that match the target
+3. edge-type or label-targeted promotion policy
+4. wildcard-targeted promotion policy (`FOR (n:*)` or `FOR ()-[r:*]-()`)
+5. configured default promotion behavior, if any
+
+Then every scoring-aware operation should resolve the decay profile in this order:
+
+6. explicit no-decay rule
+7. property-level inline rule inside the applicable decay profile
+8. entity-level rule inside the applicable decay profile
+9. edge-type or label-targeted decay profile
+10. wildcard-targeted decay profile (`FOR (n:*)` or `FOR ()-[r:*]-()`)
+11. configured default decay profile
 
 Then every score-aware read should resolve the score start time from the resolved decay profile:
 
@@ -400,9 +411,16 @@ Then every score-aware read should resolve the score start time from the resolve
 14. `CUSTOM`, if the resolved decay profile declares `CUSTOM` with a `scoreFromProperty` path; the property is resolved from accessMeta first, falling back to stored node or edge properties; if the resolved value is null or unparsable, log a warning and fall back to entity creation time
 15. configured default score start time, if no explicit profile value applies
 
-If no decay profile matches, the engine should either treat the target as non-decaying or use an explicit configured default decay profile, but it must not silently assume any legacy tier.
+Then the engine computes the final score and determines visibility:
+
+16. compute the base decay score from the resolved decay profile and score start time
+17. apply the resolved promotion policy adjustments to produce the final score
+18. if the final score falls below the archive threshold, the entity is invisible to the query unless accessed through `reveal()`
+19. if property-level decay excludes a property from retrieval surfaces, that property is hidden from the query result unless accessed through `reveal()`
 
 If no promotion policy matches, the target should resolve with a neutral promotion effect.
+
+If no decay profile matches, the engine should either treat the target as non-decaying or use an explicit configured default decay profile, but it must not silently assume any legacy tier.
 
 If no score start time matches, the engine should use an explicit configured default. The recommended default is `VERSION`.
 
@@ -526,9 +544,11 @@ These scoring modes should be accepted both:
 
 Cypher may override the profile-resolved scoring mode for the scope of that scoring expression only. Unified retrieval should not expose that override surface and should remain profile-resolved.
 
-### 6.6 Promotion Resolution Semantics
+### 6.6 Promotion and Decay Resolution Order
 
-Promotion policies should be evaluated after the base decay score is resolved.
+Promotion policies are evaluated first. The promotion policy for the target is resolved and its `ON ACCESS` block is executed before decay profile resolution begins. This ensures that access-tracking mutations in accessMeta are available to decay scoring and visibility determination.
+
+After promotion resolution, the decay profile is resolved and the base decay score is computed. The promotion adjustments are then applied to the base decay score to produce the final score. The final score determines query visibility.
 
 If no promotion policy matches, the final score should be the base decay score.
 
@@ -608,6 +628,20 @@ The `policy(...)` object is a derived value read from the accessMeta index. It d
 
 If a caller invokes `policy(...)` for a target with no accessMeta entry, the function should return an empty map with only the `_targetId` and `_targetScope` fields rather than failing.
 
+The scoring subsystem should expose a bypass function so callers can retrieve the raw stored entity without decay-driven visibility filtering or property hiding.
+
+Proposed function:
+
+- `reveal(entity)` returns the raw stored node or edge as it exists in primary storage, bypassing all scoring-driven visibility suppression and property-level decay hiding
+
+`reveal()` does not disable scoring — the entity still has a resolved score. It disables the visibility gate that would otherwise hide the entity or its properties from the query result. `reveal()` is the only mechanism to access entities that are invisible due to scoring. It does not affect `decayScore()`, `decay()`, or `policy()` — those functions still return the resolved values.
+
+When `reveal()` is used, the returned entity includes all stored properties, including any that would normally be hidden by property-level decay exclusion. The entity appears in query results regardless of its final score.
+
+`reveal()` works on both nodes and edges. It should be usable in `RETURN`, `WITH`, `WHERE`, and any other Cypher clause that accepts an entity expression.
+
+If decay is not enabled or the entity is not subject to any scoring-driven visibility suppression, `reveal()` is a no-op and returns the entity unchanged.
+
 Archived properties do not exist as a concept. Properties remain directly queryable in Cypher even when property-level decay excludes them from vectorization or vector-backed retrieval.
 
 Example usage:
@@ -653,11 +687,30 @@ MATCH ()-[r:CO_ACCESSED]-()
 RETURN r, policy(r).traversalCount AS traversals, decay(r) AS decayMeta
 ```
 
+```cypher
+// Retrieve a node that may be invisible due to scoring
+MATCH (n:SessionRecord {id: $id})
+RETURN reveal(n) AS rawNode, decayScore(n) AS score
+```
+
+```cypher
+// Retrieve all archived or hidden nodes with their scores for diagnostics
+MATCH (n:SessionRecord)
+RETURN reveal(n) AS rawNode, decay(n) AS decayMeta, policy(n) AS accessMeta
+```
+
+```cypher
+// Bypass property-level hiding to see all stored properties
+MATCH ()-[r:CO_ACCESSED]-()
+RETURN reveal(r) AS rawEdge, reveal(r).signalScore AS rawSignal
+```
+
 Compatibility rule:
 
-- `RETURN n` remains Neo4j-compatible and does not automatically inject decay metadata into the node
-- `RETURN r` remains Neo4j-compatible and does not automatically inject decay metadata into the edge
-- callers opt in by returning `decayScore(...)`, `decay(...)`, or `policy(...)` explicitly as additional columns
+- `RETURN n` remains Neo4j-compatible and does not automatically inject decay metadata into the node; however, `n` is subject to scoring-driven visibility — if the entity's score renders it invisible, it will not appear in results unless accessed through `reveal(n)`
+- `RETURN r` remains Neo4j-compatible and does not automatically inject decay metadata into the edge; same visibility rules apply
+- `RETURN reveal(n)` or `RETURN reveal(r)` bypasses scoring-driven visibility and property hiding, returning the raw stored entity
+- callers opt in by returning `decayScore(...)`, `decay(...)`, `policy(...)`, or `reveal(...)` explicitly as additional columns
 - property-level scores are therefore visible to Cypher without changing Bolt node or relationship structures
 - missing decay profile should behave like ordinary metadata lookup in Cypher: no error, neutral score
 
@@ -1170,7 +1223,8 @@ DROP PROMOTION PROFILE canonical_tier
 - native scalar function: `decayScore(entity[, options])`
 - native structured function: `decay(entity[, options])`
 - native structured function: `policy(entity)` — returns the accessMeta map for the target node or edge; no correlated `policyScore()` scalar function
-- `decayScore(...)` and `decay(...)` should work for nodes and edges
+- native bypass function: `reveal(entity)` — returns the raw stored node or edge, bypassing scoring-driven visibility suppression and property-level decay hiding
+- `decayScore(...)`, `decay(...)`, and `reveal(...)` should work for nodes and edges
 - `policy(...)` should work for nodes and edges
 - `decay(...).score` should be the canonical Cypher-visible field for downstream sorting, filtering, and projection
 - `policy(...)` keys are accessed through standard Cypher map property access, for example `policy(n).accessCount`
@@ -1191,7 +1245,10 @@ DROP PROMOTION PROFILE canonical_tier
 - archival cleanup should use batched blind deletes against known index keys rather than scanning indexes to discover stale entries
 - the archival cleanup job should default to nightly execution but be configurable in seconds
 - properties are never archived, moved, or deleted because of decay profile
-- property-level decay may exclude properties from vectorization or vector-backed retrieval, but stored properties remain directly queryable in Cypher
+- property-level decay may exclude properties from vectorization or vector-backed retrieval, but stored properties remain directly queryable in Cypher via `reveal()`
+- scoring is evaluated before query visibility; promotion policies are resolved first, then decay profiles, and the final score determines whether the entity appears in query results
+- entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths unless accessed through `reveal()`
+- `reveal()` bypasses scoring-driven visibility and property hiding but does not disable scoring itself
 - accessMeta entries are persisted in a separate index keyed to the target node or edge, serialized in msgpack alongside other data files for performance
 - `ON ACCESS` mutations write exclusively to the accessMeta index; nodes and edges are read-only during `ON ACCESS` evaluation
 - property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to stored node or edge properties
@@ -1227,6 +1284,8 @@ Deliverables:
 - define non-archival property exclusion semantics for vectorization and retrieval
 - define the native `decayScore()` and `decay()` Cypher function contracts, including explicit `property` and `scoringMode` options
 - define the native `policy()` Cypher function contract for accessMeta retrieval
+- define the native `reveal()` Cypher function contract for bypassing scoring-driven visibility and property hiding
+- define scoring-before-visibility semantics: promotion first, then decay, then visibility determination
 - define the accessMeta schema model: `map[string]interface{}` keyed per target node or edge, serialized in msgpack
 - define accessMeta-first property resolution semantics for `ON ACCESS` and `WHEN` evaluation
 - define the derived search metadata contract for node-, edge-, and property-level scores
@@ -1270,6 +1329,9 @@ Deliverables:
 - support property-level promotion behavior
 - support edge-level promotion behavior
 - support MVCC-aware decay-age evaluation using profile-declared `CREATED`, `VERSION`, or `CUSTOM`
+- implement scoring-before-visibility: resolve promotion first, then decay, then determine query visibility before exposing entities to the query
+- implement scoring-driven visibility suppression for nodes, edges, and properties in `MATCH`, `WHERE`, search, and traversal paths
+- implement `reveal()` bypass path that returns raw stored entities without scoring-driven visibility filtering or property hiding
 - support whole-node and whole-edge archive marking
 - support fast archived-entity skipping in read paths
 - implement accessMeta index storage with msgpack serialization alongside other data files
@@ -1317,14 +1379,16 @@ Deliverables:
 13. Implement per-entity index-entry catalogs for nodes and edges.
 14. Implement persistent archive work items and configurable deindex scheduling.
 15. Add asynchronous batched deindex cleanup for archived nodes and edges.
-16. Implement the accessMeta index with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first read resolution.
-17. Add native Cypher functions `decayScore()` and `decay()` for nodes and edges with an explicit options object for `property` and optional `scoringMode`.
-18. Add native Cypher function `policy()` for accessMeta retrieval on nodes and edges.
-19. Migrate runtime logic away from fixed tier assumptions.
-20. Bind unified retrieval scoring to the same shared scorer and profile-and-policy-resolved scoring configuration.
-21. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
-22. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, accessMeta mutation and resolution, archive/deindex behavior, and archival skipping.
-23. Add benchmark and evaluation coverage for profile and policy resolution overhead, accessMeta read/write throughput, and correctness.
+16. Implement scoring-before-visibility: promotion first, then decay, then visibility determination before exposing entities to the query.
+17. Implement the accessMeta index with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first read resolution.
+18. Add native Cypher functions `decayScore()` and `decay()` for nodes and edges with an explicit options object for `property` and optional `scoringMode`.
+19. Add native Cypher function `policy()` for accessMeta retrieval on nodes and edges.
+20. Add native Cypher function `reveal()` for bypassing scoring-driven visibility and property hiding on nodes and edges.
+21. Migrate runtime logic away from fixed tier assumptions.
+22. Bind unified retrieval scoring to the same shared scorer and profile-and-policy-resolved scoring configuration.
+23. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
+24. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, scoring-before-visibility, `reveal()` bypass, accessMeta mutation and resolution, archive/deindex behavior, and archival skipping.
+25. Add benchmark and evaluation coverage for profile and policy resolution overhead, scoring-before-visibility overhead, accessMeta read/write throughput, and correctness.
 
 ---
 
@@ -1370,6 +1434,14 @@ Deliverables:
 - `policy(...)` returns an empty map with only `_targetId` and `_targetScope` when no accessMeta entry exists
 - accessMeta entries survive node or edge reads without being lost or corrupted
 - accessMeta entries are correctly serialized and deserialized via msgpack across restarts
+- scoring is evaluated before query visibility: a node whose final score falls below the archive threshold does not appear in `MATCH` results
+- scoring is evaluated before query visibility: a property excluded by decay does not appear on returned nodes unless accessed through `reveal()`
+- promotion policies are resolved before decay profiles during scoring evaluation
+- `reveal(n)` returns the raw stored node including all properties regardless of scoring-driven visibility
+- `reveal(r)` returns the raw stored edge including all properties regardless of scoring-driven visibility
+- `reveal()` does not alter the values returned by `decayScore()`, `decay()`, or `policy()` for the same entity
+- `reveal()` is a no-op when decay is not enabled or the entity has no scoring-driven visibility suppression
+- entities invisible due to scoring are accessible only through `reveal()` and not through ordinary `MATCH`
 
 ### Benchmark targets
 
@@ -1385,6 +1457,8 @@ Deliverables:
 - accessMeta index read and write throughput under concurrent `ON ACCESS` mutation workloads
 - accessMeta-first property resolution overhead compared to direct node or edge property reads
 - accessMeta msgpack serialization and deserialization throughput
+- scoring-before-visibility overhead per entity during `MATCH` and search execution
+- `reveal()` bypass overhead compared to ordinary scored entity access
 
 ---
 
@@ -1421,6 +1495,10 @@ The plan is complete when:
 - the native `policy()` Cypher function exposes accessMeta for any node or edge without mutating Neo4j-compatible payloads
 - there is no correlated `policyScore()` scalar function; accessMeta is a general-purpose map, not a single score
 - targets without an accessMeta entry return an empty map from `policy()` rather than producing a Cypher error
+- scoring is evaluated before query visibility: promotion first, then decay, then visibility determination
+- entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths
+- `reveal()` is the only mechanism to access scoring-invisible entities and decay-hidden properties in Cypher
+- `reveal()` bypasses visibility suppression and property hiding without disabling scoring itself
 
 ---
 
@@ -1439,10 +1517,12 @@ The plan is complete when:
 - archive work item infrastructure for background cleanup
 - native Cypher function support for `decayScore()` and `decay()`
 - native Cypher function support for `policy()` to expose accessMeta on nodes and edges
+- native Cypher function support for `reveal()` to bypass scoring-driven visibility and property hiding on nodes and edges
+- scoring-before-visibility runtime implementation: promotion first, then decay, then visibility determination before query exposure
 - accessMeta index implementation with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first property read resolution
 - shared runtime scorer support for Cypher and unified retrieval, with Cypher-only `scoringMode` override support and profile-and-policy-resolved search scoring
 - unified search metadata support for additive node-, edge-, and property-level decay scores
-- regression tests covering node-, edge-, and property-level semantics
+- regression tests covering node-, edge-, and property-level semantics, scoring-before-visibility, and `reveal()` bypass
 - user-facing documentation for decay profile authoring
 - user-facing documentation for promotion profile and promotion policy authoring
 - user-facing documentation for archival and deindex behavior
@@ -1455,6 +1535,6 @@ This plan is intentionally implementation-oriented. The main architectural shift
 
 Named presets may remain in documentation for bootstrapping a memory decay model or promotive tier model for operator convenience, but the engine should ultimately care only about effective decay profile, effective promotion policy with its selected profile, and profile-resolved score start time.
 
-Property-level decay and promotion may affect vectorization and retrieval behavior, but properties remain stored in place and directly queryable in Cypher. Archival is reserved for whole nodes and whole edges.
+Property-level decay and promotion may affect vectorization and retrieval behavior, but properties remain stored in place and directly queryable in Cypher via `reveal()`. Archival is reserved for whole nodes and whole edges.
 
-Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar.
+Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity.
