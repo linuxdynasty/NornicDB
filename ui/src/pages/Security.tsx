@@ -147,6 +147,12 @@ export function Security() {
               </Button>
               <Button
                 variant="secondary"
+                onClick={() => navigate("/security/retention")}
+              >
+                Retention Policies
+              </Button>
+              <Button
+                variant="secondary"
                 onClick={() => navigate("/security/lifecycle")}
               >
                 MVCC Lifecycle

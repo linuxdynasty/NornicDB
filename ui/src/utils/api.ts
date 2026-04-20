@@ -211,6 +211,74 @@ export interface MVCCLifecycleDebtResponse {
   keys: MVCCLifecycleDebtKey[];
 }
 
+export type RetentionCategory =
+  | "SYSTEM"
+  | "AUDIT"
+  | "USER"
+  | "ANALYTICS"
+  | "BACKUP"
+  | "ARCHIVE"
+  | "PHI"
+  | "PII"
+  | "FINANCIAL"
+  | "LEGAL";
+
+export interface RetentionPeriod {
+  Duration: number;
+  Indefinite: boolean;
+}
+
+export interface RetentionPolicy {
+  id: string;
+  name: string;
+  category: RetentionCategory;
+  retention_period: RetentionPeriod;
+  archive_before_delete: boolean;
+  archive_path?: string;
+  compliance_frameworks?: string[];
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+  description?: string;
+}
+
+export interface RetentionLegalHold {
+  id: string;
+  description: string;
+  matter?: string;
+  placed_by: string;
+  placed_at?: string;
+  expires_at?: string;
+  subject_ids?: string[];
+  categories?: RetentionCategory[];
+  active: boolean;
+}
+
+export interface RetentionErasureRequest {
+  id: string;
+  subject_id: string;
+  subject_email?: string;
+  requested_at?: string;
+  deadline?: string;
+  status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED" | "PARTIAL";
+  items_found: number;
+  items_erased: number;
+  items_retained: number;
+  retained_reason?: string;
+  started_at?: string;
+  completed_at?: string;
+  error?: string;
+  subject_notified: boolean;
+}
+
+export interface RetentionStatus {
+  enabled: boolean;
+  policy_count: number;
+  hold_count: number;
+  erasure_count: number;
+  timestamp?: string;
+}
+
 interface DiscoveryResponse {
   bolt_direct: string;
   bolt_routing: string;
@@ -985,6 +1053,254 @@ class NornicDBClient {
       throw new Error(
         err.message ?? `Failed to update lifecycle schedule: ${res.status}`,
       );
+    }
+    return res.json();
+  }
+
+  async getRetentionStatus(): Promise<RetentionStatus> {
+    const res = await fetch(joinBasePath(BASE_PATH, "/admin/retention/status"), {
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to load retention status: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async listRetentionPolicies(): Promise<RetentionPolicy[]> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/policies"),
+      { credentials: "include" },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to load retention policies: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async createRetentionPolicy(
+    policy: RetentionPolicy,
+  ): Promise<RetentionPolicy> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/policies"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(policy),
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to create retention policy: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async updateRetentionPolicy(
+    id: string,
+    policy: RetentionPolicy,
+  ): Promise<RetentionPolicy> {
+    const res = await fetch(
+      joinBasePath(
+        BASE_PATH,
+        `/admin/retention/policies/${encodeURIComponent(id)}`,
+      ),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(policy),
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to update retention policy: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async deleteRetentionPolicy(id: string): Promise<{ status: string; id: string }> {
+    const res = await fetch(
+      joinBasePath(
+        BASE_PATH,
+        `/admin/retention/policies/${encodeURIComponent(id)}`,
+      ),
+      {
+        method: "DELETE",
+        credentials: "include",
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to delete retention policy: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async loadDefaultRetentionPolicies(): Promise<{
+    loaded: number;
+    skipped: number;
+    errors: string[];
+    total: number;
+  }> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/policies/defaults"),
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to load default retention policies: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async listRetentionHolds(): Promise<RetentionLegalHold[]> {
+    const res = await fetch(joinBasePath(BASE_PATH, "/admin/retention/holds"), {
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to load retention holds: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async createRetentionHold(
+    hold: RetentionLegalHold,
+  ): Promise<RetentionLegalHold> {
+    const res = await fetch(joinBasePath(BASE_PATH, "/admin/retention/holds"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(hold),
+    });
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to create retention hold: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async releaseRetentionHold(id: string): Promise<{ status: string; id: string }> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, `/admin/retention/holds/${encodeURIComponent(id)}`),
+      {
+        method: "DELETE",
+        credentials: "include",
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to release retention hold: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async listRetentionErasures(): Promise<RetentionErasureRequest[]> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/erasures"),
+      { credentials: "include" },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to load retention erasure requests: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async createRetentionErasureRequest(payload: {
+    subject_id: string;
+    subject_email?: string;
+  }): Promise<RetentionErasureRequest> {
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/erasures"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to create retention erasure request: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async processRetentionErasure(
+    id: string,
+  ): Promise<RetentionErasureRequest> {
+    const res = await fetch(
+      joinBasePath(
+        BASE_PATH,
+        `/admin/retention/erasures/${encodeURIComponent(id)}/process`,
+      ),
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to process retention erasure request: ${res.status}`,
+      );
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async triggerRetentionSweep(): Promise<{ status: string }> {
+    const res = await fetch(joinBasePath(BASE_PATH, "/admin/retention/sweep"), {
+      method: "POST",
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(
+        res,
+        `Failed to trigger retention sweep: ${res.status}`,
+      );
+      throw new Error(message);
     }
     return res.json();
   }
