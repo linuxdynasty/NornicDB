@@ -59,7 +59,7 @@ The system should instead treat decay behavior as configurable retention profile
 7. Nodes and edges must be handled symmetrically by the policy system. Edge decay must not be a second-class or special-case feature.
 8. Archive behavior applies only to whole nodes and whole edges, never to individual properties.
 9. Property-level decay may influence vectorization, ranking, filtering, reranking, and summarization, but it must not move, archive, or delete stored property values.
-9a. Properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion. Indexed properties must remain stable and always visible because they are relied upon for aggregation, joining, and lookup.
+   9a. Properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion. Indexed properties must remain stable and always visible because they are relied upon for aggregation, joining, and lookup.
 10. Archived nodes and edges must be removed from indexing using exact-key deindexing rather than discovery by scanning secondary indexes.
 11. Runtime paths must not silently fall back to legacy tier assumptions.
 12. Named presets may exist for convenience, but the engine must operate on resolved profiles and policies.
@@ -1568,12 +1568,12 @@ This appendix demonstrates a complete decay and promotion configuration that imp
 
 The paper identifies a category error in existing memory systems: applying uniform cognitive decay to all content types. It calls out NornicDB specifically for "applying storage-level decay to permanent facts" and Signet for "uniform 0.95 days decay to all content types." The paper proposes a four-layer decomposition where each layer has distinct persistence semantics:
 
-| Layer | Content type | Persistence semantic | Decay behavior |
-|---|---|---|---|
-| **Knowledge** | Facts, claims, entities | Supersession, not forgetting | No decay; facts are replaced by newer evidence, never forgotten by time |
-| **Memory** | Experiences, episodes, sessions | Ebbinghaus-style forgetting | Exponential decay; consolidation on repeated access promotes to Knowledge |
-| **Wisdom** | Behavioral directives, patterns | Evidence-gated revision with stability tiers | No time-based decay; stability tiers gate revision, not forgetting |
-| **Intelligence** | The model itself | Frozen in weights | Outside the scope of this system |
+| Layer            | Content type                    | Persistence semantic                         | Decay behavior                                                            |
+| ---------------- | ------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------- |
+| **Knowledge**    | Facts, claims, entities         | Supersession, not forgetting                 | No decay; facts are replaced by newer evidence, never forgotten by time   |
+| **Memory**       | Experiences, episodes, sessions | Ebbinghaus-style forgetting                  | Exponential decay; consolidation on repeated access promotes to Knowledge |
+| **Wisdom**       | Behavioral directives, patterns | Evidence-gated revision with stability tiers | No time-based decay; stability tiers gate revision, not forgetting        |
+| **Intelligence** | The model itself                | Frozen in weights                            | Outside the scope of this system                                          |
 
 The standard Ebbinghaus model treats all content uniformly: `score = e^(-t / halfLife)`. The modified model applies different decay semantics per layer while using promotion policies to model consolidation — the process by which repeatedly accessed Memory content is promoted to Knowledge-tier durability.
 
@@ -1855,84 +1855,264 @@ APPLY {
 
 ### A.6 Resolution Walkthrough
 
-This section walks through the complete resolution sequence for a query that touches all three layers, illustrating how the modified Ebbinghaus model behaves at runtime.
+This section walks through the complete resolution sequence for a semantic search query that uses NornicDB's vector search to find content related to a user question, traverses the graph across all three layers, and returns decay-filtered results. This demonstrates how scoring-before-visibility naturally integrates with semantic retrieval.
 
-#### Query
+#### Scenario
+
+A user asks: _"What are the best practices for fine-tuning efficiency?"_
+
+The system needs to:
+
+1. Semantically search for related Knowledge facts, Memory episodes, and Wisdom directives
+2. Score all touched entities through promotion and decay
+3. Suppress invisible results (decayed Memory episodes below threshold)
+4. Return ranked results across all three layers with scoring metadata
+
+#### Query 1: Semantic retrieval with graph traversal and decay filtering
+
+This query uses `db.retrieve` to find semantically related nodes across all layers, then traverses the graph to find connected evidence chains and directives, returning everything with decay scores.
 
 ```cypher
-MATCH (k:KnowledgeFact {claim: 'LoRA achieves 95% of full fine-tuning quality'})
-OPTIONAL MATCH (m:MemoryEpisode)-[e:EVIDENCES]->(k)
-OPTIONAL MATCH (w:WisdomDirective)-[:DERIVED_FROM]->(k)
-RETURN k, decayScore(k) AS kScore,
-       collect(m) AS episodes, collect(decayScore(m)) AS mScores,
-       collect(w) AS directives, collect(policy(w)) AS wMeta
+// Semantic search finds related content across all layers
+CALL db.retrieve({query: 'best practices for fine-tuning efficiency', limit: 20}) YIELD node, score AS searchScore
+
+// Separate results by layer
+WITH node, searchScore
+WHERE node:KnowledgeFact OR node:MemoryEpisode OR node:WisdomDirective
+
+// Traverse from each hit to find connected evidence and directives
+OPTIONAL MATCH (node)-[e:EVIDENCES]->(k:KnowledgeFact)
+OPTIONAL MATCH (node)<-[e2:EVIDENCES]-(m:MemoryEpisode)
+OPTIONAL MATCH (w:WisdomDirective)-[d:DERIVED_FROM]->(node)
+
+// Return with decay metadata — invisible entities are already filtered out
+RETURN node,
+       labels(node) AS layer,
+       searchScore,
+       decayScore(node) AS decayFinalScore,
+       decay(node) AS decayMeta,
+       policy(node) AS accessMeta,
+       collect(DISTINCT k) AS linkedFacts,
+       collect(DISTINCT m) AS linkedEpisodes,
+       collect(DISTINCT w) AS linkedDirectives
+ORDER BY searchScore * decayScore(node) DESC
 ```
 
-#### Step-by-step resolution
+In this query, scoring-before-visibility means:
 
-**1. Promotion policy resolution (first)**
+- The 20 candidates returned by `db.retrieve` have already been scored. Memory episodes that crossed below the archive threshold are not in the result set — they were suppressed before the `YIELD`.
+- The `OPTIONAL MATCH` traversals also respect visibility. A `:MemoryEpisode` connected by an `:EVIDENCES` edge will not appear in `linkedEpisodes` if its decay score renders it invisible.
+- The `ORDER BY` combines semantic relevance (`searchScore`) with decay freshness (`decayScore(node)`) for a unified ranking that balances meaning and recency.
+- Knowledge facts and Wisdom directives always appear because they have no decay. Memory episodes appear only if they are above threshold.
 
-For each touched entity, the engine resolves the matching promotion policy:
+#### Query 2: Vector search with explicit embedding and reranking
 
-- `k:KnowledgeFact` — no promotion policy matches (no policy defined for `:KnowledgeFact`). Neutral promotion effect.
-- `m:MemoryEpisode` — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` is incremented in accessMeta, `n.lastAccessedAt` is set. If `accessCount >= 3`, `memory_reinforced` profile is selected. If `accessCount >= 5 AND sourceAgreement >= 0.80`, `consolidation_candidate` profile is selected.
-- `e:EVIDENCES` — `evidence_traversal_tiering` matches. `ON ACCESS` executes: `r.traversalCount` is incremented in accessMeta. If `traversalCount >= 5`, `reinforced_evidence` profile is selected.
-- `w:WisdomDirective` — `wisdom_directive_stability` matches. `ON ACCESS` executes: `n.evaluationCount` is incremented in accessMeta. Stability tier is selected based on `evidenceCount` and `contradictionRate`.
-
-**2. Decay profile resolution (second)**
-
-For each touched entity, the engine resolves the matching decay profile:
-
-- `k:KnowledgeFact` — `knowledge_fact_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`. No decay.
-- `m:MemoryEpisode` — `memory_episode_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 604800`, `scoreFrom: 'VERSION'`. Base score computed from Ebbinghaus curve: `score = e^(-t * ln(2) / 604800)` where `t` is seconds since last version.
-- `e:EVIDENCES` — `evidence_edge_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 2592000`, `scoreFrom: 'CREATED'`. Base score computed from creation time.
-- `w:WisdomDirective` — `wisdom_directive_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`. No decay.
-
-**3. Final score computation**
-
-The promotion adjustments are applied to the base decay score:
-
-- `k`: base `1.0`, no promotion → final `1.0`. Always visible.
-- `m` (accessed 4 times, 3 days old): base `e^(-259200 * 0.693 / 604800) = 0.749`, promotion `memory_reinforced` multiplier `1.25` → final `min(0.749 * 1.25, 1.0) = 0.936`. Visible.
-- `m` (accessed 1 time, 10 days old): base `e^(-864000 * 0.693 / 604800) = 0.317`, no promotion → final `0.317`. Visible but low-ranked.
-- `m` (accessed 0 times, 20 days old): base `e^(-1728000 * 0.693 / 604800) = 0.100`, no promotion → final `0.100`. At archive threshold. Likely invisible.
-- `e` (created 15 days ago, traversed 6 times): base `e^(-1296000 * 0.693 / 2592000) = 0.707`, promotion `reinforced_evidence` multiplier `1.20` → final `min(0.707 * 1.20, 1.0) = 0.849`. Visible.
-- `w`: base `1.0`, promotion `wisdom_established` floor `0.50` → final `1.0`. Always visible.
-
-**4. Visibility determination**
-
-Entities with final scores below their archive threshold are suppressed from query results:
-
-- The 20-day-old episode with final score `0.100` is at the archive threshold of `0.05` — still visible but will become invisible as time advances.
-- Once an episode crosses below `0.05`, it is invisible to `MATCH` unless accessed through `reveal()`.
-- Knowledge facts and Wisdom directives are always visible because they have no decay.
-
-**5. Accessing invisible entities**
-
-To inspect archived or invisible Memory episodes for diagnostics or consolidation review:
+This query uses `db.index.vector.queryNodes` with a string query for explicit vector search against a specific index, with full decay metadata. Reranking operates on already-scored, already-materialized results — the cross-encoder evaluates semantic relevance only and does not take promotion or decay scores into account. Decay-weighted ranking is applied after reranking by the caller.
 
 ```cypher
+// Vector search against knowledge facts — queryNodes accepts a string directly
+CALL db.index.vector.queryNodes('knowledge_fact_idx', 15, 'best practices for fine-tuning efficiency') YIELD node AS fact, score AS vecScore
+
+// Traverse to find supporting episodes and derived directives
+OPTIONAL MATCH (m:MemoryEpisode)-[e:EVIDENCES]->(fact)
+OPTIONAL MATCH (w:WisdomDirective)-[:DERIVED_FROM]->(fact)
+
+// Collect candidates for reranking
+WITH fact, vecScore,
+     collect(m) AS episodes,
+     collect(w) AS directives
+
+// Return with decay and policy metadata
+RETURN fact,
+       fact.claim AS claim,
+       vecScore,
+       decayScore(fact) AS factDecayScore,
+       [ep IN episodes | {
+         episode: ep,
+         decayScore: decayScore(ep),
+         accessCount: policy(ep).accessCount,
+         lastAccessed: policy(ep)._lastMutatedAt
+       }] AS episodeDetails,
+       [dir IN directives | {
+         directive: dir,
+         stabilityTier: policy(dir).evidenceCount,
+         evaluationCount: policy(dir).evaluationCount
+       }] AS directiveDetails
+ORDER BY vecScore DESC
+```
+
+In this query:
+
+- `db.index.vector.queryNodes` accepts a string directly — NornicDB handles embedding inline. It returns only visible Knowledge facts — facts are always visible because they have `decayEnabled: false`, but if the index were over `:MemoryEpisode` nodes, decayed episodes below threshold would be suppressed from the vector search results.
+- The `OPTIONAL MATCH` for `:MemoryEpisode` respects visibility. An episode accessed once 20 days ago (score `0.100`, below threshold) does not appear in the `episodes` collection.
+- The list comprehension `[ep IN episodes | {...}]` extracts decay and policy metadata per episode, showing how `decayScore()` and `policy()` compose naturally with vector search results.
+- `policy(ep).accessCount` reads from accessMeta. If the episode was accessed 4 times, this value was incremented by `ON ACCESS` mutations during prior evaluations, not stored on the episode node.
+
+#### Query 3: Hybrid search with reranking and cross-layer aggregation
+
+This query uses `db.retrieve` for hybrid search (vector + BM25 + RRF), then `db.rerank` for cross-encoder reranking, then applies decay-weighted final scores as a separate step. The reranker is a pure semantic relevance pass — it scores query-to-content similarity using the cross-encoder model and has no knowledge of promotion policies, decay profiles, or accessMeta. Policy-based scoring (promotion and decay) happens before the results are materialized into the candidate list, determining visibility. Reranking happens after materialization, reordering only the visible candidates by semantic fit. The caller then combines the rerank score with the decay score for the final ranking.
+
+```cypher
+// Hybrid search: vector + BM25 + RRF fusion
+CALL db.retrieve({query: 'LoRA fine-tuning efficiency tradeoffs', limit: 30}) YIELD node, score AS retrievalScore
+
+// Or, optionally...
+CALL db.index.vector.queryNodes('knowledge_fact_idx', 15, 'best practices for fine-tuning efficiency') YIELD node, score AS retrievalScore
+
+// Rerank with cross-encoder
+WITH collect({id: id(node), content: coalesce(node.content, node.claim, node.summary, toString(node)), score: retrievalScore}) AS candidates
+CALL db.rerank({query: 'LoRA fine-tuning efficiency tradeoffs', candidates: candidates, rerankTopK: 10}) YIELD id, final_score AS rerankScore
+
+// Resolve the reranked nodes
+MATCH (n) WHERE id(n) = id
+
+// Decay-weighted final ranking
+WITH n, rerankScore, decayScore(n) AS decayFinal,
+     rerankScore * decayScore(n) AS combinedScore
+
+// Return with full metadata per layer
+RETURN n,
+       labels(n) AS layer,
+       rerankScore,
+       decayFinal,
+       combinedScore,
+       decay(n) AS decayMeta,
+       policy(n) AS accessMeta,
+       CASE
+         WHEN n:KnowledgeFact THEN 'permanent — supersession only'
+         WHEN n:MemoryEpisode THEN 'ebbinghaus — ' + toString(decayFinal)
+         WHEN n:WisdomDirective THEN 'stability-gated — tier ' + coalesce(toString(policy(n).evidenceCount), 'unknown')
+         ELSE 'unclassified'
+       END AS retentionBehavior
+ORDER BY combinedScore DESC
+```
+
+In this query:
+
+- `db.retrieve` performs hybrid search (vector + BM25 + RRF fusion). Scoring-before-visibility applies here: promotion and decay are resolved per candidate before `YIELD`. Memory episodes below the archive threshold are suppressed — the 30 candidates are all visible, already-scored entities.
+- `db.rerank` applies cross-encoder reranking to the top 10. The reranker is a pure semantic relevance evaluator — it receives the text content of each candidate and the query string, and produces a relevance score. It has no access to promotion policies, decay profiles, accessMeta, or any policy-based scoring. It sees only visible, materialized content.
+- The `combinedScore = rerankScore * decayScore(n)` is computed by the caller after reranking, blending the reranker's semantic relevance with the policy system's decay freshness. This is the correct composition point: the reranker handles meaning, the policy system handles durability, and the caller decides how to weight them.
+- A Knowledge fact always contributes `decayFinal = 1.0`. A 3-day-old Memory episode accessed 4 times contributes `decayFinal = 0.936` (base `0.749` × reinforced multiplier `1.25`). A 10-day-old episode accessed once contributes `decayFinal = 0.317`.
+- The `CASE` expression demonstrates how the layer decomposition is visible in query results — each layer's retention behavior is self-describing.
+
+#### Query 4: Diagnostics — reveal invisible entities
+
+When an operator needs to inspect what the decay subsystem has hidden — for consolidation review, audit, or debugging — `reveal()` bypasses visibility.
+
+```cypher
+// Find ALL memory episodes for a session, including invisible ones
 MATCH (m:MemoryEpisode {sessionId: $sessionId})
 RETURN reveal(m) AS rawEpisode,
        decay(m) AS decayMeta,
        policy(m) AS accessMeta,
-       decayScore(m) AS score
+       decayScore(m) AS score,
+       CASE
+         WHEN decayScore(m) >= 0.80 THEN 'visible — strong'
+         WHEN decayScore(m) >= 0.05 THEN 'visible — fading'
+         ELSE 'invisible — below archive threshold'
+       END AS visibilityStatus
+ORDER BY decayScore(m) ASC
 ```
 
-This returns the episode regardless of its score, along with full diagnostic metadata.
+```cypher
+// Consolidation review: find episodes that are consolidation candidates
+MATCH (m:MemoryEpisode)
+WHERE policy(reveal(m)).accessCount >= 5
+RETURN reveal(m) AS rawEpisode,
+       policy(m).accessCount AS accessCount,
+       policy(m).sourceAgreement AS sourceAgreement,
+       decayScore(m) AS currentScore,
+       decay(m).scoreFrom AS scoreAnchor
+```
+
+```cypher
+// Full cross-layer audit: semantic search with reveal to include invisible results
+CALL db.index.vector.embed('fine-tuning efficiency') YIELD embedding
+// this is for explicit control and an exmple of how we use either an embedding array or a string in the same call.
+CALL db.index.vector.queryNodes('memory_episode_idx', 50, embedding) YIELD node, score AS vecScore
+RETURN reveal(node) AS rawNode,
+       vecScore,
+       decayScore(node) AS decayFinal,
+       decay(node) AS decayMeta,
+       policy(node) AS accessMeta
+ORDER BY vecScore DESC
+```
+
+Note: `reveal()` in the last query ensures that even Memory episodes whose decay score has dropped below the archive threshold are returned from the vector search. Without `reveal()`, those episodes would be suppressed by scoring-before-visibility and would not appear in the `YIELD`.
+
+#### Step-by-step resolution (Query 1)
+
+This walkthrough traces the resolution of Query 1 for a representative set of results.
+
+**1. Semantic retrieval**
+
+`db.retrieve` performs hybrid search (vector + BM25 + RRF). Before yielding each candidate, the engine resolves promotion and decay for every touched node:
+
+**2. Promotion policy resolution (first, per candidate)**
+
+- `k:KnowledgeFact {claim: 'LoRA achieves 95% of full fine-tuning quality'}` — no promotion policy matches. Neutral promotion effect.
+- `m1:MemoryEpisode` (4 accesses, 3 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` incremented to `5` in accessMeta, `n.lastAccessedAt` set. `accessCount >= 3` → `memory_reinforced` selected (multiplier `1.25`). `accessCount >= 5 AND sourceAgreement >= 0.80` → `consolidation_candidate` selected (multiplier `1.50`, floor `0.80`). Highest multiplier wins: `consolidation_candidate`.
+- `m2:MemoryEpisode` (1 access, 10 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` incremented to `2` in accessMeta. No `WHEN` predicate matches. Neutral promotion.
+- `m3:MemoryEpisode` (0 accesses, 20 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` set to `1` in accessMeta. No `WHEN` predicate matches. Neutral promotion.
+- `e1:EVIDENCES` (traversed 6 times) — `evidence_traversal_tiering` matches. `ON ACCESS` executes: `r.traversalCount` incremented to `7` in accessMeta. `traversalCount >= 5` → `reinforced_evidence` selected (multiplier `1.20`).
+- `w1:WisdomDirective` (8 evidence sources, 0.10 contradiction rate) — `wisdom_directive_stability` matches. `ON ACCESS` executes: `n.evaluationCount` incremented in accessMeta. `evidenceCount >= 3 AND contradictionRate < 0.20` → `wisdom_established` selected (floor `0.50`).
+
+**3. Decay profile resolution (second, per candidate)**
+
+- `k`: `knowledge_fact_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`.
+- `m1`: `memory_episode_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 604800`, `scoreFrom: 'VERSION'`. Base score: `e^(-259200 × ln(2) / 604800) = 0.749`.
+- `m2`: same profile. Base score: `e^(-864000 × ln(2) / 604800) = 0.317`.
+- `m3`: same profile. Base score: `e^(-1728000 × ln(2) / 604800) = 0.100`.
+- `e1`: `evidence_edge_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 2592000`, `scoreFrom: 'CREATED'`. Base score: `e^(-1296000 × ln(2) / 2592000) = 0.707`.
+- `w1`: `wisdom_directive_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`.
+
+**4. Final score computation**
+
+| Entity                                | Base    | Promotion                                   | Final                                      | Visible?             |
+| ------------------------------------- | ------- | ------------------------------------------- | ------------------------------------------ | -------------------- |
+| `k` (KnowledgeFact)                   | `1.000` | none                                        | `1.000`                                    | yes — no decay       |
+| `m1` (MemoryEpisode, 3d, 5 accesses)  | `0.749` | `consolidation_candidate` ×1.50, floor 0.80 | `max(0.749 × 1.50, 0.80) = 1.000` (capped) | yes — consolidated   |
+| `m2` (MemoryEpisode, 10d, 2 accesses) | `0.317` | none                                        | `0.317`                                    | yes — fading         |
+| `m3` (MemoryEpisode, 20d, 1 access)   | `0.100` | none                                        | `0.100`                                    | yes — near threshold |
+| `e1` (EVIDENCES, 15d, 7 traversals)   | `0.707` | `reinforced_evidence` ×1.20                 | `0.849`                                    | yes                  |
+| `w1` (WisdomDirective, established)   | `1.000` | `wisdom_established` floor 0.50             | `1.000`                                    | yes — no decay       |
+
+Note: `m1` is now a `consolidation_candidate`. Its promotion floor of `0.80` means it resists forgetting even as the Ebbinghaus curve continues to pull the base score down. After 30 days, the base score would be `e^(-2592000 × ln(2) / 604800) = 0.045`, but the promotion floor holds the final score at `0.80`. This is the spaced-repetition effect: sufficiently rehearsed content resists the forgetting curve.
+
+**5. Visibility determination**
+
+- `m3` has a final score of `0.100`, above the archive threshold of `0.05` — still visible but low-ranked in the `ORDER BY searchScore * decayScore(node) DESC`.
+- At 25 days, `m3`'s base score would drop to `e^(-2160000 × ln(2) / 604800) = 0.060`, final `0.060`, still barely above threshold.
+- At 30 days, `m3`'s base score would drop to `0.045`, final `0.045`, below the archive threshold of `0.05` — invisible. It would no longer appear in `db.retrieve` results or `MATCH` traversals.
+- `m1` remains visible indefinitely because its promotion floor of `0.80` overrides the Ebbinghaus curve. To find `m3` after it becomes invisible, the operator would use `reveal()`.
+
+**6. Combined ranking**
+
+The `ORDER BY searchScore * decayScore(node) DESC` in Query 1 produces a unified ranking:
+
+| Entity                | Search Score | Decay Score | Combined | Layer                        |
+| --------------------- | ------------ | ----------- | -------- | ---------------------------- |
+| `k` (KnowledgeFact)   | `0.92`       | `1.000`     | `0.920`  | Knowledge                    |
+| `m1` (consolidated)   | `0.88`       | `1.000`     | `0.880`  | Memory → Knowledge candidate |
+| `w1` (established)    | `0.75`       | `1.000`     | `0.750`  | Wisdom                       |
+| `e1` (reinforced)     | `0.71`       | `0.849`     | `0.603`  | Evidence edge                |
+| `m2` (fading)         | `0.65`       | `0.317`     | `0.206`  | Memory                       |
+| `m3` (near threshold) | `0.60`       | `0.100`     | `0.060`  | Memory                       |
+
+The Knowledge fact ranks highest because it is both semantically relevant and permanently durable. The consolidated episode ranks second because its promotion floor keeps it strong. The Wisdom directive ranks third. Fading episodes rank last — their semantic relevance is discounted by their decay scores, naturally pushing stale content down the ranking without removing it entirely until it crosses the archive threshold.
 
 ### A.7 Addressing the Paper's Critique
 
 This configuration directly addresses the paper's identified problems:
 
-| Paper critique | How the modified model addresses it |
-|---|---|
-| "NornicDB applying storage-level decay to permanent facts" | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through graph operations, not decay. |
-| "Systems either forget what they should remember or remember what they should forget" | The four-layer label scheme applies different decay semantics per content type. Knowledge persists. Memory decays. Wisdom is stability-gated. |
-| "Signet applies uniform 0.95 days decay to all content types" | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life. |
-| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, and visibility behavior. |
-| "Knowing how and knowing that are architecturally distinct" | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision. `:KnowledgeFact` (knowing that) uses supersession. Different update mechanics. |
-| "Consolidation as a first-class operation" | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
+| Paper critique                                                                                 | How the modified model addresses it                                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "NornicDB applying storage-level decay to permanent facts"                                     | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through graph operations, not decay.                                    |
+| "Systems either forget what they should remember or remember what they should forget"          | The four-layer label scheme applies different decay semantics per content type. Knowledge persists. Memory decays. Wisdom is stability-gated.                                                  |
+| "Signet applies uniform 0.95 days decay to all content types"                                  | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life.                                    |
+| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, and visibility behavior.                                          |
+| "Knowing how and knowing that are architecturally distinct"                                    | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision. `:KnowledgeFact` (knowing that) uses supersession. Different update mechanics.                    |
+| "Consolidation as a first-class operation"                                                     | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
 
 ### A.8 Key Design Decisions
 
