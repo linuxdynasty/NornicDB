@@ -1003,6 +1003,7 @@ class ConfigManager: ObservableObject {
     static let appleEmbeddingDimensions: Int = 512
     static let appleEmbeddingChunkSize: Int = 512
     static let localEmbeddingChunkSize: Int = 8192
+    static let defaultEmbeddingChunkOverlap: Int = 50
     /// Get or generate the Apple Intelligence embedding server API key (stored in Keychain)
     /// This is specific to the local Apple ML embedding server, separate from cloud provider API keys.
     static func getAppleIntelligenceAPIKey() -> String {
@@ -1083,6 +1084,7 @@ class ConfigManager: ObservableObject {
     @Published var searchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
     @Published var embeddingChunkSize: Int = ConfigManager.localEmbeddingChunkSize
+    @Published var embeddingChunkOverlap: Int = ConfigManager.defaultEmbeddingChunkOverlap
     @Published var heimdallModel: String = ConfigManager.defaultHeimdallModel
     @Published var availableModels: [String] = []
     
@@ -1183,7 +1185,7 @@ class ConfigManager: ObservableObject {
         // embedding_worker
         var embeddingWorker = yamlSection(normalized, "embedding_worker")
         embeddingWorker["chunk_size"] = max(1, yamlInt(embeddingWorker["chunk_size"]) ?? ConfigManager.localEmbeddingChunkSize)
-        embeddingWorker["chunk_overlap"] = max(0, yamlInt(embeddingWorker["chunk_overlap"]) ?? 50)
+        embeddingWorker["chunk_overlap"] = max(0, yamlInt(embeddingWorker["chunk_overlap"]) ?? ConfigManager.defaultEmbeddingChunkOverlap)
         normalized["embedding_worker"] = embeddingWorker
 
         // auth
@@ -1241,6 +1243,11 @@ class ConfigManager: ObservableObject {
             return ConfigManager.appleEmbeddingChunkSize
         }
         return max(1, embeddingChunkSize)
+    }
+
+    func effectiveEmbeddingChunkOverlap() -> Int {
+        let maxAllowedOverlap = max(0, effectiveEmbeddingChunkSize() - 1)
+        return min(max(0, embeddingChunkOverlap), maxAllowedOverlap)
     }
     let modelsPath = "/usr/local/var/nornicdb/models"
     
@@ -1305,12 +1312,18 @@ class ConfigManager: ObservableObject {
             embeddingChunkSize = chunkSize
             print("✅ Loaded embedding chunk size: \(chunkSize)")
         }
+        if let chunkOverlap = yamlInt(embeddingWorkerSection["chunk_overlap"]), chunkOverlap >= 0 {
+            embeddingChunkOverlap = chunkOverlap
+            print("✅ Loaded embedding chunk overlap: \(chunkOverlap)")
+        }
         // Apple ML provider has a fixed supported chunk size.
         if useAppleIntelligence {
             embeddingChunkSize = ConfigManager.appleEmbeddingChunkSize
         } else if embeddingChunkSize <= 0 {
             embeddingChunkSize = ConfigManager.localEmbeddingChunkSize
         }
+        let maxAllowedOverlap = max(0, embeddingChunkSize - 1)
+        embeddingChunkOverlap = min(max(0, embeddingChunkOverlap), maxAllowedOverlap)
 
         // Load kmeans section
         let kmeansSection = yamlSection(root, "kmeans")
@@ -1512,8 +1525,7 @@ class ConfigManager: ObservableObject {
         heimdallSection["model"] = normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
 
         embeddingWorkerSection["chunk_size"] = effectiveEmbeddingChunkSize()
-        let existingOverlap = yamlInt(embeddingWorkerSection["chunk_overlap"]) ?? 50
-        embeddingWorkerSection["chunk_overlap"] = max(0, existingOverlap)
+        embeddingWorkerSection["chunk_overlap"] = effectiveEmbeddingChunkOverlap()
 
         let normalizedBoltPort = max(1, yamlInt(boltPortNumber) ?? 7687)
         let normalizedHTTPPort = max(1, yamlInt(httpPortNumber) ?? 7474)
@@ -1713,6 +1725,7 @@ struct SettingsView: View {
     @State private var originalEmbeddingModel: String = ConfigManager.defaultEmbeddingModel
     @State private var originalEmbeddingDimensions: Int = 1024
     @State private var originalEmbeddingChunkSize: Int = ConfigManager.localEmbeddingChunkSize
+    @State private var originalEmbeddingChunkOverlap: Int = ConfigManager.defaultEmbeddingChunkOverlap
     @State private var originalSearchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @State private var originalHeimdallModel: String = ConfigManager.defaultHeimdallModel
     @State private var originalAdminUsername: String = "admin"
@@ -1744,6 +1757,7 @@ struct SettingsView: View {
                config.embeddingModel != originalEmbeddingModel ||
                config.embeddingDimensions != originalEmbeddingDimensions ||
                config.embeddingChunkSize != originalEmbeddingChunkSize ||
+               config.embeddingChunkOverlap != originalEmbeddingChunkOverlap ||
                config.searchRerankModel != originalSearchRerankModel ||
                config.heimdallModel != originalHeimdallModel ||
                config.adminUsername != originalAdminUsername ||
@@ -1850,6 +1864,7 @@ struct SettingsView: View {
         originalEmbeddingModel = config.embeddingModel
         originalEmbeddingDimensions = config.embeddingDimensions
         originalEmbeddingChunkSize = config.embeddingChunkSize
+        originalEmbeddingChunkOverlap = config.embeddingChunkOverlap
         originalSearchRerankModel = config.searchRerankModel
         originalHeimdallModel = config.heimdallModel
         originalAdminUsername = config.adminUsername
@@ -2048,6 +2063,24 @@ struct SettingsView: View {
                             }
                             .disabled(config.useAppleIntelligence)
                         }
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Embedding Chunk Overlap")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Text(config.useAppleIntelligence
+                                     ? "Overlap between chunks for local indexing"
+                                     : "Controls how much context is preserved between chunks")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Stepper(value: $config.embeddingChunkOverlap, in: 0...max(0, config.embeddingChunkSize - 1), step: 16) {
+                                Text("\(config.embeddingChunkOverlap)")
+                                    .frame(minWidth: 70, alignment: .trailing)
+                            }
+                        }
                     }
                     .padding()
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
@@ -2057,6 +2090,10 @@ struct SettingsView: View {
                         } else if config.embeddingChunkSize <= 0 {
                             config.embeddingChunkSize = ConfigManager.localEmbeddingChunkSize
                         }
+                        config.embeddingChunkOverlap = min(max(0, config.embeddingChunkOverlap), max(0, config.embeddingChunkSize - 1))
+                    }
+                    .onChange(of: config.embeddingChunkSize) { newChunkSize in
+                        config.embeddingChunkOverlap = min(max(0, config.embeddingChunkOverlap), max(0, newChunkSize - 1))
                     }
                 }
                 
