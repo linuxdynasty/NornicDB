@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** April 15, 2026
-**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, and implementing efficient archival deindexing for archived nodes and edges.
+**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient archival deindexing for archived nodes and edges, and persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation.
 
 ---
 
@@ -106,13 +106,15 @@ Required behavior:
 - allow promotion profiles to declare score multipliers, caps, and floors
 - when multiple WHEN predicates match within a policy, the profile with the highest effective multiplier wins deterministically
 - keep promotion profiles separately authored, shown, and retrieved from promotion policies
-- support optional `ON ACCESS` mutation blocks that execute when the target is accessed during scoring resolution
+- support optional `ON ACCESS` mutation blocks that execute when the target is accessed during scoring resolution; `ON ACCESS` mutations write exclusively to a separate accessMeta index keyed to the target node or edge, never to the node or edge itself
 - enforce at most one promotion policy per unique target as a hard constraint
 
 Suggested fit in NornicDB:
 
 - a dedicated promotion subsystem with its own catalog and DDL for both profiles and policies
+- a separate accessMeta index that stores `ON ACCESS` mutation state per target node or edge as `map[string]interface{}`, serialized in msgpack alongside other data files for performance
 - shared runtime scoring that first resolves the decay profile, then evaluates the matching promotion policy
+- property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to the node or edge's stored properties
 - diagnostics that explain which promotion policy matched, which profile was selected, and how it affected the final score
 
 ### 4.3 Authoring Subsystem Layer
@@ -270,6 +272,21 @@ Minimum fields:
 - inline rule order for deterministic precedence
 - original expression text for diagnostics
 
+#### AccessMeta
+
+Persistent metadata index that stores `ON ACCESS` mutation state separately from the node or edge it describes. Each entry is a `map[string]interface{}` keyed to a target node or edge identifier. AccessMeta entries are serialized in msgpack alongside other data files for performance.
+
+Nodes and edges are read-only during `ON ACCESS` evaluation. All writes within an `ON ACCESS` block mutate the target's accessMeta entry, never the target's stored properties. All reads within `ON ACCESS` blocks and `WHEN` predicates resolve from the target's accessMeta entry first, falling back to the target's stored properties when the key is not present in accessMeta.
+
+Minimum fields:
+
+- target id
+- target scope: node or edge
+- metadata map: `map[string]interface{}`
+- last accessed at
+- last mutated at
+- mutation count
+
 #### IndexEntryCatalog
 
 Persistent catalog of exact index entries created for a node or edge.
@@ -347,6 +364,11 @@ Minimum fields:
 - whole-node and whole-edge archival state may be persisted
 - property archival state is not persisted because properties are not archival targets
 - property-level decay may exclude properties from vectorization or retrieval surfaces but must not move or delete stored property values
+- `ON ACCESS` mutation state is persisted in a separate accessMeta index keyed per target node or edge, not on the node or edge itself
+- accessMeta entries are `map[string]interface{}` serialized in msgpack alongside other data files for performance
+- nodes and edges are read-only during `ON ACCESS` evaluation; all writes target the accessMeta index
+- property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to stored node or edge properties
+- the `policy()` Cypher function projects accessMeta outward without implying that access-tracking metadata is stored on the node or edge
 
 ---
 
@@ -375,7 +397,7 @@ Then every score-aware read should resolve the score start time from the resolve
 
 12. `CREATED`, if the resolved decay profile declares `CREATED`
 13. `VERSION`, if the resolved decay profile declares `VERSION`
-14. `CUSTOM`, if the resolved decay profile declares `CUSTOM` with a `scoreFromProperty` path
+14. `CUSTOM`, if the resolved decay profile declares `CUSTOM` with a `scoreFromProperty` path; the property is resolved from accessMeta first, falling back to stored node or edge properties; if the resolved value is null or unparsable, log a warning and fall back to entity creation time
 15. configured default score start time, if no explicit profile value applies
 
 If no decay profile matches, the engine should either treat the target as non-decaying or use an explicit configured default decay profile, but it must not silently assume any legacy tier.
@@ -423,8 +445,8 @@ Semantics:
 Semantics:
 
 - MVCC still determines which node or edge version is visible at the transaction snapshot
-- the scorer reads the property path declared in the decay profile's `scoreFromProperty` option and uses its value as the start of decay age
-- the property value must be a timestamp; if the property is missing or null, the scorer should fall back to the configured default score start time
+- the scorer reads the property path declared in the decay profile's `scoreFromProperty` option using accessMeta-first resolution: the property is resolved from the target's accessMeta entry first, falling back to the target's stored node or edge properties only when the key is not present in accessMeta
+- the property value must be a timestamp; if the resolved value is missing, null, or not parsable as a timestamp, the scorer should log a warning and fall back to the entity's original creation time
 - `CUSTOM` is the operator-defined, domain-specific option
 
 #### Rule
@@ -523,7 +545,7 @@ For any entity or property, the system should be able to explain:
 - which decay profile and inline rule selected it
 - which promotion policy entry and WHEN predicate selected the profile
 - what rate, threshold, floor, and multiplier are active
-- whether decay age was measured from `CREATED`, `VERSION`, or `CUSTOM` and which property path was used if `CUSTOM`
+- whether decay age was measured from `CREATED`, `VERSION`, or `CUSTOM` and which property path was used if `CUSTOM`, whether the value was resolved from accessMeta or stored properties, and whether a fallback to entity creation time occurred due to a null or unparsable value
 - why a node or edge was archived or not archived
 - why a node or edge was deindexed or pending deindex
 - why a property was excluded from vectorization or retrieval surfaces without being archived
@@ -565,6 +587,27 @@ If a caller invokes `decayScore(...)` or `decay(...)` for a target with no match
 
 The existing Cypher scoring API remains unchanged. The score returned by `decayScore(...)` and `decay(...).score` is the final resolved score after applying the decay profile, the profile-declared score start time, and the matching promotion policy.
 
+The promotion policy subsystem should expose accessMeta through a native Cypher function so callers can inspect access-tracking state without altering Neo4j-compatible node or relationship structures.
+
+Proposed function:
+
+- `policy(entity)` returns the accessMeta map for the node or edge as a structured Cypher object
+
+There is no correlated `policyScore()` scalar function. Unlike `decay()` / `decayScore()`, the accessMeta map is a general-purpose key-value store with no single canonical scalar to extract. Callers access individual keys through standard Cypher property access on the returned map, for example `policy(n).accessCount` or `policy(r).traversalCount`.
+
+Suggested fields on `policy(...)` results:
+
+- all keys present in the target's accessMeta entry, projected as a Cypher map
+- `_targetId`: the target node or edge identifier
+- `_targetScope`: `node` or `edge`
+- `_lastAccessedAt`: timestamp of the most recent node access
+- `_lastMutatedAt`: timestamp of the most recent `ON ACCESS` mutation
+- `_mutationCount`: total number of `ON ACCESS` mutations applied
+
+The `policy(...)` object is a derived value read from the accessMeta index. It does not imply that access-tracking metadata is stored on the node or edge itself.
+
+If a caller invokes `policy(...)` for a target with no accessMeta entry, the function should return an empty map with only the `_targetId` and `_targetScope` fields rather than failing.
+
 Archived properties do not exist as a concept. Properties remain directly queryable in Cypher even when property-level decay excludes them from vectorization or vector-backed retrieval.
 
 Example usage:
@@ -594,11 +637,27 @@ MATCH (n:SessionRecord)
 RETURN n.summary, n.summary AS stillDirectlyQueryableInCypher
 ```
 
+```cypher
+MATCH (n:SessionRecord)
+RETURN n, policy(n) AS accessMeta
+```
+
+```cypher
+MATCH (n:SessionRecord)
+WHERE policy(n).accessCount >= 5
+RETURN n, policy(n).accessCount AS accessCount, policy(n)._lastMutatedAt AS lastAccessed
+```
+
+```cypher
+MATCH ()-[r:CO_ACCESSED]-()
+RETURN r, policy(r).traversalCount AS traversals, decay(r) AS decayMeta
+```
+
 Compatibility rule:
 
 - `RETURN n` remains Neo4j-compatible and does not automatically inject decay metadata into the node
 - `RETURN r` remains Neo4j-compatible and does not automatically inject decay metadata into the edge
-- callers opt in by returning `decayScore(...)` or `decay(...)` explicitly as additional columns
+- callers opt in by returning `decayScore(...)`, `decay(...)`, or `policy(...)` explicitly as additional columns
 - property-level scores are therefore visible to Cypher without changing Bolt node or relationship structures
 - missing decay profile should behave like ordinary metadata lookup in Cypher: no error, neutral score
 
@@ -733,7 +792,11 @@ Policies exist only on the promotion side. There is no separate decay policy con
 
 Promotion policies contain logic. They declare a target via `FOR`, contain an `APPLY` block, and may include `WHEN` predicates, `ON ACCESS` mutation blocks, and inline property-level rules. Promotion policies bind promotion profiles to specific node labels, edge types, and property paths through `WHEN` predicates and `APPLY PROFILE` references.
 
-Promotion policies may include an `ON ACCESS` block that executes property mutations on the target entity when the policy is evaluated during scoring resolution. `ON ACCESS` blocks run before `WHEN` predicates are evaluated, allowing access-tracking mutations to feed into promotion logic within the same policy.
+Promotion policies may include an `ON ACCESS` block that executes mutations when the policy is evaluated during scoring resolution. `ON ACCESS` blocks run before `WHEN` predicates are evaluated, allowing access-tracking mutations to feed into promotion logic within the same policy.
+
+`ON ACCESS` mutations are applied exclusively to a separate accessMeta index, never to the target node or edge itself. The target node or edge is read-only during `ON ACCESS` evaluation. The accessMeta index stores a `map[string]interface{}` per target, keyed to the target node or edge identifier, and is serialized in msgpack alongside other data files for performance.
+
+Property resolution within `ON ACCESS` blocks and `WHEN` predicates uses accessMeta-first semantics: a property read such as `n.accessCount` resolves from the target's accessMeta entry first, and falls back to the target's stored node or edge properties only when the key is not present in accessMeta. All writes such as `SET n.accessCount = ...` mutate the accessMeta entry for the target, not the target's stored properties. This means `ON ACCESS` Cypher syntax is unchanged — `n.propertyKey` and `r.propertyKey` work as expected — but the storage destination is the accessMeta index.
 
 There can be at most one promotion policy per unique target. Competing or overlapping promotion policies for the same target are a hard constraint violation.
 
@@ -923,6 +986,8 @@ APPLY {
 
 Wildcard targets use `*` in place of a label or edge type to match every node label or every edge type. A label-specific or edge-type-specific profile or policy always takes precedence over a wildcard-targeted one. Wildcards are only valid on `CREATE` statements.
 
+In the promotion policy examples above, `ON ACCESS` SET statements such as `SET n.accessCount = coalesce(n.accessCount, 0) + 1` write exclusively to the accessMeta index for the target node or edge, not to the node or edge itself. The `coalesce(n.accessCount, 0)` read resolves from accessMeta first, falling back to the node's stored properties only when the key is absent from accessMeta. This keeps nodes and edges read-only during policy evaluation while preserving familiar Cypher property syntax.
+
 In this model, edges can decay just like nodes can. They can also have independent promotion policies and property-level overrides. Properties can be excluded from vectorization or vector-backed retrieval by profile, but they are never archived from storage.
 
 ### 7.6 Profile and Policy DDL
@@ -1104,10 +1169,14 @@ DROP PROMOTION PROFILE canonical_tier
 
 - native scalar function: `decayScore(entity[, options])`
 - native structured function: `decay(entity[, options])`
-- both functions should work for nodes and edges
+- native structured function: `policy(entity)` — returns the accessMeta map for the target node or edge; no correlated `policyScore()` scalar function
+- `decayScore(...)` and `decay(...)` should work for nodes and edges
+- `policy(...)` should work for nodes and edges
 - `decay(...).score` should be the canonical Cypher-visible field for downstream sorting, filtering, and projection
-- both functions derive scores from the shared resolver rather than reading persisted property-level score fields
-- both functions accept an explicit Cypher options object with keys such as `property` and `scoringMode`
+- `policy(...)` keys are accessed through standard Cypher map property access, for example `policy(n).accessCount`
+- `decayScore(...)` and `decay(...)` derive scores from the shared resolver rather than reading persisted property-level score fields
+- `policy(...)` reads from the accessMeta index rather than from stored node or edge properties
+- `decayScore(...)` and `decay(...)` accept an explicit Cypher options object with keys such as `property` and `scoringMode`
 
 ### Suggested storage rules
 
@@ -1123,6 +1192,9 @@ DROP PROMOTION PROFILE canonical_tier
 - the archival cleanup job should default to nightly execution but be configurable in seconds
 - properties are never archived, moved, or deleted because of decay profile
 - property-level decay may exclude properties from vectorization or vector-backed retrieval, but stored properties remain directly queryable in Cypher
+- accessMeta entries are persisted in a separate index keyed to the target node or edge, serialized in msgpack alongside other data files for performance
+- `ON ACCESS` mutations write exclusively to the accessMeta index; nodes and edges are read-only during `ON ACCESS` evaluation
+- property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to stored node or edge properties
 - temporary caches of resolved scores are allowed as implementation detail, but they are not the source of truth
 - profile and policy resolution artifacts should be diagnosable without mutating the underlying entity
 - no-decay profiles should be enforced consistently across recall, archive, and maintenance paths
@@ -1154,6 +1226,9 @@ Deliverables:
 - define whole-node and whole-edge archival semantics
 - define non-archival property exclusion semantics for vectorization and retrieval
 - define the native `decayScore()` and `decay()` Cypher function contracts, including explicit `property` and `scoringMode` options
+- define the native `policy()` Cypher function contract for accessMeta retrieval
+- define the accessMeta schema model: `map[string]interface{}` keyed per target node or edge, serialized in msgpack
+- define accessMeta-first property resolution semantics for `ON ACCESS` and `WHEN` evaluation
 - define the derived search metadata contract for node-, edge-, and property-level scores
 
 ### Workstream B: Policy Authoring and Compilation
@@ -1181,6 +1256,8 @@ Deliverables:
 - make the same resolved scores available to unified search metadata without persisting them into entity fields
 - centralize profile-and-policy-resolved scoring so Cypher and unified retrieval call the same scorer
 - keep Cypher-only scoring-mode override handling at the function surface while leaving unified retrieval profile-and-policy-resolved
+- make accessMeta entries available to the native `policy()` Cypher function
+- implement accessMeta-first property resolution for `ON ACCESS` reads and `WHEN` predicate evaluation
 
 ### Workstream D: Runtime Integration
 
@@ -1195,6 +1272,9 @@ Deliverables:
 - support MVCC-aware decay-age evaluation using profile-declared `CREATED`, `VERSION`, or `CUSTOM`
 - support whole-node and whole-edge archive marking
 - support fast archived-entity skipping in read paths
+- implement accessMeta index storage with msgpack serialization alongside other data files
+- route `ON ACCESS` mutation writes to the accessMeta index, keeping nodes and edges read-only during policy evaluation
+- implement accessMeta-first read resolution for property access within `ON ACCESS` blocks and `WHEN` predicates
 
 ### Workstream E: Archival and Deindex Infrastructure
 
@@ -1237,12 +1317,14 @@ Deliverables:
 13. Implement per-entity index-entry catalogs for nodes and edges.
 14. Implement persistent archive work items and configurable deindex scheduling.
 15. Add asynchronous batched deindex cleanup for archived nodes and edges.
-16. Add native Cypher functions `decayScore()` and `decay()` for nodes and edges with an explicit options object for `property` and optional `scoringMode`.
-17. Migrate runtime logic away from fixed tier assumptions.
-18. Bind unified retrieval scoring to the same shared scorer and profile-and-policy-resolved scoring configuration.
-19. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
-20. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, archive/deindex behavior, and archival skipping.
-21. Add benchmark and evaluation coverage for profile and policy resolution overhead and correctness.
+16. Implement the accessMeta index with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first read resolution.
+17. Add native Cypher functions `decayScore()` and `decay()` for nodes and edges with an explicit options object for `property` and optional `scoringMode`.
+18. Add native Cypher function `policy()` for accessMeta retrieval on nodes and edges.
+19. Migrate runtime logic away from fixed tier assumptions.
+20. Bind unified retrieval scoring to the same shared scorer and profile-and-policy-resolved scoring configuration.
+21. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
+22. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, accessMeta mutation and resolution, archive/deindex behavior, and archival skipping.
+23. Add benchmark and evaluation coverage for profile and policy resolution overhead, accessMeta read/write throughput, and correctness.
 
 ---
 
@@ -1273,13 +1355,21 @@ Deliverables:
 - `scoreFrom: 'CREATED'` measures decay age from original entity creation time
 - `scoreFrom: 'VERSION'` measures decay age from the latest visible version time
 - `scoreFrom: 'CUSTOM'` with `scoreFromProperty` measures decay age from the specified property value
-- `scoreFrom: 'CUSTOM'` falls back to the configured default when the property is missing or null
+- `scoreFrom: 'CUSTOM'` resolves the `scoreFromProperty` from accessMeta first, falling back to stored node or edge properties
+- `scoreFrom: 'CUSTOM'` logs a warning and falls back to entity creation time when the resolved value is missing, null, or unparsable as a timestamp
 - changing only derived score as time advances does not create a new stored version
 - archived nodes and archived edges are skipped by retrieval paths
 - archived nodes and archived edges are removed from indexing by the background cleanup process
 - archive cleanup uses exact-key deindexing and does not require full index scans
 - deindex cleanup is idempotent and retry-safe
 - properties are never archived as part of archive cleanup
+- `ON ACCESS` SET mutations write to the accessMeta index and do not mutate the target node or edge
+- `ON ACCESS` and `WHEN` property reads resolve from accessMeta first, falling back to stored node or edge properties
+- `policy(n)` returns the accessMeta map for a node with all keys written by `ON ACCESS` mutations
+- `policy(r)` returns the accessMeta map for an edge with all keys written by `ON ACCESS` mutations
+- `policy(...)` returns an empty map with only `_targetId` and `_targetScope` when no accessMeta entry exists
+- accessMeta entries survive node or edge reads without being lost or corrupted
+- accessMeta entries are correctly serialized and deserialized via msgpack across restarts
 
 ### Benchmark targets
 
@@ -1292,6 +1382,9 @@ Deliverables:
 - archive pass throughput under mixed node and edge profile workloads
 - deindex throughput for archived nodes and edges
 - recall and ranking overhead with resolved node and edge profile and policy checks
+- accessMeta index read and write throughput under concurrent `ON ACCESS` mutation workloads
+- accessMeta-first property resolution overhead compared to direct node or edge property reads
+- accessMeta msgpack serialization and deserialization throughput
 
 ---
 
@@ -1322,6 +1415,12 @@ The plan is complete when:
 - new decay models can be expressed as decay profiles and new promotion tier models can be expressed as promotion profiles and policies without new engine categories
 - the existing Cypher scoring API remains unchanged
 - MVCC visibility remains snapshot-based while decay-age start time is declaratively selected by decay profile
+- `ON ACCESS` mutation handlers write exclusively to a separate accessMeta index; nodes and edges are read-only during policy evaluation
+- accessMeta entries are stored as `map[string]interface{}` keyed per target node or edge, serialized in msgpack alongside other data files
+- property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to stored node or edge properties
+- the native `policy()` Cypher function exposes accessMeta for any node or edge without mutating Neo4j-compatible payloads
+- there is no correlated `policyScore()` scalar function; accessMeta is a general-purpose map, not a single score
+- targets without an accessMeta entry return an empty map from `policy()` rather than producing a Cypher error
 
 ---
 
@@ -1339,6 +1438,8 @@ The plan is complete when:
 - exact index-entry catalog support for nodes and edges
 - archive work item infrastructure for background cleanup
 - native Cypher function support for `decayScore()` and `decay()`
+- native Cypher function support for `policy()` to expose accessMeta on nodes and edges
+- accessMeta index implementation with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first property read resolution
 - shared runtime scorer support for Cypher and unified retrieval, with Cypher-only `scoringMode` override support and profile-and-policy-resolved search scoring
 - unified search metadata support for additive node-, edge-, and property-level decay scores
 - regression tests covering node-, edge-, and property-level semantics
@@ -1356,4 +1457,4 @@ Named presets may remain in documentation for bootstrapping a memory decay model
 
 Property-level decay and promotion may affect vectorization and retrieval behavior, but properties remain stored in place and directly queryable in Cypher. Archival is reserved for whole nodes and whole edges.
 
-Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible.
+Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar.
