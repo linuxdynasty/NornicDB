@@ -498,7 +498,7 @@ func TestSearchServices_RunClusteringOnceAllDatabases_NilContext(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	require.NotPanics(t, func() {
-		db.runClusteringOnceAllDatabases(nil)
+		db.runClusteringOnceAllDatabases(context.TODO())
 	})
 }
 

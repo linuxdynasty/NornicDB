@@ -1,10 +1,13 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/retention"
 )
 
 // =============================================================================
@@ -80,6 +83,24 @@ func (s *Server) handleGDPRDelete(w http.ResponseWriter, r *http.Request) {
 	if claims != nil && claims.Sub != req.UserID && !hasPermission(s, claims.Roles, auth.PermAdmin) {
 		s.writeError(w, http.StatusForbidden, "can only delete own data", ErrForbidden)
 		return
+	}
+
+	if rm := s.db.GetRetentionManager(); rm != nil {
+		if rm.IsUnderLegalHold(req.UserID, "") {
+			s.writeError(w, http.StatusConflict,
+				"user data is under legal hold and cannot be deleted", ErrForbidden)
+			return
+		}
+
+		erasureReq, err := rm.CreateErasureRequest(req.UserID, "")
+		if err != nil && !errors.Is(err, retention.ErrErasureInProgress) {
+			s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
+			return
+		}
+		if erasureReq != nil {
+			s.logAudit(r, req.UserID, "gdpr_erasure_created", true,
+				fmt.Sprintf("request_id: %s, deadline: %s", erasureReq.ID, erasureReq.Deadline.Format(time.RFC3339)))
+		}
 	}
 
 	var err error

@@ -7,6 +7,7 @@ This section is the canonical runbook set for deploying, operating, and recoveri
 - Production setup: [deployment.md](deployment.md)
 - Runtime configuration: [configuration.md](configuration.md)
 - Environment variables: [environment-variables.md](environment-variables.md)
+- Retention policy setup: [../user-guides/retention-policies.md](../user-guides/retention-policies.md)
 - Symptom-based triage: [troubleshooting.md](troubleshooting.md)
 - Global issue map: [../ISSUES-INDEX.md](../ISSUES-INDEX.md)
 

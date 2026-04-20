@@ -7,7 +7,55 @@ It provides `Manager`, `Policy`, `LegalHold`, `ErasureRequest`, `ProcessRecord()
 `ProcessErasure()`, `DefaultPolicies()`, `SavePolicies()`/`LoadPolicies()`, and delete/archive
 callbacks. Everything compiles and passes tests.
 
-**However, nothing connects it to the running server.**
+The runtime integration is now in place across config, DB lifecycle, GDPR flows, admin HTTP APIs,
+and audit callback wiring.
+
+Retention enforcement is now disabled by default and opt-in. When disabled, the retention
+manager is not created, no retention sweep worker starts, and no policy state is persisted on shutdown.
+
+## Implementation Tracker
+
+- [x] Phase 1: Wire `retention.Manager` into DB lifecycle
+- [x] Phase 2: Add background retention sweep and shutdown persistence
+- [x] Phase 3: Extend config for label exclusions, policies, and generic GDPR subject selectors
+- [x] Phase 4: Add retention admin HTTP API
+- [x] Phase 5: Integrate GDPR delete flow with legal holds and erasure tracking
+- [x] Phase 6: Wire audit logging for retention actions
+- [x] Tests: Add unit and integration coverage, including connected-edge deletion assertions
+
+## Completion Snapshot
+
+Completed:
+
+- retention manager creation is gated by `Compliance.RetentionEnabled`
+- retention sweeping only starts when retention is explicitly enabled
+- shutdown policy persistence only runs when a retention manager exists
+- GDPR delete flow now checks legal holds and creates erasure requests
+- retention admin endpoints are implemented and return `503` when retention is disabled
+- subject matching and anonymization are config-driven rather than tied to one property name
+- user-facing docs now describe retention as a default-off, opt-in feature
+
+## Review Corrections Applied To This Plan
+
+These corrections come from comparing this finish plan to the current repository state and to the older implementation-plan document.
+
+1. **The finish plan is the source of truth; the older implementation plan is stale.**
+    The older plan still proposes adding retention config to `pkg/nornicdb`, assumes DB-owned audit logging, and misses the real search-index removal signature. Those details are incorrect for the current codebase.
+
+2. **GDPR subject ownership must be generic and config-driven.**
+    The existing `ExportUserData`, `DeleteUserData`, and `AnonymizeUserData` implementations are hard-coded to `owner_id`, which is too data-model-specific. This plan now requires configurable subject selectors instead of any baked-in knowledge of application schemas.
+
+3. **Retention remains data-model-agnostic; labels are the primary Neo4j-like control surface.**
+    Retention category inference should prefer labels first, then optional configurable property/category hints. Retention must not require application-specific labels or properties to exist.
+
+4. **Audit callback wiring must happen when the audit logger is attached, not only during server construction.**
+    `Server.New()` does not yet have an audit logger; the logger is attached later via `SetAuditLogger()`. Retention audit callback installation must therefore be updated there as well.
+
+5. **Retention route registration must cover item routes, not only collection routes.**
+    The HTTP plan needs handlers for both collection endpoints and ID-specific endpoints such as `/admin/retention/policies/{id}`, `/admin/retention/holds/{id}`, and `/admin/retention/erasures/{id}/process`.
+
+6. **Tests that delete nodes must also verify connected edges are removed.**
+    This is already a storage invariant, but retention and GDPR integration tests must assert it explicitly at the API/DB integration level as well.
 
 The `pkg/config` package parses `compliance.retention_*` fields from YAML and env vars into
 `ComplianceConfig` fields (`RetentionEnabled`, `RetentionPolicyDays`, `RetentionAutoDelete`,
@@ -96,6 +144,13 @@ These are important for anyone implementing the plan:
     cannot be implemented inside the retention manager — it must happen in the sweep loop
     before calling `ShouldDelete`.
 
+11. **Server audit logger is attached after construction**: Retention audit callback wiring must
+    be installed from `SetAuditLogger()` too, not just `New()`.
+
+12. **Current GDPR helpers are hard-coded to `owner_id`**: This is an implementation bug relative
+    to the product goal. Generic subject matching must be configured through `pkg/config` rather
+    than by adding more schema assumptions into `pkg/nornicdb`.
+
 ---
 
 ## Neo4j-Like Developer Ergonomics — Design Principles
@@ -119,6 +174,11 @@ NornicDB should feel like Neo4j to developers using retention. That means:
    - Per-category policy → checked against `CreatedAt`
    - Default policy → fallback when no category matches
    - No policy found → node is retained (safe default)
+
+5. **GDPR subject matching must not assume a fixed application schema**.
+    The database engine should not need to know whether the application uses `owner_id`,
+    `user_id`, `created_by`, `account_id`, or something else. Subject matching and anonymization
+    fields must be configured, with safe defaults for simple deployments.
 
 ---
 
@@ -504,7 +564,8 @@ The sweep implementation provides these guarantees:
 
 ## Phase 3: Extended Config — Label Exclusions and Per-Category Policies
 
-**Goal**: Let users define label exclusions and full `retention.Policy` objects in `config.yaml`.
+**Goal**: Let users define label exclusions and full `retention.Policy` objects in `config.yaml`,
+and make GDPR subject identification/anonymization configurable instead of schema-specific.
 
 ### 3.1 Add retention section to config
 
@@ -530,7 +591,7 @@ type RetentionPolicyConfig struct {
 type RetentionConfig struct {
     // SweepInterval controls how often the retention sweep runs (e.g. "1h", "30m").
     // Default: "1h"
-    SweepInterval string `yaml:"sweep_interval"`
+    SweepInterval int `yaml:"sweep_interval"`
 
     // ExcludedLabels lists node labels that are exempt from ALL retention policies.
     // If a node has ANY of these labels, it is retained indefinitely regardless of
@@ -569,17 +630,52 @@ type Config struct {
 }
 ```
 
+### 3.1.1 Add generic GDPR subject selector config
+
+**File**: `pkg/config/config.go` — extend `ComplianceConfig`
+
+```go
+type ComplianceConfig struct {
+        // ... existing fields ...
+
+        // Nodes are considered to belong to a data subject when any of these properties
+        // equals the requested subject ID.
+        SubjectIdentifierProperties []string
+
+        // During anonymization, these properties have their values replaced with the
+        // generated pseudonymous ID. If empty, SubjectIdentifierProperties are reused.
+        SubjectPseudonymizeProperties []string
+
+        // These properties are removed during anonymization.
+        SubjectRedactProperties []string
+}
+```
+
+Recommended defaults for backward compatibility:
+
+```yaml
+compliance:
+    subject_identifier_properties: [owner_id]
+    subject_pseudonymize_properties: [owner_id]
+    subject_redact_properties: [email, name, username, ip_address]
+```
+
+This preserves today's simple behavior while moving the schema knowledge into configuration.
+
 ### 3.2 Add env var support
 
 New env vars in `LoadFromEnv()`:
 
 | Env Var                                | Field                       | Example                                         |
 | -------------------------------------- | --------------------------- | ----------------------------------------------- |
-| `NORNICDB_RETENTION_SWEEP_INTERVAL`    | `Retention.SweepInterval`   | `"30m"`                                         |
+| `NORNICDB_RETENTION_SWEEP_INTERVAL`    | `Retention.SweepIntervalSeconds`   | `1800`                                         |
 | `NORNICDB_RETENTION_EXCLUDED_LABELS`   | `Retention.ExcludedLabels`  | `"AuditLog,System,LegalHold"` (comma-separated) |
 | `NORNICDB_RETENTION_POLICIES_FILE`     | `Retention.PoliciesFile`    | `"/etc/nornicdb/policies.json"`                 |
 | `NORNICDB_RETENTION_DEFAULT_POLICIES`  | `Retention.DefaultPolicies` | `"true"`                                        |
 | `NORNICDB_RETENTION_MAX_SWEEP_RECORDS` | `Retention.MaxSweepRecords` | `"100000"`                                      |
+| `NORNICDB_SUBJECT_IDENTIFIER_PROPERTIES` | `Compliance.SubjectIdentifierProperties` | `"owner_id,user_id,created_by"` |
+| `NORNICDB_SUBJECT_PSEUDONYMIZE_PROPERTIES` | `Compliance.SubjectPseudonymizeProperties` | `"owner_id,user_id"` |
+| `NORNICDB_SUBJECT_REDACT_PROPERTIES` | `Compliance.SubjectRedactProperties` | `"email,name,username,ip_address"` |
 
 ### 3.3 Wire into Open()
 
@@ -633,7 +729,7 @@ compliance:
 
 # ─── Extended (new, neo4j-like) ───
 retention:
-  sweep_interval: "1h"
+    sweep_interval: 3600
   max_sweep_records: 50000
 
   # Label exclusions — the primary developer-facing control.
@@ -750,13 +846,19 @@ In `server_retention.go`:
 ```go
 func (s *Server) registerRetentionRoutes(mux *http.ServeMux) {
     mux.HandleFunc("/admin/retention/policies", s.withAuth(s.handleRetentionPolicies, auth.PermAdmin))
+    mux.HandleFunc("/admin/retention/policies/", s.withAuth(s.handleRetentionPolicyByID, auth.PermAdmin))
     mux.HandleFunc("/admin/retention/policies/defaults", s.withAuth(s.handleRetentionPolicyDefaults, auth.PermAdmin))
     mux.HandleFunc("/admin/retention/holds", s.withAuth(s.handleRetentionHolds, auth.PermAdmin))
+    mux.HandleFunc("/admin/retention/holds/", s.withAuth(s.handleRetentionHoldByID, auth.PermAdmin))
     mux.HandleFunc("/admin/retention/erasures", s.withAuth(s.handleRetentionErasures, auth.PermAdmin))
+    mux.HandleFunc("/admin/retention/erasures/", s.withAuth(s.handleRetentionErasureByID, auth.PermAdmin))
     mux.HandleFunc("/admin/retention/sweep", s.withAuth(s.handleRetentionSweep, auth.PermAdmin))
     mux.HandleFunc("/admin/retention/status", s.withAuth(s.handleRetentionStatus, auth.PermAdmin))
 }
 ```
+
+The exact split between collection and item handlers can vary, but the route plan must support
+both collection and per-resource operations.
 
 ---
 
@@ -837,6 +939,10 @@ db.SetRetentionAuditCallback(func(action, recordID, category string) {
 })
 ```
 
+**Correction**: Because the audit logger is attached after `New()` via `SetAuditLogger()`, the
+callback wiring must also be refreshed in `SetAuditLogger()` so retention audit logging is enabled
+whenever audit logging is turned on.
+
 ---
 
 ## File Change Summary
@@ -895,10 +1001,12 @@ Phases 3–6 are independent of each other and can proceed in parallel after Pha
 | Unit        | Already exists (886 lines)                                    | `pkg/retention/retention_test.go` ✅        |
 | Unit        | `nodeToDataRecord()`, `inferCategory()`, `hasExcludedLabel()` | `pkg/nornicdb/db_retention_test.go` (new)   |
 | Unit        | `retentionExcludedLabels()` with various configs              | `pkg/nornicdb/db_retention_test.go` (new)   |
+| Unit        | Generic subject selector matching and anonymization helpers   | `pkg/nornicdb/db_privacy_test.go`           |
 | Integration | Manager creation from compliance config values                | `pkg/nornicdb/db_test.go`                   |
 | Integration | Background sweep finds + processes expired nodes              | `pkg/nornicdb/db_retention_test.go` (new)   |
 | Integration | Sweep skips nodes with excluded labels                        | `pkg/nornicdb/db_retention_test.go` (new)   |
 | Integration | Sweep respects budget limit (stops at maxSweepRecords)        | `pkg/nornicdb/db_retention_test.go` (new)   |
+| Integration | GDPR delete removes connected edges when subject-owned nodes are deleted | `pkg/nornicdb/db_privacy_test.go` |
 | Integration | YAML policy loading → manager has correct policies            | `pkg/config/config_test.go`                 |
 | HTTP        | Retention admin endpoints CRUD                                | `pkg/server/server_retention_test.go` (new) |
 | HTTP        | GDPR delete blocked by legal hold                             | `pkg/server/server_gdpr_test.go`            |
@@ -944,6 +1052,10 @@ Phases 3–6 are independent of each other and can proceed in parallel after Pha
 8. **Edge cleanup is automatic**: `BadgerEngine.DeleteNode()` uses `deleteNodeInTxn` which
    deletes connected edges in the same transaction. The sweep does not need separate edge
    cleanup logic.
+
+9. **GDPR ownership cannot remain `owner_id`-specific**: The runtime currently assumes `owner_id`
+    in export/delete/anonymize flows. That must be refactored behind configuration-driven subject
+    selectors before retention/GDPR work is considered complete.
 
 ---
 

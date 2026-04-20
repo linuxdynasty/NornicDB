@@ -26,6 +26,7 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerAuthRoutes(mux)
 	s.registerNornicDBRoutes(mux)
 	s.registerAdminRoutes(mux)
+	s.registerRetentionRoutes(mux)
 	s.registerGDPRRoutes(mux)
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)

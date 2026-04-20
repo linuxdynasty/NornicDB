@@ -18,6 +18,7 @@ Use this section for task-oriented product workflows and examples.
 - Traverse relationships/paths: [graph-traversal.md](graph-traversal.md)
 - Manage NornicDB schema constraints and contracts: [managing-constraints.md](managing-constraints.md)
 - Use ACID transactions: [transactions.md](transactions.md)
+- Configure opt-in retention enforcement: [retention-policies.md](retention-policies.md)
 - Query historical state and retention: [historical-reads-mvcc-retention.md](historical-reads-mvcc-retention.md)
 - Operate MVCC lifecycle controls: [mvcc-lifecycle-admin-api.md](mvcc-lifecycle-admin-api.md)
 - Build distributed composite topology: [infinigraph-topology.md](infinigraph-topology.md)

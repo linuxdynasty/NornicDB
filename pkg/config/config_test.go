@@ -1173,6 +1173,62 @@ func TestLoadFromFile_MissingFileReturnsDefaults(t *testing.T) {
 	require.Equal(t, "nornic", cfg.Database.DefaultDatabase)
 }
 
+func TestLoadFromFile_RetentionAndSubjectSelectorConfig(t *testing.T) {
+	clearEnvVars(t)
+	path := filepath.Join(t.TempDir(), "retention.yaml")
+	err := os.WriteFile(path, []byte("compliance:\n"+
+		"  subject_identifier_properties: [account_id, created_by]\n"+
+		"  subject_pseudonymize_properties: [account_id]\n"+
+		"  subject_redact_properties: [full_name, contact_email]\n"+
+		"retention:\n"+
+		"  sweep_interval: 2700\n"+
+		"  excluded_labels: [AuditLog, System]\n"+
+		"  policies_file: \"/tmp/retention-policies.json\"\n"+
+		"  default_policies: true\n"+
+		"  max_sweep_records: 1234\n"+
+		"  policies:\n"+
+		"    - id: pii-1y\n"+
+		"      name: \"PII One Year\"\n"+
+		"      category: PII\n"+
+		"      retention_days: 365\n"), 0o600)
+	require.NoError(t, err)
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []string{"account_id", "created_by"}, cfg.Compliance.SubjectIdentifierProperties)
+	require.Equal(t, []string{"account_id"}, cfg.Compliance.SubjectPseudonymizeProperties)
+	require.Equal(t, []string{"full_name", "contact_email"}, cfg.Compliance.SubjectRedactProperties)
+	require.Equal(t, 2700, cfg.Retention.SweepIntervalSeconds)
+	require.Equal(t, []string{"AuditLog", "System"}, cfg.Retention.ExcludedLabels)
+	require.Equal(t, "/tmp/retention-policies.json", cfg.Retention.PoliciesFile)
+	require.True(t, cfg.Retention.DefaultPolicies)
+	require.Equal(t, 1234, cfg.Retention.MaxSweepRecords)
+	require.Len(t, cfg.Retention.Policies, 1)
+	require.Equal(t, "pii-1y", cfg.Retention.Policies[0].ID)
+}
+
+func TestLoadFromEnv_RetentionAndSubjectSelectorConfig(t *testing.T) {
+	clearEnvVars(t)
+	t.Setenv("NORNICDB_SUBJECT_IDENTIFIER_PROPERTIES", "account_id,created_by")
+	t.Setenv("NORNICDB_SUBJECT_PSEUDONYMIZE_PROPERTIES", "account_id")
+	t.Setenv("NORNICDB_SUBJECT_REDACT_PROPERTIES", "full_name,contact_email")
+	t.Setenv("NORNICDB_RETENTION_SWEEP_INTERVAL", "1800")
+	t.Setenv("NORNICDB_RETENTION_EXCLUDED_LABELS", "AuditLog,System")
+	t.Setenv("NORNICDB_RETENTION_POLICIES_FILE", "/etc/nornicdb/retention.json")
+	t.Setenv("NORNICDB_RETENTION_DEFAULT_POLICIES", "true")
+	t.Setenv("NORNICDB_RETENTION_MAX_SWEEP_RECORDS", "9876")
+
+	cfg := LoadFromEnv()
+	require.Equal(t, []string{"account_id", "created_by"}, cfg.Compliance.SubjectIdentifierProperties)
+	require.Equal(t, []string{"account_id"}, cfg.Compliance.SubjectPseudonymizeProperties)
+	require.Equal(t, []string{"full_name", "contact_email"}, cfg.Compliance.SubjectRedactProperties)
+	require.Equal(t, 1800, cfg.Retention.SweepIntervalSeconds)
+	require.Equal(t, []string{"AuditLog", "System"}, cfg.Retention.ExcludedLabels)
+	require.Equal(t, "/etc/nornicdb/retention.json", cfg.Retention.PoliciesFile)
+	require.True(t, cfg.Retention.DefaultPolicies)
+	require.Equal(t, 9876, cfg.Retention.MaxSweepRecords)
+}
+
 // TestLoadFromEnv_HeimdallProvider tests Heimdall provider env vars (openai/ollama/local).
 func TestLoadFromEnv_HeimdallProvider(t *testing.T) {
 	os.Setenv("NORNICDB_HEIMDALL_PROVIDER", "openai")

@@ -35,6 +35,35 @@ export NORNICDB_CONFIG=/config/nornicdb.yaml
 
 ## Core Configuration
 
+## Retention Policies Opt-In
+
+Runtime retention enforcement is disabled by default. Enable it explicitly with `compliance.retention_enabled: true` or `NORNICDB_RETENTION_ENABLED=true`.
+
+When retention is disabled:
+
+- no retention manager is created
+- no retention sweep background worker starts
+- no retention policy file is persisted on shutdown
+- retention admin endpoints return `503 Service Unavailable`
+
+Minimal opt-in example:
+
+```yaml
+compliance:
+  retention_enabled: true
+  retention_policy_days: 30
+  retention_auto_delete: false
+
+retention:
+  sweep_interval: 3600
+  default_policies: false
+  excluded_labels: ["AuditLog", "System"]
+```
+
+The `retention:` block is inert until retention is enabled.
+
+`retention.sweep_interval` must be specified as an integer number of seconds. Shorthand duration strings are not supported.
+
 ### Database Settings
 
 ```yaml

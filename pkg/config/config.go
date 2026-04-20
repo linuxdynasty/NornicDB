@@ -12,12 +12,8 @@
 //	if err != nil {
 //		log.Fatalf("Invalid config: %v", err)
 //	}
-//
-//	fmt.Printf("Bolt server: %s:%d\n",
-//		config.Server.BoltAddress, config.Server.BoltPort)
-//
+
 // Environment Variables (all use NORNICDB_ prefix):
-//
 // Authentication:
 //   - NORNICDB_AUTH="admin:admin" or "none"
 //   - NORNICDB_MIN_PASSWORD_LENGTH=8
@@ -60,8 +56,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all NornicDB configuration loaded from environment variables.
-//
 // Configuration is organized into logical sections:
 //   - Auth: Authentication and authorization
 //   - Database: Storage and transaction settings
@@ -99,6 +93,9 @@ type Config struct {
 
 	// Compliance settings for GDPR/HIPAA/FISMA/SOC2 (NornicDB-specific)
 	Compliance ComplianceConfig
+
+	// Retention settings (extended, label-aware)
+	Retention RetentionConfig
 
 	// Logging
 	Logging LoggingConfig
@@ -509,6 +506,7 @@ type ComplianceConfig struct {
 	AuditRetentionDays int // How long to keep audit logs (HIPAA: 6 years, SOC2: 7 years)
 
 	// Data Retention - Required by: GDPR Art.5(1)(e), HIPAA §164.530(j)
+	// Retention is opt-in and disabled by default.
 	RetentionEnabled     bool
 	RetentionPolicyDays  int      // Default retention period (0 = indefinite)
 	RetentionAutoDelete  bool     // Auto-delete vs archive after retention
@@ -529,6 +527,14 @@ type ComplianceConfig struct {
 	DataExportEnabled  bool // Right to data portability
 	DataErasureEnabled bool // Right to erasure/be forgotten
 	DataAccessEnabled  bool // Right of access
+	// SubjectIdentifierProperties lists properties used to associate a node with a data subject.
+	// Nodes are considered owned by a subject when any configured property matches the subject ID.
+	SubjectIdentifierProperties []string
+	// SubjectPseudonymizeProperties lists properties whose values should be replaced with an anonymized token.
+	// When empty, SubjectIdentifierProperties are used.
+	SubjectPseudonymizeProperties []string
+	// SubjectRedactProperties lists properties to remove from matching nodes during anonymization.
+	SubjectRedactProperties []string
 
 	// Anonymization - Required by: GDPR Recital 26
 	AnonymizationEnabled bool
@@ -543,6 +549,36 @@ type ComplianceConfig struct {
 	BreachDetectionEnabled bool
 	BreachNotifyEmail      string
 	BreachNotifyWebhook    string
+}
+
+// RetentionPolicyConfig defines a single retention policy in YAML config.
+type RetentionPolicyConfig struct {
+	ID                   string   `yaml:"id"`
+	Name                 string   `yaml:"name"`
+	Category             string   `yaml:"category"`
+	RetentionDays        int      `yaml:"retention_days"`
+	Indefinite           bool     `yaml:"indefinite"`
+	ArchiveBeforeDelete  bool     `yaml:"archive_before_delete"`
+	ArchivePath          string   `yaml:"archive_path"`
+	ComplianceFrameworks []string `yaml:"compliance_frameworks"`
+	Description          string   `yaml:"description"`
+	Active               *bool    `yaml:"active"`
+}
+
+// RetentionConfig holds extended retention configuration.
+type RetentionConfig struct {
+	// SweepIntervalSeconds controls how often the retention sweep runs in whole seconds.
+	SweepIntervalSeconds int
+	// ExcludedLabels lists labels that are globally exempt from retention deletion.
+	ExcludedLabels []string
+	// PoliciesFile is the optional JSON persistence path for retention policies.
+	PoliciesFile string
+	// DefaultPolicies loads the built-in compliance policies on startup.
+	DefaultPolicies bool
+	// MaxSweepRecords limits how many records a single sweep iteration will process.
+	MaxSweepRecords int
+	// Policies defines per-category policies inline in config.
+	Policies []RetentionPolicyConfig
 }
 
 // LoggingConfig holds logging settings.
@@ -1327,9 +1363,12 @@ type YAMLConfig struct {
 		EncryptionInTransit bool   `yaml:"encryption_in_transit"`
 		EncryptionKeyPath   string `yaml:"encryption_key_path"`
 		// Data Subject Rights
-		DataExportEnabled  bool `yaml:"data_export_enabled"`
-		DataErasureEnabled bool `yaml:"data_erasure_enabled"`
-		DataAccessEnabled  bool `yaml:"data_access_enabled"`
+		DataExportEnabled             bool     `yaml:"data_export_enabled"`
+		DataErasureEnabled            bool     `yaml:"data_erasure_enabled"`
+		DataAccessEnabled             bool     `yaml:"data_access_enabled"`
+		SubjectIdentifierProperties   []string `yaml:"subject_identifier_properties"`
+		SubjectPseudonymizeProperties []string `yaml:"subject_pseudonymize_properties"`
+		SubjectRedactProperties       []string `yaml:"subject_redact_properties"`
 		// Anonymization
 		AnonymizationEnabled bool   `yaml:"anonymization_enabled"`
 		AnonymizationMethod  string `yaml:"anonymization_method"`
@@ -1342,6 +1381,15 @@ type YAMLConfig struct {
 		BreachNotifyEmail      string `yaml:"breach_notify_email"`
 		BreachNotifyWebhook    string `yaml:"breach_notify_webhook"`
 	} `yaml:"compliance"`
+
+	Retention struct {
+		SweepInterval   int                     `yaml:"sweep_interval"`
+		ExcludedLabels  []string                `yaml:"excluded_labels"`
+		PoliciesFile    string                  `yaml:"policies_file"`
+		DefaultPolicies bool                    `yaml:"default_policies"`
+		MaxSweepRecords int                     `yaml:"max_sweep_records"`
+		Policies        []RetentionPolicyConfig `yaml:"policies"`
+	} `yaml:"retention"`
 
 	// Logging configuration
 	Logging struct {
@@ -1518,12 +1566,18 @@ func LoadDefaults() *Config {
 	config.Compliance.DataExportEnabled = true
 	config.Compliance.DataErasureEnabled = true
 	config.Compliance.DataAccessEnabled = true
+	config.Compliance.SubjectIdentifierProperties = []string{"owner_id"}
+	config.Compliance.SubjectPseudonymizeProperties = []string{"owner_id"}
+	config.Compliance.SubjectRedactProperties = []string{"email", "name", "username", "ip_address"}
 	config.Compliance.AnonymizationEnabled = true
 	config.Compliance.AnonymizationMethod = "pseudonymization"
 	config.Compliance.ConsentRequired = false
 	config.Compliance.ConsentVersioning = true
 	config.Compliance.ConsentAuditTrail = true
 	config.Compliance.BreachDetectionEnabled = false
+	config.Retention.SweepIntervalSeconds = 3600
+	config.Retention.DefaultPolicies = false
+	config.Retention.MaxSweepRecords = 50000
 
 	// Logging defaults
 	config.Logging.Level = "INFO"
@@ -2065,6 +2119,30 @@ func applyEnvVars(config *Config) error {
 	}
 	if v := getEnvStringSlice("NORNICDB_RETENTION_EXEMPT_ROLES", nil); len(v) > 0 {
 		config.Compliance.RetentionExemptRoles = v
+	}
+	if v := getEnvStringSlice("NORNICDB_SUBJECT_IDENTIFIER_PROPERTIES", nil); len(v) > 0 {
+		config.Compliance.SubjectIdentifierProperties = v
+	}
+	if v := getEnvStringSlice("NORNICDB_SUBJECT_PSEUDONYMIZE_PROPERTIES", nil); len(v) > 0 {
+		config.Compliance.SubjectPseudonymizeProperties = v
+	}
+	if v := getEnvStringSlice("NORNICDB_SUBJECT_REDACT_PROPERTIES", nil); len(v) > 0 {
+		config.Compliance.SubjectRedactProperties = v
+	}
+	if v := getEnvInt("NORNICDB_RETENTION_SWEEP_INTERVAL", 0); v > 0 {
+		config.Retention.SweepIntervalSeconds = v
+	}
+	if v := getEnvStringSlice("NORNICDB_RETENTION_EXCLUDED_LABELS", nil); len(v) > 0 {
+		config.Retention.ExcludedLabels = v
+	}
+	if v := getEnv("NORNICDB_RETENTION_POLICIES_FILE", ""); v != "" {
+		config.Retention.PoliciesFile = v
+	}
+	if getEnv("NORNICDB_RETENTION_DEFAULT_POLICIES", "") == "true" {
+		config.Retention.DefaultPolicies = true
+	}
+	if v := getEnvInt("NORNICDB_RETENTION_MAX_SWEEP_RECORDS", 0); v > 0 {
+		config.Retention.MaxSweepRecords = v
 	}
 	if getEnv("NORNICDB_ACCESS_CONTROL_ENABLED", "") == "false" {
 		config.Compliance.AccessControlEnabled = false
@@ -2920,6 +2998,15 @@ func LoadFromFile(configPath string) (*Config, error) {
 	if yamlCfg.Compliance.DataAccessEnabled {
 		config.Compliance.DataAccessEnabled = true
 	}
+	if len(yamlCfg.Compliance.SubjectIdentifierProperties) > 0 {
+		config.Compliance.SubjectIdentifierProperties = yamlCfg.Compliance.SubjectIdentifierProperties
+	}
+	if len(yamlCfg.Compliance.SubjectPseudonymizeProperties) > 0 {
+		config.Compliance.SubjectPseudonymizeProperties = yamlCfg.Compliance.SubjectPseudonymizeProperties
+	}
+	if len(yamlCfg.Compliance.SubjectRedactProperties) > 0 {
+		config.Compliance.SubjectRedactProperties = yamlCfg.Compliance.SubjectRedactProperties
+	}
 	if yamlCfg.Compliance.AnonymizationEnabled {
 		config.Compliance.AnonymizationEnabled = true
 	}
@@ -2943,6 +3030,26 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Compliance.BreachNotifyWebhook != "" {
 		config.Compliance.BreachNotifyWebhook = yamlCfg.Compliance.BreachNotifyWebhook
+	}
+
+	// === Retention Settings ===
+	if yamlCfg.Retention.SweepInterval > 0 {
+		config.Retention.SweepIntervalSeconds = yamlCfg.Retention.SweepInterval
+	}
+	if len(yamlCfg.Retention.ExcludedLabels) > 0 {
+		config.Retention.ExcludedLabels = yamlCfg.Retention.ExcludedLabels
+	}
+	if yamlCfg.Retention.PoliciesFile != "" {
+		config.Retention.PoliciesFile = yamlCfg.Retention.PoliciesFile
+	}
+	if yamlCfg.Retention.DefaultPolicies {
+		config.Retention.DefaultPolicies = true
+	}
+	if yamlCfg.Retention.MaxSweepRecords > 0 {
+		config.Retention.MaxSweepRecords = yamlCfg.Retention.MaxSweepRecords
+	}
+	if len(yamlCfg.Retention.Policies) > 0 {
+		config.Retention.Policies = append([]RetentionPolicyConfig(nil), yamlCfg.Retention.Policies...)
 	}
 
 	// === Logging Settings ===

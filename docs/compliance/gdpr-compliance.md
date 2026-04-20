@@ -1,302 +1,189 @@
 # GDPR Compliance
 
-**EU General Data Protection Regulation compliance features.**
+NornicDB provides GDPR-oriented export, erasure, anonymization, consent, audit, and access-control features. This guide documents the current runtime behavior and the current configuration surface.
 
-## Overview
-
-NornicDB provides built-in features to help organizations comply with GDPR requirements for processing personal data of EU residents.
-
-## Supported GDPR Articles
+## Supported Areas
 
 | Article | Requirement | NornicDB Feature |
 |---------|-------------|------------------|
-| Art.15 | Right of Access | Data export API |
-| Art.16 | Right to Rectification | Update APIs |
-| Art.17 | Right to Erasure | GDPR delete endpoint |
-| Art.20 | Data Portability | JSON/CSV export |
-| Art.25 | Privacy by Design | Encryption, minimization |
+| Art.15 | Right of Access | `POST /gdpr/export` |
+| Art.16 | Right to Rectification | Standard update APIs |
+| Art.17 | Right to Erasure | `POST /gdpr/delete` |
+| Art.20 | Data Portability | JSON or CSV export |
+| Art.25 | Privacy by Design | Configurable anonymization and retention controls |
 | Art.30 | Records of Processing | Audit logging |
-| Art.32 | Security | Encryption, access control |
+| Art.32 | Security of Processing | RBAC, session controls, encryption settings |
+
+## Configuration
+
+The relevant GDPR and compliance controls live under `compliance:`.
+
+```yaml
+compliance:
+  audit_enabled: true
+  audit_log_path: "./logs/audit.log"
+
+  data_export_enabled: true
+  data_erasure_enabled: true
+  data_access_enabled: true
+
+  anonymization_enabled: true
+  anonymization_method: "pseudonymization"
+
+  access_control_enabled: true
+  session_timeout: "30m"
+  max_failed_logins: 5
+  lockout_duration: "15m"
+
+  encryption_at_rest: false
+  encryption_in_transit: true
+
+  subject_identifier_properties: [owner_id, user_id, account_id, created_by]
+  subject_pseudonymize_properties: [owner_id, user_id, account_id, created_by]
+  subject_redact_properties: [email, name, username, ip_address]
+
+  retention_enabled: false
+  retention_policy_days: 0
+  retention_auto_delete: false
+  retention_exempt_roles: [admin]
+```
+
+### Subject Matching
+
+GDPR export, delete, and anonymize flows no longer assume a single schema-specific property such as `owner_id`.
+
+- `subject_identifier_properties` controls how a node is matched to a subject.
+- `subject_pseudonymize_properties` controls which properties are replaced with anonymized tokens.
+- `subject_redact_properties` controls which properties are removed entirely during anonymization.
+
+This lets the same runtime work across different data models without code changes.
+
+### Retention Interaction
+
+Retention is separate from GDPR, but the two are integrated when retention is enabled.
+
+- `retention_enabled` is disabled by default and fully opt-in.
+- if retention is enabled, `POST /gdpr/delete` checks legal holds before delete/anonymize
+- if retention is enabled, `POST /gdpr/delete` creates a tracked erasure request
+
+See [Retention Policies](../user-guides/retention-policies.md).
 
 ## Right of Access (Art.15)
 
-### Export User Data
+Use `POST /gdpr/export`.
 
 ```bash
-# Export all data for a user
-curl -X POST http://localhost:7474/nornicdb/gdpr/export \
+curl -X POST http://localhost:7474/gdpr/export \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"user_id": "user-123", "format": "json"}'
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-123","format":"json"}'
 ```
 
-### API Response
+Supported formats:
 
-```json
-{
-  "user_id": "user-123",
-  "export_date": "2024-12-01T10:00:00Z",
-  "data": {
-    "nodes": [...],
-    "edges": [...],
-    "properties": {...}
-  },
-  "format": "json"
-}
-```
+- `json`
+- `csv`
 
-### Code Example
-
-```go
-// Export user data
-exportData, err := db.ExportUserData(ctx, "user-123")
-if err != nil {
-    return err
-}
-
-// Generate portable format
-json.Marshal(exportData)
-```
+The caller can export only their own data unless they have admin permission.
 
 ## Right to Erasure (Art.17)
 
-### Delete User Data
+Use `POST /gdpr/delete`.
+
+Hard delete:
 
 ```bash
-# Request erasure of all user data
-curl -X DELETE http://localhost:7474/nornicdb/gdpr/user/user-123 \
-  -H "Authorization: Bearer $TOKEN"
+curl -X POST http://localhost:7474/gdpr/delete \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-123","confirm":true}'
 ```
 
-### Response
+Anonymize instead of delete:
+
+```bash
+curl -X POST http://localhost:7474/gdpr/delete \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-123","confirm":true,"anonymize":true}'
+```
+
+Current response shape:
 
 ```json
 {
-  "status": "completed",
-  "user_id": "user-123",
-  "deleted_nodes": 42,
-  "deleted_edges": 156,
-  "timestamp": "2024-12-01T10:00:00Z"
+  "status": "deleted",
+  "user_id": "user-123"
 }
 ```
 
-### Code Example
+Or, when anonymizing:
 
-```go
-// Delete all user data (GDPR erasure)
-err := db.DeleteUserData(ctx, "user-123")
-if err != nil {
-    return err
+```json
+{
+  "status": "anonymized",
+  "user_id": "user-123"
 }
-
-// Audit log is automatically created
-// Logs: "gdpr_delete", user_id, timestamp, count
 ```
 
-### Anonymization Alternative
-
-For data that cannot be deleted (legal requirements):
-
-```bash
-# Anonymize instead of delete
-curl -X POST http://localhost:7474/nornicdb/gdpr/anonymize/user-123 \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-```go
-// Anonymize user data
-err := db.AnonymizeUserData(ctx, "user-123")
-// Replaces personal data with anonymized values
-// Maintains data structure for analytics
-```
+If retention-backed legal holds are active, the endpoint returns `409 Conflict`.
 
 ## Data Portability (Art.20)
 
-### Export Formats
+Use the same export endpoint with the requested format.
 
 ```bash
-# JSON format (default)
-curl -X POST http://localhost:7474/nornicdb/gdpr/export \
-  -d '{"user_id": "user-123", "format": "json"}'
-
-# CSV format
-curl -X POST http://localhost:7474/nornicdb/gdpr/export \
-  -d '{"user_id": "user-123", "format": "csv"}'
+curl -X POST http://localhost:7474/gdpr/export \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"user-123","format":"csv"}'
 ```
 
-### Import to Another System
+## Anonymization Behavior
 
-```go
-// Export data
-exportData := db.ExportUserData(ctx, userID)
+`db.AnonymizeUserData()` uses the configured subject fields rather than hard-coded schema assumptions.
 
-// Data is in standard format
-// Can be imported to any compliant system
-```
-
-## Privacy by Design (Art.25)
-
-### Data Minimization
-
-```yaml
-# Configure data retention
-data_retention:
-  default_ttl: 365d
-  sensitive_data_ttl: 90d
-  auto_delete: true
-```
-
-### Encryption
-
-```yaml
-# Enable encryption for PHI/PII
-encryption:
-  enabled: true
-  fields:
-    - content
-    - personal_data
-    - health_records
-```
-
-See **[Encryption](encryption.md)** for details.
-
-## Records of Processing (Art.30)
-
-### Audit Trail
-
-All data processing activities are logged:
-
-```json
-{
-  "timestamp": "2024-12-01T10:00:00Z",
-  "type": "DATA_READ",
-  "user_id": "processor-123",
-  "resource": "patient-456",
-  "action": "READ",
-  "legal_basis": "consent",
-  "purpose": "healthcare"
-}
-```
-
-See **[Audit Logging](audit-logging.md)** for details.
-
-### Processing Register
-
-```bash
-# Generate processing activities report
-nornicdb gdpr report --type processing-register
-```
-
-## Security Measures (Art.32)
-
-### Technical Measures
-
-- ✅ AES-256-GCM encryption at rest
-- ✅ TLS 1.3 encryption in transit
-- ✅ RBAC access control
-- ✅ JWT authentication
-- ✅ Audit logging
-
-### Organizational Measures
-
-- ✅ Role-based permissions
-- ✅ Account lockout
-- ✅ Password policies
-- ✅ Session management
+- pseudonymized fields get replacement values
+- redacted fields are removed
+- graph shape is preserved for analytics and relationship continuity
 
 ## Consent Management
 
-### Record Consent
+Consent APIs remain available in code and can be used alongside GDPR workflows.
 
 ```go
-// Record user consent
 err := db.RecordConsent(ctx, &nornicdb.Consent{
-    UserID:  "user-123",
-    Purpose: "marketing",
-    Given:   true,
-    Source:  "web_form",
+	UserID:  "user-123",
+	Purpose: "marketing",
+	Given:   true,
+	Source:  "web_form",
 })
-if err != nil {
-    return err
-}
 ```
 
-### Check Consent
+## Audit And Security Controls
 
-```go
-// Verify consent before processing
-hasConsent, err := db.HasConsent(ctx, "user-123", "marketing")
-if err != nil {
-    return err
-}
-if !hasConsent {
-    return ErrNoConsent
-}
-```
+GDPR workflows rely on the broader compliance controls:
 
-### Revoke Consent
+- audit logging via `audit_enabled` and `audit_log_path`
+- authentication and RBAC around `/gdpr/export` and `/gdpr/delete`
+- session timeout and lockout controls
+- encryption-in-transit and at-rest settings
 
-```go
-// Revoke consent
-err := db.RevokeConsent(ctx, "user-123", "marketing")
-if err != nil {
-    return err
-}
-```
+See [Audit Logging](audit-logging.md), [RBAC](rbac.md), and [Encryption](encryption.md).
 
-### Get All User Consents
+## Practical Checklist
 
-```go
-// Get all consent records for a user (useful for GDPR access requests)
-consents, err := db.GetUserConsents(ctx, "user-123")
-if err != nil {
-    return err
-}
-for _, c := range consents {
-    fmt.Printf("Purpose: %s, Given: %v, Source: %s\n", c.Purpose, c.Given, c.Source)
-}
-```
-
-## Data Subject Requests
-
-### Handle Requests
-
-```go
-// Process data subject request
-request := &GDPRRequest{
-    Type:      "erasure",  // access, erasure, rectification, portability
-    UserID:    "user-123",
-    Requestor: "user-123",
-    Timestamp: time.Now(),
-}
-
-result, err := db.ProcessGDPRRequest(ctx, request)
-// Audit log created automatically
-```
-
-### Request Types
-
-| Request | API | Response Time |
-|---------|-----|---------------|
-| Access | `GET /gdpr/export` | 30 days max |
-| Erasure | `DELETE /gdpr/user` | 30 days max |
-| Rectification | `PUT /nodes/:id` | 30 days max |
-| Portability | `GET /gdpr/export` | 30 days max |
-
-## Compliance Checklist
-
-- [ ] Enable encryption for personal data
-- [ ] Configure audit logging
-- [ ] Set up RBAC
-- [ ] Implement consent management
-- [ ] Configure data retention policies
-- [ ] Test erasure procedures
-- [ ] Document processing activities
-- [ ] Assign Data Protection Officer
+- enable audit logging
+- confirm `data_export_enabled` and `data_erasure_enabled` are set appropriately
+- configure subject identifier, pseudonymize, and redact properties for your schema
+- enforce RBAC and session controls
+- decide whether retention is enabled and whether legal holds must participate in erasure
+- test both delete and anonymize flows with representative production-shaped data
 
 ## See Also
 
-- **[Encryption](encryption.md)** - Data protection
-- **[RBAC](rbac.md)** - Access control
-- **[Audit Logging](audit-logging.md)** - Processing records
-- **[HIPAA Compliance](hipaa-compliance.md)** - Healthcare data
+- [Retention Policies](../user-guides/retention-policies.md)
+- [Audit Logging](audit-logging.md)
+- [RBAC](rbac.md)
+- [HIPAA Compliance](hipaa-compliance.md)
 

@@ -1584,6 +1584,14 @@ func (s *Server) SetAuditLogger(logger *audit.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.audit = logger
+	if s.db != nil {
+		s.db.SetRetentionAuditCallback(func(action, recordID, category string) {
+			if s.audit == nil {
+				return
+			}
+			_ = s.audit.LogDataAccess("system", "retention-manager", "node", recordID, action, true, category)
+		})
+	}
 }
 
 func (s *Server) setHeimdallHandler(handler *heimdall.Handler) {

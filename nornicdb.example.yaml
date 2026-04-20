@@ -419,6 +419,51 @@ embedding_worker:
   # Env: NORNICDB_EMBED_CHUNK_SIZE
   chunk_size: 512
 
+# =============================================================================
+# COMPLIANCE / RETENTION
+# Docs: https://github.com/orneryd/NornicDB/blob/main/docs/user-guides/retention-policies.md
+# =============================================================================
+compliance:
+  # Retention is disabled by default and fully opt-in.
+  # When false, no retention manager is created and no retention sweep worker starts.
+  # Env: NORNICDB_RETENTION_ENABLED
+  retention_enabled: false
+
+  # Optional fallback retention period when retention is enabled but no explicit
+  # policy has been loaded for user-category data.
+  # Env: NORNICDB_RETENTION_POLICY_DAYS
+  retention_policy_days: 0
+
+  # When false, matching records are archived before delete.
+  # Env: NORNICDB_RETENTION_AUTO_DELETE
+  retention_auto_delete: false
+
+  # Roles exempt from retention-driven deletion logic.
+  # Env: NORNICDB_RETENTION_EXEMPT_ROLES
+  retention_exempt_roles: ["admin"]
+
+retention:
+  # These settings do nothing unless compliance.retention_enabled is true.
+
+  # Background sweep interval after retention is enabled, in whole seconds.
+  # Shorthand duration strings like "1h" or "30m" are not supported.
+  sweep_interval: 3600
+
+  # Load built-in retention policies at startup.
+  default_policies: false
+
+  # Limit the records processed by a single sweep iteration.
+  max_sweep_records: 50000
+
+  # Labels that are globally exempt from retention deletion.
+  excluded_labels: []
+
+  # Optional JSON persistence override.
+  policies_file: ""
+
+  # Optional inline policies.
+  policies: []
+
   # Chunk overlap (tokens)
   # Env: NORNICDB_EMBED_CHUNK_OVERLAP
   chunk_overlap: 50

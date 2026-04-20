@@ -207,6 +207,12 @@ with driver.session() as session:
 
 ## Features
 
+### Retention Policies
+
+Retention policy enforcement is available, but it is disabled by default and must be explicitly enabled. When retention is off, NornicDB does not create the retention manager and does not start the retention sweep background worker. When enabled, retention supports label-aware policy evaluation, legal holds, GDPR erasure tracking, and admin APIs.
+
+See [Retention Policies](docs/user-guides/retention-policies.md) and [Configuration](docs/operations/configuration.md#retention-policies-opt-in).
+
 ### 🔌 Neo4j Compatible
 
 Designed to work with existing Neo4j drivers and Bolt/Cypher workflows, with minimal or no application changes for supported query shapes.

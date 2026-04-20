@@ -125,10 +125,12 @@ package nornicdb
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,6 +145,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/replication"
+	"github.com/orneryd/nornicdb/pkg/retention"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/storage/lifecycle"
@@ -434,7 +437,9 @@ type DB struct {
 	// Optional: when set, getOrCreateSearchService uses this to get the reranker for a database (enables per-DB reranker).
 	rerankerResolver func(dbName string) search.Reranker
 
-	lifecycleManager *lifecycle.MVCCLifecycleManager
+	lifecycleManager  *lifecycle.MVCCLifecycleManager
+	retentionManager  *retention.Manager
+	onRetentionAction func(action, recordID, category string)
 }
 
 // DbConfigResolver returns effective embedding dimensions, search min similarity, and BM25 engine for a database.
@@ -891,6 +896,103 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			badgerEngine.SetLifecycleController(db.lifecycleManager)
 		}
 
+		if config.Compliance.RetentionEnabled {
+			rm := retention.NewManager()
+			policiesPath := db.retentionPoliciesPath()
+			if _, err := os.Stat(policiesPath); err == nil {
+				if loadErr := rm.LoadPolicies(policiesPath); loadErr != nil {
+					log.Printf("⚠️  Failed to load retention policies: %v", loadErr)
+				}
+			}
+
+			if config.Retention.DefaultPolicies {
+				for _, policy := range retention.DefaultPolicies() {
+					if err := rm.AddPolicy(policy); err != nil && !errors.Is(err, retention.ErrAlreadyExists) {
+						log.Printf("⚠️  Failed to add default retention policy %s: %v", policy.ID, err)
+					}
+				}
+			}
+
+			for _, policyConfig := range config.Retention.Policies {
+				active := true
+				if policyConfig.Active != nil {
+					active = *policyConfig.Active
+				}
+
+				policy := &retention.Policy{
+					ID:                   policyConfig.ID,
+					Name:                 policyConfig.Name,
+					Category:             retention.DataCategory(policyConfig.Category),
+					ArchiveBeforeDelete:  policyConfig.ArchiveBeforeDelete,
+					ArchivePath:          policyConfig.ArchivePath,
+					ComplianceFrameworks: append([]string(nil), policyConfig.ComplianceFrameworks...),
+					Description:          policyConfig.Description,
+					Active:               active,
+				}
+				if policyConfig.Indefinite {
+					policy.RetentionPeriod = retention.RetentionPeriod{Indefinite: true}
+				} else {
+					policy.RetentionPeriod = retention.RetentionPeriod{
+						Duration: time.Duration(policyConfig.RetentionDays) * 24 * time.Hour,
+					}
+				}
+				if err := rm.AddPolicy(policy); err != nil && !errors.Is(err, retention.ErrAlreadyExists) {
+					log.Printf("⚠️  Failed to add retention policy %s: %v", policyConfig.ID, err)
+				}
+			}
+
+			if len(rm.ListPolicies()) == 0 && config.Compliance.RetentionPolicyDays > 0 {
+				defaultPolicy := &retention.Policy{
+					ID:       "config-default",
+					Name:     "Default Retention Policy (from config)",
+					Category: retention.CategoryUser,
+					RetentionPeriod: retention.RetentionPeriod{
+						Duration: time.Duration(config.Compliance.RetentionPolicyDays) * 24 * time.Hour,
+					},
+					ArchiveBeforeDelete: !config.Compliance.RetentionAutoDelete,
+					ArchivePath:         filepath.Join(dataDir, "archive"),
+					Active:              true,
+				}
+				if err := rm.AddPolicy(defaultPolicy); err != nil {
+					log.Printf("⚠️  Failed to add default retention policy: %v", err)
+				}
+			}
+
+			rm.SetDeleteCallback(func(record *retention.DataRecord) error {
+				if err := db.storage.DeleteNode(storage.NodeID(record.ID)); err != nil {
+					return err
+				}
+				if db.onRetentionAction != nil {
+					db.onRetentionAction("RETENTION_DELETE", record.ID, string(record.Category))
+				}
+				return nil
+			})
+			rm.SetArchiveCallback(func(record *retention.DataRecord, archivePath string) error {
+				node, err := db.storage.GetNode(storage.NodeID(record.ID))
+				if err != nil {
+					return err
+				}
+				data, err := json.Marshal(node)
+				if err != nil {
+					return err
+				}
+				if err := os.MkdirAll(archivePath, 0755); err != nil {
+					return err
+				}
+				archiveFile := filepath.Join(archivePath, record.ID+".json")
+				if err := os.WriteFile(archiveFile, data, 0644); err != nil {
+					return err
+				}
+				if db.onRetentionAction != nil {
+					db.onRetentionAction("RETENTION_ARCHIVE", record.ID, string(record.Category))
+				}
+				return nil
+			})
+
+			db.retentionManager = rm
+			log.Printf("📋 Retention manager enabled (%d policies loaded)", len(rm.ListPolicies()))
+		}
+
 		// Initialize WAL for durability (uses batch sync mode by default for better performance)
 		walConfig := storage.DefaultWALConfig()
 		walConfig.Dir = dataDir + "/wal"
@@ -1227,6 +1329,9 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			} else {
 				log.Printf("🔄 MVCC lifecycle manager enabled in manual-only mode")
 			}
+		}
+		if db.config != nil && db.config.Compliance.RetentionEnabled && db.retentionManager != nil {
+			db.startRetentionSweep(db.buildCtx)
 		}
 
 		// Collect all database names: default plus any from storage namespace listing.
@@ -1700,6 +1805,30 @@ func (db *DB) Close() error {
 	return db.closeInternal()
 }
 
+// GetRetentionManager returns the retention manager or nil when retention is disabled.
+func (db *DB) GetRetentionManager() *retention.Manager {
+	return db.retentionManager
+}
+
+// SetRetentionAuditCallback installs a callback invoked after retention archive/delete actions.
+func (db *DB) SetRetentionAuditCallback(fn func(action, recordID, category string)) {
+	db.onRetentionAction = fn
+}
+
+func (db *DB) retentionPoliciesPath() string {
+	if db == nil || db.config == nil {
+		return "retention-policies.json"
+	}
+	if path := strings.TrimSpace(db.config.Retention.PoliciesFile); path != "" {
+		return path
+	}
+	dataDir := strings.TrimSpace(db.config.Database.DataDir)
+	if dataDir == "" {
+		return "retention-policies.json"
+	}
+	return filepath.Join(dataDir, "retention-policies.json")
+}
+
 // closeInternal performs cleanup without requiring the lock.
 // Used during initialization failures and normal close.
 func (db *DB) closeInternal() error {
@@ -1725,6 +1854,12 @@ func (db *DB) closeInternal() error {
 	db.bgWg.Wait()
 
 	var errs []error
+
+	if db.retentionManager != nil && db.config != nil {
+		if err := db.retentionManager.SavePolicies(db.retentionPoliciesPath()); err != nil {
+			log.Printf("⚠️  Failed to save retention policies: %v", err)
+		}
+	}
 
 	// Persist search indexes on shutdown only when persistence is enabled.
 	if db.config != nil && db.config.Database.PersistSearchIndexes && db.config.Database.DataDir != "" {

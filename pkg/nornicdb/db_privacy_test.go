@@ -62,18 +62,63 @@ func TestDeleteUserData(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("deletes user data", func(t *testing.T) {
-		db, err := Open(t.TempDir(), nil)
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = false
+		cfg.Database.AsyncWritesEnabled = false
+		db, err := Open(t.TempDir(), cfg)
 		require.NoError(t, err)
 		defer db.Close()
 
-		// Create nodes owned by user
-		db.CreateNode(ctx, []string{"GDPRDeleteTest"}, map[string]interface{}{
+		first, err := db.CreateNode(ctx, []string{"GDPRDeleteTest"}, map[string]interface{}{
 			"owner_id": "gdpr-user-delete-456",
 			"content":  "To delete",
 		})
+		require.NoError(t, err)
+		second, err := db.CreateNode(ctx, []string{"GDPRDeleteTest"}, map[string]interface{}{
+			"owner_id": "gdpr-user-delete-456",
+			"content":  "Also delete",
+		})
+		require.NoError(t, err)
+		edge, err := db.CreateEdge(ctx, first.ID, second.ID, "LINKED_TO", nil)
+		require.NoError(t, err)
 
 		err = db.DeleteUserData(ctx, "gdpr-user-delete-456")
 		require.NoError(t, err)
+
+		_, err = db.GetNode(ctx, first.ID)
+		assert.Error(t, err)
+		_, err = db.GetNode(ctx, second.ID)
+		assert.Error(t, err)
+		allEdges, err := db.storage.AllEdges()
+		require.NoError(t, err)
+		for _, existingEdge := range allEdges {
+			assert.NotEqual(t, edge.ID, string(existingEdge.ID))
+			assert.NotEqual(t, first.ID, string(existingEdge.StartNode))
+			assert.NotEqual(t, first.ID, string(existingEdge.EndNode))
+			assert.NotEqual(t, second.ID, string(existingEdge.StartNode))
+			assert.NotEqual(t, second.ID, string(existingEdge.EndNode))
+		}
+	})
+
+	t.Run("deletes user data using configured subject selector", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = false
+		cfg.Database.AsyncWritesEnabled = false
+		cfg.Compliance.SubjectIdentifierProperties = []string{"account_id"}
+		db, err := Open(t.TempDir(), cfg)
+		require.NoError(t, err)
+		defer db.Close()
+
+		node, err := db.CreateNode(ctx, []string{"GDPRDeleteTest"}, map[string]interface{}{
+			"account_id": "acct-456",
+			"content":    "Configured selector",
+		})
+		require.NoError(t, err)
+
+		err = db.DeleteUserData(ctx, "acct-456")
+		require.NoError(t, err)
+		_, err = db.GetNode(ctx, node.ID)
+		assert.Error(t, err)
 	})
 
 	t.Run("returns error when closed", func(t *testing.T) {
@@ -115,6 +160,36 @@ func TestAnonymizeUserData(t *testing.T) {
 		assert.Nil(t, updated.Properties["ip_address"])
 		// Owner ID should be anonymized
 		assert.NotEqual(t, "gdpr-user-anon-789", updated.Properties["owner_id"])
+	})
+
+	t.Run("anonymizes using configured pseudonymize and redact properties", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Memory.AutoLinksEnabled = false
+		cfg.Database.AsyncWritesEnabled = false
+		cfg.Compliance.SubjectIdentifierProperties = []string{"account_id"}
+		cfg.Compliance.SubjectPseudonymizeProperties = []string{"account_id", "created_by"}
+		cfg.Compliance.SubjectRedactProperties = []string{"full_name", "contact_email"}
+		db, err := Open(t.TempDir(), cfg)
+		require.NoError(t, err)
+		defer db.Close()
+
+		node, err := db.CreateNode(ctx, []string{"GDPRAnonTest"}, map[string]interface{}{
+			"account_id":    "acct-789",
+			"created_by":    "acct-789",
+			"full_name":     "Alice Smith",
+			"contact_email": "alice@example.com",
+		})
+		require.NoError(t, err)
+
+		err = db.AnonymizeUserData(ctx, "acct-789")
+		require.NoError(t, err)
+
+		updated, err := db.GetNode(ctx, node.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, "acct-789", updated.Properties["account_id"])
+		assert.NotEqual(t, "acct-789", updated.Properties["created_by"])
+		assert.Nil(t, updated.Properties["full_name"])
+		assert.Nil(t, updated.Properties["contact_email"])
 	})
 
 	t.Run("returns error when closed", func(t *testing.T) {

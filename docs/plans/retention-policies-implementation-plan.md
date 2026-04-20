@@ -1,5 +1,12 @@
 # Retention Policies — Full Implementation Plan
 
+> Superseded by `docs/plans/retention-policy-finish.md`.
+>
+> This earlier plan is retained for historical context only. It contains repository-specific
+> assumptions that are no longer correct, including adding retention config in `pkg/nornicdb`,
+> DB-owned audit logging, and outdated runtime wiring details. Use the revised finish plan as the
+> execution source of truth.
+
 ## Overview
 
 The `pkg/retention` package is a **complete, well-tested library** with policies, legal holds, GDPR erasure requests, archive-before-delete, and JSON persistence. However, it is **entirely disconnected from the running server**. No startup code creates a `retention.Manager`, no background goroutine enforces policies, no HTTP endpoints expose the API, and the existing `config.yaml` compliance fields (`retention_enabled`, `retention_policy_days`, etc.) are parsed but never consumed by any runtime component.
@@ -380,7 +387,7 @@ if db.retentionManager != nil {
 ```go
 // Retention policies (extended, per-category)
 Retention struct {
-    SweepInterval string `yaml:"sweep_interval"` // e.g. "1h", "30m"
+    SweepInterval int `yaml:"sweep_interval"` // integer seconds
     PoliciesFile  string `yaml:"policies_file"`   // Path to policies JSON
     Policies []struct {
         ID                  string   `yaml:"id"`
@@ -410,7 +417,7 @@ compliance:
 
 # Extended (new) — per-category:
 retention:
-  sweep_interval: "1h"
+    sweep_interval: 3600
   default_policies: true  # Start with built-in HIPAA/GDPR/SOX policies
   policies:
     - id: pii-1y

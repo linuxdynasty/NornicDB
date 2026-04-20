@@ -1535,7 +1535,7 @@ func (db *DB) ExportUserData(ctx context.Context, userID, format string) ([]byte
 	// Collect user data using streaming
 	var userData []map[string]interface{}
 	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
-		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
+		if db.nodeMatchesSubject(n, userID) {
 			userData = append(userData, map[string]interface{}{
 				"id":         string(n.ID),
 				"labels":     n.Labels,
@@ -1652,7 +1652,7 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 	// Collect IDs to delete first (can't delete while iterating)
 	var toDelete []storage.NodeID
 	err := storage.StreamNodesWithFallback(ctx, storageEngine, 1000, func(n *storage.Node) error {
-		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
+		if db.nodeMatchesSubject(n, userID) {
 			toDelete = append(toDelete, n.ID)
 		}
 		return nil
@@ -1693,36 +1693,8 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 	// We must make copies since other goroutines might be iterating over these nodes
 	var toUpdate []*storage.Node
 	err := storage.StreamNodesWithFallback(ctx, storageEngine, 1000, func(n *storage.Node) error {
-		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
-			// Make a deep copy of the node to avoid concurrent modification
-			nodeCopy := &storage.Node{
-				ID:           n.ID,
-				Labels:       append([]string(nil), n.Labels...),
-				Properties:   make(map[string]any, len(n.Properties)),
-				CreatedAt:    n.CreatedAt,
-				UpdatedAt:    n.UpdatedAt,
-				DecayScore:   n.DecayScore,
-				LastAccessed: n.LastAccessed,
-				AccessCount:  n.AccessCount,
-				ChunkEmbeddings: func() [][]float32 {
-					chunks := make([][]float32, len(n.ChunkEmbeddings))
-					for i, emb := range n.ChunkEmbeddings {
-						chunks[i] = append([]float32(nil), emb...)
-					}
-					return chunks
-				}(),
-			}
-			for k, v := range n.Properties {
-				nodeCopy.Properties[k] = v
-			}
-
-			// Replace identifying info in the copy
-			nodeCopy.Properties["owner_id"] = anonymousID
-			delete(nodeCopy.Properties, "email")
-			delete(nodeCopy.Properties, "name")
-			delete(nodeCopy.Properties, "username")
-			delete(nodeCopy.Properties, "ip_address")
-			toUpdate = append(toUpdate, nodeCopy)
+		if db.nodeMatchesSubject(n, userID) {
+			toUpdate = append(toUpdate, db.anonymizedNodeCopy(n, anonymousID))
 		}
 		return nil
 	})
@@ -1738,4 +1710,67 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 	}
 
 	return nil
+}
+
+func (db *DB) subjectIdentifierProperties() []string {
+	if db != nil && db.config != nil && len(db.config.Compliance.SubjectIdentifierProperties) > 0 {
+		return db.config.Compliance.SubjectIdentifierProperties
+	}
+	return []string{"owner_id"}
+}
+
+func (db *DB) subjectPseudonymizeProperties() []string {
+	if db != nil && db.config != nil && len(db.config.Compliance.SubjectPseudonymizeProperties) > 0 {
+		return db.config.Compliance.SubjectPseudonymizeProperties
+	}
+	return db.subjectIdentifierProperties()
+}
+
+func (db *DB) subjectRedactProperties() []string {
+	if db != nil && db.config != nil && len(db.config.Compliance.SubjectRedactProperties) > 0 {
+		return db.config.Compliance.SubjectRedactProperties
+	}
+	return []string{"email", "name", "username", "ip_address"}
+}
+
+func (db *DB) nodeMatchesSubject(node *storage.Node, subjectID string) bool {
+	if node == nil || subjectID == "" {
+		return false
+	}
+	for _, key := range db.subjectIdentifierProperties() {
+		if value, ok := node.Properties[key]; ok && fmt.Sprintf("%v", value) == subjectID {
+			return true
+		}
+	}
+	return false
+}
+
+func (db *DB) anonymizedNodeCopy(node *storage.Node, anonymousID string) *storage.Node {
+	nodeCopy := &storage.Node{
+		ID:           node.ID,
+		Labels:       append([]string(nil), node.Labels...),
+		Properties:   make(map[string]any, len(node.Properties)),
+		CreatedAt:    node.CreatedAt,
+		UpdatedAt:    node.UpdatedAt,
+		DecayScore:   node.DecayScore,
+		LastAccessed: node.LastAccessed,
+		AccessCount:  node.AccessCount,
+		ChunkEmbeddings: func() [][]float32 {
+			chunks := make([][]float32, len(node.ChunkEmbeddings))
+			for i, emb := range node.ChunkEmbeddings {
+				chunks[i] = append([]float32(nil), emb...)
+			}
+			return chunks
+		}(),
+	}
+	for k, v := range node.Properties {
+		nodeCopy.Properties[k] = v
+	}
+	for _, key := range db.subjectPseudonymizeProperties() {
+		nodeCopy.Properties[key] = anonymousID
+	}
+	for _, key := range db.subjectRedactProperties() {
+		delete(nodeCopy.Properties, key)
+	}
+	return nodeCopy
 }
