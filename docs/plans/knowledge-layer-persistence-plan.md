@@ -1556,4 +1556,396 @@ Named presets may remain in documentation for bootstrapping a memory decay model
 
 Property-level decay and promotion may affect vectorization and retrieval behavior, but properties remain stored in place and directly queryable in Cypher via `reveal()`. Archival is reserved for whole nodes and whole edges.
 
-Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity. Added indexed-property immunity: properties that participate in general indexes (lookup, range, composite, or any index used for aggregation and joining) are immune to decay scoring, decay hiding, and property-level exclusion; rules targeting indexed properties are rejected at creation time.
+Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity. Added indexed-property immunity: properties that participate in general indexes (lookup, range, composite, or any index used for aggregation and joining) are immune to decay scoring, decay hiding, and property-level exclusion; rules targeting indexed properties are rejected at creation time. Added Appendix A with a complete worked example implementing a modified Ebbinghaus model informed by the four-layer decomposition proposed in arXiv:2604.11364v1.
+
+---
+
+## Appendix A: Modified Ebbinghaus Model — Four-Layer Example
+
+This appendix demonstrates a complete decay and promotion configuration that implements a modified Ebbinghaus forgetting-curve model, informed by the four-layer decomposition proposed in Roynard (2026), "The Missing Knowledge Layer in Cognitive Architectures for AI Agents" ([arXiv:2604.11364v1](https://arxiv.org/pdf/2604.11364)).
+
+### A.1 Motivation
+
+The paper identifies a category error in existing memory systems: applying uniform cognitive decay to all content types. It calls out NornicDB specifically for "applying storage-level decay to permanent facts" and Signet for "uniform 0.95 days decay to all content types." The paper proposes a four-layer decomposition where each layer has distinct persistence semantics:
+
+| Layer | Content type | Persistence semantic | Decay behavior |
+|---|---|---|---|
+| **Knowledge** | Facts, claims, entities | Supersession, not forgetting | No decay; facts are replaced by newer evidence, never forgotten by time |
+| **Memory** | Experiences, episodes, sessions | Ebbinghaus-style forgetting | Exponential decay; consolidation on repeated access promotes to Knowledge |
+| **Wisdom** | Behavioral directives, patterns | Evidence-gated revision with stability tiers | No time-based decay; stability tiers gate revision, not forgetting |
+| **Intelligence** | The model itself | Frozen in weights | Outside the scope of this system |
+
+The standard Ebbinghaus model treats all content uniformly: `score = e^(-t / halfLife)`. The modified model applies different decay semantics per layer while using promotion policies to model consolidation — the process by which repeatedly accessed Memory content is promoted to Knowledge-tier durability.
+
+### A.2 Layer Labels
+
+This example uses NornicDB node labels to represent the four-layer decomposition:
+
+- `:KnowledgeFact` — durable facts, claims, entities (Knowledge layer)
+- `:MemoryEpisode` — ephemeral experiences, session records, observations (Memory layer)
+- `:WisdomDirective` — behavioral patterns, learned rules, procedural knowledge (Wisdom layer)
+- `:EVIDENCES` — edge type linking Memory episodes to Knowledge facts they support or contradict
+- `:CONSOLIDATES_TO` — edge type linking Memory episodes to Knowledge facts created through consolidation
+- `:DERIVED_FROM` — edge type linking Wisdom directives to the Knowledge or Memory entities they were derived from
+
+### A.3 Decay Profiles
+
+#### Knowledge layer — no decay
+
+Knowledge facts are permanent. They are superseded by newer evidence through graph operations (creating a new fact node and marking the old one as superseded), not by time-based decay. The Ebbinghaus curve does not apply here.
+
+```cypher
+CREATE DECAY PROFILE knowledge_fact_retention
+OPTIONS {
+  decayEnabled: false,
+  archiveThreshold: 0.0,
+  scope: 'NODE',
+  function: 'none',
+  scoreFrom: 'CREATED'
+}
+```
+
+```cypher
+CREATE DECAY PROFILE knowledge_fact_retention_binding
+FOR (n:KnowledgeFact)
+APPLY {
+  DECAY PROFILE 'knowledge_fact_retention'
+  n.sourceId NO DECAY
+  n.tenantId NO DECAY
+  n.claim NO DECAY
+  n.confidence NO DECAY
+  n.supersededBy NO DECAY
+}
+```
+
+#### Memory layer — Ebbinghaus exponential decay
+
+Memory episodes decay according to the Ebbinghaus forgetting curve. The half-life is 7 days (604800 seconds). Episodes that are not accessed or consolidated within this window lose score and eventually become invisible to queries. Archived episodes are deindexed but remain accessible through `reveal()`.
+
+```cypher
+CREATE DECAY PROFILE memory_episode_retention
+OPTIONS {
+  halfLifeSeconds: 604800,
+  archiveThreshold: 0.05,
+  scope: 'NODE',
+  function: 'exponential',
+  scoreFrom: 'VERSION'
+}
+```
+
+```cypher
+CREATE DECAY PROFILE memory_episode_retention_binding
+FOR (n:MemoryEpisode)
+APPLY {
+  DECAY PROFILE 'memory_episode_retention'
+  DECAY ARCHIVE THRESHOLD 0.05
+  n.tenantId NO DECAY
+  n.sessionId NO DECAY
+  n.summary DECAY RATE 1209600
+  n.summary DECAY FLOOR 0.10
+  n.ephemeralContext DECAY RATE 86400
+}
+```
+
+#### Memory episode summaries — property-level decay
+
+Episode summaries decay more slowly than the episode itself, reflecting that a summary may retain value even as the raw experience fades. The ephemeral context (working state, scratch data) decays aggressively at a 1-day half-life.
+
+#### Wisdom layer — no time-based decay
+
+Wisdom directives do not decay over time. They have stability tiers managed through promotion policies. A directive is revised only when evidence gates are met, not when time passes. This directly addresses the paper's observation that "knowing how" and "knowing that" are architecturally distinct.
+
+```cypher
+CREATE DECAY PROFILE wisdom_directive_retention
+OPTIONS {
+  decayEnabled: false,
+  archiveThreshold: 0.0,
+  scope: 'NODE',
+  function: 'none',
+  scoreFrom: 'CREATED'
+}
+```
+
+```cypher
+CREATE DECAY PROFILE wisdom_directive_retention_binding
+FOR (n:WisdomDirective)
+APPLY {
+  DECAY PROFILE 'wisdom_directive_retention'
+  n.tenantId NO DECAY
+  n.directive NO DECAY
+  n.stabilityTier NO DECAY
+  n.revisionLog NO DECAY
+}
+```
+
+#### Evidence edges — moderate decay
+
+Evidence edges linking Memory episodes to Knowledge facts decay at a moderate rate. Old evidence relationships lose weight over time, but the Knowledge fact they support does not decay. This models the intuition that the relevance of a specific piece of supporting evidence fades, even though the conclusion it supported remains durable.
+
+```cypher
+CREATE DECAY PROFILE evidence_edge_retention
+OPTIONS {
+  halfLifeSeconds: 2592000,
+  archiveThreshold: 0.10,
+  scope: 'EDGE',
+  function: 'exponential',
+  scoreFrom: 'CREATED'
+}
+```
+
+```cypher
+CREATE DECAY PROFILE evidence_edge_retention_binding
+FOR ()-[r:EVIDENCES]-()
+APPLY {
+  DECAY PROFILE 'evidence_edge_retention'
+  DECAY ARCHIVE THRESHOLD 0.10
+  r.sourceId NO DECAY
+}
+```
+
+#### Consolidation edges — no decay
+
+Consolidation edges are permanent records of the provenance chain from Memory to Knowledge. They do not decay because the fact that a Knowledge fact was consolidated from specific episodes is itself a durable claim.
+
+```cypher
+CREATE DECAY PROFILE consolidation_edge_retention
+FOR ()-[r:CONSOLIDATES_TO]-()
+APPLY {
+  NO DECAY
+  r.consolidatedAt NO DECAY
+  r.sourceId NO DECAY
+}
+```
+
+### A.4 Promotion Profiles
+
+#### Memory consolidation tiers
+
+These profiles model the Ebbinghaus spaced-repetition effect: repeated access strengthens the memory trace. The `consolidation_candidate` tier identifies episodes that have been accessed enough times to be candidates for consolidation into durable Knowledge facts.
+
+```cypher
+CREATE PROMOTION PROFILE memory_reinforced
+OPTIONS {
+  scope: 'NODE',
+  multiplier: 1.25,
+  scoreFloor: 0.0,
+  scoreCap: 1.0
+}
+
+CREATE PROMOTION PROFILE consolidation_candidate
+OPTIONS {
+  scope: 'NODE',
+  multiplier: 1.50,
+  scoreFloor: 0.80,
+  scoreCap: 1.0
+}
+```
+
+#### Wisdom stability tiers
+
+Wisdom directives use stability tiers rather than time-based decay. A directive that has been validated by multiple independent evidence sources is harder to revise — it requires stronger counter-evidence. This is the "evidence-gated revision" the paper describes.
+
+```cypher
+CREATE PROMOTION PROFILE wisdom_provisional
+OPTIONS {
+  scope: 'NODE',
+  multiplier: 1.0,
+  scoreFloor: 0.0,
+  scoreCap: 1.0
+}
+
+CREATE PROMOTION PROFILE wisdom_established
+OPTIONS {
+  scope: 'NODE',
+  multiplier: 1.0,
+  scoreFloor: 0.50,
+  scoreCap: 1.0
+}
+
+CREATE PROMOTION PROFILE wisdom_canonical
+OPTIONS {
+  scope: 'NODE',
+  multiplier: 1.0,
+  scoreFloor: 0.90,
+  scoreCap: 1.0
+}
+```
+
+### A.5 Promotion Policies
+
+#### Memory episode consolidation policy
+
+This policy implements the core Ebbinghaus modification: repeated access within the decay window promotes a Memory episode through reinforcement tiers. Episodes that reach `consolidation_candidate` status are flagged for the consolidation process, which creates a corresponding `:KnowledgeFact` node and a `:CONSOLIDATES_TO` edge.
+
+The `ON ACCESS` block tracks access count and last access time in the accessMeta index. The node itself is read-only — `n.accessCount` writes to accessMeta, and `n.accessCount` reads resolve from accessMeta first.
+
+```cypher
+CREATE PROMOTION POLICY memory_episode_consolidation
+FOR (n:MemoryEpisode)
+APPLY {
+  ON ACCESS {
+    SET n.accessCount = coalesce(n.accessCount, 0) + 1
+    SET n.lastAccessedAt = timestamp()
+    SET n.accessIntervals = coalesce(n.accessIntervals, '') + ',' + toString(timestamp())
+  }
+
+  WHEN n.accessCount >= 3
+    APPLY PROFILE 'memory_reinforced'
+
+  WHEN n.accessCount >= 5 AND n.sourceAgreement >= 0.80
+    APPLY PROFILE 'consolidation_candidate'
+}
+```
+
+The `consolidation_candidate` profile sets a score floor of `0.80`, which means even as the Ebbinghaus curve pulls the base score down, the promoted floor keeps the episode visible. This models the spaced-repetition finding that sufficiently rehearsed content resists forgetting.
+
+#### Wisdom directive stability policy
+
+Wisdom directives are not subject to time-based decay, but they have stability tiers that gate revision. A provisional directive can be revised by any contradicting evidence. An established directive requires multiple independent sources. A canonical directive requires overwhelming counter-evidence and is flagged for human review before revision.
+
+```cypher
+CREATE PROMOTION POLICY wisdom_directive_stability
+FOR (n:WisdomDirective)
+APPLY {
+  ON ACCESS {
+    SET n.evaluationCount = coalesce(n.evaluationCount, 0) + 1
+    SET n.lastEvaluatedAt = timestamp()
+  }
+
+  WHEN n.evidenceCount < 3
+    APPLY PROFILE 'wisdom_provisional'
+
+  WHEN n.evidenceCount >= 3 AND n.contradictionRate < 0.20
+    APPLY PROFILE 'wisdom_established'
+
+  WHEN n.evidenceCount >= 10 AND n.contradictionRate < 0.05 AND n.crossSessionSupport >= 3
+    APPLY PROFILE 'wisdom_canonical'
+}
+```
+
+Note: `n.evidenceCount`, `n.contradictionRate`, and `n.crossSessionSupport` in the `WHEN` predicates resolve from accessMeta first. If they are not present in accessMeta, they fall back to stored node properties. This allows external processes (e.g., a consolidation job) to write these values to either the node or to accessMeta depending on whether they should be durable or transient.
+
+#### Evidence edge traversal policy
+
+Evidence edges track traversal count to support ranking of evidence chains. More frequently traversed evidence links carry higher weight in retrieval even as their base decay score drops.
+
+```cypher
+CREATE PROMOTION PROFILE reinforced_evidence
+OPTIONS {
+  scope: 'EDGE',
+  multiplier: 1.20,
+  scoreFloor: 0.0,
+  scoreCap: 1.0
+}
+```
+
+```cypher
+CREATE PROMOTION POLICY evidence_traversal_tiering
+FOR ()-[r:EVIDENCES]-()
+APPLY {
+  ON ACCESS {
+    SET r.traversalCount = coalesce(r.traversalCount, 0) + 1
+    SET r.lastTraversedAt = timestamp()
+  }
+
+  WHEN r.traversalCount >= 5
+    APPLY PROFILE 'reinforced_evidence'
+}
+```
+
+### A.6 Resolution Walkthrough
+
+This section walks through the complete resolution sequence for a query that touches all three layers, illustrating how the modified Ebbinghaus model behaves at runtime.
+
+#### Query
+
+```cypher
+MATCH (k:KnowledgeFact {claim: 'LoRA achieves 95% of full fine-tuning quality'})
+OPTIONAL MATCH (m:MemoryEpisode)-[e:EVIDENCES]->(k)
+OPTIONAL MATCH (w:WisdomDirective)-[:DERIVED_FROM]->(k)
+RETURN k, decayScore(k) AS kScore,
+       collect(m) AS episodes, collect(decayScore(m)) AS mScores,
+       collect(w) AS directives, collect(policy(w)) AS wMeta
+```
+
+#### Step-by-step resolution
+
+**1. Promotion policy resolution (first)**
+
+For each touched entity, the engine resolves the matching promotion policy:
+
+- `k:KnowledgeFact` — no promotion policy matches (no policy defined for `:KnowledgeFact`). Neutral promotion effect.
+- `m:MemoryEpisode` — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` is incremented in accessMeta, `n.lastAccessedAt` is set. If `accessCount >= 3`, `memory_reinforced` profile is selected. If `accessCount >= 5 AND sourceAgreement >= 0.80`, `consolidation_candidate` profile is selected.
+- `e:EVIDENCES` — `evidence_traversal_tiering` matches. `ON ACCESS` executes: `r.traversalCount` is incremented in accessMeta. If `traversalCount >= 5`, `reinforced_evidence` profile is selected.
+- `w:WisdomDirective` — `wisdom_directive_stability` matches. `ON ACCESS` executes: `n.evaluationCount` is incremented in accessMeta. Stability tier is selected based on `evidenceCount` and `contradictionRate`.
+
+**2. Decay profile resolution (second)**
+
+For each touched entity, the engine resolves the matching decay profile:
+
+- `k:KnowledgeFact` — `knowledge_fact_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`. No decay.
+- `m:MemoryEpisode` — `memory_episode_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 604800`, `scoreFrom: 'VERSION'`. Base score computed from Ebbinghaus curve: `score = e^(-t * ln(2) / 604800)` where `t` is seconds since last version.
+- `e:EVIDENCES` — `evidence_edge_retention_binding` matches. `function: 'exponential'`, `halfLifeSeconds: 2592000`, `scoreFrom: 'CREATED'`. Base score computed from creation time.
+- `w:WisdomDirective` — `wisdom_directive_retention_binding` matches. `decayEnabled: false`. Base score: `1.0`. No decay.
+
+**3. Final score computation**
+
+The promotion adjustments are applied to the base decay score:
+
+- `k`: base `1.0`, no promotion → final `1.0`. Always visible.
+- `m` (accessed 4 times, 3 days old): base `e^(-259200 * 0.693 / 604800) = 0.749`, promotion `memory_reinforced` multiplier `1.25` → final `min(0.749 * 1.25, 1.0) = 0.936`. Visible.
+- `m` (accessed 1 time, 10 days old): base `e^(-864000 * 0.693 / 604800) = 0.317`, no promotion → final `0.317`. Visible but low-ranked.
+- `m` (accessed 0 times, 20 days old): base `e^(-1728000 * 0.693 / 604800) = 0.100`, no promotion → final `0.100`. At archive threshold. Likely invisible.
+- `e` (created 15 days ago, traversed 6 times): base `e^(-1296000 * 0.693 / 2592000) = 0.707`, promotion `reinforced_evidence` multiplier `1.20` → final `min(0.707 * 1.20, 1.0) = 0.849`. Visible.
+- `w`: base `1.0`, promotion `wisdom_established` floor `0.50` → final `1.0`. Always visible.
+
+**4. Visibility determination**
+
+Entities with final scores below their archive threshold are suppressed from query results:
+
+- The 20-day-old episode with final score `0.100` is at the archive threshold of `0.05` — still visible but will become invisible as time advances.
+- Once an episode crosses below `0.05`, it is invisible to `MATCH` unless accessed through `reveal()`.
+- Knowledge facts and Wisdom directives are always visible because they have no decay.
+
+**5. Accessing invisible entities**
+
+To inspect archived or invisible Memory episodes for diagnostics or consolidation review:
+
+```cypher
+MATCH (m:MemoryEpisode {sessionId: $sessionId})
+RETURN reveal(m) AS rawEpisode,
+       decay(m) AS decayMeta,
+       policy(m) AS accessMeta,
+       decayScore(m) AS score
+```
+
+This returns the episode regardless of its score, along with full diagnostic metadata.
+
+### A.7 Addressing the Paper's Critique
+
+This configuration directly addresses the paper's identified problems:
+
+| Paper critique | How the modified model addresses it |
+|---|---|
+| "NornicDB applying storage-level decay to permanent facts" | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through graph operations, not decay. |
+| "Systems either forget what they should remember or remember what they should forget" | The four-layer label scheme applies different decay semantics per content type. Knowledge persists. Memory decays. Wisdom is stability-gated. |
+| "Signet applies uniform 0.95 days decay to all content types" | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life. |
+| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, and visibility behavior. |
+| "Knowing how and knowing that are architecturally distinct" | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision. `:KnowledgeFact` (knowing that) uses supersession. Different update mechanics. |
+| "Consolidation as a first-class operation" | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
+
+### A.8 Key Design Decisions
+
+1. **Decay applies only to the Memory layer.** Knowledge and Wisdom do not decay over time. This is the core departure from uniform Ebbinghaus.
+
+2. **Consolidation is promotion-driven.** Repeated access promotes a Memory episode through reinforcement tiers until it reaches `consolidation_candidate` status. An external consolidation process then creates a `:KnowledgeFact` and a `:CONSOLIDATES_TO` edge. The policy subsystem identifies candidates; the graph operation performs the consolidation.
+
+3. **Wisdom uses stability tiers, not decay.** A Wisdom directive's durability comes from evidence accumulation, not from time-based score. The promotion policy selects the stability tier; the tier determines how much counter-evidence is needed for revision.
+
+4. **Evidence edges decay but facts do not.** The relevance of a specific piece of evidence fades over time, but the conclusion it supports persists. This mirrors how human semantic memory works: you remember that LoRA is effective, but you forget which specific experiment convinced you.
+
+5. **accessMeta tracks access patterns without mutating nodes.** All access counters, timestamps, and interval tracking live in the accessMeta index. The nodes and edges themselves are read-only during policy evaluation. This preserves MVCC integrity and avoids creating new stored versions solely because access state changed.
+
+6. **`reveal()` enables diagnostics and consolidation.** Invisible Memory episodes remain accessible through `reveal()` for consolidation review, audit, and diagnostics. Nothing is truly lost — it is scored out of default visibility.
+
+7. **Indexed properties are immune.** Properties like `tenantId`, `sessionId`, and `sourceId` that participate in general indexes are declared `NO DECAY` and are immune to decay scoring and hiding, ensuring aggregation and joining remain stable.
