@@ -59,6 +59,62 @@ Use `retention.default_policies` to load built-in compliance policies at startup
 
 Use `retention.policies` for inline custom policies when you need category-specific durations or archive paths.
 
+## Modified Ebbinghaus, As-Is
+
+If you want a practical four-tier memory model today, use retention as a coarse lifecycle tool:
+
+- keep durable knowledge labels out of retention entirely
+- keep durable wisdom or rule labels out of retention entirely
+- apply finite retention only to memory-like labels
+- optionally relabel promoted memories into an excluded durable label
+
+Recommended label mapping:
+
+- `KnowledgeFact`: excluded from retention
+- `WisdomDirective`: excluded from retention
+- `MemoryEpisode`: retained for a bounded period
+- `ConsolidatedMemory`: excluded from retention after promotion or review
+
+Example:
+
+```yaml
+compliance:
+  retention_enabled: true
+  retention_auto_delete: false
+
+retention:
+  sweep_interval: 3600
+  excluded_labels:
+    - KnowledgeFact
+    - WisdomDirective
+    - ConsolidatedMemory
+    - System
+    - AuditLog
+  policies:
+    - id: memory-episode-30d
+      name: Memory Episodes 30 Days
+      category: USER
+      retention_days: 30
+      archive_before_delete: true
+      archive_path: /archive/memory
+      active: true
+```
+
+How to use it:
+
+- store durable facts as `KnowledgeFact`
+- store long-lived directives as `WisdomDirective`
+- store ephemeral sessions or observations as `MemoryEpisode`
+- when a memory becomes durable, relabel or copy it into `ConsolidatedMemory` or `KnowledgeFact`
+
+Current caveats:
+
+- this is whole-node retention, not true score-based decay
+- edges are not retained independently yet
+- properties do not have separate retention behavior
+- there is no access-driven promotion or automatic consolidation in retention itself
+- retention uses category-based expiry plus label exclusions, so this is an operational workaround, not the full declarative knowledge-layer design
+
 ## GDPR Integration
 
 Retention integrates with GDPR delete handling:
