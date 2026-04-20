@@ -59,6 +59,7 @@ The system should instead treat decay behavior as configurable retention profile
 7. Nodes and edges must be handled symmetrically by the policy system. Edge decay must not be a second-class or special-case feature.
 8. Archive behavior applies only to whole nodes and whole edges, never to individual properties.
 9. Property-level decay may influence vectorization, ranking, filtering, reranking, and summarization, but it must not move, archive, or delete stored property values.
+9a. Properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion. Indexed properties must remain stable and always visible because they are relied upon for aggregation, joining, and lookup.
 10. Archived nodes and edges must be removed from indexing using exact-key deindexing rather than discovery by scanning secondary indexes.
 11. Runtime paths must not silently fall back to legacy tier assumptions.
 12. Named presets may exist for convenience, but the engine must operate on resolved profiles and policies.
@@ -82,6 +83,7 @@ Required behavior:
 - support score start-time selection through profile options
 - resolve archive eligibility for whole nodes and whole edges
 - resolve property-level vectorization-exclusion behavior without treating properties as archival targets
+- reject or ignore property-level decay rules that target properties participating in general indexes; indexed properties are immune to decay scoring and hiding
 - enforce at most one decay profile per unique target as a hard constraint
 
 Suggested fit in NornicDB:
@@ -417,6 +419,7 @@ Then the engine computes the final score and determines visibility:
 17. apply the resolved promotion policy adjustments to produce the final score
 18. if the final score falls below the archive threshold, the entity is invisible to the query unless accessed through `reveal()`
 19. if property-level decay excludes a property from retrieval surfaces, that property is hidden from the query result unless accessed through `reveal()`
+20. properties that participate in general indexes are never subject to steps 18 or 19 — they are immune to decay scoring, decay hiding, and property-level exclusion regardless of any matching decay profile or promotion policy
 
 If no promotion policy matches, the target should resolve with a neutral promotion effect.
 
@@ -496,6 +499,8 @@ Property decay should support at least these outcomes:
 - exclusion of the property from vectorization or vector-backed retrieval if policy says so
 - explicit supersession or replacement behavior in retrieval logic, if configured
 
+Properties that participate in general indexes (lookup indexes, range indexes, composite indexes, or any index used for aggregation and joining) are immune to property-level decay scoring, decay hiding, and vectorization exclusion. These properties must remain stable and always visible to queries because index-backed operations depend on their values being present and consistent. If a decay profile or promotion policy contains a property-level rule that targets an indexed property, the engine should reject the rule at creation time with a validation error.
+
 Property-level promotion should support at least these outcomes:
 
 - higher ranking weight for the property during retrieval
@@ -522,7 +527,7 @@ When a node or edge crosses archive eligibility:
 
 Property-level decay must not cause property archival, property movement, or property deletion from storage.
 
-If a node remains indexed, its properties remain indexable under ordinary indexing rules. Property-level decay affects retrieval and vectorization behavior, not whether the property exists in storage.
+If a node remains indexed, its properties remain indexable under ordinary indexing rules. Property-level decay affects retrieval and vectorization behavior, not whether the property exists in storage. Properties that participate in general indexes are entirely immune to decay scoring, decay hiding, and vectorization exclusion — they must remain stable and always visible for aggregation, joining, and lookup.
 
 ### 6.5 Decay Function Semantics
 
@@ -569,6 +574,7 @@ For any entity or property, the system should be able to explain:
 - why a node or edge was archived or not archived
 - why a node or edge was deindexed or pending deindex
 - why a property was excluded from vectorization or retrieval surfaces without being archived
+- whether a property is immune to decay because it participates in a general index
 
 ### 6.8 Native Cypher Access
 
@@ -824,6 +830,8 @@ A label-specific or edge-type-specific profile or policy takes precedence over a
 Edges are first-class targets and must support the same lifecycle as nodes, including creation, alteration, introspection, resolution, scoring, and archival behavior.
 
 Properties are valid scoring targets, but not archival targets.
+
+Properties that participate in general indexes (lookup indexes, range indexes, composite indexes, or any index used for aggregation and joining) are not valid decay or promotion targets. If an inline property-level rule in a decay profile or promotion policy targets an indexed property, the engine should reject the rule at creation time with a validation error. This constraint ensures that indexed properties remain stable and always visible for index-backed operations.
 
 There can be at most one decay profile and one promotion policy per unique target. Competing or overlapping definitions for the same target are a hard constraint violation. A wildcard target does not conflict with a label-specific or edge-type-specific target — the specific target wins. Two wildcard-scoped definitions for the same scope (node or edge) do conflict. If an operator needs different decay or promotion behavior for a different label or edge type, they must create a separate targeted profile or policy.
 
@@ -1246,6 +1254,8 @@ DROP PROMOTION PROFILE canonical_tier
 - the archival cleanup job should default to nightly execution but be configurable in seconds
 - properties are never archived, moved, or deleted because of decay profile
 - property-level decay may exclude properties from vectorization or vector-backed retrieval, but stored properties remain directly queryable in Cypher via `reveal()`
+- properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion; they remain stable and always visible for aggregation, joining, and lookup
+- property-level decay or promotion rules targeting indexed properties must be rejected at creation time
 - scoring is evaluated before query visibility; promotion policies are resolved first, then decay profiles, and the final score determines whether the entity appears in query results
 - entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths unless accessed through `reveal()`
 - `reveal()` bypasses scoring-driven visibility and property hiding but does not disable scoring itself
@@ -1282,6 +1292,7 @@ Deliverables:
 - define explainable resolution output
 - define whole-node and whole-edge archival semantics
 - define non-archival property exclusion semantics for vectorization and retrieval
+- define indexed-property immunity: properties in general indexes are immune to decay scoring, hiding, and exclusion
 - define the native `decayScore()` and `decay()` Cypher function contracts, including explicit `property` and `scoringMode` options
 - define the native `policy()` Cypher function contract for accessMeta retrieval
 - define the native `reveal()` Cypher function contract for bypassing scoring-driven visibility and property hiding
@@ -1299,6 +1310,7 @@ Deliverables:
 - compile `scoreFrom` from decay profile `OPTIONS { ... }`
 - support node-, edge-, and property-targeted policies
 - validate creation-time behavior and introspection
+- reject property-level decay or promotion rules that target properties participating in general indexes at creation time
 
 ### Workstream C: Shared Resolver
 
@@ -1404,6 +1416,11 @@ Deliverables:
 - property-level inline promotion rules can boost one property without boosting the parent entity
 - property-level vectorization exclusion does not archive, move, or delete the stored property
 - properties excluded from vectorization remain directly queryable in Cypher
+- property-level decay or promotion rules targeting indexed properties are rejected at creation time with a validation error
+- indexed properties remain visible in query results regardless of entity-level decay score
+- indexed properties are never hidden by property-level decay exclusion
+- indexed properties are never excluded from vectorization by property-level decay rules
+- creating a general index on a property that already has a decay or promotion rule produces a validation error or warning
 - conflicting profiles or policies for the same target are rejected at creation time
 - removing or changing a decay profile changes future resolution without corrupting stored history
 - removing or changing a promotion policy or profile changes future resolution without corrupting stored history
@@ -1480,6 +1497,8 @@ The plan is complete when:
 - background archival cleanup defaults to nightly execution and is configurable in seconds
 - properties are never archived, moved, or deleted because of decay profile
 - property-level decay can exclude properties from vectorization or vector-backed retrieval while preserving storage and direct Cypher access
+- properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion
+- property-level decay or promotion rules targeting indexed properties are rejected at creation time
 - explainable profile and policy resolution is available for diagnostics
 - native Cypher functions expose resolved node, edge, and property scores without mutating Neo4j-compatible payloads
 - unified search exposes the same resolved scores additively through response metadata rather than persisted fields
@@ -1508,8 +1527,8 @@ The plan is complete when:
 - schema and Cypher/search updates for profile-aware decay behavior and policy-aware promotion behavior
 - a shared decay profile resolver with config-backed defaults and compiled profile entries
 - a shared promotion policy resolver with config-backed defaults and compiled policy entries
-- dedicated decay profile subsystem support for inline property-level retention rules
-- dedicated promotion policy subsystem support for inline property-level promotion rules
+- dedicated decay profile subsystem support for inline property-level retention rules, with creation-time validation rejecting rules that target indexed properties
+- dedicated promotion policy subsystem support for inline property-level promotion rules, with creation-time validation rejecting rules that target indexed properties
 - declarative decay profile support for `scoreFrom: 'CREATED' | 'VERSION' | 'CUSTOM'`
 - explicit node and edge targeting support throughout profile and policy resolution and scoring
 - whole-node and whole-edge archival strategy with asynchronous deindex cleanup
@@ -1537,4 +1556,4 @@ Named presets may remain in documentation for bootstrapping a memory decay model
 
 Property-level decay and promotion may affect vectorization and retrieval behavior, but properties remain stored in place and directly queryable in Cypher via `reveal()`. Archival is reserved for whole nodes and whole edges.
 
-Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity.
+Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity. Added indexed-property immunity: properties that participate in general indexes (lookup, range, composite, or any index used for aggregation and joining) are immune to decay scoring, decay hiding, and property-level exclusion; rules targeting indexed properties are rejected at creation time.
