@@ -239,7 +239,7 @@ struct llama_context* create_gen_context(struct llama_model* model, int n_ctx, i
 	// llama.cpp defaults and only flip the fields we actually need.
     params.embeddings = 0;
     params.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
-    params.attention_type = LLAMA_ATTENTION_TYPE_UNSPECIFIED;
+    params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
 
     // logits_all removed - controlled per-batch now
 
@@ -330,10 +330,11 @@ int get_vocab_size(struct llama_model* model) {
 // Check if context is healthy (not NULL, has valid state)
 int ctx_is_healthy(struct llama_context* ctx) {
     if (!ctx) return 0;
-    // Try to get memory info - if this works, context is alive
-    // Memory API renamed from KV cache in newer llama.cpp releases
-    llama_memory_t mem = llama_get_memory(ctx);
-    return mem != NULL ? 1 : 0;
+    // Verify context has a valid n_ctx — this works regardless of
+    // whether the KV cache is unified or per-layer (kv_unified=false).
+    // llama_get_memory() returns NULL for non-unified caches, so we
+    // cannot use it as a health check.
+    return llama_n_ctx(ctx) > 0 ? 1 : 0;
 }
 
 // Check if model is healthy

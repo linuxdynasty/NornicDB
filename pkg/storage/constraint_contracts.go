@@ -2,13 +2,147 @@ package storage
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/convert"
 )
+
+// ============================================================================
+// Allocation-free keyword scanning helpers (same style as pkg/cypher/keyword_scan.go).
+// Written locally because pkg/storage must not import pkg/cypher.
+// ============================================================================
+
+// ccSkipSpaces advances past whitespace.
+func ccSkipSpaces(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// ccIsIdentStart returns true for [A-Za-z_].
+func ccIsIdentStart(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_'
+}
+
+// ccIsIdentByte returns true for [A-Za-z0-9_].
+func ccIsIdentByte(b byte) bool {
+	return ccIsIdentStart(b) || (b >= '0' && b <= '9')
+}
+
+// ccScanIdent reads an identifier at position i. Returns ("", i) if none.
+func ccScanIdent(s string, i int) (string, int) {
+	if i >= len(s) || !ccIsIdentStart(s[i]) {
+		return "", i
+	}
+	start := i
+	for i < len(s) && ccIsIdentByte(s[i]) {
+		i++
+	}
+	return s[start:i], i
+}
+
+// ccMatchKeywordAt checks for a case-insensitive keyword at position i with
+// word-boundary checking. Returns the position after the keyword, or -1.
+func ccMatchKeywordAt(s string, i int, kw string) int {
+	if i+len(kw) > len(s) {
+		return -1
+	}
+	for k := 0; k < len(kw); k++ {
+		sc, kc := s[i+k], kw[k]
+		if sc >= 'a' && sc <= 'z' {
+			sc -= 'a' - 'A'
+		}
+		if kc >= 'a' && kc <= 'z' {
+			kc -= 'a' - 'A'
+		}
+		if sc != kc {
+			return -1
+		}
+	}
+	// Right boundary: must not be followed by ident char.
+	end := i + len(kw)
+	if end < len(s) && ccIsIdentByte(s[end]) {
+		return -1
+	}
+	return end
+}
+
+// ccScanComparator reads a comparison operator at position i.
+func ccScanComparator(s string, i int) (string, int) {
+	if i >= len(s) {
+		return "", i
+	}
+	if i+1 < len(s) {
+		two := s[i : i+2]
+		switch two {
+		case "<=", ">=", "<>", "!=":
+			return two, i + 2
+		}
+	}
+	switch s[i] {
+	case '=', '<', '>':
+		return s[i : i+1], i + 1
+	}
+	return "", i
+}
+
+// ccExpectByte checks s[i]==b, returns i+1 or -1.
+func ccExpectByte(s string, i int, b byte) int {
+	if i < len(s) && s[i] == b {
+		return i + 1
+	}
+	return -1
+}
+
+// ccScanLabels reads zero or more `:Label` sequences starting at i.
+func ccScanLabels(s string, i int) ([]string, int) {
+	var labels []string
+	for {
+		p := ccSkipSpaces(s, i)
+		if p >= len(s) || s[p] != ':' {
+			return labels, i
+		}
+		p++ // skip ':'
+		p = ccSkipSpaces(s, p)
+		label, next := ccScanIdent(s, p)
+		if label == "" {
+			return labels, i // colon without ident — don't consume
+		}
+		labels = append(labels, label)
+		i = next
+	}
+}
+
+// ccScanNodeContents reads the inside of a node pattern (...) starting after '('.
+// Returns any labels found and the position after ')'.
+func ccScanNodeContents(s string, i int) ([]string, int, bool) {
+	p := ccSkipSpaces(s, i)
+	// Optional variable name
+	if _, next := ccScanIdent(s, p); next > p {
+		p = next
+	}
+	// Zero or more :Label
+	labels, p := ccScanLabels(s, p)
+	p = ccSkipSpaces(s, p)
+	p = ccExpectByte(s, p, ')')
+	if p == -1 {
+		return nil, 0, false
+	}
+	return labels, p, true
+}
+
+// hasAllLabels checks that all required labels exist on the node.
+func hasAllLabels(labels []string, required []string) bool {
+	for _, req := range required {
+		if !hasLabel(labels, req) {
+			return false
+		}
+	}
+	return true
+}
 
 const (
 	ConstraintContractKindPrimitiveNode         = "primitive-node"
@@ -255,7 +389,7 @@ func evaluateRelationshipConstraintContractExpressionEngine(engine Engine, edge 
 		return evaluatePropertyInExpression(edge.Properties[property], values), nil
 	}
 
-	if matched := relationshipDistinctPattern.MatchString(strings.TrimSpace(expr)); matched {
+	if isDistinctEndpointsExpression(expr) {
 		return edge.StartNode != edge.EndNode, nil
 	}
 
@@ -286,32 +420,81 @@ func evaluateRelationshipConstraintContractExpressionEngine(engine Engine, edge 
 type contractPattern struct {
 	Direction    string
 	RelationType string
-	TargetLabel  string
+	TargetLabels []string
 }
 
-var (
-	countPatternExpr                = regexp.MustCompile(`(?is)^COUNT\s*\{\s*(?:MATCH\s+)?(.+?)\s*\}\s*(<=|>=|<>|!=|=|<|>)\s*(-?\d+)\s*$`)
-	notExistsPatternExpr            = regexp.MustCompile(`(?is)^NOT\s+EXISTS\s*\{\s*(?:MATCH\s+)?(.+?)\s*\}\s*$`)
-	propertyInExpr                  = regexp.MustCompile(`^\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+\[(.*)\]\s*$`)
-	relationshipDistinctPattern     = regexp.MustCompile(`(?i)^\s*startNode\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*<>\s*endNode\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*$`)
-	endpointPropertyEqualityExpr    = regexp.MustCompile(`(?i)^\s*startNode\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*endNode\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`)
-	relationshipPropertyCompareExpr = regexp.MustCompile(`^\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|<>|!=|=|<|>)\s*(.+?)\s*$`)
-	patternOutgoingExpr             = regexp.MustCompile(`(?is)^\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*->\s*\(\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*\)$`)
-	patternIncomingExpr             = regexp.MustCompile(`(?is)^\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*<-\s*\[:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*-\s*\(\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*\)$`)
-)
+// ============================================================================
+// Expression parsers — keyword scanning, no regex.
+// ============================================================================
 
+// parsePropertyInExpression: ident.property IN [values]
 func parsePropertyInExpression(expr string) (bool, []interface{}, string, error) {
-	matches := propertyInExpr.FindStringSubmatch(strings.TrimSpace(expr))
-	if matches == nil {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// ident (variable name)
+	_, p = ccScanIdent(s, p)
+	if p == 0 {
 		return false, nil, "", nil
 	}
-	values, err := parseContractLiteralList(matches[2])
+	// .
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '.') == -1 {
+		return false, nil, "", nil
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	// property name
+	property, next := ccScanIdent(s, p)
+	if property == "" {
+		return false, nil, "", nil
+	}
+	p = next
+	// IN keyword
+	p = ccSkipSpaces(s, p)
+	if end := ccMatchKeywordAt(s, p, "IN"); end == -1 {
+		return false, nil, "", nil
+	} else {
+		p = end
+	}
+	// [
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '[') == -1 {
+		return false, nil, "", nil
+	}
+	p++
+	// Find matching ]
+	bracketStart := p
+	depth := 1
+	for p < len(s) && depth > 0 {
+		switch s[p] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		}
+		if depth > 0 {
+			p++
+		}
+	}
+	if depth != 0 {
+		return false, nil, "", nil
+	}
+	listContent := s[bracketStart:p]
+	p++ // skip ']'
+	// Must be at end
+	if ccSkipSpaces(s, p) != len(s) {
+		return false, nil, "", nil
+	}
+	values, err := parseContractLiteralList(listContent)
 	if err != nil {
 		return false, nil, "", err
 	}
-	return true, values, matches[1], nil
+	return true, values, property, nil
 }
 
+// parseRelationshipPropertyInExpression delegates to parsePropertyInExpression
+// with swapped return order for callers that expect (matched, property, values, err).
 func parseRelationshipPropertyInExpression(expr string) (bool, string, []interface{}, error) {
 	matched, values, property, err := parsePropertyInExpression(expr)
 	if !matched || err != nil {
@@ -320,66 +503,431 @@ func parseRelationshipPropertyInExpression(expr string) (bool, string, []interfa
 	return true, property, values, nil
 }
 
+// parseCountPatternExpression: COUNT { [MATCH] pattern } comparator threshold
 func parseCountPatternExpression(expr string) (bool, contractPattern, string, int, error) {
-	matches := countPatternExpr.FindStringSubmatch(strings.TrimSpace(expr))
-	if matches == nil {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// COUNT
+	if end := ccMatchKeywordAt(s, p, "COUNT"); end == -1 {
+		return false, contractPattern{}, "", 0, nil
+	} else {
+		p = end
+	}
+	// {
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '{') == -1 {
 		return false, contractPattern{}, "", 0, nil
 	}
-	pattern, err := parseConstraintPattern(matches[1])
+	p++
+	// Find matching }
+	braceStart := p
+	depth := 1
+	for p < len(s) && depth > 0 {
+		switch s[p] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		if depth > 0 {
+			p++
+		}
+	}
+	if depth != 0 {
+		return false, contractPattern{}, "", 0, nil
+	}
+	inner := strings.TrimSpace(s[braceStart:p])
+	p++ // skip '}'
+
+	// Optional MATCH keyword inside braces
+	if end := ccMatchKeywordAt(inner, 0, "MATCH"); end != -1 {
+		inner = strings.TrimSpace(inner[end:])
+	}
+
+	pattern, err := parseConstraintPattern(inner)
 	if err != nil {
 		return false, contractPattern{}, "", 0, err
 	}
-	threshold, err := strconv.Atoi(matches[3])
+
+	// comparator
+	p = ccSkipSpaces(s, p)
+	comparator, next := ccScanComparator(s, p)
+	if comparator == "" {
+		return false, contractPattern{}, "", 0, nil
+	}
+	p = next
+
+	// threshold (integer, possibly negative)
+	p = ccSkipSpaces(s, p)
+	numStart := p
+	if p < len(s) && s[p] == '-' {
+		p++
+	}
+	for p < len(s) && s[p] >= '0' && s[p] <= '9' {
+		p++
+	}
+	if p == numStart {
+		return false, contractPattern{}, "", 0, nil
+	}
+	threshold, err := strconv.Atoi(s[numStart:p])
 	if err != nil {
 		return false, contractPattern{}, "", 0, err
 	}
-	return true, pattern, matches[2], threshold, nil
+	if ccSkipSpaces(s, p) != len(s) {
+		return false, contractPattern{}, "", 0, nil
+	}
+	return true, pattern, comparator, threshold, nil
 }
 
+// parseNotExistsPatternExpression: NOT EXISTS { [MATCH] pattern }
 func parseNotExistsPatternExpression(expr string) (bool, contractPattern, error) {
-	matches := notExistsPatternExpr.FindStringSubmatch(strings.TrimSpace(expr))
-	if matches == nil {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// NOT
+	if end := ccMatchKeywordAt(s, p, "NOT"); end == -1 {
+		return false, contractPattern{}, nil
+	} else {
+		p = end
+	}
+	// EXISTS
+	p = ccSkipSpaces(s, p)
+	if end := ccMatchKeywordAt(s, p, "EXISTS"); end == -1 {
+		return false, contractPattern{}, nil
+	} else {
+		p = end
+	}
+	// {
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '{') == -1 {
 		return false, contractPattern{}, nil
 	}
-	pattern, err := parseConstraintPattern(matches[1])
+	p++
+	// Find matching }
+	braceStart := p
+	depth := 1
+	for p < len(s) && depth > 0 {
+		switch s[p] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		if depth > 0 {
+			p++
+		}
+	}
+	if depth != 0 {
+		return false, contractPattern{}, nil
+	}
+	inner := strings.TrimSpace(s[braceStart:p])
+	p++ // skip '}'
+
+	if ccSkipSpaces(s, p) != len(s) {
+		return false, contractPattern{}, nil
+	}
+
+	// Optional MATCH keyword
+	if end := ccMatchKeywordAt(inner, 0, "MATCH"); end != -1 {
+		inner = strings.TrimSpace(inner[end:])
+	}
+
+	pattern, err := parseConstraintPattern(inner)
 	if err != nil {
 		return false, contractPattern{}, err
 	}
 	return true, pattern, nil
 }
 
+// parseConstraintPattern: (node)-[:TYPE]->(node) or (node)<-[:TYPE]-(node)
+// Supports n-arity labels on both source and target: (n:A:B)-[:R]->(:X:Y:Z)
 func parseConstraintPattern(raw string) (contractPattern, error) {
-	raw = strings.TrimSpace(raw)
-	if matches := patternOutgoingExpr.FindStringSubmatch(raw); matches != nil {
-		return contractPattern{Direction: "OUTGOING", RelationType: matches[1], TargetLabel: matches[2]}, nil
+	s := strings.TrimSpace(raw)
+	p := 0
+
+	// Source node: ( ... )
+	if ccExpectByte(s, p, '(') == -1 {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
 	}
-	if matches := patternIncomingExpr.FindStringSubmatch(raw); matches != nil {
-		return contractPattern{Direction: "INCOMING", RelationType: matches[1], TargetLabel: matches[2]}, nil
+	p++
+	_, p, ok := ccScanNodeContents(s, p)
+	if !ok {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
 	}
-	return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+
+	// Arrow start: - or <-
+	p = ccSkipSpaces(s, p)
+	direction := ""
+	if p+1 < len(s) && s[p] == '<' && s[p+1] == '-' {
+		direction = "INCOMING"
+		p += 2
+	} else if p < len(s) && s[p] == '-' {
+		p++
+	} else {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+
+	// Relationship: [ :TYPE ]
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '[') == -1 {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ':') == -1 {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	relType, next := ccScanIdent(s, p)
+	if relType == "" {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+	p = next
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ']') == -1 {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+	p++
+
+	// Arrow end: -> or -
+	p = ccSkipSpaces(s, p)
+	if direction == "" {
+		// Must be outgoing: ->
+		if p+1 < len(s) && s[p] == '-' && s[p+1] == '>' {
+			direction = "OUTGOING"
+			p += 2
+		} else {
+			return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+		}
+	} else {
+		// INCOMING: expect -
+		if ccExpectByte(s, p, '-') == -1 {
+			return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+		}
+		p++
+	}
+
+	// Target node: ( ... )
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '(') == -1 {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+	p++
+	targetLabels, p, ok := ccScanNodeContents(s, p)
+	if !ok {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+
+	if ccSkipSpaces(s, p) != len(s) {
+		return contractPattern{}, fmt.Errorf("unsupported pattern %q", raw)
+	}
+
+	return contractPattern{
+		Direction:    direction,
+		RelationType: relType,
+		TargetLabels: targetLabels,
+	}, nil
 }
 
+// isDistinctEndpointsExpression: startNode(r) <> endNode(r)
+func isDistinctEndpointsExpression(expr string) bool {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// startNode
+	if end := ccMatchKeywordAt(s, p, "startNode"); end == -1 {
+		return false
+	} else {
+		p = end
+	}
+	// ( ident )
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '(') == -1 {
+		return false
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if _, next := ccScanIdent(s, p); next == p {
+		return false
+	} else {
+		p = next
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ')') == -1 {
+		return false
+	}
+	p++
+	// <>
+	p = ccSkipSpaces(s, p)
+	comp, next := ccScanComparator(s, p)
+	if comp != "<>" {
+		return false
+	}
+	p = next
+	// endNode
+	p = ccSkipSpaces(s, p)
+	if end := ccMatchKeywordAt(s, p, "endNode"); end == -1 {
+		return false
+	} else {
+		p = end
+	}
+	// ( ident )
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '(') == -1 {
+		return false
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if _, next := ccScanIdent(s, p); next == p {
+		return false
+	} else {
+		p = next
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ')') == -1 {
+		return false
+	}
+	p++
+	return ccSkipSpaces(s, p) == len(s)
+}
+
+// parseEndpointPropertyEqualityExpression: startNode(r).prop = endNode(r).prop
 func parseEndpointPropertyEqualityExpression(expr string) (bool, string, string) {
-	matches := endpointPropertyEqualityExpr.FindStringSubmatch(strings.TrimSpace(expr))
-	if matches == nil {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// startNode ( ident ) . property
+	if end := ccMatchKeywordAt(s, p, "startNode"); end == -1 {
+		return false, "", ""
+	} else {
+		p = end
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '(') == -1 {
 		return false, "", ""
 	}
-	return true, matches[1], matches[2]
+	p++
+	p = ccSkipSpaces(s, p)
+	if _, next := ccScanIdent(s, p); next == p {
+		return false, "", ""
+	} else {
+		p = next
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ')') == -1 {
+		return false, "", ""
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '.') == -1 {
+		return false, "", ""
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	leftProp, next := ccScanIdent(s, p)
+	if leftProp == "" {
+		return false, "", ""
+	}
+	p = next
+
+	// =
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '=') == -1 {
+		return false, "", ""
+	}
+	p++
+
+	// endNode ( ident ) . property
+	p = ccSkipSpaces(s, p)
+	if end := ccMatchKeywordAt(s, p, "endNode"); end == -1 {
+		return false, "", ""
+	} else {
+		p = end
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '(') == -1 {
+		return false, "", ""
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if _, next := ccScanIdent(s, p); next == p {
+		return false, "", ""
+	} else {
+		p = next
+	}
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, ')') == -1 {
+		return false, "", ""
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '.') == -1 {
+		return false, "", ""
+	}
+	p++
+	p = ccSkipSpaces(s, p)
+	rightProp, next := ccScanIdent(s, p)
+	if rightProp == "" {
+		return false, "", ""
+	}
+	p = next
+
+	if ccSkipSpaces(s, p) != len(s) {
+		return false, "", ""
+	}
+	return true, leftProp, rightProp
 }
 
+// parseRelationshipPropertyComparisonExpression: ident.property comparator value
+// Excludes IN expressions (those are handled by parsePropertyInExpression).
 func parseRelationshipPropertyComparisonExpression(expr string) (bool, string, string, interface{}, error) {
-	matches := relationshipPropertyCompareExpr.FindStringSubmatch(strings.TrimSpace(expr))
-	if matches == nil {
+	s := strings.TrimSpace(expr)
+	p := 0
+
+	// ident (variable)
+	_, next := ccScanIdent(s, p)
+	if next == p {
 		return false, "", "", nil, nil
 	}
-	if _, _, property, err := parsePropertyInExpression(expr); err == nil && property != "" {
+	p = next
+	// .
+	p = ccSkipSpaces(s, p)
+	if ccExpectByte(s, p, '.') == -1 {
 		return false, "", "", nil, nil
 	}
-	value, err := parseContractLiteral(matches[3])
+	p++
+	p = ccSkipSpaces(s, p)
+	// property
+	property, next := ccScanIdent(s, p)
+	if property == "" {
+		return false, "", "", nil, nil
+	}
+	p = next
+	// comparator
+	p = ccSkipSpaces(s, p)
+	comparator, next := ccScanComparator(s, p)
+	if comparator == "" {
+		return false, "", "", nil, nil
+	}
+	p = next
+
+	// Guard: if it's an IN expression, don't match as comparison
+	if _, _, prop, err := parsePropertyInExpression(expr); err == nil && prop != "" {
+		return false, "", "", nil, nil
+	}
+
+	// remaining = value
+	rest := strings.TrimSpace(s[p:])
+	if rest == "" {
+		return false, "", "", nil, nil
+	}
+	value, err := parseContractLiteral(rest)
 	if err != nil {
 		return false, "", "", nil, err
 	}
-	return true, matches[1], matches[2], value, nil
+	return true, property, comparator, value, nil
 }
 
 func parseContractLiteralList(raw string) ([]interface{}, error) {
@@ -543,7 +1091,7 @@ func countMatchingPatternEdgesEngine(engine Engine, node *Node, pattern contract
 		if edge.Type != pattern.RelationType {
 			continue
 		}
-		if pattern.TargetLabel != "" {
+		if len(pattern.TargetLabels) > 0 {
 			otherID := edge.EndNode
 			if pattern.Direction == "INCOMING" {
 				otherID = edge.StartNode
@@ -552,7 +1100,7 @@ func countMatchingPatternEdgesEngine(engine Engine, node *Node, pattern contract
 			if err != nil {
 				return 0, err
 			}
-			if otherNode == nil || !hasLabel(otherNode.Labels, pattern.TargetLabel) {
+			if otherNode == nil || !hasAllLabels(otherNode.Labels, pattern.TargetLabels) {
 				continue
 			}
 		}
@@ -708,7 +1256,7 @@ func (tx *BadgerTransaction) evaluateRelationshipConstraintContractExpressionLoc
 	} else if matched {
 		return evaluatePropertyInExpression(edge.Properties[property], values), nil
 	}
-	if relationshipDistinctPattern.MatchString(strings.TrimSpace(expr)) {
+	if isDistinctEndpointsExpression(expr) {
 		return edge.StartNode != edge.EndNode, nil
 	}
 	if matched, leftProp, rightProp := parseEndpointPropertyEqualityExpression(expr); matched {
@@ -749,7 +1297,7 @@ func (tx *BadgerTransaction) countMatchingPatternEdgesLocked(node *Node, pattern
 		if edge.Type != pattern.RelationType {
 			continue
 		}
-		if pattern.TargetLabel != "" {
+		if len(pattern.TargetLabels) > 0 {
 			otherID := edge.EndNode
 			if pattern.Direction == "INCOMING" {
 				otherID = edge.StartNode
@@ -758,7 +1306,7 @@ func (tx *BadgerTransaction) countMatchingPatternEdgesLocked(node *Node, pattern
 			if err != nil {
 				return 0, err
 			}
-			if otherNode == nil || !hasLabel(otherNode.Labels, pattern.TargetLabel) {
+			if otherNode == nil || !hasAllLabels(otherNode.Labels, pattern.TargetLabels) {
 				continue
 			}
 		}
