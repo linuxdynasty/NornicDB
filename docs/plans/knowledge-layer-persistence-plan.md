@@ -13,7 +13,7 @@ Implement a flexible decay and scoring architecture in NornicDB where retention 
 The system must support:
 
 - no-decay entities and properties
-- configurable decay rates and thresholds
+- configurable decay half-lives and thresholds
 - node-, edge-, and property-level decay behavior
 - named policy presets for operator convenience
 - separate promotion policies that declaratively model tier-like score boosts by referencing promotion profiles, without changing the existing Cypher scoring API
@@ -53,7 +53,7 @@ The system should instead treat decay behavior as configurable retention profile
 1. Retention behavior must be data-driven, not hardcoded into a fixed enum.
 2. Decay and scoring must be resolvable at node, edge, and property scope.
 3. `NO DECAY` must be directly expressible in policy definitions.
-4. Decay rate, decay function, archive threshold, and score floor must be configurable independently.
+4. Decay half-life, decay function, archive threshold, and score floor must be configurable independently.
 5. Promotion tiers must be expressible declaratively through separate promotion profile and promotion policy subsystems rather than through hardcoded runtime categories.
 6. Score start time must be declaratively expressible through decay profile options using `CREATED`, `VERSION`, or `CUSTOM`.
 7. Nodes and edges must be handled symmetrically by the policy system. Edge decay must not be a second-class or special-case feature.
@@ -227,7 +227,7 @@ Minimum fields:
 
 - profile id
 - profile name
-- half-life or decay-rate definition in seconds
+- half-life definition in seconds
 - scoring function or strategy id
 - score start time: `CREATED`, `VERSION`, or `CUSTOM`
 - custom score-from property path, if `CUSTOM`
@@ -787,7 +787,7 @@ Decay behavior should be authored through a dedicated decay profile subsystem, n
 
 Promotion behavior should be authored through dedicated promotion profile and promotion policy subsystems, not through first-class constraints.
 
-`NO DECAY`, `DECAY RATE`, `DECAY ARCHIVE THRESHOLD`, `DECAY PROFILE`, and `DECAY FLOOR` are decay directives inside decay profile APPLY blocks. They are not standalone constraint types. Decay function and scope are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
+`NO DECAY`, `DECAY HALF LIFE`, `DECAY ARCHIVE THRESHOLD`, `DECAY PROFILE`, and `DECAY FLOOR` are decay directives inside decay profile APPLY blocks. They are not standalone constraint types. Decay function and scope are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
 
 `APPLY PROFILE` is the promotion directive inside promotion policy APPLY blocks. It is not a standalone constraint type. Multiplier, score floor, and score cap are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
 
@@ -884,7 +884,7 @@ APPLY {
   DECAY PROFILE 'working_memory'
   DECAY ARCHIVE THRESHOLD 0.10
   n.summary DECAY PROFILE 'session_summary'
-  n.lastConversationSummary DECAY RATE 2592000
+  n.lastConversationSummary DECAY HALF LIFE 2592000
   n.tenantId NO DECAY
 }
 ```
@@ -907,8 +907,8 @@ APPLY {
 CREATE DECAY PROFILE coaccess_retention
 FOR ()-[r:CO_ACCESSED]-()
 APPLY {
-  DECAY RATE 1209600
-  r.signalScore DECAY RATE 1209600
+  DECAY HALF LIFE 1209600
+  r.signalScore DECAY HALF LIFE 1209600
   r.signalScore DECAY FLOOR 0.15
   r.externalId NO DECAY
 }
@@ -932,8 +932,8 @@ APPLY {
 CREATE DECAY PROFILE review_link_retention
 FOR ()-[r:REVIEWED_WITH]-()
 APPLY {
-  DECAY RATE 604800
-  r.confidence DECAY RATE 86400
+  DECAY HALF LIFE 604800
+  r.confidence DECAY HALF LIFE 86400
   r.confidence DECAY FLOOR 0.25
 }
 ```
@@ -1004,7 +1004,7 @@ CREATE DECAY PROFILE session_vectorization_rules
 FOR (n:SessionRecord)
 APPLY {
   n.summary DECAY PROFILE 'session_summary'
-  n.lastConversationSummary DECAY RATE 2592000
+  n.lastConversationSummary DECAY HALF LIFE 2592000
 }
 ```
 
@@ -1318,7 +1318,7 @@ Deliverables:
 
 - introduce a shared decay profile resolver
 - introduce a shared promotion policy resolver
-- support configurable decay rates and named presets
+- support configurable decay half-lives and named presets
 - support configurable promotion multipliers and named presets
 - support `CREATED`, `VERSION`, and `CUSTOM` score-start resolution from decay profile
 - define precedence and conflict rules for overlapping inline block entries
@@ -1641,9 +1641,9 @@ APPLY {
   DECAY ARCHIVE THRESHOLD 0.05
   n.tenantId NO DECAY
   n.sessionId NO DECAY
-  n.summary DECAY RATE 1209600
+  n.summary DECAY HALF LIFE 1209600
   n.summary DECAY FLOOR 0.10
-  n.ephemeralContext DECAY RATE 86400
+  n.ephemeralContext DECAY HALF LIFE 86400
 }
 ```
 
