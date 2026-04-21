@@ -38,6 +38,16 @@
   <a href="#contributors">Contributors</a>
 </p>
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=orneryd%2FNornicDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## Quick Start
 
 ```bash
@@ -461,16 +471,6 @@ Additional deep dives referenced above:
 - [Canonical graph ledger](docs/user-guides/canonical-graph-ledger.md)
 - [Historical reads and MVCC retention](docs/user-guides/historical-reads-mvcc-retention.md)
 - [Cypher parser modes](docs/architecture/cypher-parser-modes.md)
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=orneryd%2FNornicDB&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
- </picture>
-</a>
 
 ## Comparison
 
