@@ -306,7 +306,7 @@ The entire policy-driven retention subsystem is gated behind the **existing** `c
 2. **`pkg/retention/access_flusher.go`** (Phase 3) — `AccessFlusher.Start()` exits immediately when `!config.Memory.DecayEnabled`. `AccessAccumulator.IncrementAccess()` is a no-op (check flag before atomic increment).
 3. **`pkg/retention/scorer.go`** (Phase 2) — `Scorer.ScoreNode()` and `Scorer.ScoreEdge()` return a neutral `RetentionResolution{FinalScore: 1.0, NoDecay: true}` when `!config.Memory.DecayEnabled`.
 4. **`pkg/storage/badger_archive_cleanup.go`** (Phase 6) — `ArchiveCleanupJob.Start()` exits immediately when `!config.Memory.DecayEnabled`.
-5. **`pkg/cypher/retention_functions.go`** (Phase 5) — `decayScore()` returns `1.0`, `decay()` returns `{score: 1.0, applies: false, reason: "decay subsystem disabled"}`, `policy()` returns empty metadata. These do not error — they degrade gracefully.
+5. **`pkg/cypher/retention_functions.go`** (Phase 5) — `decayScore()` returns `1.0`, `decay()` returns `{score: 1.0, applies: false, reason: "decay subsystem disabled — enable with NORNICDB_MEMORY_DECAY_ENABLED=true"}`, `policy()` returns empty metadata, `reveal()` returns entity unchanged. These do not error — they degrade gracefully. A config mismatch warning is logged once per query execution (§5.4).
 6. **`pkg/cypher/retention_ddl.go`** (Phase 1) — DDL statements (`CREATE DECAY PROFILE`, etc.) always succeed regardless of flag state. Profiles and policies are schema objects and must persist across flag toggles. The flag only gates runtime evaluation.
 
 **`pkg/config/config.go`** — Change the default and env var parsing:
@@ -799,11 +799,56 @@ Register in the existing function registry (same pattern as `kalman_functions.go
 
 Validate `options` map keys against accepted set: `property`, `scoringMode`. Reject unknown keys at parse time. Validate `scoringMode` values against `exponential`, `linear`, `step`, `none`.
 
-### 5.3 Default behavior
+### 5.3 Default behavior (decay enabled, no matching profile)
 
 - `decayScore()` on a target with no matching profile: return `1.0`.
 - `decay()` on a target with no matching profile: return `{score: 1.0, applies: false, reason: "no decay profile", ...}`.
 - `policy()` on a target with no accessMeta: return `{_targetId: id, _targetScope: "node"}`.
+
+### 5.4 Behavior when `DecayEnabled = false` — graceful degradation
+
+When `config.Memory.DecayEnabled` is `false`, all four retention functions remain callable and return semantically correct values. They do **not** error. This is the PostgreSQL/Elasticsearch pattern — queries are portable across configurations without requiring conditional function calls.
+
+**Return values when disabled:**
+
+| Function | Return value | Rationale |
+|----------|-------------|-----------|
+| `decayScore(n)` | `1.0` | Nothing decays → everything is full score. Semantically correct. |
+| `decayScore(n, options)` | `1.0` | Same — options are accepted but have no effect. |
+| `decay(n)` | `{score: 1.0, applies: false, reason: "decay subsystem disabled — enable with NORNICDB_MEMORY_DECAY_ENABLED=true", ...}` | Self-documenting: `applies: false` is queryable, `reason` tells the operator exactly what to do. |
+| `policy(n)` | `{_targetId: id, _targetScope: "node"}` | Empty metadata — correct, since no access tracking is running. |
+| `reveal(n)` | Identity (returns entity unchanged) | There is no visibility filtering to bypass — `reveal()` is inherently a no-op. |
+
+**Config mismatch log:** Every time one of these functions is evaluated with `DecayEnabled = false`, the runtime logs a warning:
+
+```
+WARN  retention: decayScore() called but decay subsystem is disabled (NORNICDB_MEMORY_DECAY_ENABLED=false). Returning 1.0. Enable decay to get actual scores.
+```
+
+This warning is logged **once per query execution**, not once per entity per query. The log is scoped to the query context — if a single `MATCH (n) RETURN decayScore(n)` touches 10,000 nodes, it produces one log line, not 10,000. This gives operators visibility into misconfiguration without flooding logs during bulk scans.
+
+Implementation: set a `decayMismatchLogged` boolean on the `QueryContext`. On first function invocation with `!DecayEnabled`, log the warning and set the flag. Subsequent invocations in the same query skip the log.
+
+**Documented caveat — inverted predicates return empty results silently:**
+
+When decay is disabled, `decayScore(n)` always returns `1.0`. This means:
+
+```cypher
+// This returns ALL nodes (1.0 > 0.5 is always true) — correct, expected.
+MATCH (n) WHERE decayScore(n) > 0.5 RETURN n
+
+// This returns NOTHING (1.0 < 0.5 is always false) — correct but potentially surprising.
+MATCH (n) WHERE decayScore(n) < 0.5 RETURN n
+```
+
+The second query asks "give me nodes that have decayed below 0.5." When decay is disabled, no node has ever decayed, so returning nothing is semantically correct. However, an operator who expects decay to be active may not realize the subsystem is off.
+
+This edge case is mitigated by:
+1. The config mismatch log (above) — the operator sees the warning in the query's log output.
+2. The `decay(n).applies` field — operators can inspect subsystem status: `MATCH (n) RETURN decay(n).applies LIMIT 1` returns `false` when disabled.
+3. Documentation in `docs/user-guides/decay-profiles.md` explicitly calls out this behavior with an example.
+
+This is an acceptable tradeoff: returning empty results for "find me decayed nodes" when decay is off is the correct answer to the question being asked. The alternative — erroring on any retention function call — would force operators to maintain two query variants and would break `reveal()` semantics (since `reveal()` is inherently a no-op when decay is off).
 
 ### Phase 5 acceptance gate
 
@@ -813,12 +858,16 @@ Validate `options` map keys against accepted set: `property`, `scoringMode`. Rej
 - `policy(n).accessCount` reads from accessMeta.
 - `reveal(n)` works in RETURN, WITH, WHERE, ORDER BY.
 - Options validation rejects unknown keys.
+- With `DecayEnabled = false`: `decayScore(n)` returns `1.0`, `decay(n).applies` returns `false`, `policy(n)` returns empty metadata, `reveal(n)` returns entity unchanged.
+- With `DecayEnabled = false`: config mismatch warning logged once per query execution (not per entity).
+- With `DecayEnabled = false`: `WHERE decayScore(n) < 0.5` returns empty results (correct behavior, not an error).
 
 ### Phase 5 test files
 
 - `pkg/cypher/retention_functions_test.go` — all function variants, default behavior
 - `pkg/cypher/retention_functions_options_test.go` — options validation
 - `pkg/cypher/retention_reveal_integration_test.go` — reveal in all clause positions
+- `pkg/cypher/retention_functions_disabled_test.go` — all functions with `DecayEnabled = false`: return values correct, config mismatch warning logged once per query (assert log output), `WHERE decayScore(n) < 0.5` returns empty results, `WHERE decayScore(n) > 0.5` returns all nodes
 
 ---
 
@@ -1230,7 +1279,7 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 - DDL validation errors → return Cypher error to client.
 - Multi-label conflict at equal specificity and equal Order → reject DDL at creation time with clear error message (§2.3.1).
 - Runtime label conflict (label added post-DDL) → warning logged on every occurrence, resolve to lower-Order binding.
-- `DecayEnabled = false` → all scoring functions degrade gracefully, no errors. `decayScore()` returns `1.0`, `decay()` returns `{applies: false}`, `policy()` returns empty metadata.
+- `DecayEnabled = false` → all scoring functions degrade gracefully, no errors. `decayScore()` returns `1.0`, `decay()` returns `{applies: false, reason: "..."}`, `policy()` returns empty metadata, `reveal()` returns identity. Config mismatch warning logged once per query execution (§5.4). `WHERE decayScore(n) < threshold` returning empty results is correct, documented behavior.
 
 ### Testing strategy
 
