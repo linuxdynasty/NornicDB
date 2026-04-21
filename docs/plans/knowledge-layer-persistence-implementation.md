@@ -1,4 +1,4 @@
-# Policy-Driven Decay and Scoring — Implementation Plan
+# Knowledge-Layer Scoring and Visibility — Implementation Plan
 
 **Status:** Draft
 **Date:** April 21, 2026
@@ -9,9 +9,62 @@
 
 ## Overview
 
-This document is the concrete implementation plan for the policy-driven decay and scoring system described in the parent design document. It maps the design's six workstreams to specific Go packages, files, types, functions, Badger key prefixes, schema persistence changes, Cypher parser additions, and test suites — sequenced into phases with explicit dependencies, acceptance gates, and migration notes.
+This document is the concrete implementation plan for the knowledge-layer scoring and visibility system described in the parent design document. It maps the design's six workstreams to specific Go packages, files, types, functions, Badger key prefixes, schema persistence changes, Cypher parser additions, and test suites — sequenced into phases with explicit dependencies, acceptance gates, and migration notes.
 
 The plan is intentionally file-and-function-level. Each phase produces a shippable, testable increment. No phase depends on a later phase.
+
+---
+
+## Subsystem Boundary: Compliance Retention vs Knowledge-Layer Visibility
+
+The existing **compliance retention subsystem** (`pkg/retention`, `/admin/retention/`) and the new **knowledge-layer scoring subsystem** (`pkg/knowledgepolicy`, `/admin/knowledge-policies/`) are independent systems that operate at different layers.
+
+### Compliance retention subsystem (existing — unchanged)
+
+The checked-in `pkg/retention` package remains the authoritative system for:
+
+- **Deletion** — permanent removal of data from storage
+- **Legal holds** — preventing deletion during litigation
+- **Erasure requests** — GDPR Art.17 "right to be forgotten"
+- **Retention-policy-driven archival** — archive-before-delete behavior
+- **Retention sweeps** — periodic enforcement of retention policies
+
+This subsystem owns:
+- `pkg/retention/retention.go` and all types therein
+- `pkg/nornicdb/db_retention.go`
+- `pkg/server/server_retention.go` and the `/admin/retention/` API namespace
+- All compliance-related configuration in `config.Compliance` and `config.Retention`
+
+### Knowledge-layer scoring subsystem (new — this plan)
+
+The knowledge-layer subsystem is a **scoring and retrieval-visibility layer**. It does not replace the compliance retention subsystem. It sits on top of it.
+
+This subsystem:
+- Computes decay and promotion scores for nodes, edges, and properties
+- **Suppresses** entities from retrieval and query results when their score falls below the visibility threshold
+- Removes suppressed entities from retrieval indexes (deindexing) while leaving primary storage intact
+- Does **not** delete data — suppressed entities remain persisted in Badger
+- Does **not** replace compliance retention policies, legal holds, or erasure requests
+
+If the underlying compliance retention system later deletes or archives an entity, that lower-layer lifecycle wins. The knowledge-layer visibility layer cannot override a hard deletion or compliance-driven archival.
+
+`reveal()` bypasses only the knowledge-layer visibility gate. It does not resurrect deleted entities. It does not bypass compliance retention archival or deletion.
+
+### Precedence ordering
+
+When a query touches an entity, the layers apply in this order:
+
+1. **MVCC** resolves which version of the entity exists at the transaction snapshot.
+2. **Compliance retention** state still governs actual deletion / archival lifecycle. If the entity has been deleted or compliance-archived, it is gone — the knowledge-layer has no effect.
+3. **Knowledge-layer scorer** applies retrieval-visibility rules on top. Entities whose score falls below the visibility threshold are suppressed from query results.
+4. **`reveal()`** bypasses only step 3 — the knowledge-layer visibility gate.
+
+### Terminology convention
+
+Throughout this document:
+- **"archive" / "archived" / "archival"** refers exclusively to the existing compliance retention subsystem's lifecycle behavior.
+- **"suppress" / "suppressed" / "visibility-suppressed"** refers to the knowledge-layer scoring system hiding an entity from retrieval while it remains persisted.
+- **"deindex"** refers to the knowledge-layer system removing a suppressed entity from secondary indexes while its primary storage record remains intact.
 
 ---
 
@@ -22,7 +75,7 @@ The plan is intentionally file-and-function-level. Each phase produces a shippab
 | Component                | Location                                   | Description                                                                      |
 | ------------------------ | ------------------------------------------ | -------------------------------------------------------------------------------- |
 | `decay.Tier` enum        | `pkg/decay/decay.go:77-128`                | Hardcoded `TierEpisodic`, `TierSemantic`, `TierProcedural` with fixed half-lives |
-| `decay.Manager`          | `pkg/decay/decay.go`                       | Tier-based scoring, reinforcement, archival logic                                |
+| `decay.Manager`          | `pkg/decay/decay.go`                       | Tier-based scoring, reinforcement, suppression logic                             |
 | `Node.DecayScore`        | `pkg/storage/types.go:197`                 | Stored float64 on the Node struct                                                |
 | `Node.LastAccessed`      | `pkg/storage/types.go:198`                 | Stored time on the Node struct                                                   |
 | `Node.AccessCount`       | `pkg/storage/types.go:199`                 | Stored int64 on the Node struct                                                  |
@@ -52,7 +105,7 @@ The plan is intentionally file-and-function-level. Each phase produces a shippab
 // pkg/storage/badger.go — append to existing prefix block
 prefixAccessMeta        = byte(0x11) // accessmeta:entityID -> msgpack(AccessMetaEntry)
 prefixIndexEntryCatalog = byte(0x12) // idxcat:entityID -> msgpack(IndexEntryCatalog)
-prefixArchiveWorkItem   = byte(0x13) // archwork:workItemID -> msgpack(ArchiveWorkItem)
+prefixDeindexWorkItem   = byte(0x13) // deindexwork:workItemID -> msgpack(DeindexWorkItem)
 prefixDecayProfile      = byte(0x14) // decayprofile:name -> msgpack(DecayProfileDef)
 prefixPromotionProfile  = byte(0x15) // promoprofile:name -> msgpack(PromotionProfileDef)
 prefixPromotionPolicy   = byte(0x16) // promopolicy:name -> msgpack(PromotionPolicyDef)
@@ -67,13 +120,13 @@ prefixIndexTombstone    = byte(0x17) // idxtomb:<original-index-key> -> msgpack(
 
 **Depends on:** Nothing. This is the foundation.
 
-### 1.1 New package: `pkg/retention`
+### 1.1 New package: `pkg/knowledgepolicy`
 
-Create `pkg/retention/` as the home for all new decay/promotion types and the shared resolver. Keeping it separate from `pkg/decay/` avoids entangling with legacy tier code during migration.
+Create `pkg/knowledgepolicy/` as the home for all new decay/promotion types and the shared resolver. This package is separate from both `pkg/decay/` (legacy tier code) and `pkg/retention/` (compliance retention — GDPR, legal holds, erasure). The knowledge-layer scoring subsystem has no import dependency on the compliance retention subsystem.
 
 #### Files and types
 
-**`pkg/retention/types.go`** — Core schema objects:
+**`pkg/knowledgepolicy/types.go`** — Core schema objects:
 
 ```go
 // DecayFunction identifies a scoring function.
@@ -108,7 +161,7 @@ const (
 type DecayProfileBundle struct {
     Name              string        `msgpack:"name"`
     HalfLifeSeconds   int64         `msgpack:"halfLifeSeconds"`
-    ArchiveThreshold  float64       `msgpack:"archiveThreshold"`
+    VisibilityThreshold float64     `msgpack:"visibilityThreshold"`
     ScoreFloor        float64       `msgpack:"scoreFloor"`
     Function          DecayFunction `msgpack:"function"`
     Scope             ScopeType     `msgpack:"scope"`
@@ -137,7 +190,7 @@ type DecayProfileBinding struct {
     IsEdge            bool                       `msgpack:"isEdge"`
     ProfileRef        string                     `msgpack:"profileRef,omitempty"` // DECAY PROFILE 'name'
     NoDecay           bool                       `msgpack:"noDecay,omitempty"`
-    ArchiveThreshold  *float64                   `msgpack:"archiveThreshold,omitempty"` // override
+    VisibilityThreshold *float64                  `msgpack:"visibilityThreshold,omitempty"` // override
     PropertyRules     []DecayProfilePropertyRule `msgpack:"propertyRules,omitempty"`
 }
 
@@ -177,7 +230,7 @@ type PromotionPolicyDef struct {
 }
 ```
 
-**`pkg/retention/access_meta.go`** — AccessMeta types:
+**`pkg/knowledgepolicy/access_meta.go`** — AccessMeta types:
 
 ```go
 // AccessMetaFixedFields is the fast-path fixed-layout struct.
@@ -199,7 +252,7 @@ type AccessMetaEntry struct {
 }
 ```
 
-**`pkg/retention/compiled_binding.go`** — Compiled binding table:
+**`pkg/knowledgepolicy/compiled_binding.go`** — Compiled binding table:
 
 ```go
 // CompiledBinding is the pre-flattened lookup entry for a label/edge-type.
@@ -207,12 +260,12 @@ type CompiledBinding struct {
     DecayProfile       *DecayProfileBundle
     DecayBinding       *DecayProfileBinding
     PromotionPolicy    *PromotionPolicyDef
-    ArchiveThreshold   float64
-    ScoreFrom          ScoreFromMode
-    ScoreFromProperty  string
-    Function           DecayFunction
-    HalfLifeNanos      int64
-    ThresholdAgeNanos  int64   // pre-computed: -halfLife * ln(archiveThreshold) / ln(2)
+    VisibilityThreshold float64
+    ScoreFrom           ScoreFromMode
+    ScoreFromProperty   string
+    Function            DecayFunction
+    HalfLifeNanos       int64
+    ThresholdAgeNanos   int64   // pre-computed: -halfLife * ln(visibilityThreshold) / ln(2)
     DecayFloor         float64
     NoDecay            bool
 }
@@ -233,28 +286,28 @@ type BindingTable struct {
 
 ```go
 // Add these fields to the SchemaDefinition struct:
-DecayProfileBundles  []retention.DecayProfileBundle  `json:"decay_profile_bundles,omitempty"`
-DecayProfileBindings []retention.DecayProfileBinding  `json:"decay_profile_bindings,omitempty"`
-PromotionProfiles    []retention.PromotionProfileDef  `json:"promotion_profiles,omitempty"`
-PromotionPolicies    []retention.PromotionPolicyDef   `json:"promotion_policies,omitempty"`
+DecayProfileBundles  []knowledgepolicy.DecayProfileBundle  `json:"decay_profile_bundles,omitempty"`
+DecayProfileBindings []knowledgepolicy.DecayProfileBinding  `json:"decay_profile_bindings,omitempty"`
+PromotionProfiles    []knowledgepolicy.PromotionProfileDef  `json:"promotion_profiles,omitempty"`
+PromotionPolicies    []knowledgepolicy.PromotionPolicyDef   `json:"promotion_policies,omitempty"`
 ```
 
 **`pkg/storage/schema.go`** — Add to `SchemaManager`:
 
 ```go
 // Add these fields to the SchemaManager struct:
-decayProfileBundles  map[string]*retention.DecayProfileBundle  // key: profile name
-decayProfileBindings map[string]*retention.DecayProfileBinding // key: binding name
-promotionProfiles    map[string]*retention.PromotionProfileDef // key: profile name
-promotionPolicies    map[string]*retention.PromotionPolicyDef  // key: policy name
-bindingTable         *retention.BindingTable                   // compiled, rebuilt on DDL change
+decayProfileBundles  map[string]*knowledgepolicy.DecayProfileBundle  // key: profile name
+decayProfileBindings map[string]*knowledgepolicy.DecayProfileBinding // key: binding name
+promotionProfiles    map[string]*knowledgepolicy.PromotionProfileDef // key: profile name
+promotionPolicies    map[string]*knowledgepolicy.PromotionPolicyDef  // key: policy name
+bindingTable         *knowledgepolicy.BindingTable                   // compiled, rebuilt on DDL change
 ```
 
 Add methods: `CreateDecayProfileBundle()`, `CreateDecayProfileBinding()`, `DropDecayProfile()`, `AlterDecayProfile()`, `ShowDecayProfiles()`, `CreatePromotionProfile()`, `CreatePromotionPolicy()`, `DropPromotionProfile()`, `DropPromotionPolicy()`, `AlterPromotionProfile()`, `AlterPromotionPolicy()`, `ShowPromotionProfiles()`, `ShowPromotionPolicies()`.
 
 ### 1.3 DDL parsing
 
-**`pkg/cypher/retention_ddl.go`** — Keyword-scanning parser for decay/promotion DDL:
+**`pkg/cypher/knowledgepolicy_ddl.go`** — Keyword-scanning parser for decay/promotion DDL:
 
 Parse the following statements using the `ccSkipSpaces`/`ccScanIdent`/`ccMatchKeywordAt` pattern from `pkg/storage/constraint_contracts.go`:
 
@@ -288,26 +341,26 @@ Implement in `SchemaManager` methods:
 
 ### 1.5 Feature flag gating
 
-The entire policy-driven retention subsystem is gated behind the **existing** `config.Memory.DecayEnabled` flag (`NORNICDB_MEMORY_DECAY_ENABLED` env var, default `false`). No new feature flags are introduced for the subsystem itself.
+The entire knowledge-layer scoring subsystem is gated behind the **existing** `config.Memory.DecayEnabled` flag (`NORNICDB_MEMORY_DECAY_ENABLED` env var, default `false`). No new feature flags are introduced for the subsystem itself.
 
-**Rationale:** The policy-driven system is the evolution of the existing memory-decay subsystem — it replaces the same code paths, serves the same purpose, and targets the same operator audience. Introducing separate flags would create a confusing matrix where the legacy decay and the new retention system could be independently toggled into conflicting states. A single flag keeps the contract clean: when `DecayEnabled` is `true`, the retention subsystem is active; when `false`, no decay scoring, archival, or promotion logic executes.
+**Rationale:** The knowledge-layer scoring system is the evolution of the existing memory-decay subsystem — it replaces the same code paths, serves the same purpose, and targets the same operator audience. Introducing separate flags would create a confusing matrix where the legacy decay and the new scoring system could be independently toggled into conflicting states. A single flag keeps the contract clean: when `DecayEnabled` is `true`, the knowledge-layer scoring subsystem is active; when `false`, no decay scoring, visibility suppression, or promotion logic executes. The compliance retention subsystem (`pkg/retention`) is unaffected by this flag.
 
 **Gating behavior:**
 
-| Flag state                            | Legacy decay (pre-1.1.0)      | Policy-driven retention (1.1.0+)                                                                                                                         |
+| Flag state                            | Legacy decay (pre-1.1.0)      | Knowledge-layer scoring (1.1.0+)                                                                                                                         |
 | ------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DecayEnabled = true`, pre-migration  | Legacy `decay.Manager` active | Inactive (migration not run)                                                                                                                             |
-| `DecayEnabled = true`, post-migration | Removed                       | `retention.Scorer` active, profiles/policies evaluated                                                                                                   |
-| `DecayEnabled = false`                | Inactive                      | Inactive — DDL succeeds (profiles/policies are persisted schema), but runtime scoring, archival, `AccessAccumulator`, and flush goroutine are all no-ops |
+| `DecayEnabled = true`, post-migration | Removed                       | `knowledgepolicy.Scorer` active, profiles/policies evaluated                                                                                             |
+| `DecayEnabled = false`                | Inactive                      | Inactive — DDL succeeds (profiles/policies are persisted schema), but runtime scoring, visibility suppression, `AccessAccumulator`, and flush goroutine are all no-ops. Compliance retention subsystem unaffected. |
 
 **Gate points in code:**
 
 1. **`pkg/storage/badger_mvcc.go`** (Phase 4) — The visibility check skips profile resolution and returns the entity unchanged when `!config.Memory.DecayEnabled`.
-2. **`pkg/retention/access_flusher.go`** (Phase 3) — `AccessFlusher.Start()` exits immediately when `!config.Memory.DecayEnabled`. `AccessAccumulator.IncrementAccess()` is a no-op (check flag before atomic increment).
-3. **`pkg/retention/scorer.go`** (Phase 2) — `Scorer.ScoreNode()` and `Scorer.ScoreEdge()` return a neutral `RetentionResolution{FinalScore: 1.0, NoDecay: true}` when `!config.Memory.DecayEnabled`.
-4. **`pkg/storage/badger_archive_cleanup.go`** (Phase 6) — `ArchiveCleanupJob.Start()` exits immediately when `!config.Memory.DecayEnabled`.
-5. **`pkg/cypher/retention_functions.go`** (Phase 5) — `decayScore()` returns `1.0`, `decay()` returns `{score: 1.0, applies: false, reason: "decay subsystem disabled — enable with NORNICDB_MEMORY_DECAY_ENABLED=true"}`, `policy()` returns empty metadata, `reveal()` returns entity unchanged. These do not error — they degrade gracefully. A config mismatch warning is logged once per query execution (§5.4).
-6. **`pkg/cypher/retention_ddl.go`** (Phase 1) — DDL statements (`CREATE DECAY PROFILE`, etc.) always succeed regardless of flag state. Profiles and policies are schema objects and must persist across flag toggles. The flag only gates runtime evaluation.
+2. **`pkg/knowledgepolicy/access_flusher.go`** (Phase 3) — `AccessFlusher.Start()` exits immediately when `!config.Memory.DecayEnabled`. `AccessAccumulator.IncrementAccess()` is a no-op (check flag before atomic increment).
+3. **`pkg/knowledgepolicy/scorer.go`** (Phase 2) — `Scorer.ScoreNode()` and `Scorer.ScoreEdge()` return a neutral `ScoringResolution{FinalScore: 1.0, NoDecay: true}` when `!config.Memory.DecayEnabled`.
+4. **`pkg/storage/badger_deindex_cleanup.go`** (Phase 6) — `DeindexCleanupJob.Start()` exits immediately when `!config.Memory.DecayEnabled`.
+5. **`pkg/cypher/knowledgepolicy_functions.go`** (Phase 5) — `decayScore()` returns `1.0`, `decay()` returns `{score: 1.0, applies: false, reason: "decay subsystem disabled — enable with NORNICDB_MEMORY_DECAY_ENABLED=true"}`, `policy()` returns empty metadata, `reveal()` returns entity unchanged. These do not error — they degrade gracefully. A config mismatch warning is logged once per query execution (§5.4).
+6. **`pkg/cypher/knowledgepolicy_ddl.go`** (Phase 1) — DDL statements (`CREATE DECAY PROFILE`, etc.) always succeed regardless of flag state. Profiles and policies are schema objects and must persist across flag toggles. The flag only gates runtime evaluation.
 
 **`pkg/config/config.go`** — Change the default and env var parsing:
 
@@ -349,10 +402,10 @@ The YAML key `memory.decay_enabled` continues to work unchanged — it already s
 
 ### Phase 1 test files
 
-- `pkg/retention/types_test.go` — msgpack serialization round-trips
-- `pkg/retention/compiled_binding_test.go` — binding table compilation
-- `pkg/cypher/retention_ddl_test.go` — DDL parsing for all statement forms
-- `pkg/storage/schema_retention_test.go` — SchemaManager CRUD, validation, persistence
+- `pkg/knowledgepolicy/types_test.go` — msgpack serialization round-trips
+- `pkg/knowledgepolicy/compiled_binding_test.go` — binding table compilation
+- `pkg/cypher/knowledgepolicy_ddl_test.go` — DDL parsing for all statement forms
+- `pkg/storage/schema_knowledgepolicy_test.go` — SchemaManager CRUD, validation, persistence
 
 ---
 
@@ -364,7 +417,7 @@ The YAML key `memory.decay_enabled` continues to work unchanged — it already s
 
 ### 2.1 Resolver
 
-**`pkg/retention/resolver.go`**:
+**`pkg/knowledgepolicy/resolver.go`**:
 
 ```go
 // Resolver resolves effective decay and promotion configuration for a target.
@@ -372,23 +425,23 @@ type Resolver struct {
     bindingTable *BindingTable
 }
 
-// Resolve returns the RetentionResolution for a node identified by its sorted labels.
-func (r *Resolver) ResolveNode(labels []string) *RetentionResolution
+// ResolveNode returns the ScoringResolution for a node identified by its sorted labels.
+func (r *Resolver) ResolveNode(labels []string) *ScoringResolution
 
-// Resolve returns the RetentionResolution for an edge identified by its type.
-func (r *Resolver) ResolveEdge(edgeType string) *RetentionResolution
+// ResolveEdge returns the ScoringResolution for an edge identified by its type.
+func (r *Resolver) ResolveEdge(edgeType string) *ScoringResolution
 
 // ResolveProperty returns the resolution for a specific property on a node or edge.
-func (r *Resolver) ResolveProperty(entityLabelsOrType interface{}, propertyPath string) *RetentionResolution
+func (r *Resolver) ResolveProperty(entityLabelsOrType interface{}, propertyPath string) *ScoringResolution
 ```
 
-**`pkg/retention/resolution.go`** — `RetentionResolution` struct (design §5.2):
+**`pkg/knowledgepolicy/resolution.go`** — `ScoringResolution` struct (design §5.2):
 
-Fields: `TargetID`, `TargetScope`, `ResolvedDecayProfileID`, `ResolvedScoreFrom`, `ResolutionSourceChain`, `AppliedDecayProfileNames`, `AppliedPromotionPolicyName`, `AppliedPromotionProfileName`, `EffectiveRate`, `EffectiveThreshold`, `EffectiveMultiplier`, `BaseScore`, `FinalScore`, `NoDecay`, `ArchiveEligible`, `Explanation`.
+Fields: `TargetID`, `TargetScope`, `ResolvedDecayProfileID`, `ResolvedScoreFrom`, `ResolutionSourceChain`, `AppliedDecayProfileNames`, `AppliedPromotionPolicyName`, `AppliedPromotionProfileName`, `EffectiveRate`, `EffectiveThreshold`, `EffectiveMultiplier`, `BaseScore`, `FinalScore`, `NoDecay`, `SuppressionEligible`, `Explanation`.
 
 ### 2.2 Scorer
 
-**`pkg/retention/scorer.go`**:
+**`pkg/knowledgepolicy/scorer.go`**:
 
 ```go
 // Scorer computes decay and promotion scores.
@@ -404,7 +457,7 @@ func (s *Scorer) ScoreNode(
     versionAt int64,       // UnixNano — latest visible version timestamp
     scoringTime int64,     // UnixNano — transaction snapshot time
     accessMeta *AccessMetaEntry, // may be nil
-) *RetentionResolution
+) *ScoringResolution
 
 // ScoreEdge computes the final score for an edge at scoringTime.
 func (s *Scorer) ScoreEdge(
@@ -413,7 +466,7 @@ func (s *Scorer) ScoreEdge(
     versionAt int64,
     scoringTime int64,
     accessMeta *AccessMetaEntry,
-) *RetentionResolution
+) *ScoringResolution
 
 // ScoreProperty computes the score for a specific property.
 func (s *Scorer) ScoreProperty(
@@ -423,7 +476,7 @@ func (s *Scorer) ScoreProperty(
     versionAt int64,
     scoringTime int64,
     accessMeta *AccessMetaEntry,
-) *RetentionResolution
+) *ScoringResolution
 ```
 
 Scoring formula (design §6.6):
@@ -457,7 +510,7 @@ func stepDecay(ageNanos, halfLifeNanos int64) float64 {
 
 ### 2.3 Compiled binding table builder
 
-**`pkg/retention/binding_builder.go`**:
+**`pkg/knowledgepolicy/binding_builder.go`**:
 
 Called by `SchemaManager` on every DDL change. Rebuilds the `BindingTable` from all stored bundles, bindings, profiles, and policies. Pre-computes `thresholdAgeNanos` for the fast-path integer comparison (design §6.1 Tier 3).
 
@@ -492,7 +545,7 @@ type DecayProfileBinding struct {
 
 ### Phase 2 acceptance gate
 
-- Resolver returns correct `RetentionResolution` for all label/edge-type/property combinations.
+- Resolver returns correct `ScoringResolution` for all label/edge-type/property combinations.
 - Scorer produces correct scores for all decay functions × score-from modes.
 - Multi-label resolution picks the most specific match.
 - Multi-label tie at equal specificity is broken by `Order` field (lower wins).
@@ -502,15 +555,15 @@ type DecayProfileBinding struct {
 - No-decay targets resolve to `1.0`.
 - Targets with no matching profile resolve to `1.0` (neutral).
 - `thresholdAgeNanos` fast-path matches `math.Exp` path for all test cases.
-- Scorer returns neutral `RetentionResolution{FinalScore: 1.0, NoDecay: true}` when `!config.Memory.DecayEnabled`.
+- Scorer returns neutral `ScoringResolution{FinalScore: 1.0, NoDecay: true}` when `!config.Memory.DecayEnabled`.
 
 ### Phase 2 test files
 
-- `pkg/retention/resolver_test.go` — resolution cascade for all target types
-- `pkg/retention/scorer_test.go` — scoring correctness, all functions, all score-from modes
-- `pkg/retention/binding_builder_test.go` — compiled table correctness, multi-label conflict detection, Order-based tie-breaking
-- `pkg/retention/binding_builder_conflict_test.go` — equal-specificity with equal Order rejected at DDL time; equal-specificity with different Order resolves deterministically; runtime label conflict logs warning on every occurrence
-- `pkg/retention/scorer_bench_test.go` — benchmark: integer fast-path vs float path
+- `pkg/knowledgepolicy/resolver_test.go` — resolution cascade for all target types
+- `pkg/knowledgepolicy/scorer_test.go` — scoring correctness, all functions, all score-from modes
+- `pkg/knowledgepolicy/binding_builder_test.go` — compiled table correctness, multi-label conflict detection, Order-based tie-breaking
+- `pkg/knowledgepolicy/binding_builder_conflict_test.go` — equal-specificity with equal Order rejected at DDL time; equal-specificity with different Order resolves deterministically; runtime label conflict logs warning on every occurrence
+- `pkg/knowledgepolicy/scorer_bench_test.go` — benchmark: integer fast-path vs float path
 
 ---
 
@@ -522,7 +575,7 @@ type DecayProfileBinding struct {
 
 ### 3.1 Per-P sharded counter ring
 
-**`pkg/retention/access_accumulator.go`**:
+**`pkg/knowledgepolicy/access_accumulator.go`**:
 
 **Problem with entity-sharded design:** In graph datasets, power-law distributions are the norm. A super-node (e.g., a canonical root concept that everything connects to) hashes to a single shard. Hundreds of concurrent goroutines contending on the same `atomic.Int64` causes CPU cache-line bouncing and degrades the hot path from <30ns to >200ns under contention.
 
@@ -608,10 +661,10 @@ func (a *AccessAccumulator) ReadThrough(entityID string, key string, persisted i
 **`pkg/storage/badger_access_meta.go`**:
 
 ```go
-func (b *BadgerEngine) GetAccessMeta(entityID string) (*retention.AccessMetaEntry, error)
-func (b *BadgerEngine) PutAccessMeta(entityID string, entry *retention.AccessMetaEntry) error
+func (b *BadgerEngine) GetAccessMeta(entityID string) (*knowledgepolicy.AccessMetaEntry, error)
+func (b *BadgerEngine) PutAccessMeta(entityID string, entry *knowledgepolicy.AccessMetaEntry) error
 func (b *BadgerEngine) DeleteAccessMeta(entityID string) error
-func (b *BadgerEngine) ScanAccessMetaPrefix(prefix string) ([]*retention.AccessMetaEntry, error)
+func (b *BadgerEngine) ScanAccessMetaPrefix(prefix string) ([]*knowledgepolicy.AccessMetaEntry, error)
 ```
 
 Key format: `[prefixAccessMeta][entityID bytes]`
@@ -620,7 +673,7 @@ Serialization: fixed fields as known-size byte slice (no reflection), overflow m
 
 ### 3.3 Flush goroutine
 
-**`pkg/retention/access_flusher.go`**:
+**`pkg/knowledgepolicy/access_flusher.go`**:
 
 ```go
 type AccessFlusher struct {
@@ -638,7 +691,7 @@ Flush loop: iterate shards, atomically swap non-zero deltas, merge into persiste
 ### 3.4 Entity lifecycle integration
 
 - **Node/edge deletion:** Enqueue accessMeta key for deletion in the same transaction. Clear from accumulator immediately.
-- **Node/edge archival:** Retain accessMeta (accessible via `reveal()`). Delete only on physical reclamation.
+- **Node/edge suppression:** Retain accessMeta (accessible via `reveal()`). Delete only on physical reclamation by the compliance retention lifecycle.
 - **MVCC version pruning:** Check for orphaned accessMeta entries when all versions are pruned.
 
 ### Phase 3 acceptance gate
@@ -649,16 +702,16 @@ Flush loop: iterate shards, atomically swap non-zero deltas, merge into persiste
 - Read-through scans all P-local shards and returns `persisted + sum(buffered deltas)`.
 - accessMeta survives restart (msgpack round-trip).
 - Deletion cascades from node/edge deletion.
-- accessMeta retained on archival.
+- accessMeta retained on visibility suppression.
 - All accumulator operations are no-ops when `!config.Memory.DecayEnabled`.
 
 ### Phase 3 test files
 
-- `pkg/retention/access_accumulator_test.go` — concurrent increment correctness, P-local shard isolation
-- `pkg/retention/access_accumulator_supernode_test.go` — super-node contention: 128 goroutines × 1 entityID, assert no throughput degradation vs. 128 goroutines × 128 entityIDs
-- `pkg/retention/access_flusher_test.go` — flush persistence, batching, cross-shard aggregation
+- `pkg/knowledgepolicy/access_accumulator_test.go` — concurrent increment correctness, P-local shard isolation
+- `pkg/knowledgepolicy/access_accumulator_supernode_test.go` — super-node contention: 128 goroutines × 1 entityID, assert no throughput degradation vs. 128 goroutines × 128 entityIDs
+- `pkg/knowledgepolicy/access_flusher_test.go` — flush persistence, batching, cross-shard aggregation
 - `pkg/storage/badger_access_meta_test.go` — CRUD, serialization round-trip, deletion cascade
-- `pkg/retention/access_accumulator_bench_test.go` — throughput under contention, uniform vs. power-law distributions
+- `pkg/knowledgepolicy/access_accumulator_bench_test.go` — throughput under contention, uniform vs. power-law distributions
 
 ---
 
@@ -675,12 +728,12 @@ Flush loop: iterate shards, atomically swap non-zero deltas, merge into persiste
 After MVCC version resolution, before returning the entity to the caller:
 
 0. If `!config.Memory.DecayEnabled`: skip all steps below, return entity unchanged.
-1. Check archived bit (Tier 2 fast path — one byte check, skip if archived and no `reveal()`).
+1. Check suppressed bit (Tier 2 fast path — one byte check, skip if suppressed and no `reveal()`).
 2. Look up compiled binding for the entity's labels/edge-type (Tier 1 — single map lookup).
 3. If binding exists and `NoDecay` is false:
    a. Check `now - scoreFrom > thresholdAgeNanos` (Tier 3 — integer comparison, no `math.Exp`).
-   b. If below threshold and no `reveal()` in query context: suppress entity (return nil/skip).
-   c. If surviving visibility: attach `RetentionResolution` to entity context for lazy score computation.
+   b. If below visibility threshold and no `reveal()` in query context: suppress entity (return nil/skip).
+   c. If surviving visibility: attach `ScoringResolution` to entity context for lazy score computation.
 4. If `reveal()` is active for this binding: always materialize, still compute score for `decayScore()`/`decay()`.
 
 The `scoringTime` passed to the scorer is `txn.ReadTimestamp` (already available in the MVCC read path as the snapshot timestamp).
@@ -718,7 +771,7 @@ func (s *Scorer) resolveAccessMeta(node *Node, accessMeta *AccessMetaEntry) *Acc
 - Phase 7 migration runs: converts all legacy fields to `AccessMetaEntry` records, then removes the legacy fields from the `Node` struct.
 - After Phase 7, the fallback code path is dead (the legacy fields no longer exist on the struct). Remove the fallback function in the same commit that removes the legacy fields.
 
-**Test requirement:** Add `pkg/retention/legacy_fallback_test.go` — test that a node with legacy fields but no `AccessMetaEntry` scores identically to the same node after its legacy fields have been migrated to an `AccessMetaEntry`.
+**Test requirement:** Add `pkg/knowledgepolicy/legacy_fallback_test.go` — test that a node with legacy fields but no `AccessMetaEntry` scores identically to the same node after its legacy fields have been migrated to an `AccessMetaEntry`.
 
 ### 4.2 Query context for reveal()
 
@@ -753,13 +806,13 @@ When the scorer indicates property-level decay hiding:
 ### 4.5 Background maintenance paths
 
 - **Recalc:** Use scorer with `scoringTime = time.Now()` at cycle start, frozen for batch.
-- **Archive pass:** Entities whose final score falls below archive threshold → mark archived in primary storage, enqueue deindex work item.
+- **Suppression pass:** Entities whose final score falls below visibility threshold → mark suppressed in primary storage, enqueue deindex work item.
 - **Stats:** Report decay distribution based on scorer resolution, not hardcoded tiers.
 
 ### Phase 4 acceptance gate
 
-- `MATCH (n:MemoryEpisode)` does not return nodes below archive threshold.
-- `MATCH (n:MemoryEpisode) RETURN reveal(n)` returns all nodes including invisible ones.
+- `MATCH (n:MemoryEpisode)` does not return nodes below visibility threshold.
+- `MATCH (n:MemoryEpisode) RETURN reveal(n)` returns all nodes including suppressed ones.
 - `MATCH (n:KnowledgeFact)` always returns facts (no-decay).
 - Property-level hiding works: hidden properties absent from RETURN unless `reveal()`.
 - Indexed properties always visible regardless of decay.
@@ -771,8 +824,8 @@ When the scorer indicates property-level decay hiding:
 - `pkg/storage/badger_mvcc_decay_test.go` — visibility suppression, reveal bypass, property hiding, feature-flag-off pass-through
 - `pkg/cypher/reveal_test.go` — reveal() plan compilation, per-variable bypass
 - `pkg/search/decay_filter_test.go` — chunked retrieval, LIMIT satisfaction
-- `pkg/retention/integration_test.go` — end-to-end: DDL → score → visibility
-- `pkg/retention/legacy_fallback_test.go` — node with legacy fields but no AccessMetaEntry scores identically to migrated node; fallback is no-op when AccessMetaEntry exists
+- `pkg/knowledgepolicy/integration_test.go` — end-to-end: DDL → score → visibility
+- `pkg/knowledgepolicy/legacy_fallback_test.go` — node with legacy fields but no AccessMetaEntry scores identically to migrated node; fallback is no-op when AccessMetaEntry exists
 
 ---
 
@@ -784,13 +837,13 @@ When the scorer indicates property-level decay hiding:
 
 ### 5.1 Function registration
 
-**`pkg/cypher/retention_functions.go`**:
+**`pkg/cypher/knowledgepolicy_functions.go`**:
 
 Register in the existing function registry (same pattern as `kalman_functions.go`):
 
 - `decayScore(entity)` → `float64` — calls `Scorer.ScoreNode/ScoreEdge`, returns `FinalScore`.
 - `decayScore(entity, options)` → `float64` — `options.property`, `options.scoringMode`.
-- `decay(entity)` → `map[string]any` — structured result with `.score`, `.policy`, `.scope`, `.function`, `.archiveThreshold`, `.floor`, `.applies`, `.reason`, `.scoreFrom`.
+- `decay(entity)` → `map[string]any` — structured result with `.score`, `.policy`, `.scope`, `.function`, `.visibilityThreshold`, `.floor`, `.applies`, `.reason`, `.scoreFrom`.
 - `decay(entity, options)` → `map[string]any` — property/scoringMode variants.
 - `policy(entity)` → `map[string]any` — reads from accessMeta index via accumulator read-through.
 - `reveal(entity)` → plan-level marker, not a runtime function. Detected by planner, not function registry. Returns entity unchanged at runtime.
@@ -807,7 +860,7 @@ Validate `options` map keys against accepted set: `property`, `scoringMode`. Rej
 
 ### 5.4 Behavior when `DecayEnabled = false` — graceful degradation
 
-When `config.Memory.DecayEnabled` is `false`, all four retention functions remain callable and return semantically correct values. They do **not** error. This is the PostgreSQL/Elasticsearch pattern — queries are portable across configurations without requiring conditional function calls.
+When `config.Memory.DecayEnabled` is `false`, all four knowledge-layer functions remain callable and return semantically correct values. They do **not** error. This is the PostgreSQL/Elasticsearch pattern — queries are portable across configurations without requiring conditional function calls.
 
 **Return values when disabled:**
 
@@ -822,7 +875,7 @@ When `config.Memory.DecayEnabled` is `false`, all four retention functions remai
 **Config mismatch log:** Every time one of these functions is evaluated with `DecayEnabled = false`, the runtime logs a warning:
 
 ```
-WARN  retention: decayScore() called but decay subsystem is disabled (NORNICDB_MEMORY_DECAY_ENABLED=false). Returning 1.0. Enable decay to get actual scores.
+WARN  knowledgepolicy: decayScore() called but decay subsystem is disabled (NORNICDB_MEMORY_DECAY_ENABLED=false). Returning 1.0. Enable decay to get actual scores.
 ```
 
 This warning is logged **once per query execution**, not once per entity per query. The log is scoped to the query context — if a single `MATCH (n) RETURN decayScore(n)` touches 10,000 nodes, it produces one log line, not 10,000. This gives operators visibility into misconfiguration without flooding logs during bulk scans.
@@ -848,7 +901,7 @@ This edge case is mitigated by:
 2. The `decay(n).applies` field — operators can inspect subsystem status: `MATCH (n) RETURN decay(n).applies LIMIT 1` returns `false` when disabled.
 3. Documentation in `docs/user-guides/decay-profiles.md` explicitly calls out this behavior with an example.
 
-This is an acceptable tradeoff: returning empty results for "find me decayed nodes" when decay is off is the correct answer to the question being asked. The alternative — erroring on any retention function call — would force operators to maintain two query variants and would break `reveal()` semantics (since `reveal()` is inherently a no-op when decay is off).
+This is an acceptable tradeoff: returning empty results for "find me decayed nodes" when decay is off is the correct answer to the question being asked. The alternative — erroring on any knowledge-layer function call — would force operators to maintain two query variants and would break `reveal()` semantics (since `reveal()` is inherently a no-op when decay is off).
 
 ### Phase 5 acceptance gate
 
@@ -864,18 +917,18 @@ This is an acceptable tradeoff: returning empty results for "find me decayed nod
 
 ### Phase 5 test files
 
-- `pkg/cypher/retention_functions_test.go` — all function variants, default behavior
-- `pkg/cypher/retention_functions_options_test.go` — options validation
-- `pkg/cypher/retention_reveal_integration_test.go` — reveal in all clause positions
-- `pkg/cypher/retention_functions_disabled_test.go` — all functions with `DecayEnabled = false`: return values correct, config mismatch warning logged once per query (assert log output), `WHERE decayScore(n) < 0.5` returns empty results, `WHERE decayScore(n) > 0.5` returns all nodes
+- `pkg/cypher/knowledgepolicy_functions_test.go` — all function variants, default behavior
+- `pkg/cypher/knowledgepolicy_functions_options_test.go` — options validation
+- `pkg/cypher/knowledgepolicy_reveal_integration_test.go` — reveal in all clause positions
+- `pkg/cypher/knowledgepolicy_functions_disabled_test.go` — all functions with `DecayEnabled = false`: return values correct, config mismatch warning logged once per query (assert log output), `WHERE decayScore(n) < 0.5` returns empty results, `WHERE decayScore(n) > 0.5` returns all nodes
 
 ---
 
-## Phase 6: Archival and Deindex Infrastructure
+## Phase 6: Visibility Suppression and Deindex Infrastructure
 
-**Goal:** Implement per-entity index-entry catalogs, archive work items, and the background deindex cleanup job.
+**Goal:** Implement per-entity index-entry catalogs, deindex work items, and the background deindex cleanup job. This phase does not redefine the existing compliance retention archival lifecycle.
 
-**Depends on:** Phase 4 (archive marking).
+**Depends on:** Phase 4 (suppression marking).
 
 ### 6.1 Index-entry catalog
 
@@ -894,19 +947,19 @@ type IndexEntryCatalog struct {
 
 Key format: `[prefixIndexEntryCatalog][entityID bytes]`
 
-This is maintained on every index write. When a node is re-indexed (properties changed), the catalog is updated with the new key set. The `DeindexedAtVersion` field is set by the archive cleanup job after writing index tombstones (§6.3.1) and prevents re-processing on subsequent cleanup runs.
+This is maintained on every index write. When a node is re-indexed (properties changed), the catalog is updated with the new key set. The `DeindexedAtVersion` field is set by the deindex cleanup job after writing index tombstones (§6.3.1) and prevents re-processing on subsequent cleanup runs.
 
-### 6.2 Archive work items
+### 6.2 Deindex work items
 
-**`pkg/storage/badger_archive_work.go`**:
+**`pkg/storage/badger_deindex_work.go`**:
 
-When a node or edge is marked archived:
+When a node or edge is marked visibility-suppressed:
 
-1. Persist `ArchiveWorkItem` with the entity's index catalog reference.
+1. Persist `DeindexWorkItem` with the entity's index catalog reference.
 2. The background cleanup job drains work items.
 
 ```go
-type ArchiveWorkItem struct {
+type DeindexWorkItem struct {
     WorkItemID   string    `msgpack:"workItemId"`
     TargetID     string    `msgpack:"targetId"`
     TargetScope  string    `msgpack:"targetScope"`
@@ -919,25 +972,25 @@ type ArchiveWorkItem struct {
 
 ### 6.3 Background deindex job
 
-**`pkg/storage/badger_archive_cleanup.go`**:
+**`pkg/storage/badger_deindex_cleanup.go`**:
 
 ```go
-type ArchiveCleanupJob struct {
+type DeindexCleanupJob struct {
     engine    *BadgerEngine
     interval  time.Duration // default: 24h (nightly), configurable in seconds
 }
 
-func (j *ArchiveCleanupJob) Start(ctx context.Context)
-func (j *ArchiveCleanupJob) RunOnce(ctx context.Context) (deindexed int, err error)
+func (j *DeindexCleanupJob) Start(ctx context.Context)
+func (j *DeindexCleanupJob) RunOnce(ctx context.Context) (deindexed int, err error)
 ```
 
-Process: scan `prefixArchiveWorkItem` for pending items → for each item, load its `IndexEntryCatalog` → perform batched deindex writes against the exact index keys → mark work item completed → delete completed work items.
+Process: scan `prefixDeindexWorkItem` for pending items → for each item, load its `IndexEntryCatalog` → perform batched deindex writes against the exact index keys → mark work item completed → delete completed work items.
 
 No full index scans. Idempotent. Retry-safe (exponential backoff on failures).
 
 #### 6.3.1 MVCC-safe deindexing — no physical key wipes
 
-**Critical constraint:** NornicDB uses bitemporal MVCC. A node archived at version V_100 must still be resolvable by time-travel queries running `AS OF V_50` that traverse through secondary indexes. Physically deleting index keys would corrupt historical state.
+**Critical constraint:** NornicDB uses bitemporal MVCC. A node suppressed at version V_100 must still be resolvable by time-travel queries running `AS OF V_50` that traverse through secondary indexes. Physically deleting index keys would corrupt historical state.
 
 The "deindex" operation therefore does **not** perform a physical Badger key delete. Instead, it writes a **companion tombstone key** under a dedicated prefix that marks the original index entry as dead as of a specific MVCC version.
 
@@ -954,7 +1007,7 @@ prefixIndexTombstone = byte(0x17) // idxtomb:<original-index-key> -> msgpack(Ind
 // IndexTombstoneEntry is written as a companion key alongside the original index key.
 // The original index key is NOT modified or deleted.
 type IndexTombstoneEntry struct {
-    ArchivedAtVersion MVCCVersion `msgpack:"archivedAt"`
+    SuppressedAtVersion MVCCVersion `msgpack:"suppressedAt"`
 }
 ```
 
@@ -965,12 +1018,12 @@ type IndexTombstoneEntry struct {
 **Read-path behavior:**
 
 - **Current-time queries (`MVCCReadLatest`):** When scanning a secondary index and finding a candidate key `K`, probe for `[prefixIndexTombstone][K]`. If the tombstone key exists, skip the entry. Cost: one additional Badger point lookup per candidate. This is acceptable because the tombstone prefix is small and Badger's bloom filters will reject the lookup in <50ns for the common case (no tombstone exists).
-- **Time-travel queries (`MVCCReadSnapshot` at version V):** If the tombstone key exists and `V < ArchivedAtVersion`, the tombstone is invisible — the index entry is still live at that snapshot. Return the entry normally. If `V >= ArchivedAtVersion`, skip the entry.
-- **Optimization: batch tombstone prefetch.** During label-index scans that iterate many entries, the read path can do a single prefix scan on `[prefixIndexTombstone][original-prefix][labelName]` and build a local `map[string]MVCCVersion` of tombstoned IDs for that label. Subsequent checks are map lookups instead of point reads. This is O(tombstones) not O(candidates), and is efficient because the archived population is typically small relative to the live population.
+- **Time-travel queries (`MVCCReadSnapshot` at version V):** If the tombstone key exists and `V < SuppressedAtVersion`, the tombstone is invisible — the index entry is still live at that snapshot. Return the entry normally. If `V >= SuppressedAtVersion`, skip the entry.
+- **Optimization: batch tombstone prefetch.** During label-index scans that iterate many entries, the read path can do a single prefix scan on `[prefixIndexTombstone][original-prefix][labelName]` and build a local `map[string]MVCCVersion` of tombstoned IDs for that label. Subsequent checks are map lookups instead of point reads. This is O(tombstones) not O(candidates), and is efficient because the suppressed population is typically small relative to the live population.
 
 **Why a dedicated prefix, not a value overwrite:** The current secondary indexes (`0x03`–`0x06`) write `[]byte{}` as the value. Overwriting the value with a tombstone struct would couple the tombstone format to every index value format. If any future index writes non-empty values (e.g., composite indexes with score metadata), a sentinel-byte scheme creates a fragile format dependency. A dedicated prefix key is fully decoupled — the original key and value are never modified, and tombstone lifecycle is independent.
 
-**Physical reclamation:** Both the tombstone key and the original index key are eligible for physical deletion only when the `ArchivedAtVersion` is older than the engine's `RetentionPolicy.TTL` and no active snapshot readers hold a version at or before the tombstone's version. This is handled by the existing MVCC lifecycle pruning infrastructure (`MVCCLifecycleController`), not by the archive cleanup job. The cleanup job's sole responsibility is writing the tombstone key. Reclamation is a separate lifecycle concern.
+**Physical reclamation:** Both the tombstone key and the original index key are eligible for physical deletion only when the `SuppressedAtVersion` is older than the engine's `RetentionPolicy.TTL` and no active snapshot readers hold a version at or before the tombstone's version. This is handled by the existing MVCC lifecycle pruning infrastructure (`MVCCLifecycleController`), not by the deindex cleanup job. The cleanup job's sole responsibility is writing the tombstone key. Reclamation is a separate lifecycle concern.
 
 **IndexEntryCatalog update:** After writing tombstones, the catalog entry is updated with `DeindexedAtVersion` to prevent re-processing:
 
@@ -983,29 +1036,29 @@ type IndexEntryCatalog struct {
 }
 ```
 
-### 6.4 Archived-bit fast path
+### 6.4 Suppressed-bit fast path
 
-Add an `Archived` bool field to the node and edge serialization format. On read, check this bit before any profile resolution. Cost: one byte check. This is the Tier 2 fast path from the design.
+Add a `VisibilitySuppressed` bool field to the node and edge serialization format. On read, check this bit before any profile resolution. Cost: one byte check. This is the Tier 2 fast path from the design.
 
 ### Phase 6 acceptance gate
 
 - Index-entry catalog tracks correct keys for all index types (property, composite, vector, fulltext, range).
-- Archive work items are enqueued when an entity is marked archived.
+- Deindex work items are enqueued when an entity is marked visibility-suppressed.
 - Background cleanup writes companion tombstone keys under `prefixIndexTombstone` (not physical deletes or value overwrites) for exact index keys without scanning.
 - Cleanup is idempotent — running twice produces the same tombstones, no error.
-- Archived entities are skipped in read paths even before deindex completes (archived-bit fast path).
-- Time-travel queries at snapshots before the archive version still resolve archived entities through the index (tombstone is invisible at earlier versions).
-- Time-travel queries at snapshots at or after the archive version skip the tombstoned index entries.
-- Index tombstones are physically reclaimed only by MVCC lifecycle pruning, not by the archive cleanup job.
+- Suppressed entities are skipped in read paths even before deindex completes (suppressed-bit fast path).
+- Time-travel queries at snapshots before the suppression version still resolve suppressed entities through the index (tombstone is invisible at earlier versions).
+- Time-travel queries at snapshots at or after the suppression version skip the tombstoned index entries.
+- Index tombstones are physically reclaimed only by MVCC lifecycle pruning, not by the deindex cleanup job.
 - Cleanup interval is configurable.
 
 ### Phase 6 test files
 
 - `pkg/storage/badger_index_catalog_test.go` — catalog CRUD, correctness, DeindexedAtVersion prevents re-processing
-- `pkg/storage/badger_archive_work_test.go` — work item lifecycle
-- `pkg/storage/badger_archive_cleanup_test.go` — end-to-end cleanup, idempotency, retry
-- `pkg/storage/badger_index_tombstone_test.go` — companion tombstone key written under `prefixIndexTombstone`; current-time query skips tombstoned entries; time-travel query at pre-archive snapshot returns entry; time-travel at post-archive snapshot skips entry; batch tombstone prefetch optimization during label-index scan
-- `pkg/storage/badger_archive_cleanup_bench_test.go` — throughput
+- `pkg/storage/badger_deindex_work_test.go` — work item lifecycle
+- `pkg/storage/badger_deindex_cleanup_test.go` — end-to-end cleanup, idempotency, retry
+- `pkg/storage/badger_index_tombstone_test.go` — companion tombstone key written under `prefixIndexTombstone`; current-time query skips tombstoned entries; time-travel query at pre-suppression snapshot returns entry; time-travel at post-suppression snapshot skips entry; batch tombstone prefetch optimization during label-index scan
+- `pkg/storage/badger_deindex_cleanup_bench_test.go` — throughput
 
 ---
 
@@ -1024,14 +1077,14 @@ The migration surface is smaller than it appears because of how NornicDB seriali
 - **Edge bytes in Badger** — Same format, no decay fields to remove.
 - **MVCC version records** — `mvccNodeRecord` wraps `*Node` via `msgpack.Marshal()`. Same field-name map behavior. Old version records with legacy fields decode cleanly into the new struct — the legacy keys are ignored.
 - **Embeddings** — Unchanged.
-- **Schema definitions** — New retention fields are `omitempty` and default to nil/empty on old data.
+- **Schema definitions** — New knowledge-layer fields are `omitempty` and default to nil/empty on old data.
 
 **Needs migration (access state extraction):**
 - **Nodes with non-zero access state** — `DecayScore`, `LastAccessed`, `AccessCount` must be extracted from each node's stored bytes and written to a new `AccessMetaEntry` under `prefixAccessMeta`. This is the only data transformation.
 
 **Needs new on-disk state:**
 - **Schema version marker** — A version marker under `prefixMVCCMeta` to track which migrations have run.
-- **`Archived` bit on nodes/edges** — New field, defaults to `false` on existing data. No migration needed — the zero value is correct (nothing is archived yet).
+- **`VisibilitySuppressed` bit on nodes/edges** — New field, defaults to `false` on existing data. No migration needed — the zero value is correct (nothing is suppressed yet).
 
 ### 7.1 Schema version marker
 
@@ -1104,10 +1157,10 @@ func (b *BadgerEngine) migrateV0ToV1() error
    b. Check if the node has non-zero access state: `DecayScore != 0 || AccessCount != 0 || !LastAccessed.IsZero()`.
    c. If yes, construct an `AccessMetaEntry`:
       ```go
-      entry := &retention.AccessMetaEntry{
+      entry := &knowledgepolicy.AccessMetaEntry{
           TargetID:    string(node.ID),
-          TargetScope: retention.ScopeNode,
-          Fixed: retention.AccessMetaFixedFields{
+          TargetScope: knowledgepolicy.ScopeNode,
+          Fixed: knowledgepolicy.AccessMetaFixedFields{
               AccessCount:    node.AccessCount,
               LastAccessedAt: node.LastAccessed.UnixNano(),
           },
@@ -1162,7 +1215,7 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 ### 7.5 Remove legacy types
 
 - Delete `decay.Tier` enum (`TierEpisodic`, `TierSemantic`, `TierProcedural`) from `pkg/decay/decay.go`.
-- Delete `decay.Manager` — replaced by `retention.Scorer`.
+- Delete `decay.Manager` — replaced by `knowledgepolicy.Scorer`.
 - Remove `Node.DecayScore`, `Node.LastAccessed`, `Node.AccessCount` from `pkg/storage/types.go` (Step 2 above).
 - Remove `inference.EdgeDecay` from `pkg/inference/edge_decay.go`.
 - Remove tier-specific fields from `pkg/replication/codec.go`.
@@ -1172,15 +1225,15 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 
 - `nornicdb decay stats` → uses `Scorer` and `Resolver` instead of tier-based stats.
 - `nornicdb decay recalculate` → uses `Scorer` to recompute, respects profiles.
-- `nornicdb decay archive` → uses archive threshold from resolved profile, not CLI flag.
-- Add `nornicdb retention show` as the new canonical introspection command.
+- `nornicdb decay suppress` → uses visibility threshold from resolved profile, not CLI flag.
+- Add `nornicdb knowledge-policy show` as the new canonical introspection command.
 - Add `nornicdb migration status` → shows current schema version and migration history.
 
 ### 7.7 Replication codec
 
 - Stop sending `DecayScore` in replication.
 - Send accessMeta entries as part of the replication stream.
-- Send archived-bit changes.
+- Send suppressed-bit changes.
 
 ### Phase 7 acceptance gate
 
@@ -1188,6 +1241,7 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 - `RunOnStartMigrations()` completes without error on a pre-1.1.0 database with existing tier-based data.
 - Migration is idempotent — running twice produces the same result, no duplicate `AccessMetaEntry` records.
 - Migration is crash-safe — if the process crashes mid-migration, the next startup re-runs from the beginning (schema version marker is written last).
+- The migration only covers legacy decay/access state. It does **not** migrate or redefine compliance retention policies, legal holds, erasure requests, or checked-in retention config/endpoints.
 - Nodes with `DecayScore=0, AccessCount=0, LastAccessed=zero` produce no `AccessMetaEntry` (no empty entries).
 - Nodes with non-zero access state produce correct `AccessMetaEntry` with matching values.
 - After migration, the scorer reads `AccessMetaEntry` for all nodes — the legacy fallback path (§4.1.1) is never exercised.
@@ -1220,23 +1274,25 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 ### 8.1 UI additions
 
 - Show effective decay profile and promotion policy on node/edge detail views.
-- Show `decayScore`, `scoreFrom`, archived status, deindex status.
+- Show `decayScore`, `scoreFrom`, suppression status, deindex status.
 - Show accessMeta (access count, last accessed, traversal count).
 - Show resolution trace (explain view).
 
 ### 8.2 Admin endpoints
 
-- `GET /admin/retention/profiles` — list all profiles and bindings.
-- `GET /admin/retention/policies` — list all promotion policies.
-- `GET /admin/retention/resolve?entityId=X` — explain resolution for a specific entity.
-- `GET /admin/retention/archive/status` — archive cleanup job status.
+The `/admin/retention/` namespace already belongs to the compliance retention subsystem. The knowledge-layer scoring subsystem uses a separate namespace.
+
+- `GET /admin/knowledge-policies/profiles` — list all decay profiles and bindings.
+- `GET /admin/knowledge-policies/policies` — list all promotion policies.
+- `GET /admin/knowledge-policies/resolve?entityId=X` — explain resolution for a specific entity.
+- `GET /admin/knowledge-policies/deindex/status` — deindex cleanup job status.
 
 ### 8.3 Documentation
 
-- `docs/user-guides/retention-policies.md` — update existing doc (currently describes old tier system).
+- `docs/user-guides/knowledge-layer-policies.md` — update existing doc (currently describes old tier system).
 - `docs/user-guides/decay-profiles.md` — new: authoring decay profiles with Cypher DDL.
 - `docs/user-guides/promotion-policies.md` — new: authoring promotion profiles and policies.
-- `docs/user-guides/archival-deindex.md` — new: archival behavior, deindex cleanup.
+- `docs/user-guides/visibility-suppression-deindex.md` — new: visibility suppression behavior, deindex cleanup.
 - `docs/features/memory-decay.md` — rewrite to reference new system.
 - `docs/operations/cli-commands.md` — update decay CLI section.
 
@@ -1257,14 +1313,14 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 - `AccessAccumulator` uses P-local sharding — each goroutine writes to the shard of the P it is scheduled on, eliminating cross-core contention entirely. No `atomic.Int64` contention even under super-node access patterns.
 - Each P-local shard is mutex-protected (not lock-free) but the mutex is P-local, so contention only occurs if multiple goroutines on the same P increment in the same scheduling quantum — effectively zero contention.
 - Flush goroutine is the sole Badger writer for accessMeta keys. It briefly locks each P-local shard to swap out the delta map (lock held for ~50ns per shard — map pointer swap, not iteration).
-- Archive cleanup job runs single-threaded with batched writes.
+- Deindex cleanup job runs single-threaded with batched writes.
 
 ### Performance budget
 
 | Operation                                     | Target         | Mechanism                           |
 | --------------------------------------------- | -------------- | ----------------------------------- |
-| Visibility check (archived)                   | <10ns          | One byte check                      |
-| Visibility check (non-archived, non-decaying) | <50ns          | Map lookup + NoDecay flag           |
+| Visibility check (suppressed)                  | <10ns          | One byte check                      |
+| Visibility check (non-suppressed, non-decaying) | <50ns          | Map lookup + NoDecay flag           |
 | Visibility check (decaying, threshold)        | <100ns         | Integer subtraction on UnixNano     |
 | Full score computation (lazy)                 | <500ns         | One `math.Exp` + multiply/floor/cap |
 | AccessMeta increment (hot path)               | <30ns          | P-local shard mutex + map write (zero cross-core contention) |
@@ -1279,13 +1335,13 @@ Remove the legacy fallback from `Scorer.resolveAccessMeta()` (§4.1.1) — it be
 - DDL validation errors → return Cypher error to client.
 - Multi-label conflict at equal specificity and equal Order → reject DDL at creation time with clear error message (§2.3.1).
 - Runtime label conflict (label added post-DDL) → warning logged on every occurrence, resolve to lower-Order binding.
-- `DecayEnabled = false` → all scoring functions degrade gracefully, no errors. `decayScore()` returns `1.0`, `decay()` returns `{applies: false, reason: "..."}`, `policy()` returns empty metadata, `reveal()` returns identity. Config mismatch warning logged once per query execution (§5.4). `WHERE decayScore(n) < threshold` returning empty results is correct, documented behavior.
+- `DecayEnabled = false` → all scoring functions degrade gracefully, no errors. `decayScore()` returns `1.0`, `decay()` returns `{applies: false, reason: "..."}`, `policy()` returns empty metadata, `reveal()` returns identity. Config mismatch warning logged once per query execution (§5.4). `WHERE decayScore(n) < threshold` returning empty results is correct, documented behavior. Compliance retention subsystem remains unaffected.
 
 ### Testing strategy
 
 Total new test files: ~25. All tests are deterministic (no `time.Now()` in assertions — inject frozen timestamps). Benchmarks cover all hot-path operations.
 
-Run order: `go test ./pkg/retention/... ./pkg/storage/... ./pkg/cypher/... ./pkg/search/...`
+Run order: `go test ./pkg/knowledgepolicy/... ./pkg/storage/... ./pkg/cypher/... ./pkg/search/...`
 
 ---
 
@@ -1302,7 +1358,7 @@ Phase 4: Runtime Integration                      (wires scoring into read paths
   ↓
 Phase 5: Cypher Functions                         (user-facing query surface)
   ↓
-Phase 6: Archival and Deindex Infrastructure      (background cleanup)
+Phase 6: Visibility Suppression and Deindex        (background cleanup)
   ↓
 Phase 7: Seamless On-Start Migration              (access state extraction on first 1.1.0 startup,
          and Legacy Removal                        then legacy field removal after migration confirmed)
@@ -1321,11 +1377,11 @@ Phase 7 is internally two steps: Step 1 (migration runner + access state extract
 | Risk | Mitigation |
 |------|------------|
 | Serialization format change breaks existing databases | No re-serialization needed — msgpack field-name maps silently ignore removed keys; access state extracted to `AccessMetaEntry` on first startup; schema version marker gates idempotent migration (§7.0–7.3) |
-| Scoring overhead on hot read path | Three-tier fast path: archived-bit → no-decay flag → integer threshold comparison; entire path skipped when `!config.Memory.DecayEnabled` |
+| Scoring overhead on hot read path | Three-tier fast path: suppressed-bit → no-decay flag → integer threshold comparison; entire path skipped when `!config.Memory.DecayEnabled` |
 | AccessMeta flush lag causes stale WHEN predicate evaluation | Read-through path: `persisted + sum(P-local buffered deltas)`. Explicitly eventually-consistent by design — access counts are operational metadata, not MVCC-snapshotted graph state (§3.1.1) |
 | Super-node accumulator contention | P-local sharding eliminates cross-core contention regardless of graph topology; benchmarked with 128 goroutines × 1 entityID (§3.1) |
 | Multi-label node resolution complexity | Compile-time expansion + most-specific-match rule; equal-specificity ties broken by `Order` field; equal-specificity + equal-Order rejected at DDL time; runtime conflicts warn on every occurrence (§2.3.1) |
-| Archival deindex corrupts time-travel queries | Deindex writes companion tombstone keys under dedicated `prefixIndexTombstone` (`0x17`), not physical deletes or value overwrites; original index keys untouched; time-travel at pre-archive snapshots still resolves the entity; physical reclamation deferred to MVCC lifecycle pruning (§6.3.1) |
+| Suppression deindex corrupts time-travel queries | Deindex writes companion tombstone keys under dedicated `prefixIndexTombstone` (`0x17`), not physical deletes or value overwrites; original index keys untouched; time-travel at pre-suppression snapshots still resolves the entity; physical reclamation deferred to MVCC lifecycle pruning (§6.3.1) |
 | Phase 4 deployed before Phase 7 migration | Scorer falls back to legacy `Node.DecayScore`/`LastAccessed`/`AccessCount` fields when `AccessMetaEntry` is nil; fallback removed when Phase 7 deletes legacy fields (§4.1.1) |
 | Default flag change surprises existing deployments | `DecayEnabled` default changes `true` → `false` in 1.1.0; safe direction — no unexpected scoring on upgrade; operators opt in with `NORNICDB_MEMORY_DECAY_ENABLED=true` (§1.5) |
 | DDL parsing complexity | Keyword-scanning pattern (proven in constraint_contracts.go), not regex |
