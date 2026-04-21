@@ -38,16 +38,6 @@
   <a href="#contributors">Contributors</a>
 </p>
 
-## Star History
-
-<a href="https://www.star-history.com/?repos=orneryd%2FNornicDB&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## Quick Start
 
 ```bash
@@ -63,6 +53,16 @@ Open [http://localhost:7474](http://localhost:7474) for the admin UI. For NVIDIA
 ---
 
 > Note: Docker on macOS does not expose Metal acceleration. The Apple Silicon image still runs, but GPU acceleration on macOS requires a native install from the [releases page](https://github.com/orneryd/NornicDB/releases) or a local build.
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=orneryd%2FNornicDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=orneryd/NornicDB&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## What NornicDB Is
 
