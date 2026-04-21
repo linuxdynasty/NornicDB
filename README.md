@@ -8,12 +8,15 @@
   <strong>Graph, vector, and historical truth in one database</strong><br/>
   Neo4j-compatible • Hybrid graph + vector retrieval • Historical reads via MVCC<br/>
   <em>Achieving Psygnosis for AI</em>
+  <p align="center">
+  Multi-arch support: CPU | CUDA | Metal | Vulkan
+  <p align="center">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.42-success" alt="Version 1.0.42-hotfix">
   <a href="https://coveralls.io/github/orneryd/NornicDB?branch=main"><img src="https://coveralls.io/repos/github/orneryd/NornicDB/badge.svg?branch=main" alt="Coveralls Report"></a>
-  <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
+  <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/Docker%20Pulls-25K%2B-blue" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
   <a href="https://github.com/qdrant/qdrant"><img src="https://img.shields.io/badge/qdrant-compatible-008CC1?logo=qdrant" alt="Qdrant Compatible"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.26-00ADD8?logo=go" alt="Go Version"></a>
