@@ -1669,6 +1669,23 @@ This example uses NornicDB node labels to represent the four-layer decomposition
 - `:EVIDENCES` — edge type linking Memory episodes to Knowledge facts they support or contradict
 - `:CONSOLIDATES_TO` — edge type linking Memory episodes to Knowledge facts created through consolidation
 - `:DERIVED_FROM` — edge type linking Wisdom directives to the Knowledge or Memory entities they were derived from
+- `:SUPERSEDES` — edge type linking a newer `:KnowledgeFact` to the older fact it supersedes (Knowledge-layer supersession provenance)
+- `:REVISES` — edge type linking a newer `:WisdomDirective` to the older directive it revises (Wisdom-layer revision provenance)
+
+#### Layer semantics mapping
+
+The paper requires four categorically different persistence mechanisms. This section maps each to concrete NornicDB mechanics:
+
+| Layer | Persistence mechanism | NornicDB implementation |
+|-------|----------------------|------------------------|
+| **Knowledge** | Supersession + provenance; shared; no decay | `:KnowledgeFact` with `decayEnabled: false`. Supersession modeled through `:SUPERSEDES` edges and the Canonical Graph + Mutation Log (see [canonical-graph-ledger.md](../user-guides/canonical-graph-ledger.md)). Old facts are never deleted — they are linked to successors via `:SUPERSEDES` with provenance properties (`superseded_at`, `superseded_by_agent`, `evidence_source`). Facts are shared across agents: any agent querying the knowledge base sees the same facts. |
+| **Memory** | Ebbinghaus decay + bi-temporal event sourcing; per-agent; consolidation | `:MemoryEpisode` with exponential decay and bi-temporal timestamps. Each episode carries four timestamps following the Graphiti bi-temporal model: `system_created_at` (when NornicDB ingested it), `system_expired_at` (when it was superseded or archived), `valid_from` (when the real-world event occurred), `valid_to` (when the real-world event ceased to be true). Memory is scoped per agent via `agentId` (or `tenantId` at the tenant boundary). Each memory operation produces an immutable WAL event. Consolidation into Knowledge is promotion-driven (see A.5). |
+| **Wisdom** | Evidence-gated revision; no time-based decay; multi-source | `:WisdomDirective` with `decayEnabled: false` and stability-tier promotion. Revision is an explicit graph operation: when evidence gates are met for revision, a new `:WisdomDirective` is created and linked to the old one via `:REVISES` with provenance (`revised_at`, `revision_reason`, `evidence_sources`). The old directive is marked `status: 'retired'`. Stability tiers (provisional → established → canonical) gate how much counter-evidence is required for revision, preventing sycophantic promotion. |
+| **Intelligence** | Ephemeral; inference-time only | Outside the scope of the persistence layer. Intelligence is the model itself and the runtime query context. It leaves no trace in storage; its effects persist only through writes to the other three layers. |
+
+#### Recency vs. decay — the organizing principle
+
+The paper identifies a key design litmus: recency is a **query-time** heuristic (the Intelligence layer can boost recent results when recency matters), while decay is a **storage-level** mechanism (the Memory layer applies Ebbinghaus forgetting to experiential content). This system implements the distinction correctly: Knowledge facts are never subject to storage-level decay, but a query can still `ORDER BY` a fact's creation time or version time to prefer recent facts. Decay scoring via `decayScore()` operates at the storage level; recency boosting via `ORDER BY` or search ranking operates at query time. These are independent concerns.
 
 ### A.3 Decay Profiles
 
@@ -1697,8 +1714,12 @@ APPLY {
   n.claim NO DECAY
   n.confidence NO DECAY
   n.supersededBy NO DECAY
+  n.assertedBy NO DECAY
+  n.evidenceSource NO DECAY
 }
 ```
+
+Provenance is first-class: every `:KnowledgeFact` carries `sourceId` (where the fact came from), `assertedBy` (which agent or process asserted it), `evidenceSource` (the evidence chain), and `confidence` (extraction confidence). Supersession creates a `:SUPERSEDES` edge linking the new fact to the old, preserving both for historical queries. This matches the paper's requirement that "old claims are never deleted but linked to their successors." See the [Canonical Graph + Mutation Log Guide](../user-guides/canonical-graph-ledger.md) for the full `FactVersion` model with temporal validity windows.
 
 #### Memory layer — Ebbinghaus exponential decay
 
@@ -1722,12 +1743,30 @@ APPLY {
   DECAY PROFILE 'memory_episode_retention'
   DECAY ARCHIVE THRESHOLD 0.05
   n.tenantId NO DECAY
+  n.agentId NO DECAY
   n.sessionId NO DECAY
+  n.system_created_at NO DECAY
+  n.system_expired_at NO DECAY
+  n.valid_from NO DECAY
+  n.valid_to NO DECAY
   n.summary DECAY HALF LIFE 1209600
   n.summary DECAY FLOOR 0.10
   n.ephemeralContext DECAY HALF LIFE 86400
 }
 ```
+
+#### Bi-temporal event sourcing
+
+The paper requires bi-temporal timestamps following the Graphiti model. Every `:MemoryEpisode` carries four timestamps:
+
+- `system_created_at` — when NornicDB ingested the episode (system time)
+- `system_expired_at` — when the episode was superseded or archived (system time; null if current)
+- `valid_from` — when the real-world event occurred (real-world time)
+- `valid_to` — when the real-world event ceased to be true (real-world time; null if still true)
+
+This distinction between "when did we learn this" and "when was this actually true" is essential for resolving temporal conflicts. All four timestamps are declared `NO DECAY` — they are structural metadata, not decaying content. The decay score is computed from `scoreFrom: 'VERSION'` (the latest version timestamp), not from the bi-temporal timestamps, which serve temporal queries (`AS OF`, `WHEN`) rather than decay scoring.
+
+Memory is scoped per agent via `agentId`. An agent querying its own memory sees only its own episodes. Knowledge is shared; Memory is not. This matches the paper's ownership model.
 
 #### Memory episode summaries — property-level decay
 
@@ -1757,6 +1796,33 @@ APPLY {
   n.directive NO DECAY
   n.stabilityTier NO DECAY
   n.revisionLog NO DECAY
+  n.status NO DECAY
+  n.derivedFrom NO DECAY
+}
+```
+
+#### Wisdom revision mechanics
+
+Wisdom does not decay, but it does get revised. The paper distinguishes this from supersession: Knowledge supersession preserves both old and new claims indefinitely because both are factual statements. Wisdom revision retires the old directive because the old behavioral pattern is no longer recommended.
+
+When evidence gates are met for revision (e.g., a canonical directive is contradicted by overwhelming counter-evidence), the operation is:
+
+1. Create a new `:WisdomDirective` with the revised behavioral pattern, `status: 'active'`.
+2. Set `status: 'retired'` on the old directive.
+3. Create a `:REVISES` edge from the new directive to the old, carrying `revised_at`, `revision_reason`, and `evidence_sources`.
+4. The old directive remains queryable (it is not deleted or archived) but its `status: 'retired'` signals that it is no longer the current recommendation.
+
+This is an explicit graph operation performed by the consolidation process or the calling agent — not by the decay/promotion subsystem. The promotion policy's stability tiers determine **how much evidence is required** before revision is permitted, but they do not perform the revision itself. This separation prevents sycophantic models from promoting agreeable-but-incorrect patterns: revision requires structured evidence (corroboration count, session span, contradiction absence), not approval.
+
+```cypher
+// Example revision edge
+CREATE DECAY PROFILE revision_edge_retention
+FOR ()-[r:REVISES]-()
+APPLY {
+  NO DECAY
+  r.revised_at NO DECAY
+  r.revision_reason NO DECAY
+  r.evidence_sources NO DECAY
 }
 ```
 
@@ -1785,9 +1851,9 @@ APPLY {
 }
 ```
 
-#### Consolidation edges — no decay
+#### Consolidation and provenance edges — no decay
 
-Consolidation edges are permanent records of the provenance chain from Memory to Knowledge. They do not decay because the fact that a Knowledge fact was consolidated from specific episodes is itself a durable claim.
+Consolidation edges, supersession edges, and derivation edges are permanent records of the provenance chain between layers. They do not decay because provenance is itself a durable claim. The paper requires that "old claims are never deleted but linked to their successors" — these edges implement that invariant.
 
 ```cypher
 CREATE DECAY PROFILE consolidation_edge_retention
@@ -1796,6 +1862,28 @@ APPLY {
   NO DECAY
   r.consolidatedAt NO DECAY
   r.sourceId NO DECAY
+  r.consolidatedByAgent NO DECAY
+}
+```
+
+```cypher
+CREATE DECAY PROFILE supersession_edge_retention
+FOR ()-[r:SUPERSEDES]-()
+APPLY {
+  NO DECAY
+  r.superseded_at NO DECAY
+  r.superseded_by_agent NO DECAY
+  r.evidence_source NO DECAY
+}
+```
+
+```cypher
+CREATE DECAY PROFILE derivation_edge_retention
+FOR ()-[r:DERIVED_FROM]-()
+APPLY {
+  NO DECAY
+  r.derived_at NO DECAY
+  r.derivation_method NO DECAY
 }
 ```
 
@@ -2189,25 +2277,40 @@ This configuration directly addresses the paper's identified problems:
 
 | Paper critique                                                                                 | How the modified model addresses it                                                                                                                                                            |
 | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "NornicDB applying storage-level decay to permanent facts"                                     | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through graph operations, not decay.                                    |
-| "Systems either forget what they should remember or remember what they should forget"          | The four-layer label scheme applies different decay semantics per content type. Knowledge persists. Memory decays. Wisdom is stability-gated.                                                  |
+| "NornicDB applying storage-level decay to permanent facts"                                     | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through `:SUPERSEDES` edges with full provenance, not decay.             |
+| "Systems either forget what they should remember or remember what they should forget"          | The four-layer label scheme applies categorically different persistence semantics per content type. Knowledge: supersession. Memory: Ebbinghaus decay. Wisdom: evidence-gated revision.         |
 | "Signet applies uniform 0.95 days decay to all content types"                                  | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life.                                    |
-| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, and visibility behavior.                                          |
-| "Knowing how and knowing that are architecturally distinct"                                    | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision. `:KnowledgeFact` (knowing that) uses supersession. Different update mechanics.                    |
-| "Consolidation as a first-class operation"                                                     | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
+| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, ownership scope, and visibility behavior.                         |
+| "Knowing how and knowing that are architecturally distinct"                                    | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision via `:REVISES` edges. `:KnowledgeFact` (knowing that) uses supersession via `:SUPERSEDES` edges. Different update mechanics, different provenance models. |
+| "Consolidation as a first-class operation"                                                     | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts via `:CONSOLIDATES_TO` edges. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
+| "Knowledge is shared across agents"                                                            | `:KnowledgeFact` nodes carry no `agentId` — they are shared. `:MemoryEpisode` nodes carry `agentId` for per-agent scoping. The ownership boundary is at the label level.                      |
+| "Bi-temporal event sourcing" with four timestamps per memory                                   | `:MemoryEpisode` carries `system_created_at`, `system_expired_at`, `valid_from`, `valid_to` — the Graphiti bi-temporal model. Enables "when did we learn this" vs. "when was this true" queries. |
+| "Recency is a query-time heuristic, decay is a storage-level mechanism"                        | Decay scoring via `decayScore()` is storage-level (applied before visibility). Recency boosting via `ORDER BY` is query-time. Knowledge facts get zero decay but can still be sorted by recency. |
+| "Sycophantic models could promote agreeable-but-incorrect patterns"                            | Wisdom stability tiers gate revision on structured evidence (corroboration count, contradiction absence, cross-session support), not on approval. Prevents sycophantic promotion.              |
+| "Projections never silently become the truth they summarize"                                   | `:CONSOLIDATES_TO` and `:SUPERSEDES` edges preserve the provenance chain. The original Memory episode remains accessible via `reveal()`. Derivation is always explicit and auditable.           |
 
 ### A.8 Key Design Decisions
 
-1. **Decay applies only to the Memory layer.** Knowledge and Wisdom do not decay over time. This is the core departure from uniform Ebbinghaus.
+1. **Decay applies only to the Memory layer.** Knowledge and Wisdom do not decay over time. This is the core departure from uniform Ebbinghaus. It directly resolves the paper's central critique: "a paper's findings do not become less true after 69 days."
 
-2. **Consolidation is promotion-driven.** Repeated access promotes a Memory episode through reinforcement tiers until it reaches `consolidation_candidate` status. An external consolidation process then creates a `:KnowledgeFact` and a `:CONSOLIDATES_TO` edge. The policy subsystem identifies candidates; the graph operation performs the consolidation.
+2. **Each layer has a different update mechanism.** Knowledge uses supersession (`:SUPERSEDES` edges). Memory uses Ebbinghaus decay. Wisdom uses evidence-gated revision (`:REVISES` edges). Intelligence is ephemeral. These are the four persistence mechanisms the paper identifies as the minimum decomposition.
 
-3. **Wisdom uses stability tiers, not decay.** A Wisdom directive's durability comes from evidence accumulation, not from time-based score. The promotion policy selects the stability tier; the tier determines how much counter-evidence is needed for revision.
+3. **Consolidation is promotion-driven.** Repeated access promotes a Memory episode through reinforcement tiers until it reaches `consolidation_candidate` status. An external consolidation process then creates a `:KnowledgeFact` and a `:CONSOLIDATES_TO` edge. The policy subsystem identifies candidates; the graph operation performs the consolidation.
 
-4. **Evidence edges decay but facts do not.** The relevance of a specific piece of evidence fades over time, but the conclusion it supports persists. This mirrors how human semantic memory works: you remember that LoRA is effective, but you forget which specific experiment convinced you.
+4. **Wisdom uses stability tiers, not decay.** A Wisdom directive's durability comes from evidence accumulation, not from time-based score. The promotion policy selects the stability tier; the tier determines how much counter-evidence is needed for revision. Revision is an explicit graph operation that creates a `:REVISES` edge and retires the old directive — it is not a gradual fade.
 
-5. **accessMeta tracks access patterns without mutating nodes.** All access counters, timestamps, and interval tracking live in the accessMeta index. The nodes and edges themselves are read-only during policy evaluation. This preserves MVCC integrity and avoids creating new stored versions solely because access state changed.
+5. **Evidence edges decay but facts do not.** The relevance of a specific piece of evidence fades over time, but the conclusion it supports persists. This mirrors the paper's observation: "what decays is the agent's attentional relevance to the information (a memory concern, not a knowledge concern)."
 
-6. **`reveal()` enables diagnostics and consolidation.** Invisible Memory episodes remain accessible through `reveal()` for consolidation review, audit, and diagnostics. Nothing is truly lost — it is scored out of default visibility.
+6. **Memory is bi-temporal and per-agent.** Each `:MemoryEpisode` carries four timestamps (system-created, system-expired, valid-from, valid-to) following the Graphiti bi-temporal model. Memory is scoped per agent via `agentId`. Knowledge is shared — any agent sees the same facts. This matches the paper's ownership model.
 
-7. **Indexed properties are immune.** Properties like `tenantId`, `sessionId`, and `sourceId` that participate in general indexes are declared `NO DECAY` and are immune to decay scoring and hiding, ensuring aggregation and joining remain stable.
+7. **Recency is query-time; decay is storage-level.** The paper's organizing principle is implemented directly: `decayScore()` is a storage-level mechanism applied before visibility. `ORDER BY n.system_created_at DESC` is a query-time heuristic. A Knowledge fact with `decayEnabled: false` can still be sorted by recency without being subjected to storage-level decay.
+
+8. **Anti-sycophancy by design.** Wisdom stability tiers gate revision on structured evidence (corroboration count, contradiction absence, cross-session support), not on user approval. This directly addresses the paper's reference to [7] showing RLHF-trained models affirm user behavior 50% more than humans.
+
+9. **Provenance is explicit and auditable.** Supersession creates `:SUPERSEDES` edges. Consolidation creates `:CONSOLIDATES_TO` edges. Revision creates `:REVISES` edges. Derivation creates `:DERIVED_FROM` edges. "Projections never silently become the truth they summarize" — every derivation chain is preserved and queryable.
+
+10. **accessMeta tracks access patterns without mutating nodes.** All access counters, timestamps, and interval tracking live in the accessMeta index. The nodes and edges themselves are read-only during policy evaluation. This preserves MVCC integrity and avoids creating new stored versions solely because access state changed.
+
+11. **`reveal()` enables diagnostics and consolidation.** Invisible Memory episodes remain accessible through `reveal()` for consolidation review, audit, and diagnostics. Nothing is truly lost — it is scored out of default visibility.
+
+12. **Indexed properties are immune.** Properties like `tenantId`, `sessionId`, and `sourceId` that participate in general indexes are declared `NO DECAY` and are immune to decay scoring and hiding, ensuring aggregation and joining remain stable.
