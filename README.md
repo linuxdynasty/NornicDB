@@ -227,7 +227,7 @@ Designed to work with existing Neo4j drivers and Bolt/Cypher workflows, with min
 
 ### 🧠 Intelligent Memory
 
-Memory that behaves like human cognition.
+Memory that behaves like human cognition. (Ebbinghaus Decay)
 
 | Memory Tier    | Half-Life | Use Case               |
 | -------------- | --------- | ---------------------- |
@@ -241,6 +241,8 @@ MATCH (m:Memory) WHERE m.decayScore > 0.5
 RETURN m.title ORDER BY m.decayScore DESC
 ```
 
+> NOTE: [This April 2026 research](https://arxiv.org/pdf/2604.11364) called out Ebbinghaus decay curve as insufficient. While there is a workaround in place using the retention policy configuration, a proposal is in place with issue [#100](https://github.com/orneryd/NornicDB/issues/100) to abstract the memory model to a policy based system that is configurable in cypher and removes the hardcoded cognitive tiers. Workaround is described [here](https://github.com/orneryd/NornicDB/blob/main/docs/user-guides/retention-policies.md#modified-ebbinghaus-as-is).
+ 
 ### 🔗 Auto-Relationships
 
 NornicDB weaves connections automatically:
