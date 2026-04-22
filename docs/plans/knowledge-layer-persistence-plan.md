@@ -1655,7 +1655,7 @@ Updated summary: added a dedicated suppression/deindex layer, made suppression a
 
 ## Appendix A: Ebbingause-Roynard Model — Four-Layer Example
 
-This appendix demonstrates a complete decay and promotion configuration that implements a Modified Ebbingause forgetting-curve model, informed by the four-layer decomposition proposed in Roynard (2026), (Ebbinhaus-Roynard) "The Missing Knowledge Layer in Cognitive Architectures for AI Agents" ([arXiv:2604.11364v1](https://arxiv.org/pdf/2604.11364)).
+This appendix demonstrates a complete decay and promotion configuration that implements a Modified Ebbingause forgetting-curve model, informed by the four-layer decomposition proposed in Roynard (2026), (Ebbinghaus-Roynard) "The Missing Knowledge Layer in Cognitive Architectures for AI Agents" ([arXiv:2604.11364v1](https://arxiv.org/pdf/2604.11364)).
 
 ### A.1 Motivation
 
