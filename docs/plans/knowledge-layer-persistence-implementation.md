@@ -109,7 +109,7 @@ prefixDeindexWorkItem   = byte(0x13) // deindexwork:workItemID -> msgpack(Deinde
 prefixDecayProfile      = byte(0x14) // decayprofile:name -> msgpack(DecayProfileDef)
 prefixPromotionProfile  = byte(0x15) // promoprofile:name -> msgpack(PromotionProfileDef)
 prefixPromotionPolicy   = byte(0x16) // promopolicy:name -> msgpack(PromotionPolicyDef)
-prefixIndexTombstone    = byte(0x17) // idxtomb:<original-index-key> -> msgpack(IndexTombstoneEntry)
+prefixIndexTombstone    = byte(0x17) // idxtomb:<original-index-key> -> []byte{} (presence marker)
 ```
 
 ---
@@ -938,16 +938,16 @@ When a node or edge is indexed (written to any secondary index), record the exac
 
 ```go
 type IndexEntryCatalog struct {
-    TargetID           string      `msgpack:"targetId"`
-    TargetScope        string      `msgpack:"targetScope"`                // "NODE" or "EDGE"
-    IndexKeys          [][]byte    `msgpack:"indexKeys"`                  // exact Badger keys written
-    DeindexedAtVersion MVCCVersion `msgpack:"deindexedAt,omitempty"`      // set by cleanup job (§6.3.1)
+    TargetID           string   `msgpack:"targetId"`
+    TargetScope        string   `msgpack:"targetScope"`           // "NODE" or "EDGE"
+    IndexKeys          [][]byte `msgpack:"indexKeys"`             // exact Badger keys written
+    Deindexed          bool     `msgpack:"deindexed,omitempty"`   // set by cleanup job (§6.3.1)
 }
 ```
 
 Key format: `[prefixIndexEntryCatalog][entityID bytes]`
 
-This is maintained on every index write. When a node is re-indexed (properties changed), the catalog is updated with the new key set. The `DeindexedAtVersion` field is set by the deindex cleanup job after writing index tombstones (§6.3.1) and prevents re-processing on subsequent cleanup runs.
+This is maintained on every index write. When a node is re-indexed (properties changed), the catalog is updated with the new key set. The `Deindexed` flag is set by the deindex cleanup job after writing index tombstones (§6.3.1) and prevents re-processing on subsequent cleanup runs.
 
 ### 6.2 Deindex work items
 
@@ -988,51 +988,53 @@ Process: scan `prefixDeindexWorkItem` for pending items → for each item, load 
 
 No full index scans. Idempotent. Retry-safe (exponential backoff on failures).
 
-#### 6.3.1 MVCC-safe deindexing — no physical key wipes
+#### 6.3.1 Deindexing — presence-marker tombstones
 
-**Critical constraint:** NornicDB uses bitemporal MVCC. A node suppressed at version V_100 must still be resolvable by time-travel queries running `AS OF V_50` that traverse through secondary indexes. Physically deleting index keys would corrupt historical state.
+**Why version-aware tombstones are unnecessary:** NornicDB's time-travel queries (`GetNodesByLabelVisibleAt`, `GetEdgesByTypeVisibleAt`, `GetEdgesBetweenVisibleAt`) do **not** traverse secondary indexes. They iterate MVCC version records directly (`prefixMVCCNode` / `prefixMVCCEdge`) with iterator pinning on the snapshot version, then filter by label/type in-memory. Secondary indexes (`0x03`–`0x06`) are only used by current-time query paths (`GetNodesByLabel`, `GetFirstNodeByLabel`, `ForEachNodeIDByLabel`).
 
-The "deindex" operation therefore does **not** perform a physical Badger key delete. Instead, it writes a **companion tombstone key** under a dedicated prefix that marks the original index entry as dead as of a specific MVCC version.
+This means the deindex tombstone does **not** need to carry an `MVCCVersion` or support version-aware comparisons. Time-travel correctness is already guaranteed by the MVCC version iteration — a suppressed entity's MVCC records are untouched and remain resolvable at any historical snapshot. The tombstone is a simple **presence marker** that tells current-time index scans to skip the entry.
 
 **Dedicated tombstone prefix:**
 
 ```go
 // pkg/storage/badger.go — append to existing prefix block:
-prefixIndexTombstone = byte(0x17) // idxtomb:<original-index-key> -> msgpack(IndexTombstoneEntry)
+prefixIndexTombstone = byte(0x17) // idxtomb:<original-index-key> -> []byte{}
 ```
 
 **Index tombstone format:**
 
+The tombstone value is `[]byte{}` — a zero-length marker. No struct, no version, no msgpack. Existence of the key is the only signal. This matches the format of the secondary index entries themselves (`labelName:nodeID → []byte{}`).
+
 ```go
-// IndexTombstoneEntry is written as a companion key alongside the original index key.
-// The original index key is NOT modified or deleted.
-type IndexTombstoneEntry struct {
-    SuppressedAtVersion MVCCVersion `msgpack:"suppressedAt"`
-}
+// No IndexTombstoneEntry struct needed — the tombstone is a presence marker.
+// Key:   [prefixIndexTombstone][original-index-key]
+// Value: []byte{}
 ```
 
 **Tombstone key construction:** For an original index key `K` (e.g., `[0x03][labelName][nodeID]`), the tombstone key is `[prefixIndexTombstone][K]`. The original prefix byte is preserved inside the tombstone key so that the read path can reconstruct the original key if needed.
 
-**Deindex write:** For each key `K` in the `IndexEntryCatalog`, the cleanup job writes `[prefixIndexTombstone][K] → msgpack(IndexTombstoneEntry)` in a single batched Badger transaction. The original key `K` is untouched.
+**Deindex write:** For each key `K` in the `IndexEntryCatalog`, the cleanup job writes `[prefixIndexTombstone][K] → []byte{}` in a single batched Badger transaction. The original key `K` is untouched.
 
 **Read-path behavior:**
 
-- **Current-time queries (`MVCCReadLatest`):** When scanning a secondary index and finding a candidate key `K`, probe for `[prefixIndexTombstone][K]`. If the tombstone key exists, skip the entry. Cost: one additional Badger point lookup per candidate. This is acceptable because the tombstone prefix is small and Badger's bloom filters will reject the lookup in <50ns for the common case (no tombstone exists).
-- **Time-travel queries (`MVCCReadSnapshot` at version V):** If the tombstone key exists and `V < SuppressedAtVersion`, the tombstone is invisible — the index entry is still live at that snapshot. Return the entry normally. If `V >= SuppressedAtVersion`, skip the entry.
-- **Optimization: batch tombstone prefetch.** During label-index scans that iterate many entries, the read path can do a single prefix scan on `[prefixIndexTombstone][original-prefix][labelName]` and build a local `map[string]MVCCVersion` of tombstoned IDs for that label. Subsequent checks are map lookups instead of point reads. This is O(tombstones) not O(candidates), and is efficient because the suppressed population is typically small relative to the live population.
+- **Current-time queries:** When scanning a secondary index and finding a candidate key `K`, probe for `[prefixIndexTombstone][K]`. If the tombstone key exists, skip the entry. Cost: one additional Badger point lookup per candidate. This is acceptable because the tombstone prefix is small and Badger's bloom filters will reject the lookup in <50ns for the common case (no tombstone exists).
+- **Time-travel queries:** Not affected. Time-travel never reads secondary indexes — it iterates MVCC version records directly with iterator pinning on the snapshot version, then filters by label/type in-memory. Tombstones are invisible to this path.
+- **Optimization: batch tombstone prefetch.** During label-index scans that iterate many entries, the read path can do a single prefix scan on `[prefixIndexTombstone][original-prefix][labelName]` and build a local `map[NodeID]bool` of tombstoned IDs for that label. Subsequent checks are map lookups instead of point reads. This is O(tombstones) not O(candidates), and is efficient because the suppressed population is typically small relative to the live population.
 
-**Why a dedicated prefix, not a value overwrite:** The current secondary indexes (`0x03`–`0x06`) write `[]byte{}` as the value. Overwriting the value with a tombstone struct would couple the tombstone format to every index value format. If any future index writes non-empty values (e.g., composite indexes with score metadata), a sentinel-byte scheme creates a fragile format dependency. A dedicated prefix key is fully decoupled — the original key and value are never modified, and tombstone lifecycle is independent.
+**Why a dedicated prefix, not a value overwrite:** The current secondary indexes (`0x03`–`0x06`) write `[]byte{}` as the value. Overwriting the value with a sentinel would couple the tombstone format to every index value format. If any future index writes non-empty values (e.g., composite indexes with score metadata), a sentinel-byte scheme creates a fragile format dependency. A dedicated prefix key is fully decoupled — the original key and value are never modified, and tombstone lifecycle is independent.
 
-**Physical reclamation:** Both the tombstone key and the original index key are eligible for physical deletion only when the `SuppressedAtVersion` is older than the engine's `RetentionPolicy.TTL` and no active snapshot readers hold a version at or before the tombstone's version. This is handled by the existing MVCC lifecycle pruning infrastructure (`MVCCLifecycleController`), not by the deindex cleanup job. The cleanup job's sole responsibility is writing the tombstone key. Reclamation is a separate lifecycle concern.
+**`reveal()` and re-indexing:** When `reveal()` restores an entity to visibility (e.g., via promotion or manual score boost), the tombstone keys for that entity are deleted and the entity's index entries become live again. The original index keys were never removed, so no re-indexing write is needed — only the tombstone deletion.
 
-**IndexEntryCatalog update:** After writing tombstones, the catalog entry is updated with `DeindexedAtVersion` to prevent re-processing:
+**Physical reclamation:** Both the tombstone key and the original index key are eligible for physical deletion when the underlying entity is hard-deleted by the compliance retention lifecycle or MVCC version pruning. This is handled by the existing node/edge deletion paths, not by the deindex cleanup job. The cleanup job's sole responsibility is writing tombstone keys for suppressed entities. The reverse (deleting tombstones for revealed entities) is handled by the suppression-pass when an entity's score rises above the visibility threshold.
+
+**IndexEntryCatalog update:** After writing tombstones, the catalog entry is marked as deindexed to prevent re-processing:
 
 ```go
 type IndexEntryCatalog struct {
-    TargetID           string      `msgpack:"targetId"`
-    TargetScope        string      `msgpack:"targetScope"`
-    IndexKeys          [][]byte    `msgpack:"indexKeys"`
-    DeindexedAtVersion MVCCVersion `msgpack:"deindexedAt,omitempty"` // set by cleanup job
+    TargetID           string   `msgpack:"targetId"`
+    TargetScope        string   `msgpack:"targetScope"`
+    IndexKeys          [][]byte `msgpack:"indexKeys"`
+    Deindexed          bool     `msgpack:"deindexed,omitempty"` // set by cleanup job
 }
 ```
 
@@ -1044,20 +1046,21 @@ Add a `VisibilitySuppressed` bool field to the node and edge serialization forma
 
 - Index-entry catalog tracks correct keys for all index types (property, composite, vector, fulltext, range).
 - Deindex work items are enqueued when an entity is marked visibility-suppressed.
-- Background cleanup writes companion tombstone keys under `prefixIndexTombstone` (not physical deletes or value overwrites) for exact index keys without scanning.
+- Background cleanup writes presence-marker tombstone keys under `prefixIndexTombstone` for exact index keys without scanning.
 - Cleanup is idempotent — running twice produces the same tombstones, no error.
-- Suppressed entities are skipped in read paths even before deindex completes (suppressed-bit fast path).
-- Time-travel queries at snapshots before the suppression version still resolve suppressed entities through the index (tombstone is invisible at earlier versions).
-- Time-travel queries at snapshots at or after the suppression version skip the tombstoned index entries.
-- Index tombstones are physically reclaimed only by MVCC lifecycle pruning, not by the deindex cleanup job.
+- Suppressed entities are skipped in current-time read paths even before deindex completes (suppressed-bit fast path).
+- Time-travel queries are unaffected — they iterate MVCC version records directly and never touch secondary indexes or tombstones.
+- Tombstones are zero-length presence markers (`[]byte{}`), not versioned structs.
+- `reveal()` restoring an entity to visibility deletes its tombstone keys — no re-indexing write needed since original index keys were never removed.
+- Tombstone keys are physically reclaimed when the underlying entity is hard-deleted by compliance retention or MVCC version pruning.
 - Cleanup interval is configurable.
 
 ### Phase 6 test files
 
-- `pkg/storage/badger_index_catalog_test.go` — catalog CRUD, correctness, DeindexedAtVersion prevents re-processing
+- `pkg/storage/badger_index_catalog_test.go` — catalog CRUD, correctness, Deindexed flag prevents re-processing
 - `pkg/storage/badger_deindex_work_test.go` — work item lifecycle
 - `pkg/storage/badger_deindex_cleanup_test.go` — end-to-end cleanup, idempotency, retry
-- `pkg/storage/badger_index_tombstone_test.go` — companion tombstone key written under `prefixIndexTombstone`; current-time query skips tombstoned entries; time-travel query at pre-suppression snapshot returns entry; time-travel at post-suppression snapshot skips entry; batch tombstone prefetch optimization during label-index scan
+- `pkg/storage/badger_index_tombstone_test.go` — presence-marker tombstone key written under `prefixIndexTombstone`; current-time query skips tombstoned entries; time-travel query unaffected (does not read secondary indexes); batch tombstone prefetch optimization during label-index scan; tombstone deletion on reveal restores index visibility
 - `pkg/storage/badger_deindex_cleanup_bench_test.go` — throughput
 
 ---
@@ -1381,7 +1384,7 @@ Phase 7 is internally two steps: Step 1 (migration runner + access state extract
 | AccessMeta flush lag causes stale WHEN predicate evaluation | Read-through path: `persisted + sum(P-local buffered deltas)`. Explicitly eventually-consistent by design — access counts are operational metadata, not MVCC-snapshotted graph state (§3.1.1) |
 | Super-node accumulator contention | P-local sharding eliminates cross-core contention regardless of graph topology; benchmarked with 128 goroutines × 1 entityID (§3.1) |
 | Multi-label node resolution complexity | Compile-time expansion + most-specific-match rule; equal-specificity ties broken by `Order` field; equal-specificity + equal-Order rejected at DDL time; runtime conflicts warn on every occurrence (§2.3.1) |
-| Suppression deindex corrupts time-travel queries | Deindex writes companion tombstone keys under dedicated `prefixIndexTombstone` (`0x17`), not physical deletes or value overwrites; original index keys untouched; time-travel at pre-suppression snapshots still resolves the entity; physical reclamation deferred to MVCC lifecycle pruning (§6.3.1) |
+| Suppression deindex corrupts time-travel queries | Not possible — time-travel queries iterate MVCC version records directly with iterator pinning and never read secondary indexes. Tombstones are zero-length presence markers under `prefixIndexTombstone` (`0x17`) that only affect current-time index scans; original index keys are untouched (§6.3.1) |
 | Phase 4 deployed before Phase 7 migration | Scorer falls back to legacy `Node.DecayScore`/`LastAccessed`/`AccessCount` fields when `AccessMetaEntry` is nil; fallback removed when Phase 7 deletes legacy fields (§4.1.1) |
 | Default flag change surprises existing deployments | `DecayEnabled` default changes `true` → `false` in 1.1.0; safe direction — no unexpected scoring on upgrade; operators opt in with `NORNICDB_MEMORY_DECAY_ENABLED=true` (§1.5) |
 | DDL parsing complexity | Keyword-scanning pattern (proven in constraint_contracts.go), not regex |

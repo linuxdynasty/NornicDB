@@ -1,8 +1,8 @@
-# Policy-Driven Decay and Scoring Plan
+# Knowledge-Layer Scoring and Visibility Plan
 
 **Status:** Proposed
 **Date:** April 15, 2026
-**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient archival deindexing for archived nodes and edges, persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation, evaluating scoring before query visibility so that invisible entities are suppressed from queries unless accessed through `reveal()`, and resolving promotion policies before decay profiles.
+**Scope:** Replace hardcoded Ebbinghaus memory-tier decay behavior with a generic, profile-and-policy-driven decay and scoring system that can support existing, proposed, or future decay models, while expressing promotive declarative tiers through separate promotion profile and policy subsystems, supporting MVCC-aware score-from selection for both nodes and edges, implementing efficient deindexing for visibility-suppressed nodes and edges, persisting `ON ACCESS` mutation state in a separate accessMeta index so that nodes and edges remain read-only during policy evaluation, evaluating scoring before query visibility so that invisible entities are suppressed from queries unless accessed through `reveal()`, and resolving promotion policies before decay profiles.
 
 ---
 
@@ -19,13 +19,13 @@ The system must support:
 - separate promotion policies that declaratively model tier-like score boosts by referencing promotion profiles, without changing the existing Cypher scoring API
 - declarative MVCC-aware score-from selection through decay profile options
 - future decay models without requiring new engine enums or switch statements
-- efficient archival of whole nodes and whole edges
-- asynchronous removal of archived nodes and archived edges from indexing
-- property-level decay effects that can exclude properties from vectorization or retrieval surfaces without archiving, moving, or deleting those properties from storage
+- efficient visibility suppression of whole nodes and whole edges
+- asynchronous removal of suppressed nodes and suppressed edges from indexing
+- property-level decay effects that can exclude properties from vectorization or retrieval surfaces without suppressing, moving, or deleting those properties from storage
 
-Nodes and edges must be treated as first-class decay targets. A node or edge must be able to decay, be scored, be archived, be removed from indexing, and be promoted using the same policy-driven machinery.
+Nodes and edges must be treated as first-class decay targets. A node or edge must be able to decay, be scored, be suppressed from retrieval, be removed from indexing, and be promoted using the same policy-driven machinery.
 
-Properties are not archival targets. Properties may receive decay scores and vectorization-exclusion behavior, but they remain stored in place and remain directly queryable through Cypher.
+Properties are not suppression targets. Properties may receive decay scores and vectorization-exclusion behavior, but they remain stored in place and remain directly queryable through Cypher.
 
 This plan is intentionally model-agnostic. It is not tied to any one research paper or taxonomy. Although inspired by this research paper which called out NornicDB specifically. [https://arxiv.org/pdf/2604.11364](https://arxiv.org/pdf/2604.11364)
 
@@ -42,9 +42,9 @@ That creates six engineering problems:
 3. Decay is primarily entity-wide instead of being expressible at node, edge, and property scope.
 4. Operators cannot declare retention semantics through the same schema-oriented mechanisms they already use elsewhere.
 5. Under MVCC, decay scoring needs an explicit start-time anchor unless the policy states whether score age begins at entity creation time or at the latest visible version time.
-6. Archived nodes and edges must be removed from indexing efficiently, without expensive full-index scans, while property-level decay behavior must not be confused with whole-entity archival.
+6. Suppressed nodes and edges must be removed from indexing efficiently, without expensive full-index scans, while property-level decay behavior must not be confused with whole-entity suppression.
 
-The system should instead treat decay behavior as configurable retention profiles, promotion behavior as separate configurable scoring profiles and policies, score start time as an explicit profile decision, and archive cleanup as a dedicated deindex workflow for nodes and edges only.
+The system should instead treat decay behavior as configurable retention profiles, promotion behavior as separate configurable scoring profiles and policies, score start time as an explicit profile decision, and deindex cleanup as a dedicated deindex workflow for nodes and edges only.
 
 ---
 
@@ -53,14 +53,14 @@ The system should instead treat decay behavior as configurable retention profile
 1. Retention behavior must be data-driven, not hardcoded into a fixed enum.
 2. Decay and scoring must be resolvable at node, edge, and property scope.
 3. `NO DECAY` must be directly expressible in policy definitions.
-4. Decay half-life, decay function, archive threshold, and score floor must be configurable independently.
+4. Decay half-life, decay function, visibility threshold, and score floor must be configurable independently.
 5. Promotion tiers must be expressible declaratively through separate promotion profile and promotion policy subsystems rather than through hardcoded runtime categories.
 6. Score start time must be declaratively expressible through decay profile options using `CREATED`, `VERSION`, or `CUSTOM`.
 7. Nodes and edges must be handled symmetrically by the policy system. Edge decay must not be a second-class or special-case feature.
-8. Archive behavior applies only to whole nodes and whole edges, never to individual properties.
-9. Property-level decay may influence vectorization, ranking, filtering, reranking, and summarization, but it must not move, archive, or delete stored property values.
+8. Suppression behavior applies only to whole nodes and whole edges, never to individual properties.
+9. Property-level decay may influence vectorization, ranking, filtering, reranking, and summarization, but it must not move, suppress, or delete stored property values.
    9a. Properties that participate in structural indexes (lookup indexes, range indexes, and composite indexes) are immune to decay scoring, decay hiding, and property-level exclusion. Fulltext indexes and vector indexes are retrieval-surface indexes and do not confer property immunity. Indexed properties must remain stable and always visible because they are relied upon for aggregation, joining, and lookup.
-10. Archived nodes and edges must be removed from indexing using exact-key deindexing rather than discovery by scanning secondary indexes.
+10. Suppressed nodes and edges must be removed from indexing using exact-key deindexing rather than discovery by scanning secondary indexes.
 11. Runtime paths must not silently fall back to legacy tier assumptions.
 12. Named presets may exist for convenience, but the engine must operate on resolved profiles and policies.
 13. The architecture must be flexible enough to support any current or future decay model.
@@ -81,14 +81,14 @@ Required behavior:
 - permit named presets but not require them
 - support multiple decay functions over time
 - support score start-time selection through profile options
-- resolve archive eligibility for whole nodes and whole edges
-- resolve property-level vectorization-exclusion behavior without treating properties as archival targets
+- resolve suppression eligibility for whole nodes and whole edges
+- resolve property-level vectorization-exclusion behavior without treating properties as suppression targets
 - reject or ignore property-level decay rules that target properties participating in structural indexes (lookup, range, and composite indexes); indexed properties are immune to decay scoring and hiding; fulltext and vector indexes do not confer immunity
 - enforce at most one decay profile per unique target as a hard constraint
 
 Suggested fit in NornicDB:
 
-- shared profile resolver used by recall, recalc, archive, and ranking paths
+- shared profile resolver used by recall, recalc, suppression pass, and ranking paths
 - config-defined presets for operator convenience
 - schema-backed decay profiles as the main control surface
 - diagnostics that explain why a given node or edge resolved to a given decay profile and score start time
@@ -99,7 +99,7 @@ Promotion behavior is split into two object types: profiles and policies.
 
 Promotion profiles are named parameter bundles (multiplier, score floor, score cap, scope). They contain no logic and cannot be targeted to entities directly. They are referenced by name inside promotion policy APPLY blocks.
 
-Promotion policies contain logic — `FOR` targets, `APPLY` blocks, `WHEN` predicates, and optional `ON ACCESS` mutation blocks. Policies bind profiles to specific node labels, edge types, and property paths. Promotion policies are resolved first, before decay profile resolution. The promotion adjustments are applied to the base decay score to produce the final score without changing the existing Cypher scoring API.
+Promotion policies contain logic — `FOR` targets, `APPLY` blocks, `WHEN` predicates, and optional `ON ACCESS` mutation blocks. Policies bind profiles to specific node labels, edge types, and property paths. Promotion policies are resolved first, before decay profile resolution. `WHEN` predicates are evaluated before `ON ACCESS` mutations — if the entity is visibility-suppressed (below the visibility threshold), `ON ACCESS` mutations do not execute. This prevents suppressed entities from accumulating access state they should not have. The promotion adjustments are applied to the base decay score to produce the final score without changing the existing Cypher scoring API.
 
 Required behavior:
 
@@ -108,7 +108,7 @@ Required behavior:
 - allow promotion profiles to declare score multipliers, caps, and floors
 - when multiple WHEN predicates match within a policy, the profile with the highest effective multiplier wins deterministically
 - keep promotion profiles separately authored, shown, and retrieved from promotion policies
-- support optional `ON ACCESS` mutation blocks that execute when the target is accessed during scoring resolution; `ON ACCESS` mutations write exclusively to a separate accessMeta index keyed to the target node or edge, never to the node or edge itself
+- support optional `ON ACCESS` mutation blocks that execute when the target is accessed during scoring resolution, but only after `WHEN` predicates have been evaluated and only if the entity passes the suppression gate (is not visibility-suppressed); `ON ACCESS` mutations write exclusively to a separate accessMeta index keyed to the target node or edge, never to the node or edge itself
 - enforce at most one promotion policy per unique target as a hard constraint
 
 Suggested fit in NornicDB:
@@ -152,8 +152,8 @@ The runtime resolution layer converts configuration and profiles into effective 
 
 Required behavior:
 
-- evaluate the matching promotion policy first during recall, reinforcement, recalc, archive, and ranking, executing any `ON ACCESS` mutations before further scoring
-- resolve decay profile second during recall, reinforcement, recalc, archive, and ranking
+- evaluate the matching promotion policy first during recall, reinforcement, recalc, suppression pass, and ranking; evaluate `WHEN` predicates to determine the entity's promotion tier and whether it is suppressed; execute `ON ACCESS` mutations only if the entity passes the suppression gate (is not visibility-suppressed after promotion and decay resolution)
+- resolve decay profile second during recall, reinforcement, recalc, suppression pass, and ranking
 - resolve score start time from decay profile during score evaluation
 - compute the final score from promotion and decay resolution before determining query visibility
 - suppress nodes, edges, and properties from query results when their final score renders them invisible, unless the caller uses `reveal()` to bypass scoring-driven visibility
@@ -181,7 +181,7 @@ Required behavior:
 - resolve the visible node, edge, or property version using the transaction snapshot
 - evaluate promotion policy and decay profile on the resolved version before exposing the entity to the query
 - evaluate the base decay score using the score start time resolved from decay profile
-- suppress entities whose final score falls below the archive threshold from query results, search hits, and traversal paths
+- suppress entities whose final score falls below the visibility threshold from query results, search hits, and traversal paths
 - support `CREATED`, where decay age begins at the entity's original creation timestamp
 - support `VERSION`, where decay age begins at the latest visible version timestamp under MVCC
 - allow `reveal()` to bypass scoring-driven visibility and return the MVCC-resolved version without suppression
@@ -194,28 +194,28 @@ Suggested fit in NornicDB:
 - the shared scorer consumes both the visible node or edge version and the profile-resolved score start time
 - query visibility is determined after scoring: MVCC resolves the version, scoring determines whether it appears
 
-### 4.6 Archival and Deindex Layer
+### 4.6 Visibility Suppression and Deindex Layer
 
-The archival and deindex layer is the mechanism that removes archived whole nodes and whole edges from indexing in the most performant way possible.
+The visibility suppression and deindex layer is the mechanism that removes suppressed whole nodes and whole edges from indexing in the most performant way possible.
 
 Required behavior:
 
-- archive only whole nodes and whole edges
-- never archive, move, or delete individual properties because of decay profile
-- mark archived nodes and edges in primary storage immediately
-- remove archived nodes and edges from indexing asynchronously
+- suppress only whole nodes and whole edges
+- never suppress, move, or delete individual properties because of decay profile
+- mark suppressed nodes and edges in primary storage immediately
+- remove suppressed nodes and edges from indexing asynchronously
 - avoid discovering stale index entries by scanning entire secondary indexes
 - support a configurable background cleanup cadence, defaulting to nightly but configurable in seconds
-- ensure archived nodes and edges are skipped efficiently during retrieval
+- ensure suppressed nodes and edges are skipped efficiently during retrieval
 - allow property-level vectorization exclusion without storage relocation or Cypher inaccessibility
 
 Suggested fit in NornicDB:
 
 - maintain a per-node and per-edge index-entry catalog that stores the exact secondary-index keys written for that entity
-- when a node or edge becomes archived, enqueue a deindex work item referencing that entity and its index-entry catalog
-- have the background archival job drain deindex work items and perform blind batched deletes against index keys
-- keep read-time archived checks cheap so archived entities are skipped even before asynchronous deindex completes
-- treat physical space reclamation as separate storage maintenance rather than part of logical archive/deindex semantics
+- when a node or edge becomes suppressed, enqueue a deindex work item referencing that entity and its index-entry catalog
+- have the background deindex job drain deindex work items and perform blind batched deletes against index keys
+- keep read-time suppressed checks cheap so suppressed entities are skipped even before asynchronous deindex completes
+- treat physical space reclamation as separate storage maintenance rather than part of logical suppression/deindex semantics
 
 ---
 
@@ -237,7 +237,7 @@ Minimum fields:
 - scoring function or strategy id
 - score start time: `CREATED`, `VERSION`, or `CUSTOM`
 - custom score-from property path, if `CUSTOM`
-- archive threshold override for node or edge archival eligibility
+- visibility threshold override for node or edge suppression eligibility
 - minimum score floor
 - scope type: node, edge, property
 - enabled or disabled
@@ -312,7 +312,7 @@ Minimum fields:
 
 When a node or edge is deleted (tombstoned in MVCC), its accessMeta entry is enqueued for deletion in the same transaction. The accessMeta key is deleted immediately from the in-process accumulator and enqueued as a deindex work item alongside any index-entry catalog cleanup.
 
-When a node or edge is archived, its accessMeta entry is retained — archived entities are still accessible via `reveal()`, and `policy()` on a revealed entity should still return its access history. The accessMeta entry is only deleted when the archived entity is physically reclaimed.
+When a node or edge is suppressed, its accessMeta entry is retained — suppressed entities are still accessible via `reveal()`, and `policy()` on a revealed entity should still return its access history. The accessMeta entry is only deleted when the entity is physically reclaimed by the compliance retention lifecycle.
 
 When MVCC version pruning removes all versions of an entity, its accessMeta entry is eligible for deletion. The `PruneMVCCVersions` function should check for orphaned accessMeta entries and delete them.
 
@@ -331,18 +331,18 @@ Minimum fields:
 - index entry key list or catalog reference
 - index family identifiers, if partitioned
 - last indexed version, if tracked
-- archived boolean or state marker, if duplicated for cleanup convenience
+- suppressed boolean or state marker, if duplicated for cleanup convenience
 
-#### ArchiveWorkItem
+#### DeindexWorkItem
 
-Persistent background work item used to deindex an archived node or edge.
+Persistent background work item used to deindex a visibility-suppressed node or edge.
 
 Minimum fields:
 
 - work item id
 - target id
 - target scope: node or edge
-- archive state
+- suppression state
 - enqueued at
 - next attempt at
 - retry count
@@ -351,7 +351,7 @@ Minimum fields:
 
 ### 5.2 Derived Runtime Artifacts
 
-#### RetentionResolution
+#### ScoringResolution
 
 Derived resolution result produced by the shared resolver for a requested node, edge, or property.
 
@@ -372,7 +372,7 @@ Minimum fields:
 - base score
 - final score
 - no-decay boolean
-- archive-eligible boolean for node or edge targets only
+- suppression-eligible boolean for node or edge targets only
 
 #### DecayResolutionMeta
 
@@ -394,8 +394,8 @@ Minimum fields:
 - Cypher functions and unified search metadata project derived scores outward without mutating stored graph data
 - the existing Cypher scoring API remains unchanged; resolved promotion policies affect the returned score through the shared scorer rather than through new function signatures
 - the score start time is resolved from decay profile and used by the shared scorer without changing the existing Cypher scoring API
-- whole-node and whole-edge archival state may be persisted
-- property archival state is not persisted because properties are not archival targets
+- whole-node and whole-edge suppression state is persisted
+- property suppression state is not persisted because properties are not suppression targets
 - property-level decay may exclude properties from vectorization or retrieval surfaces but must not move or delete stored property values
 - `ON ACCESS` mutation state is persisted in a separate accessMeta index keyed per target node or edge, not on the node or edge itself
 - accessMeta entries are `map[string]interface{}` serialized in msgpack alongside other data files for performance
@@ -409,7 +409,7 @@ Minimum fields:
 
 ### 6.1 Resolution Rules
 
-Scoring happens before query visibility. When a query touches a node or edge, the engine must resolve and apply promotion and decay scoring before deciding whether the entity is visible to the query. An entity whose final score falls below the archive threshold or whose decay profile renders it invisible must not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal(entity)` to bypass scoring-driven visibility.
+Scoring happens before query visibility. When a query touches a node or edge, the engine must resolve and apply promotion and decay scoring before deciding whether the entity is visible to the query. An entity whose final score falls below the visibility threshold or whose decay profile renders it invisible must not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal(entity)` to bypass scoring-driven visibility.
 
 The resolution order is: promotion first, then decay, then score-start resolution, then visibility determination.
 
@@ -441,7 +441,7 @@ Then the engine computes the final score and determines visibility:
 
 16. compute the base decay score from the resolved decay profile and score start time
 17. apply the resolved promotion policy adjustments to produce the final score
-18. if the final score falls below the archive threshold, the entity is invisible to the query unless accessed through `reveal()`
+18. if the final score falls below the visibility threshold, the entity is invisible to the query unless accessed through `reveal()`; `ON ACCESS` mutations do not execute for suppressed entities
 19. if property-level decay excludes a property from retrieval surfaces, that property is hidden from the query result unless accessed through `reveal()`
 20. properties that participate in structural indexes (lookup, range, and composite indexes) are never subject to steps 18 or 19 — they are immune to decay scoring, decay hiding, and property-level exclusion regardless of any matching decay profile or promotion policy; fulltext and vector indexes do not confer this immunity
 
@@ -455,11 +455,11 @@ If no score start time matches, the engine should use an explicit configured def
 
 The resolution cascade above is the logical model. The implementation pre-flattens it at DDL time using a three-tier optimization strategy.
 
-**Tier 1 — Compile-time profile binding table.** When a decay profile or promotion policy is created, altered, or dropped, the schema manager builds a direct lookup table: `map[string]*compiledBinding` keyed by label or edge type. Each `compiledBinding` holds the resolved decay profile pointer, the resolved promotion policy pointer, the archive threshold, the score-start mode, and the decay function pointer. Wildcard entries are expanded into per-label/per-type entries at compile time. Resolution at query time is a single map lookup — no cascade. The table is rebuilt on any DDL change, which is rare. For multi-label nodes, the table keys on sorted label sets, not individual labels.
+**Tier 1 — Compile-time profile binding table.** When a decay profile or promotion policy is created, altered, or dropped, the schema manager builds a direct lookup table: `map[string]*compiledBinding` keyed by label or edge type. Each `compiledBinding` holds the resolved decay profile pointer, the resolved promotion policy pointer, the visibility threshold, the score-start mode, and the decay function pointer. Wildcard entries are expanded into per-label/per-type entries at compile time. Resolution at query time is a single map lookup — no cascade. The table is rebuilt on any DDL change, which is rare. For multi-label nodes, the table keys on sorted label sets, not individual labels.
 
-**Tier 2 — Archived-bit fast path.** Archived entities already have a persisted marker in primary storage. The read path checks the archived bit before any profile resolution. If archived and the query does not use `reveal()`, skip immediately. Cost: one byte check. This eliminates full resolution for the entire archived population.
+**Tier 2 — Suppressed-bit fast path.** Suppressed entities already have a persisted marker in primary storage. The read path checks the suppressed bit before any profile resolution. If suppressed and the query does not use `reveal()`, skip immediately. Cost: one byte check. This eliminates full resolution for the entire suppressed population.
 
-**Tier 3 — Amortized score computation.** For non-archived entities with exponential decay, the score is a pure function of `(now - scoreFrom, halfLife)`. Pre-compute a score threshold timestamp: `thresholdAge = -halfLife * ln(archiveThreshold) / ln(2)`. At read time, compare `now - scoreFrom > thresholdAge` using integer subtraction on UnixNano values — no `math.Exp()` needed for the visibility check. Only compute the precise float64 score when the entity survives visibility and is projected into results (lazy scoring). This reduces the hot path to one integer comparison per entity. The `thresholdAge` is computed once at compile time per decay profile and stored as `int64` nanoseconds in the compiled binding.
+**Tier 3 — Amortized score computation.** For non-suppressed entities with exponential decay, the score is a pure function of `(now - scoreFrom, halfLife)`. Pre-compute a score threshold timestamp: `thresholdAge = -halfLife * ln(visibilityThreshold) / ln(2)`. At read time, compare `now - scoreFrom > thresholdAge` using integer subtraction on UnixNano values — no `math.Exp()` needed for the visibility check. Only compute the precise float64 score when the entity survives visibility and is projected into results (lazy scoring). This reduces the hot path to one integer comparison per entity. The `thresholdAge` is computed once at compile time per decay profile and stored as `int64` nanoseconds in the compiled binding.
 
 For `ORDER BY decayScore(n)`, the scorer can use a monotonic proxy: `scoreFromTime.UnixNano()` itself is monotonically related to the decay score (newer = higher score) for a fixed half-life and function. Sorting by `scoreFromTime DESC` is equivalent to sorting by `decayScore ASC` without computing any exponentials. The precise score is only needed if the caller mixes `decayScore()` with other expressions in ORDER BY.
 
@@ -519,7 +519,7 @@ Semantics:
 
 Visibility is always snapshot-based. Only the decay-age start time changes.
 
-The scoring timestamp ("now") is the transaction's MVCC snapshot timestamp for query paths, or the maintenance cycle start time for background paths. The scorer does not call `time.Now()`. The scorer receives the snapshot timestamp from the transaction context. This ensures deterministic, repeatable scoring within a transaction: the same entity queried twice in the same transaction returns the same score. The snapshot timestamp is already available in the MVCC read path (`MVCCVersion.CommitTimestamp`). It is passed through to the scorer as `scoringTime`. For background maintenance (recalc, archive pass), `scoringTime` is `time.Now()` at the start of the maintenance cycle, frozen for the duration of the batch.
+The scoring timestamp ("now") is the transaction's MVCC snapshot timestamp for query paths, or the maintenance cycle start time for background paths. The scorer does not call `time.Now()`. The scorer receives the snapshot timestamp from the transaction context. This ensures deterministic, repeatable scoring within a transaction: the same entity queried twice in the same transaction returns the same score. The snapshot timestamp is already available in the MVCC read path (`MVCCVersion.CommitTimestamp`). It is passed through to the scorer as `scoringTime`. For background maintenance (recalc, suppression pass), `scoringTime` is `time.Now()` at the start of the maintenance cycle, frozen for the duration of the batch.
 
 The system must not create new stored versions solely because a derived score changed.
 
@@ -537,7 +537,7 @@ Examples:
 Edge-level decay should support at least these outcomes:
 
 - lowering ranking weight for an edge during retrieval or traversal
-- archival or hiding of an edge while preserving endpoint nodes
+- suppression or hiding of an edge while preserving endpoint nodes
 - edge-specific decay independent of the decay profile of connected nodes
 
 Property decay should support at least these outcomes:
@@ -558,21 +558,21 @@ Property-level scores should only influence retrieval when the property is direc
 
 Edge decay should not be inferred from node decay by default. An edge must be able to decay on its own policy terms even if both endpoint nodes are non-decaying.
 
-Properties are not archival targets. A property with a low archival-like score for vectorization may be excluded from vectorization outputs or vector-backed retrieval, but it remains stored in place and directly queryable in Cypher.
+Properties are not suppression targets. A property with a low score for vectorization may be excluded from vectorization outputs or vector-backed retrieval, but it remains stored in place and directly queryable in Cypher.
 
-### 6.4 Archival Semantics
+### 6.4 Suppression Semantics
 
-Archival applies only to whole nodes and whole edges.
+Visibility suppression applies only to whole nodes and whole edges.
 
-When a node or edge crosses archive eligibility:
+When a node or edge crosses suppression eligibility:
 
-- the node or edge may be marked archived in primary storage
+- the node or edge may be marked suppressed in primary storage
 - the node or edge should be skipped by retrieval and ranking paths as efficiently as possible
 - the node or edge must be removed from secondary indexing asynchronously
 - the system must not scan secondary indexes to discover which entries to remove
 - the system should use the target's stored index-entry catalog to perform direct key deletion
 
-Property-level decay must not cause property archival, property movement, or property deletion from storage.
+Property-level decay must not cause property suppression, property movement, or property deletion from storage.
 
 If a node remains indexed, its properties remain indexable under ordinary indexing rules. Property-level decay affects retrieval and vectorization behavior, not whether the property exists in storage. Properties that participate in structural indexes (lookup, range, and composite indexes) are entirely immune to decay scoring, decay hiding, and vectorization exclusion — they must remain stable and always visible for aggregation, joining, and lookup. Fulltext indexes and vector indexes are retrieval-surface indexes and do not confer this immunity.
 
@@ -598,9 +598,20 @@ Cypher may override the profile-resolved scoring mode for the scope of that scor
 
 ### 6.6 Promotion and Decay Resolution Order
 
-Promotion policies are evaluated first. The promotion policy for the target is resolved and its `ON ACCESS` block is executed before decay profile resolution begins. This ensures that access-tracking mutations in accessMeta are available to decay scoring and visibility determination.
+Promotion policies are evaluated first. The promotion policy for the target is resolved and its `WHEN` predicates are evaluated before decay profile resolution begins. `WHEN` predicates determine which promotion profile applies and what tier the entity is in.
 
 After promotion resolution, the decay profile is resolved and the base decay score is computed. The promotion adjustments are then applied to the base decay score to produce the final score. The final score determines query visibility.
+
+`ON ACCESS` mutations execute **after** the final score and visibility determination. If the entity's final score falls below the visibility threshold (i.e., the entity is suppressed), `ON ACCESS` mutations do **not** execute. This prevents suppressed entities from accumulating access state — a suppressed entity should not record "accesses" that only occurred because the scorer was evaluating it, not because a user or query actually retrieved it. `ON ACCESS` mutations reflect genuine access by a visible entity, not internal scoring housekeeping.
+
+The evaluation order is:
+
+1. Resolve `WHEN` predicates from the matching promotion policy (determines promotion tier)
+2. Resolve the decay profile and compute the base decay score
+3. Apply promotion adjustments to produce the final score
+4. Determine visibility: is the final score above the visibility threshold?
+5. **Only if visible:** execute `ON ACCESS` mutations (increment access counts, set timestamps, etc.)
+6. Flush `ON ACCESS` deltas to accessMeta asynchronously
 
 The normative formula for final score computation is:
 
@@ -635,9 +646,9 @@ For any entity or property, the system should be able to explain:
 - which promotion policy entry and WHEN predicate selected the profile
 - what rate, threshold, floor, and multiplier are active
 - whether decay age was measured from `CREATED`, `VERSION`, or `CUSTOM` and which property path was used if `CUSTOM`, whether the value was resolved from accessMeta or stored properties, and whether a fallback to entity creation time occurred due to a null or unparsable value
-- why a node or edge was archived or not archived
+- why a node or edge was suppressed or not suppressed
 - why a node or edge was deindexed or pending deindex
-- why a property was excluded from vectorization or retrieval surfaces without being archived
+- why a property was excluded from vectorization or retrieval surfaces without being suppressed
 - whether a property is immune to decay because it participates in a structural index (lookup, range, or composite)
 
 ### 6.8 Native Cypher Access
@@ -665,7 +676,7 @@ Suggested fields on `decay(...)` results:
 - `policy`
 - `scope`
 - `function`
-- `archiveThreshold`
+- `visibilityThreshold`
 - `floor`
 - `applies`
 - `reason`
@@ -718,7 +729,7 @@ When `reveal()` is used, the returned entity includes all stored properties, inc
 
 If decay is not enabled or the entity is not subject to any scoring-driven visibility suppression, `reveal()` is a no-op and returns the entity unchanged.
 
-Archived properties do not exist as a concept. Properties remain directly queryable in Cypher even when property-level decay excludes them from vectorization or vector-backed retrieval.
+Suppressed properties do not exist as a concept. Properties remain directly queryable in Cypher even when property-level decay excludes them from vectorization or vector-backed retrieval.
 
 Example usage:
 
@@ -770,7 +781,7 @@ RETURN reveal(n) AS rawNode, decayScore(n) AS score
 ```
 
 ```cypher
-// Retrieve all archived or hidden nodes with their scores for diagnostics
+// Retrieve all suppressed or hidden nodes with their scores for diagnostics
 MATCH (n:SessionRecord)
 RETURN reveal(n) AS rawNode, decay(n) AS decayMeta, policy(n) AS accessMeta
 ```
@@ -845,7 +856,7 @@ Suggested retrieval scoring inputs:
 
 The existing unified search metadata shape remains unchanged. Promotion-policy effects and score-start-time effects are reflected in the resolved score value rather than through a new response field, though richer metadata may optionally expose the selected `scoreFrom`.
 
-Archived nodes and edges should be excluded from unified retrieval as soon as possible. Property-level exclusions should affect vectorization and vector-backed retrieval only, while stored properties remain directly queryable in Cypher.
+Suppressed nodes and edges should be excluded from unified retrieval as soon as possible. Property-level exclusions should affect vectorization and vector-backed retrieval only, while stored properties remain directly queryable in Cypher.
 
 When vector search (e.g., `db.retrieve`, `db.index.vector.queryNodes`) returns candidates that are subsequently suppressed by decay visibility, the caller may receive fewer results than the requested LIMIT. To address this, the vector search layer should chunk results based on the LIMIT value and continue pulling additional chunks until the original limit is satisfied or the index is exhausted. This ensures that decay-filtered vector search returns the expected number of visible results.
 
@@ -859,7 +870,7 @@ Decay behavior should be authored through a dedicated decay profile subsystem, n
 
 Promotion behavior should be authored through dedicated promotion profile and promotion policy subsystems, not through first-class constraints.
 
-`NO DECAY`, `DECAY HALF LIFE`, `DECAY ARCHIVE THRESHOLD`, `DECAY PROFILE`, and `DECAY FLOOR` are decay directives inside decay profile APPLY blocks. They are not standalone constraint types. Decay function and scope are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
+`NO DECAY`, `DECAY HALF LIFE`, `DECAY VISIBILITY THRESHOLD`, `DECAY PROFILE`, and `DECAY FLOOR` are decay directives inside decay profile APPLY blocks. They are not standalone constraint types. Decay function and scope are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
 
 `APPLY PROFILE` is the promotion directive inside promotion policy APPLY blocks. It is not a standalone constraint type. Multiplier, score floor, and score cap are declared through `OPTIONS { ... }` on the profile definition itself, not as inline APPLY-block directives.
 
@@ -899,9 +910,9 @@ The wildcard `*` target applies the profile or policy to every node label or eve
 
 A label-specific or edge-type-specific profile or policy takes precedence over a wildcard-targeted one. The wildcard acts as the default for any target that does not have its own explicit profile or policy.
 
-Edges are first-class targets and must support the same lifecycle as nodes, including creation, alteration, introspection, resolution, scoring, and archival behavior.
+Edges are first-class targets and must support the same lifecycle as nodes, including creation, alteration, introspection, resolution, scoring, and suppression behavior.
 
-Properties are valid scoring targets, but not archival targets.
+Properties are valid scoring targets, but not suppression targets.
 
 Properties that participate in structural indexes (lookup indexes, range indexes, and composite indexes) are not valid decay or promotion targets. Fulltext indexes and vector indexes are retrieval-surface indexes and do not confer property immunity. If an inline property-level rule in a decay profile or promotion policy targets a property participating in a structural index, the engine should reject the rule at creation time with a validation error. This constraint ensures that structurally indexed properties remain stable and always visible for index-backed operations.
 
@@ -911,9 +922,9 @@ There can be at most one decay profile and one promotion policy per unique targe
 
 Promotion profiles are named parameter bundles. They contain no logic — no `FOR` targets, no `APPLY` blocks, no `WHEN` predicates, no `ON ACCESS` mutations. A promotion profile declares configuration values: multiplier, score floor, score cap, and scope. Promotion profiles cannot be targeted to entities directly — they are only referenced by name inside promotion policy APPLY blocks via `APPLY PROFILE 'name'`.
 
-Decay profiles are always targeted. Every decay profile must include `FOR` and `APPLY` clauses that bind the profile to a specific node label, edge type, or wildcard target. A decay profile may reference a named parameter bundle via `DECAY PROFILE '<bundle_name>'` inside its APPLY block, or it may declare decay directives inline (e.g., `DECAY HALF LIFE`, `DECAY ARCHIVE THRESHOLD`, `NO DECAY`).
+Decay profiles are always targeted. Every decay profile must include `FOR` and `APPLY` clauses that bind the profile to a specific node label, edge type, or wildcard target. A decay profile may reference a named parameter bundle via `DECAY PROFILE '<bundle_name>'` inside its APPLY block, or it may declare decay directives inline (e.g., `DECAY HALF LIFE`, `DECAY VISIBILITY THRESHOLD`, `NO DECAY`).
 
-Parameter bundles are reusable configuration objects created with `CREATE DECAY PROFILE <name> OPTIONS { ... }` (no `FOR` clause). They declare configuration values only — half-life, scoring function, score start time, archive threshold, score floor, and scope. Parameter bundles are not directly targeted to entities; they exist to be referenced by name inside targeted decay profiles. A parameter bundle without a `FOR` clause is inert until referenced.
+Parameter bundles are reusable configuration objects created with `CREATE DECAY PROFILE <name> OPTIONS { ... }` (no `FOR` clause). They declare configuration values only — half-life, scoring function, score start time, visibility threshold, score floor, and scope. Parameter bundles are not directly targeted to entities; they exist to be referenced by name inside targeted decay profiles. A parameter bundle without a `FOR` clause is inert until referenced.
 
 Internally, parameter bundles and targeted bindings are stored in separate maps in the schema manager: `decayProfileBundles map[string]*DecayProfileBundle` and `decayProfileBindings map[string]*DecayProfileBinding`. This avoids runtime type-switching.
 
@@ -931,7 +942,7 @@ Policies exist only on the promotion side. There is no separate decay policy con
 
 Promotion policies contain logic. They declare a target via `FOR`, contain an `APPLY` block, and may include `WHEN` predicates, `ON ACCESS` mutation blocks, and inline property-level rules. Promotion policies bind promotion profiles to specific node labels, edge types, and property paths through `WHEN` predicates and `APPLY PROFILE` references.
 
-Promotion policies may include an `ON ACCESS` block that executes mutations when the policy is evaluated during scoring resolution. `ON ACCESS` blocks run before `WHEN` predicates are evaluated, allowing access-tracking mutations to feed into promotion logic within the same policy.
+Promotion policies may include an `ON ACCESS` block that executes mutations when the target entity is accessed and passes the suppression gate. `WHEN` predicates are evaluated first to determine the entity's promotion tier. The decay profile is then resolved to compute the final score and visibility. `ON ACCESS` mutations execute only if the entity's final score is above the visibility threshold — suppressed entities do not accumulate access state. This means `WHEN` predicates cannot depend on access counts from the current evaluation cycle; they read the persisted + buffered accessMeta state from prior accesses.
 
 `ON ACCESS` mutations are applied exclusively to a separate accessMeta index, never to the target node or edge itself. The target node or edge is read-only during `ON ACCESS` evaluation. The accessMeta index stores a `map[string]interface{}` per target, keyed to the target node or edge identifier, and is serialized in msgpack alongside other data files for performance.
 
@@ -943,7 +954,7 @@ Property-level promotion rules should be authored inline within the same promoti
 
 Property-level retention rules should be authored inline within the same decay profile body that declares the entity-level defaults for that label or edge type.
 
-When a targeted decay profile's APPLY block contains `DECAY ARCHIVE THRESHOLD`, that value overrides the `archiveThreshold` declared in the referenced parameter bundle's OPTIONS. When omitted, the parameter bundle's value is inherited. The resolution precedence is: APPLY block override → referenced profile OPTIONS → configured system default.
+When a targeted decay profile's APPLY block contains `DECAY VISIBILITY THRESHOLD`, that value overrides the `visibilityThreshold` declared in the referenced parameter bundle's OPTIONS. When omitted, the parameter bundle's value is inherited. The resolution precedence is: APPLY block override → referenced profile OPTIONS → configured system default.
 
 Nested `FOR ... APPLY` entries should remain invalid inside a profile or policy body. If operators need different decay or promotion behavior for a different label or edge type, they must create a separate targeted profile or policy.
 
@@ -951,7 +962,7 @@ When property-level retention or promotion rules exist, the runtime should make 
 
 The same shared scorer should also back retrieval scoring, using the scoring mode resolved from the decay profile, the score start time resolved from the decay profile, and the promotion adjustments resolved from the promotion policy rather than a caller override.
 
-Property-level rules may exclude properties from vectorization or vector-backed retrieval, but they do not archive, move, or delete properties from storage.
+Property-level rules may exclude properties from vectorization or vector-backed retrieval, but they do not suppress, move, or delete properties from storage.
 
 ### 7.5 Sample Policies in Cypher
 
@@ -962,7 +973,7 @@ CREATE DECAY PROFILE session_record_retention
 FOR (n:SessionRecord)
 APPLY {
   DECAY PROFILE 'working_memory'
-  DECAY ARCHIVE THRESHOLD 0.10
+  DECAY VISIBILITY THRESHOLD 0.10
   n.summary DECAY PROFILE 'session_summary'
   n.lastConversationSummary DECAY HALF LIFE 2592000
   n.tenantId NO DECAY
@@ -976,7 +987,7 @@ CREATE DECAY PROFILE coaccess_edge_retention
 FOR ()-[r:CO_ACCESSED]-()
 APPLY {
   DECAY PROFILE 'edge_working_memory'
-  DECAY ARCHIVE THRESHOLD 0.15
+  DECAY VISIBILITY THRESHOLD 0.15
   r.externalId NO DECAY
 }
 ```
@@ -1077,7 +1088,7 @@ APPLY {
 }
 ```
 
-#### Property-level vectorization exclusion without archival
+#### Property-level vectorization exclusion without suppression
 
 ```cypher
 CREATE DECAY PROFILE session_vectorization_rules
@@ -1095,7 +1106,7 @@ CREATE DECAY PROFILE default_node_retention
 FOR (n:*)
 APPLY {
   DECAY PROFILE 'working_memory'
-  DECAY ARCHIVE THRESHOLD 0.05
+  DECAY VISIBILITY THRESHOLD 0.05
 }
 ```
 
@@ -1106,7 +1117,7 @@ CREATE DECAY PROFILE default_edge_retention
 FOR ()-[r:*]-()
 APPLY {
   DECAY PROFILE 'edge_working_memory'
-  DECAY ARCHIVE THRESHOLD 0.10
+  DECAY VISIBILITY THRESHOLD 0.10
 }
 ```
 
@@ -1129,7 +1140,7 @@ Wildcard targets use `*` in place of a label or edge type to match every node la
 
 In the promotion policy examples above, `ON ACCESS` SET statements such as `SET n.accessCount = coalesce(n.accessCount, 0) + 1` write exclusively to the accessMeta index for the target node or edge, not to the node or edge itself. The `coalesce(n.accessCount, 0)` read resolves from accessMeta first, falling back to the node's stored properties only when the key is absent from accessMeta. This keeps nodes and edges read-only during policy evaluation while preserving familiar Cypher property syntax.
 
-In this model, edges can decay just like nodes can. They can also have independent promotion policies and property-level overrides. Properties can be excluded from vectorization or vector-backed retrieval by profile, but they are never archived from storage.
+In this model, edges can decay just like nodes can. They can also have independent promotion policies and property-level overrides. Properties can be excluded from vectorization or vector-backed retrieval by profile, but they are never suppressed from storage.
 
 ### 7.6 Profile and Policy DDL
 
@@ -1149,7 +1160,7 @@ Example decay profile bootstrap with declarative score start time:
 CREATE DECAY PROFILE durable_fact
 OPTIONS {
   decayEnabled: false,
-  archiveThreshold: 0.0,
+  visibilityThreshold: 0.0,
   scope: 'NODE',
   function: 'none',
   scoreFrom: 'CREATED'
@@ -1158,7 +1169,7 @@ OPTIONS {
 CREATE DECAY PROFILE durable_edge
 OPTIONS {
   decayEnabled: false,
-  archiveThreshold: 0.0,
+  visibilityThreshold: 0.0,
   scope: 'EDGE',
   function: 'none',
   scoreFrom: 'CREATED'
@@ -1167,7 +1178,7 @@ OPTIONS {
 CREATE DECAY PROFILE session_summary
 OPTIONS {
   halfLifeSeconds: 1209600,
-  archiveThreshold: 0.10,
+  visibilityThreshold: 0.10,
   scope: 'PROPERTY',
   function: 'exponential',
   scoreFrom: 'VERSION'
@@ -1176,7 +1187,7 @@ OPTIONS {
 CREATE DECAY PROFILE working_memory
 OPTIONS {
   halfLifeSeconds: 604800,
-  archiveThreshold: 0.05,
+  visibilityThreshold: 0.05,
   scope: 'NODE',
   function: 'exponential',
   scoreFrom: 'VERSION'
@@ -1185,7 +1196,7 @@ OPTIONS {
 CREATE DECAY PROFILE edge_working_memory
 OPTIONS {
   halfLifeSeconds: 604800,
-  archiveThreshold: 0.05,
+  visibilityThreshold: 0.05,
   scope: 'EDGE',
   function: 'exponential',
   scoreFrom: 'VERSION'
@@ -1194,7 +1205,7 @@ OPTIONS {
 CREATE DECAY PROFILE event_anchored
 OPTIONS {
   halfLifeSeconds: 2592000,
-  archiveThreshold: 0.05,
+  visibilityThreshold: 0.05,
   scope: 'NODE',
   function: 'exponential',
   scoreFrom: 'CUSTOM',
@@ -1272,7 +1283,7 @@ SHOW PROMOTION POLICIES
 ALTER DECAY PROFILE working_memory
 SET OPTIONS {
   halfLifeSeconds: 432000,
-  archiveThreshold: 0.08,
+  visibilityThreshold: 0.08,
   scoreFrom: 'VERSION'
 }
 ```
@@ -1327,12 +1338,12 @@ DROP PROMOTION PROFILE canonical_tier
 - score start time is resolved from decay profile options, not from runtime defaults alone
 - node-level and edge-level decay are both first-class resolved behaviors
 - property-level decay scores are derived on demand and are not written into the entity's stored property map
-- archived nodes and archived edges are persisted as archived state in primary storage
-- archived nodes and archived edges are removed from secondary indexing asynchronously
+- suppressed nodes and suppressed edges are persisted as suppressed state in primary storage
+- suppressed nodes and suppressed edges are removed from secondary indexing asynchronously
 - each node and edge should maintain an exact index-entry catalog to support direct deindex deletes
-- archival cleanup should use batched blind deletes against known index keys rather than scanning indexes to discover stale entries
-- the archival cleanup job should default to nightly execution but be configurable in seconds
-- properties are never archived, moved, or deleted because of decay profile
+- deindex cleanup should use batched blind deletes against known index keys rather than scanning indexes to discover stale entries
+- the deindex cleanup job should default to nightly execution but be configurable in seconds
+- properties are never suppressed, moved, or deleted because of decay profile
 - property-level decay may exclude properties from vectorization or vector-backed retrieval, but stored properties remain directly queryable in Cypher via `reveal()`
 - properties that participate in structural indexes (lookup, range, and composite indexes) are immune to decay scoring, decay hiding, and property-level exclusion; they remain stable and always visible for aggregation, joining, and lookup; fulltext and vector indexes do not confer immunity
 - property-level decay or promotion rules targeting indexed properties must be rejected at creation time
@@ -1344,7 +1355,7 @@ DROP PROMOTION PROFILE canonical_tier
 - property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to stored node or edge properties
 - temporary caches of resolved scores are allowed as implementation detail, but they are not the source of truth
 - profile and policy resolution artifacts should be diagnosable without mutating the underlying entity
-- no-decay profiles should be enforced consistently across recall, archive, and maintenance paths
+- no-decay profiles should be enforced consistently across recall, suppression pass, and maintenance paths
 - derived score changes must not create new stored versions solely because time advanced
 
 ### Suggested search response behavior
@@ -1353,7 +1364,7 @@ DROP PROMOTION PROFILE canonical_tier
 - the `meta` section should mirror the same resolved scores available through `decayScore()` and `decay()`
 - search hits themselves remain standard result entities plus ordinary ranking fields
 - unified retrieval scoring should call the same shared scorer implementation as Cypher, but without exposing the Cypher-only `scoringMode` override
-- archived nodes and edges must be skipped efficiently during retrieval, even before background deindexing fully drains
+- suppressed nodes and edges must be skipped efficiently during retrieval, even before background deindexing fully drains
 - property-level decay exclusions should apply to vectorization and vector-backed retrieval, not to storage visibility or direct Cypher access
 
 ---
@@ -1370,8 +1381,8 @@ Deliverables:
 - define supported promotion multipliers
 - define supported score start-time values `CREATED`, `VERSION`, and `CUSTOM`
 - define explainable resolution output
-- define whole-node and whole-edge archival semantics
-- define non-archival property exclusion semantics for vectorization and retrieval
+- define whole-node and whole-edge suppression semantics
+- define non-suppression property exclusion semantics for vectorization and retrieval
 - define indexed-property immunity: properties in structural indexes (lookup, range, and composite) are immune to decay scoring, hiding, and exclusion; fulltext and vector indexes do not confer immunity
 - define the native `decayScore()` and `decay()` Cypher function contracts, including explicit `property` and `scoringMode` options
 - define the native `policy()` Cypher function contract for accessMeta retrieval
@@ -1414,7 +1425,7 @@ Deliverables:
 
 Deliverables:
 
-- route recall, recalc, archive, ranking, and stats paths through the shared resolver
+- route recall, recalc, suppression pass, ranking, and stats paths through the shared resolver
 - remove hardcoded tier branching from runtime code
 - support property-level decay behavior
 - support edge-level decay behavior
@@ -1424,8 +1435,8 @@ Deliverables:
 - implement scoring-before-visibility: resolve promotion first, then decay, then determine query visibility before exposing entities to the query
 - implement scoring-driven visibility suppression for nodes, edges, and properties in `MATCH`, `WHERE`, search, and traversal paths
 - implement `reveal()` bypass path that returns raw stored entities without scoring-driven visibility filtering or property hiding
-- support whole-node and whole-edge archive marking
-- support fast archived-entity skipping in read paths
+- support whole-node and whole-edge suppression marking
+- support fast suppressed-entity skipping in read paths
 - implement accessMeta index storage with msgpack serialization alongside other data files
 - route `ON ACCESS` mutation writes to the accessMeta index, keeping nodes and edges read-only during policy evaluation
 - implement accessMeta-first read resolution for property access within `ON ACCESS` blocks and `WHEN` predicates
@@ -1435,11 +1446,11 @@ Deliverables:
 Deliverables:
 
 - implement per-node and per-edge exact index-entry catalogs
-- implement persistent archive work items for deindex cleanup
-- implement configurable archive cleanup scheduling, default nightly and configurable in seconds
-- perform asynchronous batched deindex deletes for archived nodes and edges
+- implement persistent deindex work items for deindex cleanup
+- implement configurable deindex cleanup scheduling, default nightly and configurable in seconds
+- perform asynchronous batched deindex deletes for suppressed nodes and edges
 - ensure cleanup does not scan entire indexes to discover stale entries
-- keep physical storage reclamation separate from logical archival and deindex behavior
+- keep physical storage reclamation separate from logical suppression and deindex behavior
 
 ### Workstream F: UI and Tooling
 
@@ -1447,10 +1458,10 @@ Deliverables:
 
 - show effective decay profile and matching promotion policy in browser, diagnostics, and admin outputs
 - show effective score start time in diagnostics and admin outputs
-- show archived vs deindexed status for nodes and edges in diagnostics and admin outputs
+- show suppressed vs deindexed status for nodes and edges in diagnostics and admin outputs
 - let operators inspect policies and resolution traces
-- add diagnostics for why a node or edge decayed, promoted, archived, deindexed, or did not
-- add diagnostics for why a property was excluded from vectorization or retrieval without being archived
+- add diagnostics for why a node or edge decayed, promoted, was suppressed, deindexed, or did not
+- add diagnostics for why a property was excluded from vectorization or retrieval without being suppressed
 
 ---
 
@@ -1459,7 +1470,7 @@ Deliverables:
 1. Define the decay profile schema model and resolution precedence.
 2. Define the promotion profile and promotion policy schema models and resolution precedence.
 3. Define the decay profile `scoreFrom` option with supported values `CREATED`, `VERSION`, and `CUSTOM`.
-4. Centralize decay resolution in a shared helper used by recall, recalc, archive, ranking, and stats paths.
+4. Centralize decay resolution in a shared helper used by recall, recalc, suppression pass, ranking, and stats paths.
 5. Add configurable per-profile half-lives, decay rates, named presets, and function identifiers.
 6. Add configurable per-profile promotion multipliers and named presets.
 7. Define and implement schema-backed decay profile entries for nodes and edges in the dedicated decay profile subsystem.
@@ -1467,10 +1478,10 @@ Deliverables:
 9. Extend profile parsing and compiled metadata to support property-targeted retention entries.
 10. Extend policy parsing and compiled metadata to support property-targeted promotion entries.
 11. Add MVCC-aware decay-age start resolution using the profile-declared `scoreFrom`.
-12. Implement whole-node and whole-edge archive state transitions.
+12. Implement whole-node and whole-edge suppression state transitions.
 13. Implement per-entity index-entry catalogs for nodes and edges.
-14. Implement persistent archive work items and configurable deindex scheduling.
-15. Add asynchronous batched deindex cleanup for archived nodes and edges.
+14. Implement persistent deindex work items and configurable deindex scheduling.
+15. Add asynchronous batched deindex cleanup for suppressed nodes and edges.
 16. Implement scoring-before-visibility: promotion first, then decay, then visibility determination before exposing entities to the query.
 17. Implement the accessMeta index with msgpack serialization, `ON ACCESS` mutation routing, and accessMeta-first read resolution.
 18. Add native Cypher functions `decayScore()` and `decay()` for nodes and edges with an explicit options object for `property` and optional `scoringMode`.
@@ -1479,7 +1490,7 @@ Deliverables:
 21. Migrate runtime logic away from fixed tier assumptions.
 22. Bind unified retrieval scoring to the same shared scorer and profile-and-policy-resolved scoring configuration.
 23. Expose policy and resolution information in Cypher, search metadata, and UI surfaces.
-24. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, scoring-before-visibility, `reveal()` bypass, accessMeta mutation and resolution, archive/deindex behavior, and archival skipping.
+24. Add regression tests for node-level, edge-level, and property-level resolution, score start-time selection, scoring-before-visibility, `reveal()` bypass, accessMeta mutation and resolution, suppression/deindex behavior, and suppression skipping.
 25. Add benchmark and evaluation coverage for profile and policy resolution overhead, scoring-before-visibility overhead, accessMeta read/write throughput, and correctness.
 
 ---
@@ -1488,13 +1499,13 @@ Deliverables:
 
 ### Must-have regression cases
 
-- no-decay nodes are skipped by recalc and archive paths
-- no-decay edges are skipped by recalc and archive paths
+- no-decay nodes are skipped by recalc and suppression paths
+- no-decay edges are skipped by recalc and suppression paths
 - effective decay rate comes from resolved decay profile rather than hardcoded tier
 - edge-level decay rules can age an edge independently of its endpoint nodes
 - property-level inline decay rules can age one property without decaying the parent entity
 - property-level inline promotion rules can boost one property without boosting the parent entity
-- property-level vectorization exclusion does not archive, move, or delete the stored property
+- property-level vectorization exclusion does not suppress, move, or delete the stored property
 - properties excluded from vectorization remain directly queryable in Cypher
 - property-level decay or promotion rules targeting indexed properties are rejected at creation time with a validation error
 - indexed properties remain visible in query results regardless of entity-level decay score
@@ -1519,11 +1530,11 @@ Deliverables:
 - `scoreFrom: 'CUSTOM'` resolves the `scoreFromProperty` from accessMeta first, falling back to stored node or edge properties
 - `scoreFrom: 'CUSTOM'` logs a warning and falls back to entity creation time when the resolved value is missing, null, or unparsable as a timestamp
 - changing only derived score as time advances does not create a new stored version
-- archived nodes and archived edges are skipped by retrieval paths
-- archived nodes and archived edges are removed from indexing by the background cleanup process
-- archive cleanup uses exact-key deindexing and does not require full index scans
+- suppressed nodes and suppressed edges are skipped by retrieval paths
+- suppressed nodes and suppressed edges are removed from indexing by the background cleanup process
+- deindex cleanup uses exact-key deindexing and does not require full index scans
 - deindex cleanup is idempotent and retry-safe
-- properties are never archived as part of archive cleanup
+- properties are never suppressed as part of deindex cleanup
 - `ON ACCESS` SET mutations write to the accessMeta index and do not mutate the target node or edge
 - `ON ACCESS` and `WHEN` property reads resolve from accessMeta first, falling back to stored node or edge properties
 - `policy(n)` returns the accessMeta map for a node with all keys written by `ON ACCESS` mutations
@@ -1531,7 +1542,7 @@ Deliverables:
 - `policy(...)` returns an empty map with only `_targetId` and `_targetScope` when no accessMeta entry exists
 - accessMeta entries survive node or edge reads without being lost or corrupted
 - accessMeta entries are correctly serialized and deserialized via msgpack across restarts
-- scoring is evaluated before query visibility: a node whose final score falls below the archive threshold does not appear in `MATCH` results
+- scoring is evaluated before query visibility: a node whose final score falls below the visibility threshold does not appear in `MATCH` results
 - scoring is evaluated before query visibility: a property excluded by decay does not appear on returned nodes unless accessed through `reveal()`
 - promotion policies are resolved before decay profiles during scoring evaluation
 - `reveal(n)` returns the raw stored node including all properties regardless of scoring-driven visibility
@@ -1548,8 +1559,8 @@ Deliverables:
 - edge-level decay selectivity and maintenance cost
 - property-level decay selectivity and maintenance cost
 - property-level promotion selectivity and ranking cost
-- archive pass throughput under mixed node and edge profile workloads
-- deindex throughput for archived nodes and edges
+- suppression pass throughput under mixed node and edge profile workloads
+- deindex throughput for suppressed nodes and edges
 - recall and ranking overhead with resolved node and edge profile and policy checks
 - accessMeta index read and write throughput under concurrent `ON ACCESS` mutation workloads
 - accessMeta-first property resolution overhead compared to direct node or edge property reads
@@ -1572,10 +1583,10 @@ The plan is complete when:
 - node-, edge-, and property-level decay are all supported
 - node-, edge-, and property-level promotion are all supported
 - edges can decay just like nodes can
-- only whole nodes and whole edges can be archived
-- archived nodes and archived edges are removed from indexing asynchronously and efficiently
-- background archival cleanup defaults to nightly execution and is configurable in seconds
-- properties are never archived, moved, or deleted because of decay profile
+- only whole nodes and whole edges can be suppressed
+- suppressed nodes and suppressed edges are removed from indexing asynchronously and efficiently
+- background deindex cleanup defaults to nightly execution and is configurable in seconds
+- properties are never suppressed, moved, or deleted because of decay profile
 - property-level decay can exclude properties from vectorization or vector-backed retrieval while preserving storage and direct Cypher access
 - properties that participate in general indexes are immune to decay scoring, decay hiding, and property-level exclusion
 - property-level decay or promotion rules targeting indexed properties are rejected at creation time
@@ -1611,9 +1622,9 @@ The plan is complete when:
 - dedicated promotion policy subsystem support for inline property-level promotion rules, with creation-time validation rejecting rules that target indexed properties
 - declarative decay profile support for `scoreFrom: 'CREATED' | 'VERSION' | 'CUSTOM'`
 - explicit node and edge targeting support throughout profile and policy resolution and scoring
-- whole-node and whole-edge archival strategy with asynchronous deindex cleanup
+- whole-node and whole-edge suppression strategy with asynchronous deindex cleanup
 - exact index-entry catalog support for nodes and edges
-- archive work item infrastructure for background cleanup
+- deindex work item infrastructure for background cleanup
 - native Cypher function support for `decayScore()` and `decay()`
 - native Cypher function support for `policy()` to expose accessMeta on nodes and edges
 - native Cypher function support for `reveal()` to bypass scoring-driven visibility and property hiding on nodes and edges
@@ -1624,7 +1635,7 @@ The plan is complete when:
 - regression tests covering node-, edge-, and property-level semantics, scoring-before-visibility, and `reveal()` bypass
 - user-facing documentation for decay profile authoring
 - user-facing documentation for promotion profile and promotion policy authoring
-- user-facing documentation for archival and deindex behavior
+- user-facing documentation for suppression and deindex behavior
 
 ---
 
@@ -1638,7 +1649,7 @@ Property-level decay and promotion may affect vectorization and retrieval behavi
 
 There is no migration path from the existing tier system (`TierEpisodic`, `TierSemantic`, `TierProcedural` with hardcoded lambdas, `Node.DecayScore`, `Node.LastAccessed`, `Node.AccessCount` stored on nodes, replication codec sending `DecayScore`). This is a 1.1.0 version bump signifying an incompatible break with the older experimental memory model.
 
-Updated summary: added a dedicated archival/deindex layer, made archival apply only to whole nodes and edges, added exact index-entry catalogs plus archive work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never archived and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity. Added indexed-property immunity: properties that participate in general indexes (lookup, range, composite, or any index used for aggregation and joining) are immune to decay scoring, decay hiding, and property-level exclusion; rules targeting indexed properties are rejected at creation time. Added Appendix A with a complete worked example implementing a modified Ebbinghaus model informed by the four-layer decomposition proposed in arXiv:2604.11364v1.
+Updated summary: added a dedicated suppression/deindex layer, made suppression apply only to whole nodes and edges, added exact index-entry catalogs plus deindex work items for async cleanup, made the cleanup job nightly by default but configurable in seconds, and clarified that properties are never suppressed and only get excluded from vectorization/retrieval surfaces while remaining in storage and Cypher-visible. Added a separate accessMeta index for `ON ACCESS` mutation state, making nodes and edges read-only during policy evaluation. AccessMeta entries are `map[string]interface{}` keyed per target, serialized in msgpack alongside other data files. Property reads in `ON ACCESS` and `WHEN` blocks resolve from accessMeta first, falling back to stored node or edge properties. Added the native `policy()` Cypher function to expose accessMeta, with no correlated `policyScore()` scalar. Changed resolution order to promotion first, then decay. Scoring now happens before query visibility — entities whose final score renders them invisible are suppressed from `MATCH`, `WHERE`, search hits, and traversal paths. Added the native `reveal()` Cypher function to bypass scoring-driven visibility suppression and property-level decay hiding, returning the raw stored entity. Added indexed-property immunity: properties that participate in general indexes (lookup, range, composite, or any index used for aggregation and joining) are immune to decay scoring, decay hiding, and property-level exclusion; rules targeting indexed properties are rejected at creation time. Added Appendix A with a complete worked example implementing a modified Ebbinghaus model informed by the four-layer decomposition proposed in arXiv:2604.11364v1.
 
 ---
 
@@ -1676,12 +1687,12 @@ This example uses NornicDB node labels to represent the four-layer decomposition
 
 The paper requires four categorically different persistence mechanisms. This section maps each to concrete NornicDB mechanics:
 
-| Layer | Persistence mechanism | NornicDB implementation |
-|-------|----------------------|------------------------|
-| **Knowledge** | Supersession + provenance; shared; no decay | `:KnowledgeFact` with `decayEnabled: false`. Supersession modeled through `:SUPERSEDES` edges and the Canonical Graph + Mutation Log (see [canonical-graph-ledger.md](../user-guides/canonical-graph-ledger.md)). Old facts are never deleted — they are linked to successors via `:SUPERSEDES` with provenance properties (`superseded_at`, `superseded_by_agent`, `evidence_source`). Facts are shared across agents: any agent querying the knowledge base sees the same facts. |
-| **Memory** | Ebbinghaus decay + bi-temporal event sourcing; per-agent; consolidation | `:MemoryEpisode` with exponential decay and bi-temporal timestamps. Each episode carries four timestamps following the Graphiti bi-temporal model: `system_created_at` (when NornicDB ingested it), `system_expired_at` (when it was superseded or archived), `valid_from` (when the real-world event occurred), `valid_to` (when the real-world event ceased to be true). Memory is scoped per agent via `agentId` (or `tenantId` at the tenant boundary). Each memory operation produces an immutable WAL event. Consolidation into Knowledge is promotion-driven (see A.5). |
-| **Wisdom** | Evidence-gated revision; no time-based decay; multi-source | `:WisdomDirective` with `decayEnabled: false` and stability-tier promotion. Revision is an explicit graph operation: when evidence gates are met for revision, a new `:WisdomDirective` is created and linked to the old one via `:REVISES` with provenance (`revised_at`, `revision_reason`, `evidence_sources`). The old directive is marked `status: 'retired'`. Stability tiers (provisional → established → canonical) gate how much counter-evidence is required for revision, preventing sycophantic promotion. |
-| **Intelligence** | Ephemeral; inference-time only | Outside the scope of the persistence layer. Intelligence is the model itself and the runtime query context. It leaves no trace in storage; its effects persist only through writes to the other three layers. |
+| Layer            | Persistence mechanism                                                   | NornicDB implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Knowledge**    | Supersession + provenance; shared; no decay                             | `:KnowledgeFact` with `decayEnabled: false`. Supersession modeled through `:SUPERSEDES` edges and the Canonical Graph + Mutation Log (see [canonical-graph-ledger.md](../user-guides/canonical-graph-ledger.md)). Old facts are never deleted — they are linked to successors via `:SUPERSEDES` with provenance properties (`superseded_at`, `superseded_by_agent`, `evidence_source`). Facts are shared across agents: any agent querying the knowledge base sees the same facts.                                                                                             |
+| **Memory**       | Ebbinghaus decay + bi-temporal event sourcing; per-agent; consolidation | `:MemoryEpisode` with exponential decay and bi-temporal timestamps. Each episode carries four timestamps following the Graphiti bi-temporal model: `system_created_at` (when NornicDB ingested it), `system_expired_at` (when it was superseded or archived), `valid_from` (when the real-world event occurred), `valid_to` (when the real-world event ceased to be true). Memory is scoped per agent via `agentId` (or `tenantId` at the tenant boundary). Each memory operation produces an immutable WAL event. Consolidation into Knowledge is promotion-driven (see A.5). |
+| **Wisdom**       | Evidence-gated revision; no time-based decay; multi-source              | `:WisdomDirective` with `decayEnabled: false` and stability-tier promotion. Revision is an explicit graph operation: when evidence gates are met for revision, a new `:WisdomDirective` is created and linked to the old one via `:REVISES` with provenance (`revised_at`, `revision_reason`, `evidence_sources`). The old directive is marked `status: 'retired'`. Stability tiers (provisional → established → canonical) gate how much counter-evidence is required for revision, preventing sycophantic promotion.                                                         |
+| **Intelligence** | Ephemeral; inference-time only                                          | Outside the scope of the persistence layer. Intelligence is the model itself and the runtime query context. It leaves no trace in storage; its effects persist only through writes to the other three layers.                                                                                                                                                                                                                                                                                                                                                                  |
 
 #### Recency vs. decay — the organizing principle
 
@@ -1697,7 +1708,7 @@ Knowledge facts are permanent. They are superseded by newer evidence through gra
 CREATE DECAY PROFILE knowledge_fact_retention
 OPTIONS {
   decayEnabled: false,
-  archiveThreshold: 0.0,
+  visibilityThreshold: 0.0,
   scope: 'NODE',
   function: 'none',
   scoreFrom: 'CREATED'
@@ -1723,13 +1734,13 @@ Provenance is first-class: every `:KnowledgeFact` carries `sourceId` (where the 
 
 #### Memory layer — Ebbinghaus exponential decay
 
-Memory episodes decay according to the Ebbinghaus forgetting curve. The half-life is 7 days (604800 seconds). Episodes that are not accessed or consolidated within this window lose score and eventually become invisible to queries. Archived episodes are deindexed but remain accessible through `reveal()`.
+Memory episodes decay according to the Ebbinghaus forgetting curve. The half-life is 7 days (604800 seconds). Episodes that are not accessed or consolidated within this window lose score and eventually become invisible to queries. Suppressed episodes are deindexed but remain accessible through `reveal()`.
 
 ```cypher
 CREATE DECAY PROFILE memory_episode_retention
 OPTIONS {
   halfLifeSeconds: 604800,
-  archiveThreshold: 0.05,
+  visibilityThreshold: 0.05,
   scope: 'NODE',
   function: 'exponential',
   scoreFrom: 'VERSION'
@@ -1741,7 +1752,7 @@ CREATE DECAY PROFILE memory_episode_retention_binding
 FOR (n:MemoryEpisode)
 APPLY {
   DECAY PROFILE 'memory_episode_retention'
-  DECAY ARCHIVE THRESHOLD 0.05
+  DECAY VISIBILITY THRESHOLD 0.05
   n.tenantId NO DECAY
   n.agentId NO DECAY
   n.sessionId NO DECAY
@@ -1780,7 +1791,7 @@ Wisdom directives do not decay over time. They have stability tiers managed thro
 CREATE DECAY PROFILE wisdom_directive_retention
 OPTIONS {
   decayEnabled: false,
-  archiveThreshold: 0.0,
+  visibilityThreshold: 0.0,
   scope: 'NODE',
   function: 'none',
   scoreFrom: 'CREATED'
@@ -1834,7 +1845,7 @@ Evidence edges linking Memory episodes to Knowledge facts decay at a moderate ra
 CREATE DECAY PROFILE evidence_edge_retention
 OPTIONS {
   halfLifeSeconds: 2592000,
-  archiveThreshold: 0.10,
+  visibilityThreshold: 0.10,
   scope: 'EDGE',
   function: 'exponential',
   scoreFrom: 'CREATED'
@@ -1846,7 +1857,7 @@ CREATE DECAY PROFILE evidence_edge_retention_binding
 FOR ()-[r:EVIDENCES]-()
 APPLY {
   DECAY PROFILE 'evidence_edge_retention'
-  DECAY ARCHIVE THRESHOLD 0.10
+  DECAY VISIBILITY THRESHOLD 0.10
   r.sourceId NO DECAY
 }
 ```
@@ -2070,7 +2081,7 @@ ORDER BY searchScore * decayScore(node) DESC
 
 In this query, scoring-before-visibility means:
 
-- The 20 candidates returned by `db.retrieve` have already been scored. Memory episodes that crossed below the archive threshold are not in the result set — they were suppressed before the `YIELD`.
+- The 20 candidates returned by `db.retrieve` have already been scored. Memory episodes that crossed below the visibility threshold are not in the result set — they were suppressed before the `YIELD`.
 - The `OPTIONAL MATCH` traversals also respect visibility. A `:MemoryEpisode` connected by an `:EVIDENCES` edge will not appear in `linkedEpisodes` if its decay score renders it invisible.
 - The `ORDER BY` combines semantic relevance (`searchScore`) with decay freshness (`decayScore(node)`) for a unified ranking that balances meaning and recency.
 - Knowledge facts and Wisdom directives always appear because they have no decay. Memory episodes appear only if they are above threshold.
@@ -2159,7 +2170,7 @@ ORDER BY combinedScore DESC
 
 In this query:
 
-- `db.retrieve` performs hybrid search (vector + BM25 + RRF fusion). Scoring-before-visibility applies here: promotion and decay are resolved per candidate before `YIELD`. Memory episodes below the archive threshold are suppressed — the 30 candidates are all visible, already-scored entities.
+- `db.retrieve` performs hybrid search (vector + BM25 + RRF fusion). Scoring-before-visibility applies here: promotion and decay are resolved per candidate before `YIELD`. Memory episodes below the visibility threshold are suppressed — the 30 candidates are all visible, already-scored entities.
 - `db.rerank` applies cross-encoder reranking to the top 10. The reranker is a pure semantic relevance evaluator — it receives the text content of each candidate and the query string, and produces a relevance score. It has no access to promotion policies, decay profiles, accessMeta, or any policy-based scoring. It sees only visible, materialized content.
 - The `combinedScore = rerankScore * decayScore(n)` is computed by the caller after reranking, blending the reranker's semantic relevance with the policy system's decay freshness. This is the correct composition point: the reranker handles meaning, the policy system handles durability, and the caller decides how to weight them.
 - A Knowledge fact always contributes `decayFinal = 1.0`. A 3-day-old Memory episode accessed 4 times contributes `decayFinal = 0.936` (base `0.749` × reinforced multiplier `1.25`). A 10-day-old episode accessed once contributes `decayFinal = 0.317`.
@@ -2179,7 +2190,7 @@ RETURN reveal(m) AS rawEpisode,
        CASE
          WHEN decayScore(m) >= 0.80 THEN 'visible — strong'
          WHEN decayScore(m) >= 0.05 THEN 'visible — fading'
-         ELSE 'invisible — below archive threshold'
+         ELSE 'invisible — below visibility threshold'
        END AS visibilityStatus
 ORDER BY decayScore(m) ASC
 ```
@@ -2208,7 +2219,7 @@ RETURN reveal(node) AS rawNode,
 ORDER BY vecScore DESC
 ```
 
-Note: `reveal()` in the last query ensures that even Memory episodes whose decay score has dropped below the archive threshold are returned from the vector search. Without `reveal()`, those episodes would be suppressed by scoring-before-visibility and would not appear in the `YIELD`.
+Note: `reveal()` in the last query ensures that even Memory episodes whose decay score has dropped below the visibility threshold are returned from the vector search. Without `reveal()`, those episodes would be suppressed by scoring-before-visibility and would not appear in the `YIELD`.
 
 #### Step-by-step resolution (Query 1)
 
@@ -2218,14 +2229,16 @@ This walkthrough traces the resolution of Query 1 for a representative set of re
 
 `db.retrieve` performs hybrid search (vector + BM25 + RRF). Before yielding each candidate, the engine resolves promotion and decay for every touched node:
 
-**2. Promotion policy resolution (first, per candidate)**
+**2. Promotion policy WHEN resolution (first, per candidate)**
+
+`WHEN` predicates are evaluated using the persisted + buffered accessMeta state from prior accesses. `ON ACCESS` mutations have not yet executed for this evaluation cycle.
 
 - `k:KnowledgeFact {claim: 'LoRA achieves 95% of full fine-tuning quality'}` — no promotion policy matches. Neutral promotion effect.
-- `m1:MemoryEpisode` (4 accesses, 3 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` incremented to `5` in accessMeta, `n.lastAccessedAt` set. `accessCount >= 3` → `memory_reinforced` selected (multiplier `1.25`). `accessCount >= 5 AND sourceAgreement >= 0.80` → `consolidation_candidate` selected (multiplier `1.50`, floor `0.80`). Highest multiplier wins: `consolidation_candidate`.
-- `m2:MemoryEpisode` (1 access, 10 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` incremented to `2` in accessMeta. No `WHEN` predicate matches. Neutral promotion.
-- `m3:MemoryEpisode` (0 accesses, 20 days old) — `memory_episode_consolidation` matches. `ON ACCESS` executes: `n.accessCount` set to `1` in accessMeta. No `WHEN` predicate matches. Neutral promotion.
-- `e1:EVIDENCES` (traversed 6 times) — `evidence_traversal_tiering` matches. `ON ACCESS` executes: `r.traversalCount` incremented to `7` in accessMeta. `traversalCount >= 5` → `reinforced_evidence` selected (multiplier `1.20`).
-- `w1:WisdomDirective` (8 evidence sources, 0.10 contradiction rate) — `wisdom_directive_stability` matches. `ON ACCESS` executes: `n.evaluationCount` incremented in accessMeta. `evidenceCount >= 3 AND contradictionRate < 0.20` → `wisdom_established` selected (floor `0.50`).
+- `m1:MemoryEpisode` (4 accesses, 3 days old) — `memory_episode_consolidation` matches. `WHEN` predicates evaluated against current accessMeta: `accessCount = 4`. `accessCount >= 3` → `memory_reinforced` selected (multiplier `1.25`). `accessCount >= 5` → not met (only 4). Highest matching: `memory_reinforced`.
+- `m2:MemoryEpisode` (1 access, 10 days old) — `memory_episode_consolidation` matches. `WHEN` predicates evaluated: `accessCount = 1`. No `WHEN` predicate matches. Neutral promotion.
+- `m3:MemoryEpisode` (0 accesses, 20 days old) — `memory_episode_consolidation` matches. `WHEN` predicates evaluated: `accessCount = 0`. No `WHEN` predicate matches. Neutral promotion.
+- `e1:EVIDENCES` (traversed 6 times) — `evidence_traversal_tiering` matches. `WHEN` predicates evaluated: `traversalCount = 6`. `traversalCount >= 5` → `reinforced_evidence` selected (multiplier `1.20`).
+- `w1:WisdomDirective` (8 evidence sources, 0.10 contradiction rate) — `wisdom_directive_stability` matches. `WHEN` predicates evaluated: `evidenceCount = 8`, `contradictionRate = 0.10`. `evidenceCount >= 3 AND contradictionRate < 0.20` → `wisdom_established` selected (floor `0.50`).
 
 **3. Decay profile resolution (second, per candidate)**
 
@@ -2251,10 +2264,23 @@ Note: `m1` is now a `consolidation_candidate`. Its promotion floor of `0.80` mea
 
 **5. Visibility determination**
 
-- `m3` has a final score of `0.100`, above the archive threshold of `0.05` — still visible but low-ranked in the `ORDER BY searchScore * decayScore(node) DESC`.
+- `m3` has a final score of `0.100`, above the visibility threshold of `0.05` — still visible but low-ranked in the `ORDER BY searchScore * decayScore(node) DESC`.
 - At 25 days, `m3`'s base score would drop to `e^(-2160000 × ln(2) / 604800) = 0.060`, final `0.060`, still barely above threshold.
-- At 30 days, `m3`'s base score would drop to `0.045`, final `0.045`, below the archive threshold of `0.05` — invisible. It would no longer appear in `db.retrieve` results or `MATCH` traversals.
-- `m1` remains visible indefinitely because its promotion floor of `0.80` overrides the Ebbinghaus curve. To find `m3` after it becomes invisible, the operator would use `reveal()`.
+- At 30 days, `m3`'s base score would drop to `0.045`, final `0.045`, below the visibility threshold of `0.05` — suppressed. It would no longer appear in `db.retrieve` results or `MATCH` traversals.
+- `m1` remains visible indefinitely because its promotion floor of `0.80` overrides the Ebbinghaus curve. To find `m3` after it becomes suppressed, the operator would use `reveal()`.
+
+**5a. ON ACCESS execution (visible entities only)**
+
+`ON ACCESS` mutations execute only for entities that passed the visibility gate in step 5. Suppressed entities do not accumulate access state.
+
+- `k`: no promotion policy → no `ON ACCESS` block. No mutation.
+- `m1`: visible. `ON ACCESS` executes: `n.accessCount` incremented to `5` in accessMeta, `n.lastAccessedAt` set.
+- `m2`: visible. `ON ACCESS` executes: `n.accessCount` incremented to `2` in accessMeta.
+- `m3`: visible (score `0.100` > threshold `0.05`). `ON ACCESS` executes: `n.accessCount` set to `1` in accessMeta.
+- `e1`: visible. `ON ACCESS` executes: `r.traversalCount` incremented to `7` in accessMeta.
+- `w1`: visible (no decay). `ON ACCESS` executes: `n.evaluationCount` incremented in accessMeta.
+
+Note: if `m3` were below the visibility threshold (e.g., at 30 days), its `ON ACCESS` block would **not** execute. The entity would remain at `accessCount = 0` — it cannot accumulate access state while suppressed.
 
 **6. Combined ranking**
 
@@ -2269,25 +2295,25 @@ The `ORDER BY searchScore * decayScore(node) DESC` in Query 1 produces a unified
 | `m2` (fading)         | `0.65`       | `0.317`     | `0.206`  | Memory                       |
 | `m3` (near threshold) | `0.60`       | `0.100`     | `0.060`  | Memory                       |
 
-The Knowledge fact ranks highest because it is both semantically relevant and permanently durable. The consolidated episode ranks second because its promotion floor keeps it strong. The Wisdom directive ranks third. Fading episodes rank last — their semantic relevance is discounted by their decay scores, naturally pushing stale content down the ranking without removing it entirely until it crosses the archive threshold.
+The Knowledge fact ranks highest because it is both semantically relevant and permanently durable. The consolidated episode ranks second because its promotion floor keeps it strong. The Wisdom directive ranks third. Fading episodes rank last — their semantic relevance is discounted by their decay scores, naturally pushing stale content down the ranking without removing it entirely until it crosses the visibility threshold.
 
 ### A.7 Addressing the Paper's Critique
 
 This configuration directly addresses the paper's identified problems:
 
-| Paper critique                                                                                 | How the modified model addresses it                                                                                                                                                            |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "NornicDB applying storage-level decay to permanent facts"                                     | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through `:SUPERSEDES` edges with full provenance, not decay.             |
-| "Systems either forget what they should remember or remember what they should forget"          | The four-layer label scheme applies categorically different persistence semantics per content type. Knowledge: supersession. Memory: Ebbinghaus decay. Wisdom: evidence-gated revision.         |
-| "Signet applies uniform 0.95 days decay to all content types"                                  | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life.                                    |
-| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, ownership scope, and visibility behavior.                         |
+| Paper critique                                                                                 | How the modified model addresses it                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "NornicDB applying storage-level decay to permanent facts"                                     | `:KnowledgeFact` nodes use `decayEnabled: false`. Facts are never subject to time-based decay. Supersession is modeled through `:SUPERSEDES` edges with full provenance, not decay.                                                                   |
+| "Systems either forget what they should remember or remember what they should forget"          | The four-layer label scheme applies categorically different persistence semantics per content type. Knowledge: supersession. Memory: Ebbinghaus decay. Wisdom: evidence-gated revision.                                                               |
+| "Signet applies uniform 0.95 days decay to all content types"                                  | Each layer has its own decay profile. Memory episodes use Ebbinghaus exponential. Knowledge and Wisdom use no-decay. Evidence edges use a longer half-life.                                                                                           |
+| "CoALA does not distinguish the persistence semantics of semantic memory from episodic memory" | `:KnowledgeFact` (semantic) and `:MemoryEpisode` (episodic) have fundamentally different decay profiles, promotion policies, ownership scope, and visibility behavior.                                                                                |
 | "Knowing how and knowing that are architecturally distinct"                                    | `:WisdomDirective` (knowing how) uses stability-tier promotion with evidence-gated revision via `:REVISES` edges. `:KnowledgeFact` (knowing that) uses supersession via `:SUPERSEDES` edges. Different update mechanics, different provenance models. |
-| "Consolidation as a first-class operation"                                                     | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts via `:CONSOLIDATES_TO` edges. Consolidation is expressed through promotion policies, not hardcoded runtime logic. |
-| "Knowledge is shared across agents"                                                            | `:KnowledgeFact` nodes carry no `agentId` — they are shared. `:MemoryEpisode` nodes carry `agentId` for per-agent scoping. The ownership boundary is at the label level.                      |
-| "Bi-temporal event sourcing" with four timestamps per memory                                   | `:MemoryEpisode` carries `system_created_at`, `system_expired_at`, `valid_from`, `valid_to` — the Graphiti bi-temporal model. Enables "when did we learn this" vs. "when was this true" queries. |
-| "Recency is a query-time heuristic, decay is a storage-level mechanism"                        | Decay scoring via `decayScore()` is storage-level (applied before visibility). Recency boosting via `ORDER BY` is query-time. Knowledge facts get zero decay but can still be sorted by recency. |
-| "Sycophantic models could promote agreeable-but-incorrect patterns"                            | Wisdom stability tiers gate revision on structured evidence (corroboration count, contradiction absence, cross-session support), not on approval. Prevents sycophantic promotion.              |
-| "Projections never silently become the truth they summarize"                                   | `:CONSOLIDATES_TO` and `:SUPERSEDES` edges preserve the provenance chain. The original Memory episode remains accessible via `reveal()`. Derivation is always explicit and auditable.           |
+| "Consolidation as a first-class operation"                                                     | The `consolidation_candidate` promotion tier flags Memory episodes for consolidation into Knowledge facts via `:CONSOLIDATES_TO` edges. Consolidation is expressed through promotion policies, not hardcoded runtime logic.                           |
+| "Knowledge is shared across agents"                                                            | `:KnowledgeFact` nodes carry no `agentId` — they are shared. `:MemoryEpisode` nodes carry `agentId` for per-agent scoping. The ownership boundary is at the label level.                                                                              |
+| "Bi-temporal event sourcing" with four timestamps per memory                                   | `:MemoryEpisode` carries `system_created_at`, `system_expired_at`, `valid_from`, `valid_to` — the Graphiti bi-temporal model. Enables "when did we learn this" vs. "when was this true" queries.                                                      |
+| "Recency is a query-time heuristic, decay is a storage-level mechanism"                        | Decay scoring via `decayScore()` is storage-level (applied before visibility). Recency boosting via `ORDER BY` is query-time. Knowledge facts get zero decay but can still be sorted by recency.                                                      |
+| "Sycophantic models could promote agreeable-but-incorrect patterns"                            | Wisdom stability tiers gate revision on structured evidence (corroboration count, contradiction absence, cross-session support), not on approval. Prevents sycophantic promotion.                                                                     |
+| "Projections never silently become the truth they summarize"                                   | `:CONSOLIDATES_TO` and `:SUPERSEDES` edges preserve the provenance chain. The original Memory episode remains accessible via `reveal()`. Derivation is always explicit and auditable.                                                                 |
 
 ### A.8 Key Design Decisions
 
