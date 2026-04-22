@@ -794,6 +794,61 @@ When the scorer indicates property-level decay hiding:
 - If `reveal()` is active: include all properties.
 - Properties in structural indexes: never hidden (immune).
 
+### 4.3.1 Property-level vectorization exclusion
+
+When a property's decay score falls below its visibility threshold, the property must be excluded from future embeddings so that stale content does not pollute the vector index. This uses the existing accessMeta-first resolution pattern and the existing embed worker infrastructure — no background scorer, no separate state store, and no new embedding pipeline.
+
+**Mechanism: nil-projection in accessMeta overflow map.**
+
+When the `AccessFlusher` (§3.3) drains P-local shards to Badger, it evaluates property-level decay rules for any entity whose accessMeta changed during this flush cycle. If a property's score is below its visibility threshold, the flusher writes an explicit `nil` value for that property key in the entity's `AccessMetaEntry.Overflow` map:
+
+```go
+// In AccessFlusher, post-flush property suppression check:
+if scorer.PropertyScoreBelowThreshold(labels, propertyKey, scoringTime, accessMeta) {
+    accessMeta.Overflow[propertyKey] = nil // explicit nil = suppressed
+}
+```
+
+If a property was previously `nil` in the overflow map but now scores above the visibility threshold (e.g., via promotion), the flusher deletes the key from the overflow map, restoring the stored property's visibility.
+
+**Re-embedding trigger:** If the flusher wrote or removed any `nil` entries (suppression state changed for any property), it calls `embeddingutil.InvalidateManagedEmbeddings(node)` followed by `storage.AddToPendingEmbeddings(node.ID)` to re-queue the node for embedding.
+
+**Embed worker integration — `embed_queue.go:668`:**
+
+When the embed worker picks up a node, it applies accessMeta-first resolution over the node's properties before building embed text. This is the same projection used by `ON ACCESS` and `WHEN` predicates — accessMeta values override stored properties. After projection, any property that resolved to an explicit `nil` is excluded from the embed text.
+
+```go
+// In EmbedWorker.processNode(), before building embed text:
+// 1. Load accessMeta for this node
+// 2. Project: for each key in accessMeta.Overflow, override node.Properties[key]
+// 3. Any property that resolves to explicit nil is added to the exclude list
+
+projectedProps := mergeAccessMetaProjection(node.Properties, accessMeta)
+// projectedProps contains stored values overridden by accessMeta;
+// nil values signal decay-suppressed properties
+
+opts := embeddingutil.EmbedTextOptionsFromFields(
+    ew.config.PropertiesInclude, ew.config.PropertiesExclude, ew.config.IncludeLabels,
+)
+for key, val := range projectedProps {
+    if val == nil {
+        opts.Exclude = append(opts.Exclude, key)
+    }
+}
+text := embeddingutil.BuildText(projectedProps, node.Labels, opts)
+```
+
+**Why this works:**
+
+- The accessMeta overflow map is already the canonical store for per-entity runtime state that overlays stored properties.
+- Explicit `nil` in the overflow map is an unambiguous signal — it cannot be confused with "key not present" (which means "fall back to stored property") or "key present with a value" (which means "ON ACCESS wrote this value").
+- The flusher is the only writer to Badger accessMeta keys (§3.3), so suppression state updates are serialized with access count updates — no write contention.
+- The embed worker already loads nodes from storage. Adding an accessMeta lookup per node is one additional Badger point read on the cold path — negligible.
+- No separate `SuppressedProperties()` method or background suppression pass needed. The flusher does the property scoring check inline during its existing flush cycle.
+- `embeddingutil.BuildText()` already filters via the `Exclude` set — no changes needed there.
+
+**Gating:** This entire mechanism is gated on `config.Memory.DecayEnabled`. When decay is disabled, the flusher does not evaluate property-level rules, no `nil` entries are written, and the embed worker builds text from raw stored properties as it does today.
+
 ### 4.4 Search path integration
 
 **`pkg/search/`** — Unified search:
@@ -818,6 +873,9 @@ When the scorer indicates property-level decay hiding:
 - Indexed properties always visible regardless of decay.
 - Vector search returns expected LIMIT count despite decay filtering.
 - Same scorer invoked by Cypher and unified search.
+- Property-level suppression triggers re-embedding: flusher writes `nil` in accessMeta overflow map, node re-queued via `InvalidateManagedEmbeddings` + `AddToPendingEmbeddings`.
+- Property restoration (score rises above threshold) triggers re-embedding: flusher removes `nil` key from overflow map, node re-queued.
+- Embed worker applies accessMeta projection before building embed text: explicit `nil` values excluded from embed text.
 
 ### Phase 4 test files
 
@@ -826,6 +884,7 @@ When the scorer indicates property-level decay hiding:
 - `pkg/search/decay_filter_test.go` — chunked retrieval, LIMIT satisfaction
 - `pkg/knowledgepolicy/integration_test.go` — end-to-end: DDL → score → visibility
 - `pkg/knowledgepolicy/legacy_fallback_test.go` — node with legacy fields but no AccessMetaEntry scores identically to migrated node; fallback is no-op when AccessMetaEntry exists
+- `pkg/knowledgepolicy/access_flusher_property_suppression_test.go` — flusher writes `nil` in overflow map when property score crosses below threshold; flusher removes `nil` key when property score rises above threshold; flusher calls `InvalidateManagedEmbeddings` + `AddToPendingEmbeddings` on suppression state change; embed worker excludes `nil`-projected properties from embed text; no suppression logic runs when `!config.Memory.DecayEnabled`
 
 ---
 
