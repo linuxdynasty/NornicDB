@@ -83,10 +83,7 @@ func TestDatabaseManagerBoltNeo4jDriverExecuteWriteRollsBackPriorWrites(t *testi
 	t.Cleanup(func() {
 		_ = server.Close()
 	})
-	go func() {
-		_ = server.ListenAndServe()
-	}()
-	port := waitForBoltTestPort(t, server)
+	port := startBoltTestServer(t, server)
 
 	ctx := context.Background()
 	driver, err := neo4jdriver.NewDriverWithContext(
@@ -144,10 +141,7 @@ func TestDatabaseManagerBoltNeo4jDriverExecuteWritePrefixesGeneratedNodeIDs(t *t
 	t.Cleanup(func() {
 		_ = server.Close()
 	})
-	go func() {
-		_ = server.ListenAndServe()
-	}()
-	port := waitForBoltTestPort(t, server)
+	port := startBoltTestServer(t, server)
 
 	ctx := context.Background()
 	driver, err := neo4jdriver.NewDriverWithContext(
@@ -209,10 +203,7 @@ func TestDatabaseManagerBoltNeo4jDriverExecuteWritePrefixesCanonicalUnwindIDs(t 
 	t.Cleanup(func() {
 		_ = server.Close()
 	})
-	go func() {
-		_ = server.ListenAndServe()
-	}()
-	port := waitForBoltTestPort(t, server)
+	port := startBoltTestServer(t, server)
 
 	ctx := context.Background()
 	driver, err := neo4jdriver.NewDriverWithContext(
@@ -311,19 +302,58 @@ func databaseScopedExecutor(t *testing.T, store storage.Engine) QueryExecutor {
 	return exec
 }
 
-func waitForBoltTestPort(t *testing.T, server *Server) int {
+func startBoltTestServer(t *testing.T, server *Server) int {
 	t.Helper()
+
+	port := reserveBoltTestPort(t)
+	server.config.Port = port
+
+	listenErrCh := make(chan error, 1)
+	go func() {
+		listenErrCh <- server.ListenAndServe()
+	}()
+
+	address := fmt.Sprintf("127.0.0.1:%d", port)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if server.listener != nil {
-			addr, ok := server.listener.Addr().(*net.TCPAddr)
-			require.True(t, ok)
-			return addr.Port
+		select {
+		case err := <-listenErrCh:
+			require.NoError(t, err)
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return port
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("timed out waiting for Bolt test listener")
-	return 0
+
+	select {
+	case err := <-listenErrCh:
+		require.NoError(t, err)
+	default:
+	}
+	t.Fatalf("timed out waiting for Bolt test listener on %s", address)
+	return -1
+}
+
+func reserveBoltTestPort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	require.Greater(t, addr.Port, 0)
+	port := addr.Port
+	require.NoError(t, listener.Close())
+	return port
 }
 
 func transactionalDatabaseScopedExecutor(t *testing.T, store storage.Engine) QueryExecutor {
