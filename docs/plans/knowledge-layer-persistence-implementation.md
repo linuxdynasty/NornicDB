@@ -212,9 +212,37 @@ type PromotionPolicyWhenClause struct {
     Order          int    `msgpack:"order"`
 }
 
+// KalmanMode identifies how the Kalman filter is configured for a mutation.
+type KalmanMode string
+
+const (
+    KalmanModeNone   KalmanMode = ""       // No Kalman filtering (plain write)
+    KalmanModeAuto   KalmanMode = "auto"   // R auto-adjusted via VarianceTracker
+    KalmanModeManual KalmanMode = "manual" // Fixed Q and R
+)
+
+// KalmanConfig holds the Kalman filter configuration for an ON ACCESS mutation.
+// See design plan §7.4 "WITH KALMAN Behavioral Signal Smoother" for constraints.
+// WITH KALMAN is appropriate for derived behavioral metrics (confidence scores,
+// cross-session access rates, agreement ratios). Raw monotonic counters and
+// timestamps should use plain SET without Kalman.
+type KalmanConfig struct {
+    Mode          KalmanMode `msgpack:"mode"`
+    Q             float64    `msgpack:"q"`                       // Process noise (scaled by 0.001 like imu-f)
+    R             float64    `msgpack:"r,omitempty"`              // Measurement noise (0 = auto)
+    VarianceScale float64    `msgpack:"varianceScale,omitempty"` // For auto R (default: 10.0)
+    WindowSize    int        `msgpack:"windowSize,omitempty"`    // Variance tracker window (default: 32)
+}
+
+// OnAccessMutation is a single SET expression inside an ON ACCESS block.
+type OnAccessMutation struct {
+    Expression string        `msgpack:"expression"` // Raw SET expression text
+    Kalman     *KalmanConfig `msgpack:"kalman,omitempty"` // nil = plain write (no filtering)
+}
+
 // PromotionPolicyOnAccess is the ON ACCESS block definition.
 type PromotionPolicyOnAccess struct {
-    Mutations []string `msgpack:"mutations"` // raw SET expressions
+    Mutations []OnAccessMutation `msgpack:"mutations"`
 }
 
 // PromotionPolicyDef is a targeted promotion policy.
@@ -243,14 +271,60 @@ type AccessMetaFixedFields struct {
 
 // AccessMetaEntry is the full persisted entry per target.
 type AccessMetaEntry struct {
-    TargetID    string                 `msgpack:"targetId"`
-    TargetScope ScopeType              `msgpack:"targetScope"` // NODE or EDGE
-    Fixed       AccessMetaFixedFields  `msgpack:"fixed"`
-    Overflow    map[string]interface{} `msgpack:"overflow,omitempty"`
-    LastMutatedAt int64                `msgpack:"lastMutatedAt"` // UnixNano
-    MutationCount int64               `msgpack:"mutationCount"`
+    TargetID      string                            `msgpack:"targetId"`
+    TargetScope   ScopeType                         `msgpack:"targetScope"` // NODE or EDGE
+    Fixed         AccessMetaFixedFields             `msgpack:"fixed"`
+    Overflow      map[string]interface{}            `msgpack:"overflow,omitempty"`
+    KalmanFilters map[string]*KalmanPropertyState   `msgpack:"kalmanFilters,omitempty"` // key: property name
+    LastMutatedAt int64                             `msgpack:"lastMutatedAt"` // UnixNano
+    MutationCount int64                             `msgpack:"mutationCount"`
+}
+
+// KalmanPropertyState holds the Kalman filter state and variance tracker state
+// for a single property that uses WITH KALMAN. Stored as a typed field on
+// AccessMetaEntry, not in the overflow map.
+type KalmanPropertyState struct {
+    // FilteredValue is the Kalman filter's optimal estimate (x).
+    // This is what WHEN predicates and policy() see for this property.
+    FilteredValue float64          `msgpack:"filteredValue"`
+    // Filter is the Kalman filter state (same fields as pkg/cypher/kalman_functions.go KalmanState).
+    Filter        KalmanFilterState `msgpack:"filter"`
+    // Variance is the variance tracker state (auto-R mode only). Nil for manual-R.
+    Variance      *VarianceTrackerState `msgpack:"variance,omitempty"`
+}
+
+// KalmanFilterState is the per-property Kalman filter state.
+// Reuses the same field layout as pkg/cypher/kalman_functions.go KalmanState.
+type KalmanFilterState struct {
+    X             float64 `msgpack:"x"`    // Current state estimate
+    LastX         float64 `msgpack:"lx"`   // Previous state
+    P             float64 `msgpack:"p"`    // Estimate covariance
+    K             float64 `msgpack:"k"`    // Kalman gain
+    E             float64 `msgpack:"e"`    // Setpoint error factor
+    Q             float64 `msgpack:"q"`    // Process noise (scaled)
+    R             float64 `msgpack:"r"`    // Measurement noise
+    VarianceScale float64 `msgpack:"vs"`   // Adaptive noise scaling
+    Observations  int     `msgpack:"n"`    // Observations processed
+}
+
+// VarianceTrackerState is the serializable state for auto-R calculation.
+// Based on pkg/filter/kalman.go VarianceTracker (port of imu-f update_kalman_covariance).
+type VarianceTrackerState struct {
+    Window    []float64 `msgpack:"w"`
+    WindowIdx int       `msgpack:"wi"`
+    SumMean   float64   `msgpack:"sm"`
+    SumVar    float64   `msgpack:"sv"`
+    Mean      float64   `msgpack:"m"`
+    Variance  float64   `msgpack:"v"`
+    InverseN  float64   `msgpack:"in"`
 }
 ```
+
+**Kalman state on AccessMetaEntry — dedicated struct field:**
+
+Per-property Kalman filter state is stored as a typed `map[string]*KalmanPropertyState` field on `AccessMetaEntry`, not in the `Overflow` map. The map key is the property name being filtered (e.g., `"confidenceScore"`, `"crossSessionAccessRate"`). This keeps Kalman state type-safe and co-located with the entity's access metadata without polluting the general-purpose overflow map with stringly-typed reserved keys.
+
+No new Badger prefix is needed — `KalmanFilters` is serialized as part of the `AccessMetaEntry` under the existing `prefixAccessMeta (0x11)`.
 
 **`pkg/knowledgepolicy/compiled_binding.go`** — Compiled binding table:
 
@@ -328,6 +402,34 @@ Parse the following statements using the `ccSkipSpaces`/`ccScanIdent`/`ccMatchKe
 
 Each parser function returns a typed command struct (e.g., `CreateDecayProfileCmd`). The executor maps these to `SchemaManager` calls.
 
+#### ON ACCESS block parsing with WITH KALMAN
+
+When parsing an `ON ACCESS { ... }` block inside a `CREATE PROMOTION POLICY` statement, the parser must recognize the `WITH KALMAN` modifier on individual `SET` expressions:
+
+```
+SET <expr>                           → OnAccessMutation{Expression: "<expr>", Kalman: nil}
+WITH KALMAN SET <expr>               → OnAccessMutation{Expression: "<expr>", Kalman: &KalmanConfig{Mode: Auto, Q: 0.1, R: 88.0, VarianceScale: 10.0, WindowSize: 32}}
+WITH KALMAN{q: 0.1, r: 88.0} SET <expr> → OnAccessMutation{Expression: "<expr>", Kalman: &KalmanConfig{Mode: Manual, Q: 0.1, R: 88.0}}
+WITH KALMAN{q: 0.05} SET <expr>      → OnAccessMutation{Expression: "<expr>", Kalman: &KalmanConfig{Mode: Auto, Q: 0.05, R: 88.0, VarianceScale: 10.0, WindowSize: 32}}
+```
+
+The `{...}` config block is parsed as a comma-separated list of `key: value` pairs. Accepted keys: `q`, `r`, `varianceScale`, `windowSize`. Unknown keys are rejected at parse time. If `r` is present, mode is `Manual`. If `r` is absent, mode is `Auto` (R auto-adjusted by variance tracker).
+
+#### Query context variable passthrough
+
+The engine projects all `X-Query-*` HTTP headers (and Bolt metadata keys with prefix `query_`) into the query evaluation context as `$_<key>` variables. The header name is lowercased and the `X-Query-` prefix is stripped:
+
+- `X-Query-Session` / `query_session` → `$_session`
+- `X-Query-Agent` / `query_agent` → `$_agent`
+- `X-Query-Tenant` / `query_tenant` → `$_tenant`
+- Any `X-Query-<Key>` → `$_<key>`
+
+These variables are available inside `ON ACCESS` blocks, `WHEN` predicates, and general Cypher queries. They are read-only and ephemeral — they exist for the duration of the query evaluation, not as stored graph state. If a header is not provided, the corresponding variable resolves to `""`.
+
+The passthrough is generic — the engine does not decide which context matters. Operators define their own gating logic using whatever context they send. `$_session` and `$_agent` are conventions, not special cases. This enables expressions like `CASE WHEN n._lastSessionId <> $_session THEN ... END` for same-session deduplication before measurements reach the Kalman filter.
+
+**Implementation:** Extract `X-Query-*` headers in the HTTP handler (`pkg/server/`) and Bolt metadata in the Bolt handler. Pass as `map[string]string` on the query context (`QueryContext.QueryVars`). The Cypher evaluator resolves `$_<key>` references from this map during expression evaluation.
+
 ### 1.4 Validation rules (creation-time)
 
 Implement in `SchemaManager` methods:
@@ -394,17 +496,25 @@ The YAML key `memory.decay_enabled` continues to work unchanged — it already s
 ### Phase 1 acceptance gate
 
 - All decay/promotion types compile and have msgpack round-trip tests.
+- `KalmanConfig`, `OnAccessMutation`, and `VarianceTrackerState` compile and have msgpack/JSON round-trip tests.
+- `OnAccessMutation` with `Kalman: nil` round-trips correctly (plain write, no filtering).
+- `OnAccessMutation` with `Kalman: &KalmanConfig{Mode: Auto, ...}` round-trips correctly.
 - DDL parsing produces correct command structs for all 14 statement types.
-- Schema persistence round-trips all new definition sections.
+- DDL parsing of `WITH KALMAN SET ...` produces `OnAccessMutation` with auto-mode `KalmanConfig`.
+- DDL parsing of `WITH KALMAN{q: 0.1, r: 88.0} SET ...` produces manual-mode `KalmanConfig`.
+- DDL parsing of `WITH KALMAN{q: 0.05} SET ...` produces auto-mode `KalmanConfig` with user Q.
+- DDL parsing of plain `SET ...` (no WITH KALMAN) produces `OnAccessMutation` with `Kalman: nil`.
+- DDL parsing rejects unknown keys in `WITH KALMAN{...}` config block.
+- Schema persistence round-trips all new definition sections including `OnAccessMutation` with Kalman configs.
 - Validation rejects illegal targets, duplicates, and indexed-property rules.
 - `config.Memory.DecayEnabled = false` (default) gates all runtime behavior; DDL persists regardless. Existing behavior unchanged when flag is off.
 - `SHOW DECAY PROFILES`, `SHOW PROMOTION PROFILES`, `SHOW PROMOTION POLICIES` return stored definitions.
 
 ### Phase 1 test files
 
-- `pkg/knowledgepolicy/types_test.go` — msgpack serialization round-trips
+- `pkg/knowledgepolicy/types_test.go` — msgpack serialization round-trips for all types including `KalmanConfig`, `OnAccessMutation`, `VarianceTrackerState`; `OnAccessMutation` with and without `KalmanConfig`; `KalmanConfig` for all three modes (auto, manual, hybrid)
 - `pkg/knowledgepolicy/compiled_binding_test.go` — binding table compilation
-- `pkg/cypher/knowledgepolicy_ddl_test.go` — DDL parsing for all statement forms
+- `pkg/cypher/knowledgepolicy_ddl_test.go` — DDL parsing for all statement forms; `WITH KALMAN SET` → auto mode; `WITH KALMAN{q: 0.1, r: 88.0} SET` → manual mode; `WITH KALMAN{q: 0.05} SET` → hybrid; plain `SET` → Kalman nil; unknown keys in `{...}` rejected; query context variables (`$_session`, `$_agent`, `$_tenant`) recognized in ON ACCESS expressions
 - `pkg/storage/schema_knowledgepolicy_test.go` — SchemaManager CRUD, validation, persistence
 
 ---
@@ -688,6 +798,57 @@ func (f *AccessFlusher) Stop()
 
 Flush loop: iterate shards, atomically swap non-zero deltas, merge into persisted entries via single batched Badger write. Timestamps: write latest value, not accumulation.
 
+### 3.3.1 Kalman-filtered mutation processing
+
+**`pkg/knowledgepolicy/kalman_accumulator.go`** — Kalman filter processing for `WITH KALMAN` mutations:
+
+```go
+// ProcessKalmanMutation takes a raw measurement, loads/initializes Kalman state
+// from the entity's AccessMetaEntry.KalmanFilters map, runs the filter, and
+// writes the filtered value and updated state back to the same map.
+//
+// This is a behavioral signal smoother — it stabilizes derived metrics (confidence
+// scores, cross-session access rates, agreement ratios) where the input stream is
+// noisy. It must not be used on raw monotonic counters or timestamps.
+//
+// Reuses the exact algorithm from pkg/filter/kalman.go:375-409 (imu-f port).
+// Reuses VarianceTracker logic from pkg/filter/kalman.go:648-668 for auto-R.
+// Inlined for zero-allocation hot-path performance (~20 lines of pure scalar math).
+func ProcessKalmanMutation(
+    propertyKey string,
+    rawMeasurement float64,
+    kalmanCfg *KalmanConfig,
+    entry *AccessMetaEntry,
+) float64 // returns the filtered value
+```
+
+**Internal algorithm (inlined from `pkg/filter/kalman.go`, matching `docs/plans/kalman.md`):**
+
+1. Load `KalmanPropertyState` from `entry.KalmanFilters[propertyKey]` or initialize a new one with seed values from `kalmanCfg` (P=30.0, e=1.0, Q=cfg.Q×0.001, R=cfg.R). If `entry.KalmanFilters` is nil, allocate the map.
+2. If auto-R mode (`kalmanCfg.Mode == KalmanModeAuto`): initialize or update the `Variance` field on the `KalmanPropertyState`. Update the sliding window variance with `rawMeasurement`. Set `filter.R = sqrt(variance) * kalmanCfg.VarianceScale`. This is a direct port of `update_kalman_covariance` from the flight controller.
+3. Run the Kalman process step on `state.Filter`:
+   - Velocity projection: `x += (x - lastX)`
+   - Save lastX
+   - Error boosting: `e = abs(1 - target/lastX)` (target=0 → e=1.0)
+   - Prediction: `p = p + q*e`
+   - Measurement: `k = p / (p + r)`, `x += k * (measurement - x)`, `p = (1-k) * p`
+4. Store filtered `x` as `state.FilteredValue`.
+5. Write updated `KalmanPropertyState` back to `entry.KalmanFilters[propertyKey]`.
+6. Return `state.FilteredValue`.
+
+**Why inline instead of importing `pkg/filter`:** The accumulator mutation path targets <500ns per Kalman step. Importing `pkg/filter/kalman.go` would pull in `sync.RWMutex` overhead and allocation from the `innovations` slice. The inline version is ~20 lines of pure scalar math with zero allocations — exactly matching the flight controller's `kalman_process()`.
+
+**Integration with `AccessAccumulator`:** When processing a mutation:
+
+- If `mutation.Kalman == nil` → existing path (plain delta accumulation to P-local shard via atomic operations)
+- If `mutation.Kalman != nil` → call `ProcessKalmanMutation()` with the raw RHS expression result and the entity's `AccessMetaEntry`
+
+The Kalman path cannot use the pure-atomic P-local shard optimization because it needs read-modify-write on the `KalmanPropertyState`. Instead, Kalman mutations use the `pLocalShard.mu` mutex path (already exists) with the entity's `AccessMetaEntry`. This is still P-local (zero cross-core contention) and the lock is held for ~200ns (one Kalman step), well within the performance budget.
+
+**ReadThrough** for Kalman-filtered properties returns `entry.KalmanFilters[propertyKey].FilteredValue` — the Kalman's optimal estimate `x` of the behavioral signal.
+
+**`policy()` Cypher function** exposes the `KalmanFilters` map as part of the accessMeta result. For example, `policy(n).kalmanFilters.confidenceScore` returns the full `KalmanPropertyState` for that property, including `filteredValue`, `filter` (gain, covariance, observations), and `variance` (window, current variance) for diagnostics.
+
 ### 3.4 Entity lifecycle integration
 
 - **Node/edge deletion:** Enqueue accessMeta key for deletion in the same transaction. Clear from accumulator immediately.
@@ -704,6 +865,14 @@ Flush loop: iterate shards, atomically swap non-zero deltas, merge into persiste
 - Deletion cascades from node/edge deletion.
 - accessMeta retained on visibility suppression.
 - All accumulator operations are no-ops when `!config.Memory.DecayEnabled`.
+- `ProcessKalmanMutation` produces correct filtered values for a stable signal with Gaussian noise — filter converges.
+- `ProcessKalmanMutation` dampens a hallucinated spike (e.g., value jumps from 5.0 to 500.0 then back to 5.0) — filtered value stays near 5.0.
+- Auto-R mode: variance tracker adjusts R based on measurement variance; filter becomes more responsive as noise decreases.
+- Manual-R mode: fixed R produces output matching `pkg/filter/kalman.go` for identical inputs.
+- Kalman state and VarianceTrackerState round-trip through msgpack as part of AccessMetaEntry.KalmanFilters.
+- Variance tracker window wraps correctly at `WindowSize` boundary.
+- Kalman mutations use the mutex path on P-local shards — zero cross-core contention under concurrent access.
+- Query context variables from `X-Query-*` headers are projected into ON ACCESS evaluation context as `$_<key>` (e.g., `$_session`, `$_agent`); default to `""` when header absent; generic passthrough — no hardcoded variable names.
 
 ### Phase 3 test files
 
@@ -712,6 +881,9 @@ Flush loop: iterate shards, atomically swap non-zero deltas, merge into persiste
 - `pkg/knowledgepolicy/access_flusher_test.go` — flush persistence, batching, cross-shard aggregation
 - `pkg/storage/badger_access_meta_test.go` — CRUD, serialization round-trip, deletion cascade
 - `pkg/knowledgepolicy/access_accumulator_bench_test.go` — throughput under contention, uniform vs. power-law distributions
+- `pkg/knowledgepolicy/kalman_accumulator_test.go` — Kalman filter convergence on stable signal with Gaussian noise; hallucinated spike dampening (value jumps from 5.0→500.0→5.0, filtered value stays near 5.0); auto-R variance tracker adjusts R correctly; manual-R matches `pkg/filter/kalman.go` output; KalmanPropertyState, KalmanFilterState, VarianceTrackerState msgpack round-trips as part of AccessMetaEntry.KalmanFilters; window wrapping at WindowSize boundary; session-gated CASE expression evaluates correctly with `$_session` query context variable from `X-Query-Session` header
+- `pkg/knowledgepolicy/kalman_accumulator_bench_test.go` — single Kalman mutation step: target <500ns (includes KalmanFilters map read/write); compare vs plain accumulation: should be <5x overhead
+- `pkg/knowledgepolicy/kalman_anti_sycophancy_test.go` — end-to-end anti-sycophancy scenario: create a promotion policy with `WITH KALMAN{q: 0.05, r: 50.0} SET n.confidenceScore = $evaluatedConfidence`; process 100 accesses with stable confidence ~0.6; inject hallucinated spike at access 50 (confidence jumps to 0.99); assert filtered `confidenceScore` stays near 0.6, not 0.99; assert by access 55 filter has recovered; assert `policy(n).confidenceScore` returns filtered value; assert `policy(n).kalmanFilters.confidenceScore` exposes full KalmanPropertyState for diagnostics (filteredValue, filter state, variance tracker state)
 
 ---
 
@@ -1375,6 +1547,7 @@ The `/admin/retention/` namespace already belongs to the compliance retention su
 - `AccessAccumulator` uses P-local sharding — each goroutine writes to the shard of the P it is scheduled on, eliminating cross-core contention entirely. No `atomic.Int64` contention even under super-node access patterns.
 - Each P-local shard is mutex-protected (not lock-free) but the mutex is P-local, so contention only occurs if multiple goroutines on the same P increment in the same scheduling quantum — effectively zero contention.
 - Flush goroutine is the sole Badger writer for accessMeta keys. It briefly locks each P-local shard to swap out the delta map (lock held for ~50ns per shard — map pointer swap, not iteration).
+- Kalman mutations use the same P-local shard mutex as entity delta writes. Lock held for ~200ns (one Kalman step — ~20 lines of scalar math, KalmanFilters map lookup). Still P-local, zero cross-core contention. No additional synchronization primitives.
 - Deindex cleanup job runs single-threaded with batched writes.
 
 ### Performance budget
@@ -1386,6 +1559,7 @@ The `/admin/retention/` namespace already belongs to the compliance retention su
 | Visibility check (decaying, threshold)        | <100ns         | Integer subtraction on UnixNano     |
 | Full score computation (lazy)                 | <500ns         | One `math.Exp` + multiply/floor/cap |
 | AccessMeta increment (hot path)               | <30ns          | P-local shard mutex + map write (zero cross-core contention) |
+| AccessMeta Kalman mutation (hot path)         | <500ns         | P-local shard mutex + KalmanFilters map read/write + ~20 lines scalar math (zero cross-core contention) |
 | AccessMeta flush (cold path)                  | <5ms per batch | Batched Badger write, aggregate across P-local shards        |
 | Binding table rebuild (DDL)                   | <10ms          | Map construction, rare              |
 
@@ -1401,7 +1575,7 @@ The `/admin/retention/` namespace already belongs to the compliance retention su
 
 ### Testing strategy
 
-Total new test files: ~25. All tests are deterministic (no `time.Now()` in assertions — inject frozen timestamps). Benchmarks cover all hot-path operations.
+Total new test files: ~28. All tests are deterministic (no `time.Now()` in assertions — inject frozen timestamps). Benchmarks cover all hot-path operations including Kalman mutation throughput.
 
 Run order: `go test ./pkg/knowledgepolicy/... ./pkg/storage/... ./pkg/cypher/... ./pkg/search/...`
 
@@ -1448,3 +1622,7 @@ Phase 7 is internally two steps: Step 1 (migration runner + access state extract
 | Default flag change surprises existing deployments | `DecayEnabled` default changes `true` → `false` in 1.1.0; safe direction — no unexpected scoring on upgrade; operators opt in with `NORNICDB_MEMORY_DECAY_ENABLED=true` (§1.5) |
 | DDL parsing complexity | Keyword-scanning pattern (proven in constraint_contracts.go), not regex |
 | Replication codec breaking change | Version bump to 1.1.0 signals incompatible break |
+| Kalman filter converges to wrong value under systematic bias (sycophancy loop) | Kalman smooths variance, not bias. Bias correction is handled by session-aware gating via query context variables (`$_session`, `$_agent` from `X-Query-*` headers) which deduplicates same-session accesses before the measurement reaches the filter. The two layers compose: gating removes bias, Kalman removes variance. Design constraint documented in §7.4 of the design plan. |
+| Operator misuses WITH KALMAN on raw monotonic counters | Design constraint 3 in §7.4 explicitly states Kalman is for derived behavioral metrics, not counters. Documentation and examples show plain `SET` for counters. No engine-level enforcement — this is a usage guidance constraint, not a hard gate. |
+| Kalman state grows AccessMetaEntry size | Each Kalman-filtered property adds one `KalmanPropertyState` entry to `AccessMetaEntry.KalmanFilters`: `KalmanFilterState` (~72 bytes msgpack) + `VarianceTrackerState` (~300 bytes msgpack for 32-window, auto-R only). Bounded per-entity by the number of `WITH KALMAN` mutations in the policy. Typical: 1–3 filtered properties per entity = <1.2KB overhead. Type-safe struct — no stringly-typed overflow keys. |
+| Truth-immune labels inadvertently receive promotion multipliers that outweigh behavioral entities | Design constraint 1 in §7.4: truth-immune labels should have no promotion policy, or `multiplier: 1.0` with no score floor override. Their relevance comes from semantic matching, not access-pattern promotion. Enforced by operator convention, documented in design plan. |

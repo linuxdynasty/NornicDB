@@ -116,6 +116,7 @@ Suggested fit in NornicDB:
 - a dedicated promotion subsystem with its own catalog and DDL for both profiles and policies
 - a separate accessMeta index that stores `ON ACCESS` mutation state per target node or edge as `map[string]interface{}`, serialized in msgpack alongside other data files for performance
 - ON ACCESS mutations are accumulated in-process and flushed asynchronously; ON ACCESS blocks are syntactic sugar for declaring which counters and timestamps the accumulator tracks — they are not executed as literal Cypher statements on every read
+- ON ACCESS SET expressions may optionally include a `WITH KALMAN` modifier that routes the raw measurement through a per-property Kalman filter before storing the value in accessMeta; this is a behavioral signal smoother — it stabilizes derived metrics (confidence scores, cross-session access rates, agreement ratios) where the input stream is noisy, not raw monotonic counters or timestamps which should use plain `SET`; the Kalman filter algorithm is the same fast scalar Kalman from the imu-f flight controller (`docs/plans/kalman.md`), inlined for zero-allocation hot-path performance; three modes are supported: `WITH KALMAN` (auto mode — R auto-adjusted by a per-property variance tracker, Q defaults to 0.0001), `WITH KALMAN{q: <val>, r: <val>}` (manual mode — fixed Q and R), and `WITH KALMAN{q: <val>}` (hybrid — user-set Q, R auto-adjusted); Kalman filter state and variance tracker state are persisted as a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, keyed by property name; when `WHEN` predicates or `policy()` read a Kalman-filtered property, they see the filter's optimal estimate, not the raw measurement; query context variables from `X-Query-*` request headers are available inside `ON ACCESS` blocks and `WHEN` predicates as `$_<key>` (e.g., `X-Query-Session` → `$_session`, `X-Query-Agent` → `$_agent`, `X-Query-Tenant` → `$_tenant`), enabling session-aware gating, provenance tracking, and cross-session reinforcement before measurements reach the filter; see §7.4 for design constraints and usage guidance
 - the hot path (read time) buffers ON ACCESS increments in a per-entity sharded counter ring (`[N]atomic.Int64`, N = number of shards, e.g. 64), keyed by `hash(entityID) % N`; each shard holds a delta, not an absolute value; no msgpack, no Badger write, no allocation; the read path sees `storedValue + pendingDelta` via a single atomic load
 - the cold path (flush) is a background goroutine that drains the counter ring on a configurable interval (default: 1s–5s); it reads each non-zero shard, atomically swaps it to zero, and applies a single batched Badger write that merges the deltas into the persisted accessMeta entries; this is the only path that does msgpack round-trips
 - atomic increments on the shard eliminate lost updates; the flush goroutine is the sole writer to Badger accessMeta keys, eliminating write contention
@@ -610,8 +611,8 @@ The evaluation order is:
 2. Resolve the decay profile and compute the base decay score
 3. Apply promotion adjustments to produce the final score
 4. Determine visibility: is the final score above the visibility threshold?
-5. **Only if visible:** execute `ON ACCESS` mutations (increment access counts, set timestamps, etc.)
-6. Flush `ON ACCESS` deltas to accessMeta asynchronously
+5. **Only if visible:** execute `ON ACCESS` mutations (increment access counts, set timestamps, etc.); for mutations marked `WITH KALMAN`, the raw measurement (a derived behavioral metric such as a confidence score or cross-session access rate) is run through the per-property Kalman filter before storing — the filter's optimal estimate `x` replaces the raw value, smoothing noise in the behavioral signal while tracking genuine trends; session-aware gating via query context variables (e.g., `$_session`, `$_agent` from `X-Query-*` headers) should be applied in the ON ACCESS expression itself before the measurement reaches the filter, to prevent same-session sycophancy loops from biasing the estimate
+6. Flush `ON ACCESS` deltas (including updated Kalman filter state and variance tracker state) to accessMeta asynchronously
 
 The normative formula for final score computation is:
 
@@ -948,6 +949,86 @@ Promotion policies may include an `ON ACCESS` block that executes mutations when
 
 Property resolution within `ON ACCESS` blocks and `WHEN` predicates uses accessMeta-first semantics: a property read such as `n.accessCount` resolves from the target's accessMeta entry first, and falls back to the target's stored node or edge properties only when the key is not present in accessMeta. All writes such as `SET n.accessCount = ...` mutate the accessMeta entry for the target, not the target's stored properties. This means `ON ACCESS` Cypher syntax is unchanged — `n.propertyKey` and `r.propertyKey` work as expected — but the storage destination is the accessMeta index.
 
+#### WITH KALMAN Behavioral Signal Smoother
+
+##### Design Constraints
+
+`WITH KALMAN` is a behavioral signal smoother, not a truth estimator. Three constraints govern its use:
+
+1. **Kalman stabilizes behavioral signals, not truth.** The filter is appropriate for derived metrics — access rates, confidence scores from LLM evaluations, traversal velocity — where the underlying signal is noisy and the system is estimating a latent behavioral state. It must not be used to estimate ground-truth values. Labels that represent canonical facts (e.g., `:KnowledgeFact`, `:WisdomDirective`, or any label the operator designates as ground truth) should either not have a promotion policy with `WITH KALMAN` mutations, or should use `NO DECAY` on their decay profile so they are never subject to behavioral scoring. The truth-immunity is enforced generically by `FOR` targeting — if a label has no promotion policy with `WITH KALMAN` mutations, no Kalman filtering occurs. If a label has `NO DECAY`, it is truth-immune at the scoring layer. No label is hardcoded as special. Truth-immune labels are always visible (`score = 1.0` via `NO DECAY`) but must never receive promotion multipliers that boost them above other nodes — their relevance comes from semantic matching at retrieval time, not from access-pattern promotion. A truth-immune label should have no promotion policy, or at most a promotion policy with `multiplier: 1.0` and no score floor override. This prevents the canonical graph layer from drowning out episodic content that has earned legitimate behavioral reinforcement through cross-session access patterns.
+
+2. **Session-aware gating before filtering.** LLM-driven access noise is not Gaussian — it is adversarial, bursty, and self-reinforcing within a session. A Kalman filter will smooth transient spikes, but it cannot correct systematic bias from a sycophancy loop where the same agent repeatedly accesses the same entity within a single session. To address this, `ON ACCESS` blocks and `WHEN` predicates have access to **query context variables** projected from request headers. The gating is expressed in the `ON ACCESS` block itself, not hardcoded in the engine:
+
+   ```cypher
+   ON ACCESS {
+     -- Only increment if this is a new session (cross-session reinforcement)
+     WITH KALMAN SET n.crossSessionAccessRate =
+       CASE WHEN n._lastSessionId <> $_session
+         THEN coalesce(n.crossSessionAccessRate, 0) + 1
+         ELSE n.crossSessionAccessRate
+       END
+     SET n._lastSessionId = $_session
+     SET n._lastAgentId = $_agent
+     SET n.lastAccessedAt = timestamp()
+   }
+   ```
+
+   ##### Query Context Variable Passthrough
+
+   The engine projects all `X-Query-*` HTTP headers (and Bolt metadata keys with prefix `query_`) into the query evaluation context as `$_<key>` variables. The header name is lowercased and the `X-Query-` prefix is stripped. Examples:
+
+   | Request Header / Bolt Metadata | Available As | Purpose |
+   |-------------------------------|-------------|---------|
+   | `X-Query-Session` / `query_session` | `$_session` | Same-session deduplication |
+   | `X-Query-Agent` / `query_agent` | `$_agent` | Agent-aware gating |
+   | `X-Query-Tenant` / `query_tenant` | `$_tenant` | Multi-tenant isolation |
+   | `X-Query-Experiment` / `query_experiment` | `$_experiment` | A/B testing, experiment tracking |
+   | Any `X-Query-<Key>` | `$_<key>` | User-defined context |
+
+   Query context variables are:
+   - **Read-only** — available inside `ON ACCESS` blocks, `WHEN` predicates, and general Cypher queries, but not writable.
+   - **Not stored** — they exist for the duration of the query evaluation. They are ephemeral request context, not graph state.
+   - **Generic** — the engine does not decide which provenance matters. Operators define their own gating logic using whatever context they send. `$_session` and `$_agent` are conventions, not special cases.
+   - **Default to empty string** — if a header is not provided in the request, the corresponding variable resolves to `""`. This means same-session gating expressions evaluate conservatively (an empty `$_session` always differs from a previously stored session ID).
+
+   This generic passthrough keeps the engine unopinionated about what context matters for gating. The operator decides what to send in headers and what to gate on in their `ON ACCESS` expressions.
+
+3. **Multi-signal modeling, not scalar counters.** Kalman filtering a raw monotonic counter (e.g., `accessCount += 1`) is a misuse of the filter — the counter has no noise to smooth and no latent state to estimate. `WITH KALMAN` is designed for derived metrics where the input signal has genuine measurement noise: confidence scores, agreement ratios, relevance assessments, access rates, and other quantities where the observed value fluctuates around a latent true state. Raw counters and timestamps should use plain `SET` without `WITH KALMAN`.
+
+##### Filter Semantics
+
+Individual `SET` expressions within an `ON ACCESS` block may be prefixed with a `WITH KALMAN` modifier. When present, the raw measurement value (the RHS expression result) is run through a per-property Kalman filter before being written to accessMeta. The stored value is the filter's optimal state estimate — a smoother that dampens noisy measurements while tracking genuine trends in the behavioral signal.
+
+The Kalman filter algorithm is the same fast scalar Kalman from the imu-f flight controller (`docs/plans/kalman.md`): velocity-based state projection, setpoint error boosting, and gain-limited measurement update. It is inlined in the accumulator for zero-allocation hot-path performance (~20 lines of pure scalar math).
+
+Three modes are supported:
+
+- `WITH KALMAN` — auto mode. R (measurement noise) is continuously adjusted by a per-property variance tracker using a sliding window (default window size: 32). This is a direct port of `update_kalman_covariance` from the flight controller. Q (process noise) defaults to `0.0001` (0.1 × 0.001 scaling). As measurement noise decreases, R decreases and the filter becomes more responsive. As noise increases, R increases and the filter dampens harder.
+- `WITH KALMAN{q: <val>, r: <val>}` — manual mode. Fixed Q and R, no variance tracker. For operators who know their signal characteristics.
+- `WITH KALMAN{q: <val>}` — hybrid mode. User-set Q, R auto-adjusted by the variance tracker.
+
+Additional optional parameters: `varianceScale` (default: 10.0) and `windowSize` (default: 32).
+
+Kalman filter state is persisted as a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, keyed by property name (e.g., `"confidenceScore"`, `"crossSessionAccessRate"`). Each `KalmanPropertyState` contains the filtered value, the full `KalmanFilterState` (gain, covariance, observations), and the `VarianceTrackerState` (auto mode only, sliding window + variance). This is a type-safe struct field — not stringly-typed keys in the overflow map. The `policy()` Cypher function exposes `kalmanFilters` as part of the accessMeta result for diagnostics (e.g., `policy(n).kalmanFilters.confidenceScore.filteredValue`, `policy(n).kalmanFilters.confidenceScore.filter.k` for gain).
+
+When `WHEN` predicates or `policy()` read a Kalman-filtered property, they see the filter's optimal estimate (`x`), not the raw measurement. The raw measurement is not stored — only the filtered value. This is the smoother-only design: all measurements are accepted, but the stored value is always the Kalman's best estimate.
+
+##### Why Kalman Works for Behavioral Signals
+
+The filter's anti-noise properties come from the flight controller algorithm:
+
+- **Velocity-based prediction** (`x += x - lastX`) projects the state forward. A genuine trend in the behavioral signal continues; a hallucinated spike deviates from the trajectory.
+- **Gain limiting** (`K = P / (P + R)`) — when R is high (noisy measurements), K is low, and a single wild measurement barely moves the estimate. The filter trusts its prediction over a single outlier.
+- **Auto-R via variance tracking** (auto mode) — the `VarianceTracker` computes `R = sqrt(sample_variance) * VARIANCE_SCALE` over a sliding window. As the measurement stream becomes noisier, R increases and the filter dampens harder. A single outlier in a stable stream has minimal effect.
+
+This is analogous to filtering noisy gyro readings on a flight controller — transient spikes should not corrupt the estimated state. However, unlike gyro noise, LLM-driven access patterns can exhibit systematic bias (sycophancy loops). The Kalman filter alone cannot correct bias — it can only smooth variance. Bias correction is handled by the session-aware gating layer (constraint 2 above), which deduplicates same-session accesses before the measurement reaches the filter. The two layers work together: gating removes bias, Kalman removes variance.
+
+##### Access History for Diagnostics
+
+The variance tracker's sliding window (default: 32 samples) provides a built-in access history for each Kalman-filtered property. This window is persisted as part of the `KalmanPropertyState.Variance` field on `AccessMetaEntry.KalmanFilters` and is accessible through `policy()` for diagnostics (e.g., `policy(n).kalmanFilters.confidenceScore.variance.w` for the raw window values). Operators can inspect the last N measurements, the current variance, and the filter's covariance to understand how the behavioral signal has evolved over time.
+
+`SET` expressions without `WITH KALMAN` behave exactly as before — plain delta accumulation with no filtering.
+
 There can be at most one promotion policy per unique target. Competing or overlapping promotion policies for the same target are a hard constraint violation.
 
 Property-level promotion rules should be authored inline within the same promotion policy body that declares the entity-level promotion behavior for that label or edge type.
@@ -1049,6 +1130,46 @@ APPLY {
 }
 ```
 
+#### Node-level promotion with Kalman-filtered behavioral signals (anti-sycophancy)
+
+```cypher
+CREATE PROMOTION POLICY episodic_recall_quality
+FOR (n:MemoryEpisode)
+APPLY {
+  ON ACCESS {
+    SET n.accessCount = coalesce(n.accessCount, 0) + 1
+    SET n.lastAccessedAt = timestamp()
+
+    -- Kalman-filter derived behavioral metrics, not raw counters.
+    -- confidenceScore is an LLM-evaluated assessment — noisy, not monotonic.
+    WITH KALMAN{q: 0.05, r: 50.0} SET n.confidenceScore = $evaluatedConfidence
+
+    -- Cross-session access rate: gated by session provenance before filtering.
+    -- Only increments when a NEW session accesses this entity, then Kalman-smoothed.
+    WITH KALMAN SET n.crossSessionAccessRate =
+      CASE WHEN n._lastSessionId <> $_session
+        THEN coalesce(n.crossSessionAccessRate, 0) + 1
+        ELSE n.crossSessionAccessRate
+      END
+    SET n._lastSessionId = $_session
+    SET n._lastAgentId = $_agent
+  }
+
+  WHEN n.accessCount >= 5 AND n.confidenceScore >= 0.8
+    APPLY PROFILE 'high_confidence_tier'
+
+  WHEN n.accessCount >= 3
+    APPLY PROFILE 'reinforced_tier'
+
+}
+```
+
+In this example, `n.confidenceScore` is a value written by an LLM during retrieval evaluation — a noisy behavioral signal, not a monotonic counter. Without `WITH KALMAN`, a single hallucinated confidence of 0.99 on a mediocre memory would immediately promote it to `high_confidence_tier`. With `WITH KALMAN{q: 0.05, r: 50.0}`, the Kalman filter dampens the spike — the stored value moves slowly toward 0.99 only if subsequent evaluations consistently agree. A single outlier barely moves the estimate.
+
+The `crossSessionAccessRate` demonstrates session-aware gating: the `CASE WHEN n._lastSessionId <> $_session` expression ensures that repeated accesses from the same session (sycophancy loops) do not inflate the rate. Only genuinely new sessions contribute measurements to the Kalman filter, which then smooths cross-session access velocity.
+
+Raw counters (`accessCount`) and timestamps (`lastAccessedAt`) use plain `SET` — they are monotonic and have no noise to smooth.
+
 #### Edge-level promotion tiers
 
 ```cypher
@@ -1058,6 +1179,14 @@ APPLY {
   ON ACCESS {
     SET r.traversalCount = coalesce(r.traversalCount, 0) + 1
     SET r.lastTraversedAt = timestamp()
+
+    -- Kalman-smooth the cross-session support signal (noisy, session-gated)
+    WITH KALMAN SET r.crossSessionSupport =
+      CASE WHEN r._lastSessionId <> $_session
+        THEN coalesce(r.crossSessionSupport, 0) + 1
+        ELSE r.crossSessionSupport
+      END
+    SET r._lastSessionId = $_session
   }
 
   WHEN r.traversalCount >= 10
@@ -1139,6 +1268,8 @@ APPLY {
 Wildcard targets use `*` in place of a label or edge type to match every node label or every edge type. A label-specific or edge-type-specific profile or policy always takes precedence over a wildcard-targeted one. Wildcards are only valid on `CREATE` statements.
 
 In the promotion policy examples above, `ON ACCESS` SET statements such as `SET n.accessCount = coalesce(n.accessCount, 0) + 1` write exclusively to the accessMeta index for the target node or edge, not to the node or edge itself. The `coalesce(n.accessCount, 0)` read resolves from accessMeta first, falling back to the node's stored properties only when the key is absent from accessMeta. This keeps nodes and edges read-only during policy evaluation while preserving familiar Cypher property syntax.
+
+When `WITH KALMAN` is present on a `SET` expression, the raw RHS expression result is run through a per-property Kalman filter before storage. The filter's optimal estimate replaces the raw value, providing behavioral signal smoothing. The `WITH KALMAN` modifier is optional and per-expression, so a single `ON ACCESS` block can mix filtered and unfiltered mutations. The correct pattern is: `WITH KALMAN` on derived behavioral metrics (confidence scores, cross-session rates, agreement ratios) and plain `SET` on raw counters and timestamps. Raw monotonic counters have no noise to smooth and no latent state to estimate — Kalman filtering them is a misuse of the filter. Query context variables from `X-Query-*` request headers (e.g., `$_session`, `$_agent`, `$_tenant`) are available inside `ON ACCESS` blocks for session-aware gating before measurements reach the filter.
 
 In this model, edges can decay just like nodes can. They can also have independent promotion policies and property-level overrides. Properties can be excluded from vectorization or vector-backed retrieval by profile, but they are never suppressed from storage.
 
@@ -1958,7 +2089,9 @@ OPTIONS {
 
 This policy implements the core Ebbinghaus modification: repeated access within the decay window promotes a Memory episode through reinforcement tiers. Episodes that reach `consolidation_candidate` status are flagged for the consolidation process, which creates a corresponding `:KnowledgeFact` node and a `:CONSOLIDATES_TO` edge.
 
-The `ON ACCESS` block tracks access count and last access time in the accessMeta index. The node itself is read-only — `n.accessCount` writes to accessMeta, and `n.accessCount` reads resolve from accessMeta first.
+**Architectural boundary: truth-promotion is an application-layer concern.** The promotion policy determines *when an entity is a candidate for consolidation* (via `WHEN` predicates and promotion tiers). It does **not** perform the consolidation itself — creating a `:KnowledgeFact` node, linking it with a `:CONSOLIDATES_TO` edge, and deciding what constitutes "ground truth" is a workload-specific decision that belongs in the application layer, not in the engine's decay/promotion subsystem. NornicDB provides the primitives (decay profiles, promotion policies, Kalman-smoothed behavioral signals, query context variables) but leaves the truth-promotion logic to the calling application. The Heimdall plugin (`pkg/heimdall/plugin.go`) serves as the reference implementation for how to build a consolidation pipeline on top of these primitives — it reads `policy(n).crossSessionAccessRate`, checks agreement thresholds, and performs the graph operations to promote episodic content to the canonical knowledge layer. This separation prevents the engine from encoding workload-specific opinions about what constitutes truth, while giving every deployment a documented pattern to follow or customize.
+
+The `ON ACCESS` block tracks access count and last access time in the accessMeta index. The node itself is read-only — `n.accessCount` writes to accessMeta, and `n.accessCount` reads resolve from accessMeta first. Raw counters and timestamps use plain `SET`. The `WITH KALMAN` modifier is used on the derived `crossSessionAccessRate` — a noisy behavioral signal that benefits from smoothing and session-aware gating.
 
 ```cypher
 CREATE PROMOTION POLICY memory_episode_consolidation
@@ -1968,6 +2101,14 @@ APPLY {
     SET n.accessCount = coalesce(n.accessCount, 0) + 1
     SET n.lastAccessedAt = timestamp()
     SET n.accessIntervals = coalesce(n.accessIntervals, '') + ',' + toString(timestamp())
+
+    -- Kalman-smooth cross-session access rate (session-gated, noisy behavioral signal)
+    WITH KALMAN SET n.crossSessionAccessRate =
+      CASE WHEN n._lastSessionId <> $_session
+        THEN coalesce(n.crossSessionAccessRate, 0) + 1
+        ELSE n.crossSessionAccessRate
+      END
+    SET n._lastSessionId = $_session
   }
 
   WHEN n.accessCount >= 3
