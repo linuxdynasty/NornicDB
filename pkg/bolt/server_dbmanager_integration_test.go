@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"testing"
-	"time"
 
 	neo4jdriver "github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -302,63 +301,32 @@ func databaseScopedExecutor(t *testing.T, store storage.Engine) QueryExecutor {
 	return exec
 }
 
-// startBoltTestServer binds a deterministic loopback port for the test server,
-// starts ListenAndServe in the background, and fails fast if startup returns an
-// unexpected error before the driver can connect.
+// startBoltTestServer pre-binds a loopback listener for the test server and
+// runs the accept loop directly, avoiding racy reads of server.listener and the
+// reserve-then-rebind TOCTOU window.
 func startBoltTestServer(t *testing.T, server *Server) int {
-	t.Helper()
-
-	port := reserveBoltTestPort(t)
-	server.config.Port = port
-
-	listenErrCh := make(chan error, 1)
-	go func() {
-		listenErrCh <- server.ListenAndServe()
-	}()
-
-	address := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-listenErrCh:
-			require.NoError(t, err)
-		default:
-		}
-
-		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return port
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	select {
-	case err := <-listenErrCh:
-		require.NoError(t, err)
-	default:
-	}
-	t.Fatalf("timed out waiting for Bolt test listener on %s", address)
-	return -1
-}
-
-// reserveBoltTestPort grabs an ephemeral loopback port up front so tests avoid
-// racy reads of server.listener while ListenAndServe initializes.
-func reserveBoltTestPort(t *testing.T) int {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = listener.Close()
-	})
-
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	require.True(t, ok)
 	require.Greater(t, addr.Port, 0)
-	port := addr.Port
-	require.NoError(t, listener.Close())
-	return port
+	server.listener = listener
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.serve()
+	}()
+
+	t.Cleanup(func() {
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		default:
+		}
+	})
+	return addr.Port
 }
 
 func transactionalDatabaseScopedExecutor(t *testing.T, store storage.Engine) QueryExecutor {
