@@ -9,6 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestExecuteInTransaction_ReusesExistingTransactionWrapper proves that
+// recursive execution paths reuse the transaction wrapper already stored in
+// context instead of re-wrapping the same Badger transaction and dropping the
+// active namespace metadata.
 func TestExecuteInTransaction_ReusesExistingTransactionWrapper(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "tenant")
