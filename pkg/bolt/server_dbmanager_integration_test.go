@@ -302,6 +302,9 @@ func databaseScopedExecutor(t *testing.T, store storage.Engine) QueryExecutor {
 	return exec
 }
 
+// startBoltTestServer binds a deterministic loopback port for the test server,
+// starts ListenAndServe in the background, and fails fast if startup returns an
+// unexpected error before the driver can connect.
 func startBoltTestServer(t *testing.T, server *Server) int {
 	t.Helper()
 
@@ -339,6 +342,8 @@ func startBoltTestServer(t *testing.T, server *Server) int {
 	return -1
 }
 
+// reserveBoltTestPort grabs an ephemeral loopback port up front so tests avoid
+// racy reads of server.listener while ListenAndServe initializes.
 func reserveBoltTestPort(t *testing.T) int {
 	t.Helper()
 
