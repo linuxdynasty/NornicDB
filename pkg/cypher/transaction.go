@@ -279,6 +279,24 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 		return nil, fmt.Errorf("unknown transaction type")
 	}
 
+	// Recursive execution paths, such as UNWIND ... MATCH ... MERGE fallback
+	// routing, can re-enter Execute while the transaction wrapper is already in
+	// context. Reuse it so database namespace metadata is not lost by wrapping
+	// the same Badger transaction a second time.
+	if txWrapper, ok := ctx.Value(ctxKeyTxStorage).(*transactionStorageWrapper); ok && txWrapper != nil {
+		txExec := e.cloneWithStorage(txWrapper)
+		result, err := txExec.executeQueryAgainstStorage(ctx, cypher, upperQuery)
+		if err != nil {
+			return nil, err
+		}
+		if inlineEmbeddingEnabled {
+			if err := txExec.applyInlineEmbeddingMutations(ctx, txWrapper.snapshotMutatedNodeIDs()); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+
 	// Create a transactional wrapper that routes writes through the transaction.
 	// IMPORTANT: carry namespace info so writes remain correctly prefixed in multi-db.
 	engines := e.resolveImplicitTxEngines()

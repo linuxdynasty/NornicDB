@@ -1906,7 +1906,7 @@ func (s *Session) handleBegin(data []byte) error {
 		if dbName == "" {
 			dbName = s.server.dbManager.DefaultDatabaseName()
 		}
-		txExec, err := s.getExecutorForDatabase(dbName)
+		txExec, err := s.getTransactionalExecutorForDatabase(dbName)
 		if err != nil {
 			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
 				fmt.Sprintf("Database '%s' not found: %v", dbName, err))
@@ -2372,10 +2372,6 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 		return nil, fmt.Errorf("database manager not available")
 	}
 
-	type authAwareStorageResolver interface {
-		GetStorageWithAuth(name string, authToken string) (storage.Engine, error)
-	}
-
 	useAuthScopedResolver := false
 	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && strings.TrimSpace(s.forwardedAuthHeader) != "" {
 		_ = resolver
@@ -2391,57 +2387,9 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 		s.server.executorsMu.RUnlock()
 	}
 
-	var (
-		storageEngine storage.Engine
-		err           error
-	)
-	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && useAuthScopedResolver {
-		storageEngine, err = resolver.GetStorageWithAuth(dbName, s.forwardedAuthHeader)
-	} else {
-		storageEngine, err = s.server.dbManager.GetStorage(dbName)
-	}
+	executor, err := s.newDatabaseScopedCypherExecutor(dbName, useAuthScopedResolver)
 	if err != nil {
 		return nil, err
-	}
-
-	// Create Cypher executor scoped to this database
-	executor := cypher.NewStorageExecutor(storageEngine)
-
-	// Inherit shared embedder configuration from the server's base executor so
-	// Bolt multi-database sessions can run string vector queries
-	// (db.index.vector.queryNodes(..., $text)) just like HTTP/GraphQL paths.
-	if baseAdapter, ok := s.server.executor.(*boltQueryExecutorAdapter); ok && baseAdapter != nil && baseAdapter.executor != nil {
-		if emb := baseAdapter.executor.GetEmbedder(); emb != nil {
-			executor.SetEmbedder(emb)
-		}
-	}
-	// Allow the server's root executor to fully configure DB-scoped Bolt
-	// executors (embedder/search/inference/callbacks) so Bolt and HTTP share
-	// the same runtime behavior.
-	type databaseExecutorConfigurator interface {
-		ConfigureDatabaseExecutor(exec *cypher.StorageExecutor, dbName string, storageEngine storage.Engine)
-	}
-	if cfg, ok := s.server.executor.(databaseExecutorConfigurator); ok && cfg != nil {
-		cfg.ConfigureDatabaseExecutor(executor, dbName, storageEngine)
-	}
-	// Production Bolt wiring uses cmd/nornicdb DBQueryExecutor directly rather
-	// than boltQueryExecutorAdapter. Support that path via a narrow interface.
-	type baseCypherExecutorProvider interface {
-		BaseCypherExecutor() *cypher.StorageExecutor
-	}
-	if provider, ok := s.server.executor.(baseCypherExecutorProvider); ok && provider != nil {
-		if baseExec := provider.BaseCypherExecutor(); baseExec != nil {
-			if emb := baseExec.GetEmbedder(); emb != nil {
-				executor.SetEmbedder(emb)
-			}
-		}
-	}
-
-	// Wire database manager support when the underlying manager is available so
-	// USE/SHOW/CREATE/ALTER/DROP database commands share the same semantics as
-	// HTTP/GraphQL execution paths.
-	if mgr, ok := s.server.dbManager.(*multidb.DatabaseManager); ok {
-		executor.SetDatabaseManager(&boltDatabaseManagerAdapter{manager: mgr})
 	}
 
 	dbExecutor := &boltQueryExecutorAdapter{executor: executor}
@@ -2461,6 +2409,72 @@ func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
 	s.server.executorsMu.Unlock()
 
 	return dbExecutor, nil
+}
+
+type authAwareStorageResolver interface {
+	GetStorageWithAuth(name string, authToken string) (storage.Engine, error)
+}
+
+type databaseExecutorConfigurator interface {
+	ConfigureDatabaseExecutor(exec *cypher.StorageExecutor, dbName string, storageEngine storage.Engine)
+}
+
+type baseCypherExecutorProvider interface {
+	BaseCypherExecutor() *cypher.StorageExecutor
+}
+
+func (s *Session) getTransactionalExecutorForDatabase(dbName string) (QueryExecutor, error) {
+	if s.server == nil || s.server.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available")
+	}
+	useAuthScopedResolver := false
+	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && strings.TrimSpace(s.forwardedAuthHeader) != "" {
+		_ = resolver
+		useAuthScopedResolver = true
+	}
+	executor, err := s.newDatabaseScopedCypherExecutor(dbName, useAuthScopedResolver)
+	if err != nil {
+		return nil, err
+	}
+	return &transactionalBoltQueryExecutorAdapter{
+		boltQueryExecutorAdapter: boltQueryExecutorAdapter{executor: executor},
+	}, nil
+}
+
+func (s *Session) newDatabaseScopedCypherExecutor(dbName string, useAuthScopedResolver bool) (*cypher.StorageExecutor, error) {
+	var (
+		storageEngine storage.Engine
+		err           error
+	)
+	if resolver, ok := s.server.dbManager.(authAwareStorageResolver); ok && useAuthScopedResolver {
+		storageEngine, err = resolver.GetStorageWithAuth(dbName, s.forwardedAuthHeader)
+	} else {
+		storageEngine, err = s.server.dbManager.GetStorage(dbName)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	executor := cypher.NewStorageExecutor(storageEngine)
+	if baseAdapter, ok := s.server.executor.(*boltQueryExecutorAdapter); ok && baseAdapter != nil && baseAdapter.executor != nil {
+		if emb := baseAdapter.executor.GetEmbedder(); emb != nil {
+			executor.SetEmbedder(emb)
+		}
+	}
+	if cfg, ok := s.server.executor.(databaseExecutorConfigurator); ok && cfg != nil {
+		cfg.ConfigureDatabaseExecutor(executor, dbName, storageEngine)
+	}
+	if provider, ok := s.server.executor.(baseCypherExecutorProvider); ok && provider != nil {
+		if baseExec := provider.BaseCypherExecutor(); baseExec != nil {
+			if emb := baseExec.GetEmbedder(); emb != nil {
+				executor.SetEmbedder(emb)
+			}
+		}
+	}
+	if mgr, ok := s.server.dbManager.(*multidb.DatabaseManager); ok {
+		executor.SetDatabaseManager(&boltDatabaseManagerAdapter{manager: mgr})
+	}
+	return executor, nil
 }
 
 // boltDatabaseManagerAdapter wraps multidb.DatabaseManager to implement
@@ -2626,4 +2640,54 @@ func (a *boltQueryExecutorAdapter) Execute(ctx context.Context, query string, pa
 		Rows:     result.Rows,
 		Metadata: result.Metadata,
 	}, nil
+}
+
+// transactionalBoltQueryExecutorAdapter owns one database-scoped explicit
+// transaction executor. It is intentionally not cached across sessions.
+type transactionalBoltQueryExecutorAdapter struct {
+	boltQueryExecutorAdapter
+
+	mu   sync.Mutex
+	inTx bool
+}
+
+func (a *transactionalBoltQueryExecutorAdapter) Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.boltQueryExecutorAdapter.Execute(ctx, query, params)
+}
+
+func (a *transactionalBoltQueryExecutorAdapter) BeginTransaction(ctx context.Context, _ map[string]any) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inTx {
+		return nil
+	}
+	if _, err := a.boltQueryExecutorAdapter.Execute(ctx, "BEGIN", nil); err != nil {
+		return err
+	}
+	a.inTx = true
+	return nil
+}
+
+func (a *transactionalBoltQueryExecutorAdapter) CommitTransaction(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.inTx {
+		return nil
+	}
+	_, err := a.boltQueryExecutorAdapter.Execute(ctx, "COMMIT", nil)
+	a.inTx = false
+	return err
+}
+
+func (a *transactionalBoltQueryExecutorAdapter) RollbackTransaction(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.inTx {
+		return nil
+	}
+	_, err := a.boltQueryExecutorAdapter.Execute(ctx, "ROLLBACK", nil)
+	a.inTx = false
+	return err
 }
