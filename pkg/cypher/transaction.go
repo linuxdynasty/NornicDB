@@ -282,8 +282,12 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 	// Recursive execution paths, such as UNWIND ... MATCH ... MERGE fallback
 	// routing, can re-enter Execute while the transaction wrapper is already in
 	// context. Reuse it so database namespace metadata is not lost by wrapping
-	// the same Badger transaction a second time.
-	if txWrapper, ok := ctx.Value(ctxKeyTxStorage).(*transactionStorageWrapper); ok && txWrapper != nil {
+	// the same Badger transaction a second time. Only reuse the wrapper that
+	// belongs to the active explicit transaction; stale wrappers from reused
+	// contexts must fall back to a fresh wrapper for the current tx.
+	if txWrapper, ok := ctx.Value(ctxKeyTxStorage).(*transactionStorageWrapper); ok &&
+		txWrapper != nil &&
+		txWrapper.tx == tx {
 		txExec := e.cloneWithStorage(txWrapper)
 		result, err := txExec.executeQueryAgainstStorage(ctx, cypher, upperQuery)
 		if err != nil {
