@@ -320,11 +320,8 @@ func startBoltTestServer(t *testing.T, server *Server) int {
 	}()
 
 	t.Cleanup(func() {
-		select {
-		case err := <-errCh:
-			require.NoError(t, err)
-		default:
-		}
+		require.NoError(t, server.Close())
+		require.NoError(t, <-errCh)
 	})
 	return addr.Port
 }

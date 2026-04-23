@@ -3,6 +3,7 @@ package multidb
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +11,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type manualClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newManualClock(start time.Time) *manualClock {
+	return &manualClock{now: start}
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
 
 // ============================================================================
 // Test Helpers
@@ -845,7 +867,8 @@ func TestDatabaseLimitChecker_CheckStorageLimits_StorageError(t *testing.T) {
 // ============================================================================
 
 func TestRateLimiter_Allow_WithinLimit(t *testing.T) {
-	limiter := newRateLimiter(10)
+	clock := newManualClock(time.Unix(0, 0))
+	limiter := newRateLimiterWithClock(10, clock.Now)
 
 	// Should allow all requests within limit
 	for i := 0; i < 10; i++ {
@@ -854,7 +877,8 @@ func TestRateLimiter_Allow_WithinLimit(t *testing.T) {
 }
 
 func TestRateLimiter_Allow_ExceedsLimit(t *testing.T) {
-	limiter := newRateLimiter(5)
+	clock := newManualClock(time.Unix(0, 0))
+	limiter := newRateLimiterWithClock(5, clock.Now)
 
 	// Use up all tokens
 	for i := 0; i < 5; i++ {
@@ -866,7 +890,8 @@ func TestRateLimiter_Allow_ExceedsLimit(t *testing.T) {
 }
 
 func TestRateLimiter_Allow_TokenRefill(t *testing.T) {
-	limiter := newRateLimiter(5)
+	clock := newManualClock(time.Unix(0, 0))
+	limiter := newRateLimiterWithClock(5, clock.Now)
 
 	// Use up all tokens
 	for i := 0; i < 5; i++ {
@@ -876,15 +901,16 @@ func TestRateLimiter_Allow_TokenRefill(t *testing.T) {
 	// Should be denied immediately
 	assert.False(t, limiter.Allow())
 
-	// Wait for token refill (1 second per token)
-	time.Sleep(1200 * time.Millisecond)
+	// Advance enough time for one token refill.
+	clock.Advance(1200 * time.Millisecond)
 
 	// Should allow at least one more request
 	assert.True(t, limiter.Allow())
 }
 
 func TestRateLimiter_Allow_Concurrent(t *testing.T) {
-	limiter := newRateLimiter(100)
+	clock := newManualClock(time.Unix(0, 0))
+	limiter := newRateLimiterWithClock(100, clock.Now)
 
 	// Run concurrent requests
 	results := make(chan bool, 200)
@@ -902,12 +928,14 @@ func TestRateLimiter_Allow_Concurrent(t *testing.T) {
 		}
 	}
 
-	// Should allow exactly 100 requests
+	// With a frozen clock there is no refill during the burst, so exactly the
+	// initial bucket should be allowed.
 	assert.Equal(t, 100, allowed)
 }
 
 func TestRateLimiter_Allow_ZeroRate(t *testing.T) {
-	limiter := newRateLimiter(0)
+	clock := newManualClock(time.Unix(0, 0))
+	limiter := newRateLimiterWithClock(0, clock.Now)
 
 	// Zero rate should never allow
 	assert.False(t, limiter.Allow())

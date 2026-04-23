@@ -463,15 +463,24 @@ type rateLimiter struct {
 	rate      int // Requests per second
 	lastCheck time.Time
 	tokens    int
+	now       func() time.Time
 	mu        sync.Mutex
 }
 
 // newRateLimiter creates a new rate limiter.
 func newRateLimiter(rate int) *rateLimiter {
+	return newRateLimiterWithClock(rate, time.Now)
+}
+
+func newRateLimiterWithClock(rate int, now func() time.Time) *rateLimiter {
+	if now == nil {
+		now = time.Now
+	}
 	return &rateLimiter{
 		rate:      rate,
-		lastCheck: time.Now(),
+		lastCheck: now(),
 		tokens:    rate, // Start with full bucket
+		now:       now,
 	}
 }
 
@@ -480,7 +489,7 @@ func (r *rateLimiter) Allow() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := time.Now()
+	now := r.now()
 	elapsed := now.Sub(r.lastCheck)
 
 	// Add tokens based on elapsed time (1 token per second)

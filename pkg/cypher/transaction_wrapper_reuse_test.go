@@ -103,3 +103,55 @@ func TestExecuteInTransaction_IgnoresStaleTransactionWrapper(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, countFromResult(t, result))
 }
+
+func TestExplicitTransaction_ReusesWrapperForRecursiveUnwindMatchMerge(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "tenant")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "BEGIN", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx,
+		"MERGE (r:Repository {id: $repo_id}) SET r.name = $name, r.path = $path",
+		map[string]any{
+			"repo_id": "pcg-nornicdb-canonical",
+			"name":    "pcg-nornicdb-canonical",
+			"path":    "/tmp/pcg-nornicdb-canonical",
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `UNWIND $rows AS row
+MATCH (r:Repository {id: row.repo_id})
+MERGE (d:Directory {path: row.path})
+SET d.name = row.name, d.repo_id = row.repo_id,
+    d.scope_id = row.scope_id, d.generation_id = row.generation_id
+MERGE (r)-[:CONTAINS]->(d)`, map[string]any{
+		"rows": []map[string]any{{
+			"repo_id":       "pcg-nornicdb-canonical",
+			"path":          "/tmp/pcg-nornicdb-canonical/src",
+			"name":          "src",
+			"scope_id":      "scope:pcg-nornicdb-canonical",
+			"generation_id": "generation:pcg-nornicdb-canonical",
+		}},
+	})
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "COMMIT", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx,
+		"MATCH (:Repository {id: $repo_id})-[:CONTAINS]->(d:Directory {path: $path}) RETURN count(*) AS c, max(d.scope_id) AS scope_id, max(d.generation_id) AS generation_id",
+		map[string]any{
+			"repo_id": "pcg-nornicdb-canonical",
+			"path":    "/tmp/pcg-nornicdb-canonical/src",
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	require.EqualValues(t, 1, countFromResult(t, result))
+	require.Equal(t, "scope:pcg-nornicdb-canonical", result.Rows[0][1])
+	require.Equal(t, "generation:pcg-nornicdb-canonical", result.Rows[0][2])
+}
