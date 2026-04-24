@@ -724,6 +724,58 @@ RETURN count(f) AS files_joined, count(r) AS contains_edges, count(n) AS variabl
 	require.Equal(t, int64(3), counts.Rows[0][2])
 }
 
+func TestMigrationShape_UnwindMergeSetMapThenMatchRelationshipHotPath(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE (f:File {path: '/repo/main.go'})
+`, nil)
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{
+			"file_path": "/repo/main.go",
+			"entity_id": "fn:one",
+			"props": map[string]interface{}{
+				"id":      "fn:one",
+				"name":    "handleOne",
+				"repo_id": "repo-batch",
+			},
+		},
+		{
+			"file_path": "/repo/main.go",
+			"entity_id": "fn:two",
+			"props": map[string]interface{}{
+				"id":      "fn:two",
+				"name":    "handleTwo",
+				"repo_id": "repo-batch",
+			},
+		},
+	}
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:Function {uid: row.entity_id})
+SET n += row.props
+MATCH (f:File {path: row.file_path})
+MERGE (f)-[:CONTAINS]->(n)
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+
+	counts, err := exec.Execute(ctx, `
+MATCH (:File {path: '/repo/main.go'})-[r:CONTAINS]->(n:Function)
+RETURN count(r) AS edge_count, count(n) AS node_count
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, counts.Rows, 1)
+	require.Equal(t, int64(2), counts.Rows[0][0])
+	require.Equal(t, int64(2), counts.Rows[0][1])
+}
+
 func TestMigrationShape_UnwindMatchMergeSetMap_IdempotentAndPaginatedProjection(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")

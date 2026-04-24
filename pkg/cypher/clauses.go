@@ -831,8 +831,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 }
 
 type unwindSimpleSetAssignment struct {
-	prop string
-	expr string
+	prop     string
+	expr     string
+	mapMerge bool
 }
 
 type unwindMergeChainNodePlan struct {
@@ -923,6 +924,18 @@ func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAss
 	for _, assignment := range assignments {
 		a := strings.TrimSpace(assignment)
 		if a == "" {
+			continue
+		}
+		if plusEqIdx := strings.Index(a, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(a[:plusEqIdx])
+			right := strings.TrimSpace(a[plusEqIdx+2:])
+			if left != mergeVar || right == "" {
+				return nil, false
+			}
+			out = append(out, unwindSimpleSetAssignment{
+				expr:     right,
+				mapMerge: true,
+			})
 			continue
 		}
 		eqIdx := strings.Index(a, "=")
@@ -1638,10 +1651,26 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						Properties: cloneNodePropertiesMap(matchProps),
 					}
 					for _, assignment := range nodePlan.setAssignments {
-						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
+						if assignment.mapMerge {
+							if props, ok := toStringAnyMap(resolveBatchValue(assignment.expr, rowValues)); ok {
+								for key, value := range props {
+									setNodeProperty(node, key, value)
+								}
+							}
+							continue
+						}
+						setNodeProperty(node, assignment.prop, resolveBatchValue(assignment.expr, rowValues))
 					}
 					for _, assignment := range nodePlan.onCreateAssignments {
-						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
+						if assignment.mapMerge {
+							if props, ok := toStringAnyMap(resolveBatchValue(assignment.expr, rowValues)); ok {
+								for key, value := range props {
+									setNodeProperty(node, key, value)
+								}
+							}
+							continue
+						}
+						setNodeProperty(node, assignment.prop, resolveBatchValue(assignment.expr, rowValues))
 					}
 					actualID, err := store.CreateNode(node)
 					if err != nil {
@@ -1655,16 +1684,38 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				} else {
 					needsUpdate := false
 					for _, assignment := range nodePlan.setAssignments {
+						if assignment.mapMerge {
+							if props, ok := toStringAnyMap(resolveBatchValue(assignment.expr, rowValues)); ok {
+								for key, value := range props {
+									if cur, exists := node.Properties[key]; !exists || !reflect.DeepEqual(cur, value) {
+										setNodeProperty(node, key, value)
+										needsUpdate = true
+									}
+								}
+							}
+							continue
+						}
 						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-							node.Properties[assignment.prop] = val
+						if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
+							setNodeProperty(node, assignment.prop, val)
 							needsUpdate = true
 						}
 					}
 					for _, assignment := range nodePlan.onMatchAssignments {
+						if assignment.mapMerge {
+							if props, ok := toStringAnyMap(resolveBatchValue(assignment.expr, rowValues)); ok {
+								for key, value := range props {
+									if cur, exists := node.Properties[key]; !exists || !reflect.DeepEqual(cur, value) {
+										setNodeProperty(node, key, value)
+										needsUpdate = true
+									}
+								}
+							}
+							continue
+						}
 						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-							node.Properties[assignment.prop] = val
+						if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
+							setNodeProperty(node, assignment.prop, val)
 							needsUpdate = true
 						}
 					}
