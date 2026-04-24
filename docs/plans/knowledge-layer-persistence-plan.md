@@ -1803,7 +1803,7 @@ The standard Ebbinghaus model treats all content uniformly: `score = e^(-t / hal
 
 ### A.2 Layer Labels
 
-This example uses NornicDB node labels to represent the four-layer decomposition:
+This example uses NornicDB node labels to represent the four-layer decomposition. The [Canonical Graph + Mutation Log Guide](../user-guides/canonical-graph-ledger.md) defines a reusable pattern for versioned facts using generic placeholder labels (`:FactKey`, `:FactVersion`) and structural edges (`:CURRENT`, `:SUPERSEDES`, `:HAS_VERSION`). Those labels are generic — operators replace them with domain-specific labels when adopting the pattern. In this model, `:KnowledgeFact` is the domain label for durable facts in the Knowledge layer. Operators structure `:KnowledgeFact` nodes using the CGL pattern (stable identity keys, immutable versioned snapshots, `:CURRENT` pointers, temporal no-overlap constraints) as described in the ledger guide. Supersession is modeled exclusively through `:SUPERSEDES` edges, not as a property on the node.
 
 - `:KnowledgeFact` — durable facts, claims, entities (Knowledge layer)
 - `:MemoryEpisode` — ephemeral experiences, session records, observations (Memory layer)
@@ -1855,7 +1855,6 @@ APPLY {
   n.tenantId NO DECAY
   n.claim NO DECAY
   n.confidence NO DECAY
-  n.supersededBy NO DECAY
   n.assertedBy NO DECAY
   n.evidenceSource NO DECAY
 }

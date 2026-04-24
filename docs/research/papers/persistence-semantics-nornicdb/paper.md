@@ -112,11 +112,11 @@ This section describes the four architectural components that address the requir
 
 ### 4.1 Canonical Graph Ledger
 
-The canonical graph ledger is the core persistence layer. It models facts as versioned graph entities using three constructs:
+The canonical graph ledger is the core persistence layer. It defines a reusable pattern for versioned facts using three constructs with generic placeholder labels. Operators replace these with domain-specific labels when adopting the pattern — for example, the decay profiles in §4.2.1 target `:KnowledgeFact`, the domain label for durable facts in the Knowledge layer, which operators structure using the constructs below.
 
 - **`FactKey`**: a stable identifier for a factual claim (e.g., `company:acme:revenue:2024`). The key is the identity of the fact across versions.
 - **`FactVersion`**: an immutable snapshot of the fact at a point in time. Each version carries a validity window (`validFrom`, `validUntil`), provenance metadata (source, timestamp, authoring agent), and the content payload.
-- **`CURRENT` edge**: a cardinality-1 edge from `FactKey` to the active `FactVersion`. Supersession creates a new `FactVersion`, moves the `CURRENT` edge, and records a `SUPERSEDES` relationship from the new version to the old. The old version is never deleted.
+- **`CURRENT` edge**: a cardinality-1 edge from `FactKey` to the active `FactVersion`. Supersession creates a new `FactVersion`, moves the `CURRENT` edge, and records a `SUPERSEDES` relationship from the new version to the old. The old version is never deleted. Supersession is always modeled through graph structure (`:SUPERSEDES` edges).
 
 Temporal integrity is enforced by a `TEMPORAL NO OVERLAP` constraint on `FactVersion` nodes sharing a `FactKey`. This guarantees that at most one version of a fact is active at any point in real-world time, enabling unambiguous point-in-time queries. The constraint is checked at write time and rejects any version whose validity window overlaps an existing version for the same key.
 
@@ -135,12 +135,13 @@ The subsystem is designed to be independent from — and layered on top of — t
 Decay profiles define how a score degrades over time. In the proposed design, they are authored through Cypher DDL extensions and targeted to specific node labels, edge types, or wildcards:
 
 ```cypher
--- Knowledge facts: never decay, only supersede
+-- Knowledge facts: never decay; supersession is modeled through
+-- :SUPERSEDES edges in the canonical graph ledger (§4.1), not
+-- as a property on the node.
 CREATE DECAY PROFILE knowledge_fact_retention
 FOR (n:KnowledgeFact)
 APPLY {
   NO DECAY
-  n.supersededBy NO DECAY
 }
 
 -- Memory episodes: 7-day Ebbinghaus half-life
