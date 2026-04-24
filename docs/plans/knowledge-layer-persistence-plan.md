@@ -117,11 +117,11 @@ Suggested fit in NornicDB:
 - a separate accessMeta index that stores `ON ACCESS` mutation state per target node or edge as `map[string]interface{}`, serialized in msgpack alongside other data files for performance
 - ON ACCESS mutations are accumulated in-process and flushed asynchronously; ON ACCESS blocks are syntactic sugar for declaring which counters and timestamps the accumulator tracks — they are not executed as literal Cypher statements on every read
 - ON ACCESS SET expressions may optionally include a `WITH KALMAN` modifier that routes the raw measurement through a per-property Kalman filter before storing the value in accessMeta; this is a behavioral signal smoother — it stabilizes derived metrics (confidence scores, cross-session access rates, agreement ratios) where the input stream is noisy, not raw monotonic counters or timestamps which should use plain `SET`; the Kalman filter algorithm is the same fast scalar Kalman from the imu-f flight controller (`docs/plans/kalman.md`), inlined for zero-allocation hot-path performance; three modes are supported: `WITH KALMAN` (auto mode — R auto-adjusted by a per-property variance tracker, Q defaults to 0.0001), `WITH KALMAN{q: <val>, r: <val>}` (manual mode — fixed Q and R), and `WITH KALMAN{q: <val>}` (hybrid — user-set Q, R auto-adjusted); Kalman filter state and variance tracker state are persisted as a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, keyed by property name; when `WHEN` predicates or `policy()` read a Kalman-filtered property, they see the filter's optimal estimate, not the raw measurement; query context variables from `X-Query-*` request headers are available inside `ON ACCESS` blocks and `WHEN` predicates as `$_<key>` (e.g., `X-Query-Session` → `$_session`, `X-Query-Agent` → `$_agent`, `X-Query-Tenant` → `$_tenant`), enabling session-aware gating, provenance tracking, and cross-session reinforcement before measurements reach the filter; see §7.4 for design constraints and usage guidance
-- the hot path (read time) buffers ON ACCESS increments in a per-entity sharded counter ring (`[N]atomic.Int64`, N = number of shards, e.g. 64), keyed by `hash(entityID) % N`; each shard holds a delta, not an absolute value; no msgpack, no Badger write, no allocation; the read path sees `storedValue + pendingDelta` via a single atomic load
-- the cold path (flush) is a background goroutine that drains the counter ring on a configurable interval (default: 1s–5s); it reads each non-zero shard, atomically swaps it to zero, and applies a single batched Badger write that merges the deltas into the persisted accessMeta entries; this is the only path that does msgpack round-trips
-- atomic increments on the shard eliminate lost updates; the flush goroutine is the sole writer to Badger accessMeta keys, eliminating write contention
-- timestamp fields (`lastAccessedAt`, `lastTraversedAt`) are stored as `atomic.Int64` (UnixNano) in the same shard struct; the flush writes the latest value, not an accumulation
-- access counts are eventually consistent with a bounded lag of one flush interval; WHEN predicates that read `n.accessCount` see `persisted + buffered delta` by reading through the accumulator, not Badger
+- the hot path (read time) buffers ON ACCESS increments in per-P (per-processor) sharded accumulators using `sync.Pool` for P-local affinity, targeting zero cross-core contention regardless of graph topology; each shard holds per-entity deltas (counters, timestamps, and custom keys), not absolute values; no msgpack, no Badger write, no allocation on the read path; see the [implementation plan](./knowledge-layer-persistence-implementation.md) §3.1 for the full `AccessAccumulator` design, including the `entityDelta` struct, `sync.Pool`-based P-local shard selection, and super-node contention analysis
+- the cold path (flush) is a background goroutine that drains the per-P shards on a configurable interval (default: 2s); it locks each shard briefly, swaps out the delta map, aggregates across all shards, and applies a single batched Badger write that merges the deltas into the persisted accessMeta entries; this is the only path that does msgpack round-trips; see the [implementation plan](./knowledge-layer-persistence-implementation.md) §3.3 for flush goroutine details
+- P-local sharding eliminates cross-core contention; the flush goroutine is the sole writer to Badger accessMeta keys, eliminating write contention
+- timestamp fields (`lastAccessedAt`, `lastTraversedAt`) use max-wins semantics in the per-entity delta struct; the flush writes the latest value, not an accumulation
+- access counts are eventually consistent with a bounded lag of one flush interval; WHEN predicates that read `n.accessCount` see `persisted + buffered delta` by reading through the accumulator across all P-local shards, not Badger
 - shared runtime scoring that first resolves the promotion policy, then resolves the decay profile, then applies promotion adjustments to the base decay score
 - property reads within `ON ACCESS` blocks and `WHEN` predicates resolve from accessMeta first, falling back to the node or edge's stored properties
 - diagnostics that explain which promotion policy matched, which profile was selected, and how it affected the final score
@@ -700,15 +700,17 @@ There is no correlated `policyScore()` scalar function. Unlike `decay()` / `deca
 Suggested fields on `policy(...)` results:
 
 - all keys present in the target's accessMeta entry, projected as a Cypher map
-- `_targetId`: the target node or edge identifier
-- `_targetScope`: `node` or `edge`
-- `_lastAccessedAt`: timestamp of the most recent node access
-- `_lastMutatedAt`: timestamp of the most recent `ON ACCESS` mutation
-- `_mutationCount`: total number of `ON ACCESS` mutations applied
+- `targetId`: the target node or edge identifier
+- `targetScope`: `node` or `edge`
+- `lastAccessedAt`: timestamp of the most recent node access
+- `lastMutatedAt`: timestamp of the most recent `ON ACCESS` mutation
+- `mutationCount`: total number of `ON ACCESS` mutations applied
+
+Field names match the `AccessMetaEntry` struct fields defined in the [implementation plan](./knowledge-layer-persistence-implementation.md) §1.1 (`pkg/knowledgepolicy/access_meta.go`).
 
 The `policy(...)` object is a derived value read from the accessMeta index. It does not imply that access-tracking metadata is stored on the node or edge itself.
 
-If a caller invokes `policy(...)` for a target with no accessMeta entry, the function should return an empty map with only the `_targetId` and `_targetScope` fields rather than failing.
+If a caller invokes `policy(...)` for a target with no accessMeta entry, the function should return an empty map with only the `targetId` and `targetScope` fields rather than failing.
 
 The scoring subsystem should expose a bypass function so callers can retrieve the raw stored entity without decay-driven visibility filtering or property hiding.
 
@@ -767,7 +769,7 @@ RETURN n, policy(n) AS accessMeta
 ```cypher
 MATCH (n:SessionRecord)
 WHERE policy(n).accessCount >= 5
-RETURN n, policy(n).accessCount AS accessCount, policy(n)._lastMutatedAt AS lastAccessed
+RETURN n, policy(n).accessCount AS accessCount, policy(n).lastMutatedAt AS lastAccessed
 ```
 
 ```cypher
@@ -1003,11 +1005,11 @@ The Kalman filter algorithm is the same fast scalar Kalman from the imu-f flight
 
 Three modes are supported:
 
-- `WITH KALMAN` — auto mode. R (measurement noise) is continuously adjusted by a per-property variance tracker using a sliding window (default window size: 32). This is a direct port of `update_kalman_covariance` from the flight controller. Q (process noise) defaults to `0.0001` (0.1 × 0.001 scaling). As measurement noise decreases, R decreases and the filter becomes more responsive. As noise increases, R increases and the filter dampens harder.
+- `WITH KALMAN` — auto mode. R (measurement noise) is continuously adjusted by a per-property variance tracker using a sliding window (default window size: 32). This is a direct port of `update_kalman_covariance` from the flight controller. Q (process noise) defaults to `0.0001` (0.1 × 0.001 scaling). R is seeded at `88.0` and adapts from there. As measurement noise decreases, R decreases and the filter becomes more responsive. As noise increases, R increases and the filter dampens harder.
 - `WITH KALMAN{q: <val>, r: <val>}` — manual mode. Fixed Q and R, no variance tracker. For operators who know their signal characteristics.
 - `WITH KALMAN{q: <val>}` — hybrid mode. User-set Q, R auto-adjusted by the variance tracker.
 
-Additional optional parameters: `varianceScale` (default: 10.0) and `windowSize` (default: 32).
+Additional optional parameters: `varianceScale` (default: 10.0) and `windowSize` (default: 32). See the [implementation plan](./knowledge-layer-persistence-implementation.md) §1.3 and §3.3.1 for the full DDL parsing rules, default values, and Kalman accumulator internals.
 
 Kalman filter state is persisted as a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, keyed by property name (e.g., `"confidenceScore"`, `"crossSessionAccessRate"`). Each `KalmanPropertyState` contains the filtered value, the full `KalmanFilterState` (gain, covariance, observations), and the `VarianceTrackerState` (auto mode only, sliding window + variance). This is a type-safe struct field — not stringly-typed keys in the overflow map. The `policy()` Cypher function exposes `kalmanFilters` as part of the accessMeta result for diagnostics (e.g., `policy(n).kalmanFilters.confidenceScore.filteredValue`, `policy(n).kalmanFilters.confidenceScore.filter.k` for gain).
 
@@ -1670,7 +1672,7 @@ Deliverables:
 - `ON ACCESS` and `WHEN` property reads resolve from accessMeta first, falling back to stored node or edge properties
 - `policy(n)` returns the accessMeta map for a node with all keys written by `ON ACCESS` mutations
 - `policy(r)` returns the accessMeta map for an edge with all keys written by `ON ACCESS` mutations
-- `policy(...)` returns an empty map with only `_targetId` and `_targetScope` when no accessMeta entry exists
+- `policy(...)` returns an empty map with only `targetId` and `targetScope` when no accessMeta entry exists
 - accessMeta entries survive node or edge reads without being lost or corrupted
 - accessMeta entries are correctly serialized and deserialized via msgpack across restarts
 - scoring is evaluated before query visibility: a node whose final score falls below the visibility threshold does not appear in `MATCH` results
@@ -1870,7 +1872,7 @@ Memory episodes decay according to the Ebbinghaus forgetting curve. The half-lif
 CREATE DECAY PROFILE memory_episode_retention
 OPTIONS {
   halfLifeSeconds: 604800,
-  visibilityThreshold: 0.05,
+  visibilityThreshold: 0.10,
   scope: 'NODE',
   function: 'exponential',
   scoreFrom: 'VERSION'
@@ -1882,7 +1884,7 @@ CREATE DECAY PROFILE memory_episode_retention_binding
 FOR (n:MemoryEpisode)
 APPLY {
   DECAY PROFILE 'memory_episode_retention'
-  DECAY VISIBILITY THRESHOLD 0.05
+  DECAY VISIBILITY THRESHOLD 0.10
   n.tenantId NO DECAY
   n.agentId NO DECAY
   n.sessionId NO DECAY
@@ -2252,7 +2254,7 @@ RETURN fact,
          episode: ep,
          decayScore: decayScore(ep),
          accessCount: policy(ep).accessCount,
-         lastAccessed: policy(ep)._lastMutatedAt
+         lastAccessed: policy(ep).lastMutatedAt
        }] AS episodeDetails,
        [dir IN directives | {
          directive: dir,
@@ -2329,7 +2331,7 @@ RETURN reveal(m) AS rawEpisode,
        decayScore(m) AS score,
        CASE
          WHEN decayScore(m) >= 0.80 THEN 'visible — strong'
-         WHEN decayScore(m) >= 0.05 THEN 'visible — fading'
+         WHEN decayScore(m) >= 0.10 THEN 'visible — fading'
          ELSE 'invisible — below visibility threshold'
        END AS visibilityStatus
 ORDER BY decayScore(m) ASC
@@ -2404,9 +2406,8 @@ Note: `m1` is now a `consolidation_candidate`. Its promotion floor of `0.80` mea
 
 **5. Visibility determination**
 
-- `m3` has a final score of `0.100`, above the visibility threshold of `0.05` — still visible but low-ranked in the `ORDER BY searchScore * decayScore(node) DESC`.
-- At 25 days, `m3`'s base score would drop to `e^(-2160000 × ln(2) / 604800) = 0.060`, final `0.060`, still barely above threshold.
-- At 30 days, `m3`'s base score would drop to `0.045`, final `0.045`, below the visibility threshold of `0.05` — suppressed. It would no longer appear in `db.retrieve` results or `MATCH` traversals.
+- `m3` has a final score of `0.100`, at the visibility threshold of `0.10` — still visible but low-ranked in the `ORDER BY searchScore * decayScore(node) DESC`.
+- At 21 days, `m3`'s base score would drop to `e^(-1814400 × ln(2) / 604800) = 0.088`, final `0.088`, below the visibility threshold of `0.10` — suppressed. It would no longer appear in `db.retrieve` results or `MATCH` traversals.
 - `m1` remains visible indefinitely because its promotion floor of `0.80` overrides the Ebbinghaus curve. To find `m3` after it becomes suppressed, the operator would use `reveal()`.
 
 **5a. ON ACCESS execution (visible entities only)**
@@ -2416,11 +2417,11 @@ Note: `m1` is now a `consolidation_candidate`. Its promotion floor of `0.80` mea
 - `k`: no promotion policy → no `ON ACCESS` block. No mutation.
 - `m1`: visible. `ON ACCESS` executes: `n.accessCount` incremented to `5` in accessMeta, `n.lastAccessedAt` set.
 - `m2`: visible. `ON ACCESS` executes: `n.accessCount` incremented to `2` in accessMeta.
-- `m3`: visible (score `0.100` > threshold `0.05`). `ON ACCESS` executes: `n.accessCount` set to `1` in accessMeta.
+- `m3`: visible (score `0.100` ≥ threshold `0.10`). `ON ACCESS` executes: `n.accessCount` set to `1` in accessMeta.
 - `e1`: visible. `ON ACCESS` executes: `r.traversalCount` incremented to `7` in accessMeta.
 - `w1`: visible (no decay). `ON ACCESS` executes: `n.evaluationCount` incremented in accessMeta.
 
-Note: if `m3` were below the visibility threshold (e.g., at 30 days), its `ON ACCESS` block would **not** execute. The entity would remain at `accessCount = 0` — it cannot accumulate access state while suppressed.
+Note: if `m3` were below the visibility threshold (e.g., at 21 days), its `ON ACCESS` block would **not** execute. The entity would remain at `accessCount = 0` — it cannot accumulate access state while suppressed.
 
 **6. Combined ranking**
 

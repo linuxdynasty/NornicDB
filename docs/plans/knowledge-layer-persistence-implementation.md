@@ -1087,7 +1087,7 @@ Validate `options` map keys against accepted set: `property`, `scoringMode`. Rej
 
 - `decayScore()` on a target with no matching profile: return `1.0`.
 - `decay()` on a target with no matching profile: return `{score: 1.0, applies: false, reason: "no decay profile", ...}`.
-- `policy()` on a target with no accessMeta: return `{_targetId: id, _targetScope: "node"}`.
+- `policy()` on a target with no accessMeta: return `{targetId: id, targetScope: "node"}`.
 
 ### 5.4 Behavior when `DecayEnabled = false` — graceful degradation
 
@@ -1100,7 +1100,7 @@ When `config.Memory.DecayEnabled` is `false`, all four knowledge-layer functions
 | `decayScore(n)` | `1.0` | Nothing decays → everything is full score. Semantically correct. |
 | `decayScore(n, options)` | `1.0` | Same — options are accepted but have no effect. |
 | `decay(n)` | `{score: 1.0, applies: false, reason: "decay subsystem disabled — enable with NORNICDB_MEMORY_DECAY_ENABLED=true", ...}` | Self-documenting: `applies: false` is queryable, `reason` tells the operator exactly what to do. |
-| `policy(n)` | `{_targetId: id, _targetScope: "node"}` | Empty metadata — correct, since no access tracking is running. |
+| `policy(n)` | `{targetId: id, targetScope: "node"}` | Empty metadata — correct, since no access tracking is running. |
 | `reveal(n)` | Identity (returns entity unchanged) | There is no visibility filtering to bypass — `reveal()` is inherently a no-op. |
 
 **Config mismatch log:** Every time one of these functions is evaluated with `DecayEnabled = false`, the runtime logs a warning:

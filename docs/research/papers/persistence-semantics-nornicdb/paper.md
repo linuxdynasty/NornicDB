@@ -417,7 +417,7 @@ CREATE (k)-[:CURRENT]->(new)
 CREATE (new)-[:SUPERSEDES]->(old)
 ```
 
-A query for the current state returns only the DoRA fact. An `AS OF` query returns the version valid at that time. Neither fact is decayed or deleted. The decay profile for `:KnowledgeFact` is `NO DECAY` — these entities are always visible with score 1.0.
+A query for the current state returns only the DoRA fact. An `AS OF` query returns the version valid at that time. Neither fact is decayed or deleted. This example uses the canonical graph ledger's generic labels (`:FactKey`, `:FactVersion`); in a deployment using the Ebbinghaus-Roynard model (§4.2.1, §5.2–5.3), operators would use `:KnowledgeFact` as their domain label, structured using the same pattern. The decay profile for `:KnowledgeFact` is `NO DECAY` — these entities are always visible with score 1.0.
 
 ### 5.2 Memory Episode Decaying Unless Reinforced
 
