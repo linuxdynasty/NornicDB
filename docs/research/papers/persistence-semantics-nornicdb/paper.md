@@ -1,6 +1,6 @@
 # Database-Native Persistence Semantics for Agent Memory
 
-**Working title — workshop-style draft (4-page target)**
+**Working title — workshop-style draft**
 
 ---
 
@@ -24,13 +24,13 @@ These three papers converge on a shared diagnosis: the storage layer matters. Te
 
 NornicDB is a graph database designed for AI agent memory. Rather than implementing a particular cognitive architecture, it exposes persistence semantics as database-native primitives. The canonical graph ledger provides fact versioning and temporal validity. The mutation log and WAL receipts provide append-only provenance and replay. A proposed scoring subsystem — authored through declarative Cypher DDL extensions — would provide policy-driven decay and evidence-gated promotion with scoring-before-visibility semantics. The proposed `reveal()` operator separates visibility policy from compliance retention. A proposed two-layer anti-sycophancy defense combines session-aware gating (removing bias) with Kalman-filtered behavioral signals (removing variance), adapted from a flight-controller gyroscope filter. Together, the implemented and proposed primitives can express the requirements raised by all three lines of work without hardcoding any single cognitive model.
 
-By *database-native persistence semantics*, we mean that validity, supersession, decay, promotion, visibility, provenance, and replay are represented as schema, constraints, indexes, query semantics, and transaction-log behavior — rather than as conventions enforced only by an application-side agent loop.
+By _database-native persistence semantics_, we mean that validity, supersession, decay, promotion, visibility, provenance, and replay are represented as schema, constraints, indexes, query semantics, and transaction-log behavior — rather than as conventions enforced only by an application-side agent loop.
 
 **Contribution statement.**
 
-- *What is new?* A database substrate that implements temporal validity, supersession, and append-only mutation history as shipped graph-native primitives, and proposes scoring-before-visibility, layer-specific decay, and evidence-gated promotion as designed extensions — all authored through declarative Cypher DDL rather than application-side memory code.
-- *Why does it matter?* Current agent memory systems either ignore persistence semantics entirely or implement them as ad hoc application logic, making them non-portable, non-auditable, and difficult to compose. NornicDB makes these semantics configurable per content type through the same schema-oriented mechanisms operators already use for constraints and indexes.
-- *What evidence supports it?* We demonstrate that NornicDB's implemented and proposed primitives address the specific requirements raised by three independent research threads, provide worked examples with concrete Cypher DDL, and describe a concrete anti-sycophancy mechanism with quantitative dampening behavior.
+- _What is new?_ A database substrate that implements temporal validity, supersession, and append-only mutation history as shipped graph-native primitives, and proposes scoring-before-visibility, layer-specific decay, and evidence-gated promotion as designed extensions — all authored through declarative Cypher DDL rather than application-side memory code.
+- _Why does it matter?_ Current agent memory systems either ignore persistence semantics entirely or implement them as ad hoc application logic, making them non-portable, non-auditable, and difficult to compose. NornicDB makes these semantics configurable per content type through the same schema-oriented mechanisms operators already use for constraints and indexes.
+- _What evidence supports it?_ We demonstrate that NornicDB's implemented and proposed primitives address the specific requirements raised by three independent research threads, provide worked examples with concrete Cypher DDL, and describe a concrete anti-sycophancy mechanism with quantitative dampening behavior.
 
 ---
 
@@ -107,6 +107,7 @@ This section describes the four architectural components that address the requir
 │                    Badger Storage Engine                             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
 **Figure 1.** NornicDB architecture overview. The canonical graph ledger (bottom) is implemented. The scoring subsystem, anti-sycophancy defense, and declarative authoring surface (middle) are proposed.
 
 ### 4.1 Canonical Graph Ledger
@@ -125,7 +126,7 @@ The mutation log records every write operation (create, supersede, suppress, res
 
 ### 4.2 Knowledge-Layer Scoring
 
-The proposed scoring subsystem sits between storage and retrieval. When a query touches an entity, the engine resolves and applies scoring *before* deciding whether the entity is visible to the query. An entity whose final score falls below the visibility threshold would not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal()`.
+The proposed scoring subsystem sits between storage and retrieval. When a query touches an entity, the engine resolves and applies scoring _before_ deciding whether the entity is visible to the query. An entity whose final score falls below the visibility threshold would not appear in `MATCH` results, `WHERE` evaluation, or search hits unless the caller explicitly uses `reveal()`.
 
 The subsystem is designed to be independent from — and layered on top of — the compliance retention subsystem (GDPR Art.17 erasure, legal holds, retention-policy-driven archival). `reveal()` bypasses only the scoring gate; it cannot resurrect compliance-deleted entities.
 
@@ -162,12 +163,12 @@ The design supports four decay functions: `exponential` (Ebbinghaus), `linear`, 
 
     score(t) = exp(-t × ln(2) / halfLife)
 
-where *t* is the elapsed time since the score-start anchor.
+where _t_ is the elapsed time since the score-start anchor.
 
 **Score-start selection.** Each decay profile declares which timestamp drives decay age through a `scoreFrom` option:
 
 - `CREATED` — decay age begins at the entity's original creation timestamp. Updates do not reset decay.
-- `VERSION` — decay age begins at the latest visible MVCC version timestamp. Updates reset the decay clock. Combined with validity windows, this provides bi-temporal scoring: the MVCC system determines *which* version is visible, and `scoreFrom: 'VERSION'` determines *how old* that version appears for scoring purposes.
+- `VERSION` — decay age begins at the latest visible MVCC version timestamp. Updates reset the decay clock. Combined with validity windows, this provides bi-temporal scoring: the MVCC system determines _which_ version is visible, and `scoreFrom: 'VERSION'` determines _how old_ that version appears for scoring purposes.
 - `CUSTOM` — decay age begins at a user-specified property value, enabling domain-specific anchors.
 
 The scoring timestamp ("now") is not `time.Now()` — it is the transaction's MVCC snapshot timestamp, passed through the scorer as `scoringTime`. This ensures deterministic, repeatable scoring within a transaction: the same entity queried twice in the same transaction would return the same score.
@@ -207,6 +208,7 @@ The resolution cascade is designed to be pre-compiled at DDL time into a compile
   │ score        │    (only for projected results)
   └──────────────┘
 ```
+
 **Figure 2.** Three-tier scoring optimization. Each tier is cheaper than the next; most entities are resolved without computing a float64 score.
 
 Three proposed optimization tiers keep the hot path fast:
@@ -247,7 +249,7 @@ APPLY {
 }
 ```
 
-A critical design decision: `ON ACCESS` mutations would execute *only if the entity passes the visibility gate*. Suppressed entities would not accumulate access state — this prevents suppressed entities from recording "accesses" that occurred only because the scorer was evaluating them, not because a user or query actually retrieved them.
+A critical design decision: `ON ACCESS` mutations would execute _only if the entity passes the visibility gate_. Suppressed entities would not accumulate access state — this prevents suppressed entities from recording "accesses" that occurred only because the scorer was evaluating them, not because a user or query actually retrieved them.
 
 `ON ACCESS` mutations would write exclusively to a separate `accessMeta` index (Badger key prefix `0x11`), never to the node or edge itself. Nodes and edges remain read-only during policy evaluation. The proposed `policy()` Cypher function exposes accessMeta for diagnostics (e.g., `policy(n).accessCount`).
 
@@ -298,6 +300,7 @@ The proposed defense addresses this with two layers that handle different failur
   │ >= 0.80              │
   └──────────────────────┘
 ```
+
 **Figure 3.** Two-layer anti-sycophancy defense. Session gating removes bias (same-session repetition). Kalman smoothing removes variance (hallucinated spikes). The promotion predicate sees the filtered value, not the raw measurement.
 
 #### Layer 1: Session-Aware Gating (Removes Bias)
@@ -333,27 +336,27 @@ The proposed filter implementation:
 
 Three modes would be exposed through the `WITH KALMAN` Cypher modifier:
 
-| Syntax | Behavior |
-|--------|----------|
-| `WITH KALMAN` | Auto mode — R self-adjusts based on observed measurement variance |
-| `WITH KALMAN{q: 0.05, r: 50.0}` | Manual mode — fixed Q and R |
-| `WITH KALMAN{q: 0.05}` | Hybrid — user-set Q, R self-adjusts |
+| Syntax                          | Behavior                                                          |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `WITH KALMAN`                   | Auto mode — R self-adjusts based on observed measurement variance |
+| `WITH KALMAN{q: 0.05, r: 50.0}` | Manual mode — fixed Q and R                                       |
+| `WITH KALMAN{q: 0.05}`          | Hybrid — user-set Q, R self-adjusts                               |
 
 **Concrete dampening behavior.** The following trace shows the filter's response to a hallucinated confidence spike on a memory episode with a stable true confidence around 0.60:
 
-| Access | Raw Confidence | Kalman-Filtered | Note |
-|--------|---------------|-----------------|------|
-| 1      | 0.60          | 0.60            | First measurement, filter initializes |
-| 2      | 0.62          | 0.61            | Consistent, filter tracks smoothly |
-| 3      | 0.58          | 0.60            | Small dip, barely changes estimate |
-| 4      | 0.61          | 0.60            | Stable around 0.60 |
-| 5      | **0.99**      | **0.63**        | **Hallucination. K is low because the signal has been stable — spike barely moves estimate** |
-| 6      | 0.59          | 0.62            | Back to normal, filter recovers |
-| 7      | 0.61          | 0.62            | Tracking the real value again |
+| Access | Raw Confidence | Kalman-Filtered | Note                                                                                         |
+| ------ | -------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| 1      | 0.60           | 0.60            | First measurement, filter initializes                                                        |
+| 2      | 0.62           | 0.61            | Consistent, filter tracks smoothly                                                           |
+| 3      | 0.58           | 0.60            | Small dip, barely changes estimate                                                           |
+| 4      | 0.61           | 0.60            | Stable around 0.60                                                                           |
+| 5      | **0.99**       | **0.63**        | **Hallucination. K is low because the signal has been stable — spike barely moves estimate** |
+| 6      | 0.59           | 0.62            | Back to normal, filter recovers                                                              |
+| 7      | 0.61           | 0.62            | Tracking the real value again                                                                |
 
-Without the Kalman filter, access 5 would have set `confidenceScore = 0.99` and triggered high-confidence promotion on a mediocre memory. With it, the estimate barely budged. Critically, a *sustained* sequence of high-confidence observations from genuinely independent sources would eventually move the estimate upward — the filter dampens spikes but does not suppress genuine signals.
+Without the Kalman filter, access 5 would have set `confidenceScore = 0.99` and triggered high-confidence promotion on a mediocre memory. With it, the estimate barely budged. Critically, a _sustained_ sequence of high-confidence observations from genuinely independent sources would eventually move the estimate upward — the filter dampens spikes but does not suppress genuine signals.
 
-**What to filter and what not to filter.** Kalman smoothing is appropriate for derived behavioral metrics where the input signal has genuine measurement noise: confidence scores from LLM evaluation, relevance assessments, cross-session access rates, agreement ratios. It is *not* appropriate for raw monotonic counters (`accessCount` — always goes up by 1, no noise) or timestamps (`lastAccessedAt` — a point in time, no noise). These use plain `SET` without `WITH KALMAN`.
+**What to filter and what not to filter.** Kalman smoothing is appropriate for derived behavioral metrics where the input signal has genuine measurement noise: confidence scores from LLM evaluation, relevance assessments, cross-session access rates, agreement ratios. It is _not_ appropriate for raw monotonic counters (`accessCount` — always goes up by 1, no noise) or timestamps (`lastAccessedAt` — a point in time, no noise). These use plain `SET` without `WITH KALMAN`.
 
 Kalman filter state (estimate, gain, covariance, observation count, variance window) would be persisted per-property in a typed `KalmanFilters map[string]*KalmanPropertyState` field on `AccessMetaEntry`, and would be inspectable through the `policy()` Cypher function for diagnostics:
 
@@ -371,12 +374,15 @@ RETURN policy(m).kalmanFilters.confidenceScore.filteredValue AS smoothedConfiden
 In the proposed design, all persistence semantics are authored through Cypher DDL extensions, following the same schema-oriented patterns NornicDB uses for constraints and indexes. The authoring surface consists of three object types:
 
 **Decay profiles** are targeted bindings that declare decay behavior for specific labels or edge types:
+
 - `CREATE DECAY PROFILE`, `ALTER DECAY PROFILE`, `DROP DECAY PROFILE`, `SHOW DECAY PROFILES`
 
 **Promotion profiles** are named parameter bundles (multiplier, score floor, score cap) with no targeting logic:
+
 - `CREATE PROMOTION PROFILE`, `ALTER PROMOTION PROFILE`, `DROP PROMOTION PROFILE`, `SHOW PROMOTION PROFILES`
 
 **Promotion policies** contain logic — `FOR` targets, `WHEN` predicates, `ON ACCESS` mutation blocks, and `APPLY PROFILE` references:
+
 - `CREATE PROMOTION POLICY`, `ALTER PROMOTION POLICY`, `DROP PROMOTION POLICY`, `SHOW PROMOTION POLICIES`
 
 At most one decay profile and one promotion policy may target each unique label or edge type — overlapping definitions are rejected at DDL time. A label-specific profile always takes precedence over a wildcard (`FOR (n:*)`).
@@ -445,7 +451,7 @@ APPLY {
 
 After 7 days without reinforcement, `score = exp(-7d × ln2 / 7d) = 0.5`. After 21 days, `score = 0.125`, which falls below the visibility threshold of 0.10 — the episode is suppressed from retrieval. If the user mentions dark mode again on day 5, the episode is accessed (resetting `scoreFrom: 'VERSION'` decay age via MVCC), consolidated, and its confidence score is Kalman-smoothed.
 
-Note: "User prefers dark mode" as a *verified preference* (not an episodic observation) would be stored as a `:KnowledgeFact` with `NO DECAY` and supersession semantics. The distinction between "the user said this once" (Memory) and "this is a verified preference" (Knowledge) is exactly the layer separation Roynard [3] argues for.
+Note: "User prefers dark mode" as a _verified preference_ (not an episodic observation) would be stored as a `:KnowledgeFact` with `NO DECAY` and supersession semantics. The distinction between "the user said this once" (Memory) and "this is a verified preference" (Knowledge) is exactly the layer separation Roynard [3] argues for.
 
 ### 5.3 Wisdom Directive with Anti-Sycophancy
 
@@ -500,7 +506,7 @@ Only genuinely independent observations from distinct sessions increment the evi
 | Knowledge should not decay        | Critique of Ebbinghaus applied to facts [3]        | `NO DECAY` profile, supersession edges                        | Proposed    |
 | Memory should decay               | Episodic observations fade unless reinforced [3]   | Ebbinghaus decay profiles with configurable half-life         | Proposed    |
 | Evidence-gated wisdom             | Sycophancy concern: access ≠ evidence [3]          | Session gating + Kalman-smoothed behavioral signals           | Proposed    |
-| Bi-temporal event sourcing        | Four-timestamp model for temporal conflicts [3, 6] | `scoreFrom: 'VERSION'` + MVCC snapshots + validity windows   | Proposed    |
+| Bi-temporal event sourcing        | Four-timestamp model for temporal conflicts [3, 6] | `scoreFrom: 'VERSION'` + MVCC snapshots + validity windows    | Proposed    |
 | Compliance vs. scoring separation | Legal deletion ≠ retrieval suppression [3]         | `reveal()` bypasses scoring; compliance deletion is permanent | Proposed    |
 
 ---
