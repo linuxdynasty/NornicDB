@@ -467,6 +467,22 @@ func TestFindMergeNode_UsesUniqueConstraintLookupWithoutScan(t *testing.T) {
 	require.Equal(t, storage.NodeID("function-1"), found.ID)
 }
 
+func TestFindMergeNode_IgnoresNonComparableUniqueLookupValue(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	require.NoError(t, schema.AddUniqueConstraint("function_uid_unique", "Function", "uid"))
+	exec := NewStorageExecutor(store)
+
+	require.NotPanics(t, func() {
+		found, err := exec.findMergeNode(store, []string{"Function"}, map[string]interface{}{"uid": []string{"bad"}})
+		require.NoError(t, err)
+		require.Nil(t, found)
+	})
+}
+
 func TestFindMergeNode_RequiresFullMultiLabelMatch(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
