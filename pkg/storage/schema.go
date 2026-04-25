@@ -604,6 +604,23 @@ func (sm *SchemaManager) CheckUniqueConstraint(label, property string, value int
 	return nil
 }
 
+// LookupUniqueConstraintValue returns the node currently registered for a
+// single-property uniqueness constraint value.
+func (sm *SchemaManager) LookupUniqueConstraintValue(label, property string, value interface{}) (NodeID, bool, bool) {
+	sm.mu.RLock()
+	key := fmt.Sprintf("%s:%s", label, property)
+	constraint, exists := sm.uniqueConstraints[key]
+	sm.mu.RUnlock()
+	if !exists || value == nil {
+		return "", false, exists
+	}
+
+	constraint.mu.RLock()
+	defer constraint.mu.RUnlock()
+	nodeID, found := constraint.values[value]
+	return nodeID, found, true
+}
+
 // RegisterUniqueValue registers a value for a unique constraint.
 func (sm *SchemaManager) RegisterUniqueValue(label, property string, value interface{}, nodeID NodeID) {
 	sm.mu.RLock()

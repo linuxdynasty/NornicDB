@@ -429,6 +429,34 @@ func TestFindMergeNode_UsesPropertyIndexLookup(t *testing.T) {
 	require.Equal(t, storage.NodeID("orig-idx-1"), found.ID)
 }
 
+func TestFindMergeNode_UsesUniqueConstraintLookup(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	require.NoError(t, schema.AddUniqueConstraint("function_uid_unique", "Function", "uid"))
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "function-idx-1",
+		Labels: []string{"Function"},
+		Properties: map[string]interface{}{
+			"uid":  "fn:one",
+			"name": "handleOne",
+		},
+	})
+	require.NoError(t, err)
+
+	found, err := exec.findMergeNode(store, []string{"Function"}, map[string]interface{}{"uid": "fn:one"})
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, storage.NodeID("function-idx-1"), found.ID)
+
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.MergeSchemaLookupUsed, "expected unique constraint lookup to count as schema lookup")
+	require.False(t, trace.MergeScanFallbackUsed, "unique constraint lookup should avoid label scan fallback")
+}
+
 func TestFindMergeNode_RequiresFullMultiLabelMatch(t *testing.T) {
 	baseStore := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(baseStore, "test")
