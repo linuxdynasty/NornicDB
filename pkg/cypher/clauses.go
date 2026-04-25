@@ -1625,6 +1625,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 
 	for _, item := range items {
 		rowValues := map[string]interface{}{unwindVar: item}
+		createdVars := make(map[string]bool)
 		skipRow := false
 		for _, step := range plan.steps {
 			if step.node != nil {
@@ -1681,6 +1682,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					e.cacheMergeNode(nodePlan.labels, matchProps, node)
 					result.Stats.NodesCreated++
 					notifyOnce(node.ID)
+					createdVars[nodePlan.mergeVar] = true
 				} else {
 					needsUpdate := false
 					for _, assignment := range nodePlan.setAssignments {
@@ -1782,8 +1784,12 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				skipRow = true
 				break
 			}
-			if store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType) != nil {
-				continue
+			if createdVars[relPlan.fromVar] || createdVars[relPlan.toVar] {
+				e.markUnwindFreshRelCreateUsed()
+			} else {
+				if store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType) != nil {
+					continue
+				}
 			}
 			edge := &storage.Edge{
 				ID:         storage.EdgeID(e.generateID()),

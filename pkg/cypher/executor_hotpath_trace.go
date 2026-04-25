@@ -12,6 +12,7 @@ type HotPathTrace struct {
 	UnwindSimpleMergeBatch    bool
 	UnwindMergeChainBatch     bool
 	UnwindFixedChainLinkBatch bool
+	UnwindFreshRelCreate      bool
 	CallTailTraversalFastPath bool
 	MergeSchemaLookupUsed     bool
 	MergeScanFallbackUsed     bool
@@ -116,6 +117,15 @@ func (e *StorageExecutor) markUnwindFixedChainLinkBatchUsed() {
 	}
 	e.hotPathTraceState.mu.Lock()
 	e.hotPathTraceState.trace.UnwindFixedChainLinkBatch = true
+	e.hotPathTraceState.mu.Unlock()
+}
+
+func (e *StorageExecutor) markUnwindFreshRelCreateUsed() {
+	if e.hotPathTraceState == nil {
+		e.hotPathTraceState = &hotPathTraceState{}
+	}
+	e.hotPathTraceState.mu.Lock()
+	e.hotPathTraceState.trace.UnwindFreshRelCreate = true
 	e.hotPathTraceState.mu.Unlock()
 }
 

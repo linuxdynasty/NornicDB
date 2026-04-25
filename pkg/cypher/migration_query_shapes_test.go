@@ -764,9 +764,31 @@ MATCH (f:File {path: row.file_path})
 MERGE (f)-[:CONTAINS]->(n)
 `, map[string]interface{}{"rows": rows})
 	require.NoError(t, err)
-	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+	trace := exec.LastHotPathTrace()
+	require.True(t, trace.UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+	require.True(t, trace.UnwindFreshRelCreate, "expected fresh endpoint relationship creation path")
 
 	counts, err := exec.Execute(ctx, `
+MATCH (:File {path: '/repo/main.go'})-[r:CONTAINS]->(n:Function)
+RETURN count(r) AS edge_count, count(n) AS node_count
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, counts.Rows, 1)
+	require.Equal(t, int64(2), counts.Rows[0][0])
+	require.Equal(t, int64(2), counts.Rows[0][1])
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:Function {uid: row.entity_id})
+SET n += row.props
+MATCH (f:File {path: row.file_path})
+MERGE (f)-[:CONTAINS]->(n)
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected rerun to stay on generalized hot path")
+	require.False(t, exec.LastHotPathTrace().UnwindFreshRelCreate, "rerun should check existing relationships when endpoints pre-exist")
+
+	counts, err = exec.Execute(ctx, `
 MATCH (:File {path: '/repo/main.go'})-[r:CONTAINS]->(n:Function)
 RETURN count(r) AS edge_count, count(n) AS node_count
 `, nil)
