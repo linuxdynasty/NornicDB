@@ -471,7 +471,11 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+		schema := e.storage.GetSchema()
+		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+			return nil, err
+		}
+		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -494,7 +498,11 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+		schema := e.storage.GetSchema()
+		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+			return nil, err
+		}
+		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
@@ -517,7 +525,11 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
 			return nil, err
 		}
-		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+		schema := e.storage.GetSchema()
+		if err := schema.AddUniqueConstraint(constraintName, label, property, ifNotExists); err != nil {
+			return nil, err
+		}
+		if err := storage.RefreshUniqueConstraintValuesForEngine(e.storage, schema); err != nil {
 			return nil, err
 		}
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
