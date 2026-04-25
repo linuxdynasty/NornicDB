@@ -166,6 +166,82 @@ ORDER BY n.uid
 	}, contains.Rows)
 }
 
+func TestUnwindMergeBatch_MatchMergeCountReflectsFilteredRows(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE CONSTRAINT file_path_unique IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE
+`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+MERGE (f:File {path: $path})
+`, map[string]interface{}{"path": "src/handler.go"})
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{"file_path": "src/handler.go", "entity_id": "annotation-1"},
+		{"file_path": "missing.go", "entity_id": "annotation-2"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (f:File {path: row.file_path})
+MERGE (n:Annotation {uid: row.entity_id})
+MERGE (f)-[:CONTAINS]->(n)
+RETURN count(n) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"prepared"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(1), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+
+	nodes, err := store.GetNodesByLabel("Annotation")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "annotation-1", nodes[0].Properties["uid"])
+}
+
+func TestUnwindOptionalMatchMutationFallsBackPerRow(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+MERGE (f:File {path: $path})
+`, map[string]interface{}{"path": "src/handler.go"})
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{"file_path": "src/handler.go", "entity_id": "annotation-1"},
+		{"file_path": "missing.go", "entity_id": "annotation-2"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+OPTIONAL MATCH (f:File {path: row.file_path})-[:CONTAINS]->(old)
+MERGE (n:Annotation {uid: row.entity_id})
+RETURN count(n) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"prepared"}, res.Columns)
+	require.Len(t, res.Rows, 2)
+
+	nodes, err := store.GetNodesByLabel("Annotation")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	seen := make(map[interface{}]bool, len(nodes))
+	for _, node := range nodes {
+		seen[node.Properties["uid"]] = true
+	}
+	require.True(t, seen["annotation-1"])
+	require.True(t, seen["annotation-2"])
+}
+
 func TestUnwindMergeBatch_HopUpsertUpdatesExisting(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
