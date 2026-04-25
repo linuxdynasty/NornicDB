@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.43] Clockwork - 2026-04-24
+
+### Added
+
+- **Runtime retention and privacy control plane**:
+  - added runtime retention sweep management in the database layer, including sweep budgeting, excluded-label handling, record collection, and immediate sweep triggering.
+  - added admin retention endpoints for policies, legal holds, erasure requests, manual sweeps, and retention status.
+  - added GDPR integration hooks so privacy and retention workflows can share the same server-side control surface.
+
+- **Retention administration UI**:
+  - added a dedicated Retention Admin page in the web UI with policy editing, legal hold management, erasure request processing, defaults loading, and sweep controls.
+  - wired new client API types and routes so operators can manage retention behavior from the browser instead of only through raw admin calls.
+
+- **Constraint and planner regression coverage**:
+  - added extensive deterministic tests for constraint contract parsing, schema validation, Bolt database-manager behavior, transaction wrapper reuse, `UNWIND` merge batches, and fabric helper types.
+  - added regression coverage around database-scoped rollback handling and deterministic multidatabase enforcement behavior.
+
+- **Knowledge-layer documentation and research material**:
+  - added a full knowledge-layer persistence implementation plan, expanded design material, Kalman-focused planning docs, and a new research-paper draft on persistence semantics. v1.1.0
+
+### Changed
+
+- **Retention configuration and operator surface**:
+  - expanded runtime config, example YAML, and macOS/app UI surfaces for retention and memory-management controls.
+  - made chunk overlap configurable in the macOS app and web UI chunking flow.
+
+- **Cypher MERGE and `UNWIND MATCH` routing**:
+  - routed more `UNWIND` + `MATCH`/map-merge shapes through the hot path and tightened optional-match fallback behavior.
+  - started using unique-constraint and unique-index information more aggressively for merge lookup and validation paths.
+
+- **Constraint contract parsing and validation internals**:
+  - replaced older regex-heavy constraint-contract parsing with allocation-free keyword scanning helpers.
+  - normalized unique-constraint cache keys and extended contract matching to cover broader label combinations and namespace cases.
+
+- **Documentation and release content**:
+  - refreshed README, operations docs, compliance docs, user-guide indexes, and the hot-path cookbook to match the current runtime behavior.
+  - removed or folded obsolete planning material into the newer knowledge-layer and compliance documentation set.
+
+- **Dependency maintenance**:
+  - refreshed Go module dependencies and updated UI package dependencies as part of the release range.
+
+### Fixed
+
+- **Database-scoped Bolt rollback correctness**:
+  - fixed Bolt explicit transaction rollback so rollback is honored against the correct selected database instead of leaking across database scope boundaries.
+  - hardened transaction wrapper reuse paths and related rollback regressions in Bolt/Cypher integration tests.
+
+- **Constraint validation correctness and safety**:
+  - fixed unique lookup and validation paths to guard non-comparable values and avoid incorrect equality handling during unique checks.
+  - corrected constraint-validation plumbing so unique indexes and schema checks stay aligned across storage and Cypher surfaces.
+
+- **Local LLM generation stability**:
+  - fixed CGO generation-path issues in the local llama integration, including causal-attention setup and health checks for non-unified KV caches.
+
+- **Deterministic multidatabase enforcement tests**:
+  - fixed rate-limit and enforcement test behavior to avoid timing-driven flakes and keep multidatabase coverage deterministic.
+
+### Tests
+
+- Added and expanded coverage for:
+  - retention manager behavior, retention admin handlers, and privacy/erasure workflows
+  - Bolt database-manager integration, database-scoped rollback, and transaction-wrapper reuse
+  - `UNWIND`/`MATCH`/`MERGE` hot-path routing and fallback behavior
+  - constraint contract parsing, validation, schema interactions, and unique lookup edge cases
+  - fabric helper coverage, plan-cache behavior, and multidatabase enforcement determinism
+
+### Documentation
+
+- Added and refreshed:
+  - GDPR compliance guidance and retention-policy operator documentation
+  - knowledge-layer persistence plan and implementation details
+  - Kalman behavioral signal planning notes
+  - persistence-semantics research paper draft, evaluation plan, bibliography, and related-work notes
+
+### Technical Details
+
+- **Range covered**: `v1.0.42-hotfix..HEAD`
+- **Commits in range**: 47 (non-merge)
+- **Repository delta**: 64 files changed, +11,730 / -1,528 lines
+- **Primary focus areas**: retention/GDPR operator workflows, Bolt rollback correctness, unique-constraint driven planner and validation improvements, deterministic regression coverage, and major knowledge-layer documentation expansion.
+
 ## [v1.0.42-hotfix] Anthem Pt. 2 - 2026-04-17
 
 ### Added
