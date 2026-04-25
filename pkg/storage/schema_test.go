@@ -69,6 +69,25 @@ func TestSchemaManager(t *testing.T) {
 		}
 	})
 
+	t.Run("UniqueConstraintNumericKeysUseCompareValuesSemantics", func(t *testing.T) {
+		sm := NewSchemaManager()
+		require.NoError(t, sm.AddUniqueConstraint("age_unique", "User", "age"))
+
+		sm.RegisterUniqueValue("User", "age", int(1), "node1")
+
+		got, found, constrained := sm.LookupUniqueConstraintValue("User", "age", int64(1))
+		require.True(t, constrained)
+		require.True(t, found)
+		assert.Equal(t, NodeID("node1"), got)
+
+		err := sm.CheckUniqueConstraint("User", "age", float64(1), "")
+		require.Error(t, err)
+
+		sm.UnregisterUniqueValue("User", "age", int64(1))
+		err = sm.CheckUniqueConstraint("User", "age", float64(1), "")
+		require.NoError(t, err)
+	})
+
 	t.Run("UnregisterUniqueValue", func(t *testing.T) {
 		sm := NewSchemaManager()
 		sm.AddUniqueConstraint("id_unique", "Node", "id")

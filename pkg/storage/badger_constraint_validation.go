@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -11,6 +12,12 @@ import (
 // compareValues compares two property values for equality.
 // This mirrors Cypher semantics for numeric comparisons across int/float types.
 func compareValues(a, b interface{}) bool {
+	if aNum, ok := numericConstraintValue(a); ok {
+		if bNum, ok := numericConstraintValue(b); ok {
+			return aNum == bNum
+		}
+	}
+
 	// Handle different numeric types
 	switch v1 := a.(type) {
 	case int:
@@ -51,7 +58,44 @@ func compareValues(a, b interface{}) bool {
 	}
 
 	// Default comparison
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !reflect.TypeOf(a).Comparable() || !reflect.TypeOf(b).Comparable() {
+		return reflect.DeepEqual(a, b)
+	}
 	return a == b
+}
+
+func numericConstraintValue(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	default:
+		return 0, false
+	}
 }
 
 func (b *BadgerEngine) validateNodeConstraintsInTxn(txn *badger.Txn, node *Node, schema *SchemaManager, namespace string, excludeNodeID NodeID) error {
@@ -181,8 +225,8 @@ func (b *BadgerEngine) validateNodeConstraintsInTxn(txn *badger.Txn, node *Node,
 }
 
 func (b *BadgerEngine) scanForUniqueViolationInTxn(txn *badger.Txn, namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
-	if uniqueConstraintScanHook != nil {
-		uniqueConstraintScanHook()
+	if hook := getUniqueConstraintScanHook(); hook != nil {
+		hook()
 	}
 
 	prefix := labelIndexPrefix(label)

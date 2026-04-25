@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -596,7 +597,12 @@ func (sm *SchemaManager) CheckUniqueConstraint(label, property string, value int
 	constraint.mu.RLock()
 	defer constraint.mu.RUnlock()
 
-	if existingNode, found := constraint.values[value]; found {
+	valueKey, ok := uniqueConstraintValueKey(value)
+	if !ok {
+		return nil
+	}
+
+	if existingNode, found := constraint.values[valueKey]; found {
 		if existingNode != excludeNode {
 			return fmt.Errorf("Node(%s) already exists with %s = %v", label, property, value)
 		}
@@ -615,10 +621,14 @@ func (sm *SchemaManager) LookupUniqueConstraintValue(label, property string, val
 	if !exists || value == nil {
 		return "", false, exists
 	}
+	valueKey, ok := uniqueConstraintValueKey(value)
+	if !ok {
+		return "", false, true
+	}
 
 	constraint.mu.RLock()
 	defer constraint.mu.RUnlock()
-	nodeID, found := constraint.values[value]
+	nodeID, found := constraint.values[valueKey]
 	return nodeID, found, true
 }
 
@@ -630,11 +640,28 @@ func (sm *SchemaManager) lookupUniqueConstraintValueForValidation(label, propert
 	if !exists || value == nil {
 		return "", false, false, exists
 	}
+	valueKey, ok := uniqueConstraintValueKey(value)
+	if !ok {
+		return "", false, false, true
+	}
 
 	constraint.mu.RLock()
 	defer constraint.mu.RUnlock()
-	nodeID, found := constraint.values[value]
+	nodeID, found := constraint.values[valueKey]
 	return nodeID, found, constraint.valuesAuthoritative, true
+}
+
+func uniqueConstraintValueKey(value interface{}) (interface{}, bool) {
+	if numeric, ok := numericConstraintValue(value); ok {
+		return numeric, true
+	}
+	if value == nil {
+		return nil, false
+	}
+	if !reflect.TypeOf(value).Comparable() {
+		return nil, false
+	}
+	return value, true
 }
 
 // RegisterUniqueValue registers a value for a unique constraint.
@@ -647,9 +674,13 @@ func (sm *SchemaManager) RegisterUniqueValue(label, property string, value inter
 	if !exists {
 		return
 	}
+	valueKey, ok := uniqueConstraintValueKey(value)
+	if !ok {
+		return
+	}
 
 	constraint.mu.Lock()
-	constraint.values[value] = nodeID
+	constraint.values[valueKey] = nodeID
 	constraint.mu.Unlock()
 }
 
@@ -663,9 +694,13 @@ func (sm *SchemaManager) UnregisterUniqueValue(label, property string, value int
 	if !exists {
 		return
 	}
+	valueKey, ok := uniqueConstraintValueKey(value)
+	if !ok {
+		return
+	}
 
 	constraint.mu.Lock()
-	delete(constraint.values, value)
+	delete(constraint.values, valueKey)
 	constraint.mu.Unlock()
 }
 
