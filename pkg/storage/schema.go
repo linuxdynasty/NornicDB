@@ -612,7 +612,9 @@ func (sm *SchemaManager) CheckUniqueConstraint(label, property string, value int
 }
 
 // LookupUniqueConstraintValue returns the node currently registered for a
-// single-property uniqueness constraint value.
+// single-property uniqueness constraint value. The second return value reports
+// whether the value is present, and the third reports whether the unique
+// constraint exists.
 func (sm *SchemaManager) LookupUniqueConstraintValue(label, property string, value interface{}) (NodeID, bool, bool) {
 	sm.mu.RLock()
 	key := fmt.Sprintf("%s:%s", label, property)
