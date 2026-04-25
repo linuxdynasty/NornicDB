@@ -124,13 +124,10 @@ func TestBadgerTransactionUniqueConstraintUsesRegisteredValueIndex(t *testing.T)
 	}
 
 	scanCalls := 0
-	previousHook := uniqueConstraintScanHook
-	uniqueConstraintScanHook = func() {
+	restoreHook := setUniqueConstraintScanHook(func() {
 		scanCalls++
-	}
-	defer func() {
-		uniqueConstraintScanHook = previousHook
-	}()
+	})
+	defer restoreHook()
 
 	// Delete the label index entry to prove duplicate detection comes from the
 	// registered unique-value index, not from a label scan.
@@ -153,6 +150,83 @@ func TestBadgerTransactionUniqueConstraintUsesRegisteredValueIndex(t *testing.T)
 	})
 	if err == nil {
 		t.Fatal("expected unique constraint violation from registered value index")
+	}
+	if scanCalls != 0 {
+		t.Fatalf("unique validation used label scan %d time(s), want registered-value lookup only", scanCalls)
+	}
+	tx2.Rollback()
+}
+
+func TestBadgerTransactionUniqueConstraintIndexMatchesNumericCompareSemantics(t *testing.T) {
+	engine, cleanup := setupTestBadgerEngine(t)
+	defer cleanup()
+
+	schema := engine.GetSchemaForNamespace("test")
+	if err := schema.AddUniqueConstraint("unique_age", "User", "age"); err != nil {
+		t.Fatalf("AddUniqueConstraint failed: %v", err)
+	}
+
+	firstID := NodeID(prefixTestID("user-unique-age-1"))
+	tx1, err := engine.BeginTransaction()
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
+	if _, err := tx1.CreateNode(&Node{
+		ID:     firstID,
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"age": int(1),
+		},
+	}); err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+	if err := tx1.Commit(); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if err := engine.rebuildUniqueConstraintValues("test", schema); err != nil {
+		t.Fatalf("rebuildUniqueConstraintValues failed: %v", err)
+	}
+	if got, found, constrained := schema.LookupUniqueConstraintValue("User", "age", int(1)); !constrained || !found || got != firstID {
+		t.Fatalf("LookupUniqueConstraintValue(int) = (%q, %v, %v), want (%q, true, true)", got, found, constrained, firstID)
+	}
+
+	if got, found, constrained := schema.LookupUniqueConstraintValue("User", "age", float64(1)); !constrained || !found || got != firstID {
+		t.Fatalf("LookupUniqueConstraintValue() = (%q, %v, %v), want (%q, true, true)", got, found, constrained, firstID)
+	}
+	if got, found, authoritative, constrained := schema.lookupUniqueConstraintValueForValidation("User", "age", float64(1)); !constrained || !authoritative || !found || got != firstID {
+		t.Fatalf("lookupUniqueConstraintValueForValidation() = (%q, %v, %v, %v), want (%q, true, true, true)", got, found, authoritative, constrained, firstID)
+	}
+	constraints := schema.GetConstraintsForLabels([]string{"User"})
+	if len(constraints) != 1 {
+		t.Fatalf("GetConstraintsForLabels(User) returned %d constraint(s), want 1", len(constraints))
+	}
+
+	scanCalls := 0
+	restoreHook := setUniqueConstraintScanHook(func() {
+		scanCalls++
+	})
+	defer restoreHook()
+
+	tx2, err := engine.BeginTransaction()
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
+	duplicate := &Node{
+		ID:     NodeID(prefixTestID("user-unique-age-2")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"age": float64(1),
+		},
+	}
+	if err := tx2.validateNodeConstraints(duplicate); err == nil {
+		t.Fatal("expected direct unique constraint validation failure")
+	}
+	if err := tx2.checkUniqueConstraint(duplicate, constraints[0]); err == nil {
+		t.Fatal("expected direct unique constraint check failure")
+	}
+	_, err = tx2.CreateNode(duplicate)
+	if err == nil {
+		t.Fatal("expected unique constraint violation from numeric-equivalent registered value")
 	}
 	if scanCalls != 0 {
 		t.Fatalf("unique validation used label scan %d time(s), want registered-value lookup only", scanCalls)

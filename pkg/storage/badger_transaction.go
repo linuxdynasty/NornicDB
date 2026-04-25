@@ -1703,12 +1703,32 @@ func uniqueConstraintViolation(label, property string, value interface{}, nodeID
 // uniqueConstraintScanHook lets storage tests assert that indexed UNIQUE
 // validation does not regress to the label-scan fallback.
 var uniqueConstraintScanHook func()
+var uniqueConstraintScanHookMu sync.RWMutex
+
+func setUniqueConstraintScanHook(hook func()) func() {
+	uniqueConstraintScanHookMu.Lock()
+	previousHook := uniqueConstraintScanHook
+	uniqueConstraintScanHook = hook
+	uniqueConstraintScanHookMu.Unlock()
+
+	return func() {
+		uniqueConstraintScanHookMu.Lock()
+		uniqueConstraintScanHook = previousHook
+		uniqueConstraintScanHookMu.Unlock()
+	}
+}
+
+func getUniqueConstraintScanHook() func() {
+	uniqueConstraintScanHookMu.RLock()
+	defer uniqueConstraintScanHookMu.RUnlock()
+	return uniqueConstraintScanHook
+}
 
 // scanForUniqueViolation performs a full database scan to check for UNIQUE violations
 // within a single namespace (database).
 func (tx *BadgerTransaction) scanForUniqueViolation(namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
-	if uniqueConstraintScanHook != nil {
-		uniqueConstraintScanHook()
+	if hook := getUniqueConstraintScanHook(); hook != nil {
+		hook()
 	}
 
 	nodes, err := tx.getNodesByLabelLocked(label)
