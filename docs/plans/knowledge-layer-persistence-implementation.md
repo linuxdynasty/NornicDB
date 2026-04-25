@@ -342,6 +342,8 @@ type CompiledBinding struct {
     ThresholdAgeNanos   int64   // pre-computed: -halfLife * ln(visibilityThreshold) / ln(2)
     DecayFloor         float64
     NoDecay            bool
+    HasNoDecayProperty bool    // true if any property rule has NoDecay — blocks entity suppression
+    CompiledPropertyRules map[string]*CompiledPropertyOverride
 }
 
 // BindingTable is the compiled lookup for all labels and edge types.
@@ -599,6 +601,16 @@ func computeFinalScore(baseDecayScore, multiplier, promoFloor, promoCap, decayFl
     return math.Max(capped, decayFloor)
 }
 ```
+
+Suppression eligibility:
+
+```go
+SuppressionEligible: finalScore < cb.VisibilityThreshold && !cb.HasNoDecayProperty
+```
+
+`HasNoDecayProperty` is pre-computed at binding compilation time by scanning `CompiledPropertyRules` for any entry with `NoDecay: true`. A `NO DECAY` property acts as a suppression anchor: the parent entity's content still decays, but the entity remains visible because the anchored property has a permanent score of 1.0. This prevents structural metadata (tenant IDs, session IDs, bi-temporal timestamps) from being hidden by entity-level decay. The `HasNoDecayProperty` flag is cleared when resolving property-level bindings (`ResolveProperty`) so that individual property suppression (vectorization exclusion) remains independent.
+
+Property-level `NO DECAY` on an entity whose binding already has `decayEnabled: false` or entity-level `NO DECAY` is redundant and should be omitted.
 
 Decay functions:
 

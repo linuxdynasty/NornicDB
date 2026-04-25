@@ -575,6 +575,8 @@ When a node or edge crosses suppression eligibility:
 
 Property-level decay must not cause property suppression, property movement, or property deletion from storage.
 
+A node or edge with at least one property-level `NO DECAY` rule is not suppressible. The `NO DECAY` property acts as a suppression anchor: the parent entity's content still decays, but the entity remains visible because the anchored property has a permanent score of 1.0. This prevents structural metadata (tenant IDs, session IDs, bi-temporal timestamps) from being hidden by entity-level decay. Property-level `NO DECAY` on an entity whose binding already has `decayEnabled: false` or entity-level `NO DECAY` is redundant and should be omitted.
+
 If a node remains indexed, its properties remain indexable under ordinary indexing rules. Property-level decay affects retrieval and vectorization behavior, not whether the property exists in storage. Properties that participate in structural indexes (lookup, range, and composite indexes) are entirely immune to decay scoring, decay hiding, and vectorization exclusion — they must remain stable and always visible for aggregation, joining, and lookup. Fulltext indexes and vector indexes are retrieval-surface indexes and do not confer this immunity.
 
 ### 6.5 Decay Function Semantics

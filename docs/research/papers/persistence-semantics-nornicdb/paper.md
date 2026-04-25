@@ -424,11 +424,17 @@ A query for the current state returns only the DoRA fact. An `AS OF` query retur
 A user mentions preferring dark mode during a conversation. This creates a `:MemoryEpisode`. The decay profile and promotion policy for this label:
 
 ```cypher
+CREATE DECAY PROFILE memory_episode_params OPTIONS {
+  halfLifeSeconds: 604800,
+  function: 'exponential',
+  scoreFrom: 'VERSION',
+  visibilityThreshold: 0.10
+}
+
 CREATE DECAY PROFILE memory_retention
 FOR (n:MemoryEpisode)
-OPTIONS { function: 'exponential', scoreFrom: 'VERSION' }
 APPLY {
-  DECAY HALF LIFE 604800  -- 7 days in seconds
+  DECAY PROFILE 'memory_episode_params'
   DECAY VISIBILITY THRESHOLD 0.10
 }
 
