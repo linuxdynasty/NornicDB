@@ -559,7 +559,24 @@ MERGE (event)-[:BELONGS_TO]->(key)
 
 Use this for qVersions-style write families where one input row materializes multiple node upserts and multiple idempotent relationship upserts in a deterministic order.
 
-### 7.3e.1 Staged Compound `UNWIND` Version Pipeline
+### 7.3e.1 Lookup-Then-Upsert With Map-Merge Properties
+
+```cypher
+UNWIND $rows AS row
+MATCH (parent:EntityA {primaryKey: row.parentKey})
+MERGE (child:EntityB {primaryKey: row.childKey})
+SET child += row.props
+MERGE (parent)-[:KEY_REL]->(child)
+RETURN count(child) AS prepared;
+```
+
+Use this when each row first resolves an existing parent, upserts a child by a
+schema-backed key, merges a row-provided property map, and links the two
+idempotently. This shape is optimized by `UnwindMergeChainBatch`; it avoids the
+generic per-row fallback for `UNWIND ... MATCH ... MERGE ... SET += row.props
+... MERGE relationship` ingestion pipelines.
+
+### 7.3e.2 Staged Compound `UNWIND` Version Pipeline
 
 ```cypher
 UNWIND $rows AS row

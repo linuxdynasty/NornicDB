@@ -483,10 +483,41 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		}
 	}
 
-	// Handle UNWIND ... CREATE/MERGE ... pattern
+	// Handle UNWIND ... CREATE/MERGE/MATCH ... mutation patterns.
 	if restQuery != "" {
-		upperRest := strings.ToUpper(strings.TrimSpace(restQuery))
-		if strings.HasPrefix(upperRest, "CREATE") || strings.HasPrefix(upperRest, "MERGE") {
+		trimmedRest := strings.TrimSpace(restQuery)
+		upperRest := strings.ToUpper(trimmedRest)
+		matchStartedMutation := (strings.HasPrefix(upperRest, "MATCH") || strings.HasPrefix(upperRest, "OPTIONAL MATCH")) &&
+			(findKeywordIndexInContext(trimmedRest, "MERGE") >= 0 ||
+				findKeywordIndexInContext(trimmedRest, "CREATE") >= 0 ||
+				findKeywordIndexInContext(trimmedRest, "SET") >= 0)
+		if matchStartedMutation {
+			if strings.HasPrefix(upperRest, "MATCH") {
+				if fast, ok, err := e.executeUnwindFixedChainLinkBatch(ctx, variable, items, restQuery); ok {
+					return fast, err
+				}
+			}
+			if fast, ok, err := e.executeUnwindCompoundMutationBatch(ctx, variable, unwindParamName, items, restQuery); ok {
+				return fast, err
+			}
+			returnIdx := findKeywordIndex(restQuery, "RETURN")
+			var mutationPart, returnPart string
+			if returnIdx > 0 {
+				mutationPart = strings.TrimSpace(restQuery[:returnIdx])
+				returnPart = strings.TrimSpace(restQuery[returnIdx:])
+			} else {
+				mutationPart = restQuery
+				returnPart = ""
+			}
+			if startsWithKeywordFold(strings.TrimSpace(mutationPart), "MATCH") ||
+				startsWithKeywordFold(strings.TrimSpace(mutationPart), "OPTIONAL MATCH") {
+				if fast, ok, err := e.executeUnwindMergeChainBatch(ctx, variable, items, mutationPart, returnPart); ok {
+					return fast, err
+				}
+			}
+		}
+		if strings.HasPrefix(upperRest, "CREATE") ||
+			strings.HasPrefix(upperRest, "MERGE") {
 			if fast, ok, err := e.executeUnwindCompoundMutationBatch(ctx, variable, unwindParamName, items, restQuery); ok {
 				return fast, err
 			}
@@ -508,7 +539,8 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				returnPart = ""
 			}
 
-			// Hot path: UNWIND row MERGE (n:Label {k: row.x}) [SET n.p = row.y] RETURN count(n)
+			// Hot path: UNWIND row [MATCH ...] MERGE (n:Label {k: row.x})
+			// [SET n.p = row.y | SET n += row.props] [MERGE relationship] RETURN count(n).
 			// Execute as a single batched pass to avoid per-item MERGE query re-parsing/scans.
 			if startsWithKeywordFold(strings.TrimSpace(mutationPart), "MERGE") {
 				if fast, ok, err := e.executeUnwindMergeChainBatch(ctx, variable, items, mutationPart, returnPart); ok {
@@ -831,8 +863,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 }
 
 type unwindSimpleSetAssignment struct {
-	prop string
-	expr string
+	prop     string
+	expr     string
+	mergeMap bool
 }
 
 type unwindMergeChainNodePlan struct {
@@ -923,6 +956,18 @@ func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAss
 	for _, assignment := range assignments {
 		a := strings.TrimSpace(assignment)
 		if a == "" {
+			continue
+		}
+		if plusEqIdx := strings.Index(a, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(a[:plusEqIdx])
+			right := strings.TrimSpace(a[plusEqIdx+2:])
+			if left != mergeVar || right == "" {
+				return nil, false
+			}
+			out = append(out, unwindSimpleSetAssignment{
+				expr:     right,
+				mergeMap: true,
+			})
 			continue
 		}
 		eqIdx := strings.Index(a, "=")
@@ -1540,6 +1585,38 @@ func unwindMergeKey(label string, props map[string]interface{}) string {
 	return string(encoded)
 }
 
+func applyUnwindMergeChainSetAssignment(
+	node *storage.Node,
+	assignment unwindSimpleSetAssignment,
+	rowValues map[string]interface{},
+	resolveValue func(string, map[string]interface{}) interface{},
+) (bool, error) {
+	if node.Properties == nil {
+		node.Properties = make(map[string]interface{})
+	}
+	if assignment.mergeMap {
+		value := resolveValue(assignment.expr, rowValues)
+		props, err := normalizePropsMap(value, fmt.Sprintf("variable %s", assignment.expr))
+		if err != nil {
+			return false, err
+		}
+		changed := false
+		for prop, val := range props {
+			if cur, exists := node.Properties[prop]; !exists || !reflect.DeepEqual(cur, val) {
+				node.Properties[prop] = val
+				changed = true
+			}
+		}
+		return changed, nil
+	}
+	val := resolveValue(assignment.expr, rowValues)
+	if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
+		node.Properties[assignment.prop] = val
+		return true, nil
+	}
+	return false, nil
+}
+
 func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
 	plan := e.cachedUnwindMergeChainPlan(mutationPart)
 	if !plan.supported {
@@ -1638,10 +1715,14 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						Properties: cloneNodePropertiesMap(matchProps),
 					}
 					for _, assignment := range nodePlan.setAssignments {
-						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
+						if _, err := applyUnwindMergeChainSetAssignment(node, assignment, rowValues, resolveBatchValue); err != nil {
+							return nil, true, err
+						}
 					}
 					for _, assignment := range nodePlan.onCreateAssignments {
-						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
+						if _, err := applyUnwindMergeChainSetAssignment(node, assignment, rowValues, resolveBatchValue); err != nil {
+							return nil, true, err
+						}
 					}
 					actualID, err := store.CreateNode(node)
 					if err != nil {
@@ -1655,16 +1736,20 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				} else {
 					needsUpdate := false
 					for _, assignment := range nodePlan.setAssignments {
-						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-							node.Properties[assignment.prop] = val
+						changed, err := applyUnwindMergeChainSetAssignment(node, assignment, rowValues, resolveBatchValue)
+						if err != nil {
+							return nil, true, err
+						}
+						if changed {
 							needsUpdate = true
 						}
 					}
 					for _, assignment := range nodePlan.onMatchAssignments {
-						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
-							node.Properties[assignment.prop] = val
+						changed, err := applyUnwindMergeChainSetAssignment(node, assignment, rowValues, resolveBatchValue)
+						if err != nil {
+							return nil, true, err
+						}
+						if changed {
 							needsUpdate = true
 						}
 					}
