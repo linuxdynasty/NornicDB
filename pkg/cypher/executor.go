@@ -268,8 +268,9 @@ type StorageExecutor struct {
 	// Node lookup cache for MATCH patterns like (n:Label {prop: value})
 	// Key: "Label:{prop:value,...}", Value: *storage.Node
 	// This dramatically speeds up repeated MATCH lookups for the same pattern
-	nodeLookupCache   map[string]*storage.Node
-	nodeLookupCacheMu sync.RWMutex
+	nodeLookupCache map[string]*storage.Node
+	// cloneWithStorage shares nodeLookupCache, so clones must share this lock too.
+	nodeLookupCacheMu *sync.RWMutex
 
 	// deferFlush when true, writes are not auto-flushed (Bolt layer handles it)
 	deferFlush bool
@@ -343,6 +344,7 @@ func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExec
 		fabricPlanCache:             e.fabricPlanCache,
 		analyzer:                    e.analyzer,
 		nodeLookupCache:             e.nodeLookupCache,
+		nodeLookupCacheMu:           e.nodeLookupCacheLock(),
 		deferFlush:                  e.deferFlush,
 		embedder:                    e.embedder,
 		searchService:               e.searchService,
@@ -362,6 +364,13 @@ func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExec
 		vectorQueryEmbedInflight:    e.vectorQueryEmbedInflight,
 		unwindMergeChainPlanCache:   e.unwindMergeChainPlanCache,
 	}
+}
+
+func (e *StorageExecutor) nodeLookupCacheLock() *sync.RWMutex {
+	if e.nodeLookupCacheMu == nil {
+		e.nodeLookupCacheMu = &sync.RWMutex{}
+	}
+	return e.nodeLookupCacheMu
 }
 
 type vectorEmbedInflight struct {
@@ -453,6 +462,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		fabricPlanCache:             fabric.NewPlanCache(500), // Cache 500 Fabric fragment plans
 		analyzer:                    NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache:             make(map[string]*storage.Node, 1000),
+		nodeLookupCacheMu:           &sync.RWMutex{},
 		shellParams:                 make(map[string]interface{}),
 		searchService:               nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
 		vectorRegistry:              vectorspace.NewIndexRegistry(),
@@ -2372,12 +2382,13 @@ func (e *StorageExecutor) executeFastPathCreateDeleteRelCount(label1, label2, pr
 func (e *StorageExecutor) findNodeByLabelAndProperty(label, prop string, val any) *storage.Node {
 	// Try cache first (with proper locking)
 	cacheKey := fmt.Sprintf("%s:{%s:%v}", label, prop, val)
-	e.nodeLookupCacheMu.RLock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.RLock()
 	if cached, ok := e.nodeLookupCache[cacheKey]; ok {
-		e.nodeLookupCacheMu.RUnlock()
+		cacheMu.RUnlock()
 		return cached
 	}
-	e.nodeLookupCacheMu.RUnlock()
+	cacheMu.RUnlock()
 
 	// Scan nodes with label
 	nodes, err := e.storage.GetNodesByLabel(label)
@@ -2390,9 +2401,9 @@ func (e *StorageExecutor) findNodeByLabelAndProperty(label, prop string, val any
 		if nodeVal, ok := node.Properties[prop]; ok {
 			if fmt.Sprintf("%v", nodeVal) == fmt.Sprintf("%v", val) {
 				// Cache for next time (with proper locking)
-				e.nodeLookupCacheMu.Lock()
+				cacheMu.Lock()
 				e.nodeLookupCache[cacheKey] = node
-				e.nodeLookupCacheMu.Unlock()
+				cacheMu.Unlock()
 				return node
 			}
 		}

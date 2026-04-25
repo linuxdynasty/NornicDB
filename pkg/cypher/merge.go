@@ -98,8 +98,9 @@ func (e *StorageExecutor) evictMergeNodeCacheEntries(labels []string, props map[
 		return
 	}
 
-	e.nodeLookupCacheMu.Lock()
-	defer e.nodeLookupCacheMu.Unlock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
 	for prop, val := range props {
 		key := mergeLookupCacheKey(labels, prop, val)
 		cached, ok := e.nodeLookupCache[key]
@@ -118,7 +119,8 @@ func (e *StorageExecutor) findMergeNodeInCache(store storage.Engine, labels []st
 	}
 
 	var cachedNode *storage.Node
-	e.nodeLookupCacheMu.RLock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.RLock()
 	for prop, val := range props {
 		if cached, ok := e.nodeLookupCache[mergeLookupCacheKey(labels, prop, val)]; ok {
 			if mergeNodeMatches(cached, labels, props) {
@@ -127,7 +129,7 @@ func (e *StorageExecutor) findMergeNodeInCache(store storage.Engine, labels []st
 			}
 		}
 	}
-	e.nodeLookupCacheMu.RUnlock()
+	cacheMu.RUnlock()
 
 	if cachedNode == nil {
 		return nil
@@ -149,8 +151,9 @@ func (e *StorageExecutor) cacheMergeNode(labels []string, props map[string]inter
 	if node == nil || len(labels) == 0 || len(props) == 0 {
 		return
 	}
-	e.nodeLookupCacheMu.Lock()
-	defer e.nodeLookupCacheMu.Unlock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
 	for prop, val := range props {
 		e.nodeLookupCache[mergeLookupCacheKey(labels, prop, val)] = node
 	}

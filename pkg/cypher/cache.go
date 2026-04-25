@@ -935,9 +935,10 @@ func makeLookupKey(label string, props map[string]interface{}) string {
 //   - The cached node, or nil if not in cache
 func (e *StorageExecutor) lookupCachedNode(label string, props map[string]interface{}) *storage.Node {
 	key := makeLookupKey(label, props)
-	e.nodeLookupCacheMu.RLock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.RLock()
 	node := e.nodeLookupCache[key]
-	e.nodeLookupCacheMu.RUnlock()
+	cacheMu.RUnlock()
 	return node
 }
 
@@ -953,20 +954,22 @@ func (e *StorageExecutor) lookupCachedNode(label string, props map[string]interf
 //   - node: The node to cache
 func (e *StorageExecutor) cacheNodeLookup(label string, props map[string]interface{}, node *storage.Node) {
 	key := makeLookupKey(label, props)
-	e.nodeLookupCacheMu.Lock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
 	// Simple eviction: if too large, clear
 	if len(e.nodeLookupCache) > 10000 {
 		e.nodeLookupCache = make(map[string]*storage.Node, 1000)
 	}
 	e.nodeLookupCache[key] = node
-	e.nodeLookupCacheMu.Unlock()
+	cacheMu.Unlock()
 }
 
 // invalidateNodeLookupCache clears the node lookup cache.
 //
 // Should be called after write operations that may affect node properties.
 func (e *StorageExecutor) invalidateNodeLookupCache() {
-	e.nodeLookupCacheMu.Lock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
 	e.nodeLookupCache = make(map[string]*storage.Node, 1000)
-	e.nodeLookupCacheMu.Unlock()
+	cacheMu.Unlock()
 }
