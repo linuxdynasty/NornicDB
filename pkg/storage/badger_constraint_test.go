@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -86,6 +87,77 @@ func TestBadgerTransaction_FullScanUniqueConstraint(t *testing.T) {
 	}
 
 	tx3.Commit()
+}
+
+func TestBadgerTransactionUniqueConstraintUsesRegisteredValueIndex(t *testing.T) {
+	engine, cleanup := setupTestBadgerEngine(t)
+	defer cleanup()
+
+	schema := engine.GetSchemaForNamespace("test")
+	if err := schema.AddUniqueConstraint("unique_email", "User", "email"); err != nil {
+		t.Fatalf("AddUniqueConstraint failed: %v", err)
+	}
+
+	firstID := NodeID(prefixTestID("user-unique-index-1"))
+	tx1, err := engine.BeginTransaction()
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
+	if _, err := tx1.CreateNode(&Node{
+		ID:     firstID,
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "alice@example.com",
+		},
+	}); err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+	if err := tx1.Commit(); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+
+	if got, found, constrained := schema.LookupUniqueConstraintValue("User", "email", "alice@example.com"); !constrained || !found || got != firstID {
+		t.Fatalf("LookupUniqueConstraintValue() = (%q, %v, %v), want (%q, true, true)", got, found, constrained, firstID)
+	}
+	if err := engine.rebuildUniqueConstraintValues("test", schema); err != nil {
+		t.Fatalf("rebuildUniqueConstraintValues failed: %v", err)
+	}
+
+	scanCalls := 0
+	previousHook := uniqueConstraintScanHook
+	uniqueConstraintScanHook = func() {
+		scanCalls++
+	}
+	defer func() {
+		uniqueConstraintScanHook = previousHook
+	}()
+
+	// Delete the label index entry to prove duplicate detection comes from the
+	// registered unique-value index, not from a label scan.
+	if err := engine.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(labelIndexKey("User", firstID))
+	}); err != nil {
+		t.Fatalf("delete label index: %v", err)
+	}
+
+	tx2, err := engine.BeginTransaction()
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
+	_, err = tx2.CreateNode(&Node{
+		ID:     NodeID(prefixTestID("user-unique-index-2")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "alice@example.com",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected unique constraint violation from registered value index")
+	}
+	if scanCalls != 0 {
+		t.Fatalf("unique validation used label scan %d time(s), want registered-value lookup only", scanCalls)
+	}
+	tx2.Rollback()
 }
 
 // TestBadgerTransaction_FullScanNodeKeyConstraint tests NODE KEY constraint across transactions.
