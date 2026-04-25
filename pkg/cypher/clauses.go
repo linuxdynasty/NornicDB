@@ -1757,6 +1757,37 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		notified[key] = struct{}{}
 		e.notifyNodeMutated(key)
 	}
+	applyRelationshipAssignments := func(edge *storage.Edge, assignments []unwindSimpleSetAssignment, values map[string]interface{}) bool {
+		if edge.Properties == nil {
+			edge.Properties = map[string]interface{}{}
+		}
+		needsUpdate := false
+		for _, assignment := range assignments {
+			val := resolveBatchValue(assignment.expr, values)
+			if cur, exists := edge.Properties[assignment.prop]; !exists || !reflect.DeepEqual(canonicalUnwindMergeValue(cur), canonicalUnwindMergeValue(val)) {
+				edge.Properties[assignment.prop] = val
+				needsUpdate = true
+			}
+		}
+		return needsUpdate
+	}
+	createRelationship := func(edge *storage.Edge) (*storage.Edge, bool, error) {
+		const maxCreateAttempts = 3
+		for attempt := 0; attempt < maxCreateAttempts; attempt++ {
+			if err := store.CreateEdge(edge); err != nil {
+				if err != storage.ErrAlreadyExists {
+					return nil, false, fmt.Errorf("UNWIND MERGE chain relationship create failed: %w", err)
+				}
+				if existing := store.GetEdgeBetween(edge.StartNode, edge.EndNode, edge.Type); existing != nil {
+					return existing, false, nil
+				}
+				edge.ID = storage.EdgeID(e.generateID())
+				continue
+			}
+			return edge, true, nil
+		}
+		return nil, false, fmt.Errorf("UNWIND MERGE chain relationship create failed after %d edge ID collisions", maxCreateAttempts)
+	}
 
 	processedRows := 0
 	for _, item := range items {
@@ -1893,7 +1924,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				break
 			}
 			edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType)
-			created := false
+			relationshipChanged := false
 			if edge == nil {
 				edge = &storage.Edge{
 					ID:         storage.EdgeID(e.generateID()),
@@ -1902,34 +1933,30 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					EndNode:    toNode.ID,
 					Properties: map[string]interface{}{},
 				}
-				created = true
-			}
-			if edge.Properties == nil {
-				edge.Properties = map[string]interface{}{}
-			}
-			needsUpdate := false
-			for _, assignment := range relPlan.setAssignments {
-				val := resolveBatchValue(assignment.expr, rowValues)
-				if cur, exists := edge.Properties[assignment.prop]; !exists || !reflect.DeepEqual(canonicalUnwindMergeValue(cur), canonicalUnwindMergeValue(val)) {
-					edge.Properties[assignment.prop] = val
-					needsUpdate = true
+				applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues)
+				createdEdge, created, err := createRelationship(edge)
+				if err != nil {
+					return nil, true, err
 				}
-			}
-			if created {
-				if err := store.CreateEdge(edge); err != nil {
-					if err != storage.ErrAlreadyExists {
-						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship create failed: %w", err)
+				if created {
+					result.Stats.RelationshipsCreated++
+					relationshipChanged = true
+				} else if applyRelationshipAssignments(createdEdge, relPlan.setAssignments, rowValues) {
+					if err := store.UpdateEdge(createdEdge); err != nil {
+						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 					}
-					continue
+					relationshipChanged = true
 				}
-				result.Stats.RelationshipsCreated++
-			} else if needsUpdate {
+			} else if applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues) {
 				if err := store.UpdateEdge(edge); err != nil {
 					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 				}
+				relationshipChanged = true
 			}
-			notifyOnce(fromNode.ID)
-			notifyOnce(toNode.ID)
+			if relationshipChanged {
+				notifyOnce(fromNode.ID)
+				notifyOnce(toNode.ID)
+			}
 		}
 		if skipRow {
 			continue
