@@ -627,6 +627,9 @@ func (sm *SchemaManager) LookupUniqueConstraintValue(label, property string, val
 	if !ok {
 		return "", false, true
 	}
+	if !isComparableConstraintValue(value) {
+		return "", true, false
+	}
 
 	constraint.mu.RLock()
 	defer constraint.mu.RUnlock()
@@ -664,6 +667,13 @@ func uniqueConstraintValueKey(value interface{}) (interface{}, bool) {
 		return nil, false
 	}
 	return value, true
+}
+
+func isComparableConstraintValue(value interface{}) bool {
+	if value == nil {
+		return true
+	}
+	return reflect.TypeOf(value).Comparable()
 }
 
 // RegisterUniqueValue registers a value for a unique constraint.

@@ -88,6 +88,18 @@ func TestSchemaManager(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("LookupUniqueConstraintValue ignores non-comparable values", func(t *testing.T) {
+		sm := NewSchemaManager()
+		require.NoError(t, sm.AddUniqueConstraint("test_tags_unique", "User", "tags"))
+
+		require.NotPanics(t, func() {
+			nodeID, valueFound, constraintExists := sm.LookupUniqueConstraintValue("User", "tags", []string{"a"})
+			require.Empty(t, nodeID)
+			require.True(t, constraintExists)
+			require.False(t, valueFound)
+		})
+	})
+
 	t.Run("UnregisterUniqueValue", func(t *testing.T) {
 		sm := NewSchemaManager()
 		sm.AddUniqueConstraint("id_unique", "Node", "id")
