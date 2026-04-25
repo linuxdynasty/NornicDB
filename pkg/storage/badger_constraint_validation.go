@@ -71,6 +71,12 @@ func (b *BadgerEngine) validateNodeConstraintsInTxn(txn *badger.Txn, node *Node,
 			if value == nil {
 				continue
 			}
+			if existingNode, found, authoritative, constrained := schema.lookupUniqueConstraintValueForValidation(c.Label, prop, value); constrained && authoritative {
+				if found && existingNode != excludeNodeID {
+					return uniqueConstraintViolation(c.Label, prop, value, existingNode)
+				}
+				continue
+			}
 			if err := b.scanForUniqueViolationInTxn(txn, namespace, c.Label, prop, value, excludeNodeID); err != nil {
 				return err
 			}
@@ -175,6 +181,10 @@ func (b *BadgerEngine) validateNodeConstraintsInTxn(txn *badger.Txn, node *Node,
 }
 
 func (b *BadgerEngine) scanForUniqueViolationInTxn(txn *badger.Txn, namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
+	if uniqueConstraintScanHook != nil {
+		uniqueConstraintScanHook()
+	}
+
 	prefix := labelIndexPrefix(label)
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false
