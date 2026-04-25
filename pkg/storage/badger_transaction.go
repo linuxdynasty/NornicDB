@@ -1675,17 +1675,42 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 		}
 	}
 
-	// Full-scan check: scan all existing nodes with this label (namespace-scoped).
-	if err := tx.scanForUniqueViolation(dbName, c.Label, prop, value, node.ID); err != nil {
-		return err
+	schema := tx.engine.GetSchemaForNamespace(dbName)
+	if existingNode, found, authoritative, constrained := schema.lookupUniqueConstraintValueForValidation(c.Label, prop, value); constrained && authoritative {
+		if found && existingNode != node.ID {
+			if _, deleted := tx.deletedNodes[existingNode]; !deleted {
+				return uniqueConstraintViolation(c.Label, prop, value, existingNode)
+			}
+		}
+		return nil
 	}
 
-	return nil
+	// If the derived unique-value cache is not known authoritative, fall back to
+	// the label scan. Normal schema creation/reload marks the cache authoritative
+	// once after rebuilding it from stored nodes, so hot writes avoid this path.
+	return tx.scanForUniqueViolation(dbName, c.Label, prop, value, node.ID)
 }
+
+func uniqueConstraintViolation(label, property string, value interface{}, nodeID NodeID) *ConstraintViolationError {
+	return &ConstraintViolationError{
+		Type:       ConstraintUnique,
+		Label:      label,
+		Properties: []string{property},
+		Message:    fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", property, value, nodeID),
+	}
+}
+
+// uniqueConstraintScanHook lets storage tests assert that indexed UNIQUE
+// validation does not regress to the label-scan fallback.
+var uniqueConstraintScanHook func()
 
 // scanForUniqueViolation performs a full database scan to check for UNIQUE violations
 // within a single namespace (database).
 func (tx *BadgerTransaction) scanForUniqueViolation(namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
+	if uniqueConstraintScanHook != nil {
+		uniqueConstraintScanHook()
+	}
+
 	nodes, err := tx.getNodesByLabelLocked(label)
 	if err != nil {
 		return err
