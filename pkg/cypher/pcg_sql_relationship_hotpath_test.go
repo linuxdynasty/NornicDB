@@ -88,6 +88,12 @@ func TestUnwindMatchRelationshipSetBatch_FallsBackForUnindexedAlternativeLabel(t
 		require.NoError(t, err)
 	}
 
+	schema := store.GetSchema()
+	_, _, hasFunctionConstraint := schema.LookupUniqueConstraintValue("SqlFunction", "uid", "function:active_users")
+	_, hasFunctionIndex := schema.GetPropertyIndex("SqlFunction", "uid")
+	require.False(t, hasFunctionConstraint)
+	require.False(t, hasFunctionIndex)
+
 	_, err = exec.Execute(ctx, strings.TrimSpace(`
 UNWIND $rows AS row
 MATCH (source:SqlTable|SqlView|SqlFunction|SqlTrigger|SqlIndex|SqlColumn {uid: row.source_entity_id})
