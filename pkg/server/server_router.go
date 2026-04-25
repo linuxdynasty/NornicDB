@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-
-	// _ "net/http/pprof" // Register pprof handlers
+	"net/http/pprof"
 	"os"
 	"time"
 
@@ -31,7 +30,7 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)
 	s.registerGraphQLRoutes(mux)
-	// s.registerDebugRoutes(mux) // Pprof endpoints
+	s.registerDebugRoutes(mux)
 
 	return s.wrapWithMiddleware(mux)
 }
@@ -306,35 +305,21 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 	log.Println("📊 GraphQL API enabled at /graphql")
 }
 
-// registerDebugRoutes registers pprof profiling endpoints
-// func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
-// 	// ==========================================================================
-// 	// Debug/Profiling Endpoints (development/testing only)
-// 	// ==========================================================================
-// 	if !s.config.EnablePprof {
-// 		return
-// 	}
-//
-// 	// Register pprof handlers at /debug/pprof/*
-// 	// These are provided by net/http/pprof package
-// 	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/cmdline", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/profile", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/symbol", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-// 	mux.HandleFunc("/debug/pprof/trace", func(w http.ResponseWriter, r *http.Request) {
-// 		http.DefaultServeMux.ServeHTTP(w, r)
-// 	})
-//
-// 	log.Println("🔍 Pprof profiling enabled at /debug/pprof/")
-// }
+// registerDebugRoutes registers pprof profiling endpoints when explicitly
+// enabled for development or controlled performance investigations.
+func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
+	if s.config == nil || !s.config.EnablePprof {
+		return
+	}
+
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	log.Println("🔍 Pprof profiling enabled at /debug/pprof/")
+}
 
 func (s *Server) wrapWithMiddleware(next http.Handler) http.Handler {
 	// Wrap with middleware (order matters: outermost runs first)
