@@ -646,6 +646,16 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	// and combining results. This avoids silently returning only unwound values when
 	// a trailing MATCH pipeline is present.
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
+		returnIdx := findKeywordIndex(restQuery, "RETURN")
+		mutationPart := restQuery
+		returnPart := ""
+		if returnIdx > 0 {
+			mutationPart = strings.TrimSpace(restQuery[:returnIdx])
+			returnPart = strings.TrimSpace(restQuery[returnIdx:])
+		}
+		if fast, ok, err := e.executeUnwindMergeChainBatch(ctx, variable, items, mutationPart, returnPart); ok {
+			return fast, err
+		}
 		if fast, ok, err := e.executeUnwindFixedChainLinkBatch(ctx, variable, items, restQuery); ok {
 			return fast, err
 		}
@@ -894,6 +904,7 @@ type unwindMergeChainLookupPlan struct {
 	labels           []string
 	matchAssignments []unwindSimpleSetAssignment
 	optional         bool
+	anyLabel         bool
 }
 
 type unwindMergeChainWithAssignment struct {
@@ -910,9 +921,11 @@ type unwindMergeChainWherePlan struct {
 }
 
 type unwindMergeChainRelationshipPlan struct {
-	fromVar string
-	toVar   string
-	relType string
+	fromVar        string
+	toVar          string
+	relVar         string
+	relType        string
+	setAssignments []unwindSimpleSetAssignment
 }
 
 type unwindMergeChainStep struct {
@@ -1010,57 +1023,77 @@ func parseSimpleUnwindMergeClause(mergePart string) (string, []string, []unwindS
 }
 
 func parseUnwindNodePatternClause(clause string, keyword string) (string, []string, []unwindSimpleSetAssignment, bool) {
+	varName, labels, assignments, _, ok := parseUnwindNodePatternClauseInternal(clause, keyword, false)
+	return varName, labels, assignments, ok
+}
+
+func parseUnwindNodePatternClauseInternal(clause string, keyword string, allowAlternatives bool) (string, []string, []unwindSimpleSetAssignment, bool, bool) {
 	trimmed := strings.TrimSpace(clause)
 	if !startsWithKeywordFold(trimmed, keyword) {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	rest := strings.TrimSpace(trimmed[len(keyword):])
 	if !strings.HasPrefix(rest, "(") {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	parenEnd := findMatchingParen(rest, 0)
 	if parenEnd < 0 || strings.TrimSpace(rest[parenEnd+1:]) != "" {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	nodePattern := strings.TrimSpace(rest[1:parenEnd])
 	braceStart := strings.Index(nodePattern, "{")
 	if braceStart < 0 {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	exec := &StorageExecutor{}
 	braceEnd := exec.findMatchingBrace(nodePattern, braceStart)
 	if braceEnd < 0 || strings.TrimSpace(nodePattern[braceEnd+1:]) != "" {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	head := strings.TrimSpace(nodePattern[:braceStart])
 	propMap := strings.TrimSpace(nodePattern[braceStart+1 : braceEnd])
 	if head == "" || propMap == "" {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	parts := strings.Split(head, ":")
 	if len(parts) < 2 {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	mergeVar := strings.TrimSpace(parts[0])
 	if !isSimpleIdentifier(mergeVar) {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	labels := make([]string, 0, len(parts)-1)
+	anyLabel := false
 	for i := 1; i < len(parts); i++ {
 		label := strings.TrimSpace(parts[i])
+		if strings.Contains(label, "|") {
+			if !allowAlternatives || anyLabel || len(parts) != 2 {
+				return "", nil, nil, false, false
+			}
+			for _, alternative := range strings.Split(label, "|") {
+				alternative = strings.TrimSpace(alternative)
+				if !isSimpleIdentifier(alternative) {
+					return "", nil, nil, false, false
+				}
+				labels = append(labels, alternative)
+			}
+			anyLabel = true
+			continue
+		}
 		if !isSimpleIdentifier(label) {
-			return "", nil, nil, false
+			return "", nil, nil, false, false
 		}
 		labels = append(labels, label)
 	}
 	if len(labels) == 0 {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
 	assignments, ok := parseUnwindSimpleMergeMatchAssignments(propMap)
 	if !ok {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
-	return mergeVar, labels, assignments, true
+	return mergeVar, labels, assignments, anyLabel, true
 }
 
 func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
@@ -1069,7 +1102,7 @@ func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
 	if optional {
 		keyword = "OPTIONAL MATCH"
 	}
-	varName, labels, assignments, ok := parseUnwindNodePatternClause(clause, keyword)
+	varName, labels, assignments, anyLabel, ok := parseUnwindNodePatternClauseInternal(clause, keyword, true)
 	if !ok {
 		return unwindMergeChainLookupPlan{}, false
 	}
@@ -1078,6 +1111,7 @@ func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
 		labels:           labels,
 		matchAssignments: assignments,
 		optional:         optional,
+		anyLabel:         anyLabel,
 	}, true
 }
 
@@ -1275,10 +1309,21 @@ func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelation
 		return unwindMergeChainRelationshipPlan{}, false
 	}
 	relInner := strings.TrimSpace(afterFrom[openBracket+1 : closeBracket])
-	if !strings.HasPrefix(relInner, ":") {
-		return unwindMergeChainRelationshipPlan{}, false
+	relVar := ""
+	relType := ""
+	if strings.HasPrefix(relInner, ":") {
+		relType = strings.TrimSpace(relInner[1:])
+	} else {
+		parts := strings.SplitN(relInner, ":", 2)
+		if len(parts) != 2 {
+			return unwindMergeChainRelationshipPlan{}, false
+		}
+		relVar = strings.TrimSpace(parts[0])
+		relType = strings.TrimSpace(parts[1])
+		if !isSimpleIdentifier(relVar) {
+			return unwindMergeChainRelationshipPlan{}, false
+		}
 	}
-	relType := strings.TrimSpace(relInner[1:])
 	afterRel := strings.TrimSpace(afterFrom[closeBracket+1:])
 	if !strings.HasPrefix(afterRel, "->") {
 		return unwindMergeChainRelationshipPlan{}, false
@@ -1295,7 +1340,7 @@ func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelation
 	if !isSimpleIdentifier(relType) || !isSimpleIdentifier(toVar) {
 		return unwindMergeChainRelationshipPlan{}, false
 	}
-	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relType: relType}, true
+	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relVar: relVar, relType: relType}, true
 }
 
 func splitUnwindCompoundMutationStages(restQuery, unwindParamName, unwindVar string) ([]string, bool) {
@@ -1438,6 +1483,7 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		return plan
 	}
 	boundVars := make(map[string]struct{})
+	hasMutation := false
 	for i := 0; i < len(clauses); i++ {
 		clause := clauses[i]
 		if !startsWithKeywordFold(clause, "MERGE") {
@@ -1497,6 +1543,7 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		nodeDone:
 			plan.steps = append(plan.steps, unwindMergeChainStep{node: nodePlan})
 			boundVars[mergeVar] = struct{}{}
+			hasMutation = true
 			continue
 		}
 		relPlan, ok := parseUnwindMergeRelationshipClause(clause)
@@ -1509,9 +1556,21 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		if _, exists := boundVars[relPlan.toVar]; !exists {
 			return unwindMergeChainPlan{}
 		}
+		for i+1 < len(clauses) && startsWithKeywordFold(clauses[i+1], "SET") {
+			if relPlan.relVar == "" {
+				return unwindMergeChainPlan{}
+			}
+			parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(clauses[i+1][len("SET"):]), relPlan.relVar)
+			if !ok {
+				return unwindMergeChainPlan{}
+			}
+			relPlan.setAssignments = append(relPlan.setAssignments, parsed...)
+			i++
+		}
 		plan.steps = append(plan.steps, unwindMergeChainStep{relationship: &relPlan})
+		hasMutation = true
 	}
-	if len(plan.steps) == 0 {
+	if len(plan.steps) == 0 || !hasMutation {
 		return unwindMergeChainPlan{}
 	}
 	plan.simple = len(plan.steps) == 1 && plan.steps[0].node != nil
@@ -1788,7 +1847,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				node := lookupCache[lookupKey]
 				if !lookupKnown[lookupKey] {
 					var err error
-					node, err = e.findMergeNode(store, lookupPlan.labels, matchProps)
+					if lookupPlan.anyLabel {
+						node, err = e.findMergeNodeAnyLabel(store, lookupPlan.labels, matchProps)
+					} else {
+						node, err = e.findMergeNode(store, lookupPlan.labels, matchProps)
+					}
 					if err != nil {
 						return nil, true, err
 					}
@@ -1829,23 +1892,42 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				skipRow = true
 				break
 			}
-			if store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType) != nil {
-				continue
-			}
-			edge := &storage.Edge{
-				ID:         storage.EdgeID(e.generateID()),
-				Type:       relPlan.relType,
-				StartNode:  fromNode.ID,
-				EndNode:    toNode.ID,
-				Properties: map[string]interface{}{},
-			}
-			if err := store.CreateEdge(edge); err != nil {
-				if err != storage.ErrAlreadyExists {
-					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship create failed: %w", err)
+			edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType)
+			created := false
+			if edge == nil {
+				edge = &storage.Edge{
+					ID:         storage.EdgeID(e.generateID()),
+					Type:       relPlan.relType,
+					StartNode:  fromNode.ID,
+					EndNode:    toNode.ID,
+					Properties: map[string]interface{}{},
 				}
-				continue
+				created = true
 			}
-			result.Stats.RelationshipsCreated++
+			if edge.Properties == nil {
+				edge.Properties = map[string]interface{}{}
+			}
+			needsUpdate := false
+			for _, assignment := range relPlan.setAssignments {
+				val := resolveBatchValue(assignment.expr, rowValues)
+				if cur, exists := edge.Properties[assignment.prop]; !exists || !reflect.DeepEqual(canonicalUnwindMergeValue(cur), canonicalUnwindMergeValue(val)) {
+					edge.Properties[assignment.prop] = val
+					needsUpdate = true
+				}
+			}
+			if created {
+				if err := store.CreateEdge(edge); err != nil {
+					if err != storage.ErrAlreadyExists {
+						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship create failed: %w", err)
+					}
+					continue
+				}
+				result.Stats.RelationshipsCreated++
+			} else if needsUpdate {
+				if err := store.UpdateEdge(edge); err != nil {
+					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
+				}
+			}
 			notifyOnce(fromNode.ID)
 			notifyOnce(toNode.ID)
 		}

@@ -31,11 +31,38 @@ func mergeNodeHasLabels(node *storage.Node, labels []string) bool {
 	return true
 }
 
+func mergeNodeHasAnyLabel(node *storage.Node, labels []string) bool {
+	for _, label := range labels {
+		for _, nodeLabel := range node.Labels {
+			if nodeLabel == label {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func mergeNodeMatches(node *storage.Node, labels []string, props map[string]interface{}) bool {
 	if node == nil {
 		return false
 	}
 	if len(labels) > 0 && !mergeNodeHasLabels(node, labels) {
+		return false
+	}
+	for key, val := range props {
+		nodeVal, ok := node.Properties[key]
+		if !ok || !reflect.DeepEqual(canonicalUnwindMergeValue(nodeVal), canonicalUnwindMergeValue(val)) {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeNodeMatchesAnyLabel(node *storage.Node, labels []string, props map[string]interface{}) bool {
+	if node == nil {
+		return false
+	}
+	if len(labels) > 0 && !mergeNodeHasAnyLabel(node, labels) {
 		return false
 	}
 	for key, val := range props {
@@ -278,6 +305,102 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 	for _, node := range allNodes {
 		if mergeNodeMatches(node, labels, props) {
 			e.cacheMergeNode(labels, props, node)
+			return node, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func (e *StorageExecutor) findMergeNodeAnyLabel(store storage.Engine, labels []string, props map[string]interface{}) (*storage.Node, error) {
+	if len(labels) == 0 || len(props) == 0 {
+		return nil, nil
+	}
+
+	schema := store.GetSchema()
+	schemaLookupUsed := false
+	if schema != nil {
+		for _, label := range labels {
+			for _, prop := range mergePropertyNamesSorted(props) {
+				val := props[prop]
+				nodeID, valueFound, constraintExists := schema.LookupUniqueConstraintValue(label, prop, val)
+				if !constraintExists {
+					continue
+				}
+				schemaLookupUsed = true
+				e.markMergeSchemaLookupUsed()
+				if !valueFound {
+					continue
+				}
+				for _, n := range e.loadMergeCandidateNodes(store, []storage.NodeID{nodeID}) {
+					if mergeNodeMatchesAnyLabel(n, labels, props) {
+						return n, nil
+					}
+				}
+			}
+		}
+
+		bestIDs := []storage.NodeID(nil)
+		bestCount := -1
+		for _, label := range labels {
+			for _, prop := range mergePropertyNamesSorted(props) {
+				val := props[prop]
+				if _, ok := schema.GetPropertyIndex(label, prop); !ok {
+					continue
+				}
+				schemaLookupUsed = true
+				e.markMergeSchemaLookupUsed()
+				ids := schema.PropertyIndexLookup(label, prop, val)
+				count := len(ids)
+				if bestCount == -1 || count < bestCount {
+					bestIDs = ids
+					bestCount = count
+					if count <= 1 {
+						break
+					}
+				}
+			}
+			if bestCount == 1 {
+				break
+			}
+		}
+		for _, n := range e.loadMergeCandidateNodes(store, bestIDs) {
+			if mergeNodeMatchesAnyLabel(n, labels, props) {
+				return n, nil
+			}
+		}
+	}
+	if schemaLookupUsed {
+		return nil, nil
+	}
+	e.markMergeScanFallbackUsed()
+
+	seen := make(map[storage.NodeID]struct{})
+	for _, label := range labels {
+		nodes, err := store.GetNodesByLabel(label)
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if _, ok := seen[node.ID]; ok {
+				continue
+			}
+			seen[node.ID] = struct{}{}
+			if mergeNodeMatchesAnyLabel(node, labels, props) {
+				return node, nil
+			}
+		}
+	}
+
+	allNodes, err := store.AllNodes()
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range allNodes {
+		if _, ok := seen[node.ID]; ok {
+			continue
+		}
+		if mergeNodeMatchesAnyLabel(node, labels, props) {
 			return node, nil
 		}
 	}
