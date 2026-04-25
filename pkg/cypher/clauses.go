@@ -517,7 +517,8 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 			}
 		}
 		if strings.HasPrefix(upperRest, "CREATE") ||
-			strings.HasPrefix(upperRest, "MERGE") {
+			strings.HasPrefix(upperRest, "MERGE") ||
+			(strings.HasPrefix(upperRest, "OPTIONAL MATCH") && matchStartedMutation) {
 			if fast, ok, err := e.executeUnwindCompoundMutationBatch(ctx, variable, unwindParamName, items, restQuery); ok {
 				return fast, err
 			}
@@ -560,7 +561,8 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				// in WITH pipelines, execute with per-item parameters instead of literal substitution.
 				// This preserves complex map/string payloads and avoids corrupting clauses like
 				// `WITH cc, row, csByID` when `row` is a map.
-				useParamExecution := strings.Contains(mutationPart, "+=")
+				useParamExecution := strings.Contains(mutationPart, "+=") ||
+					strings.HasPrefix(strings.ToUpper(strings.TrimSpace(mutationPart)), "OPTIONAL MATCH")
 
 				var mutationResult *ExecuteResult
 				var err error
@@ -570,7 +572,17 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 						callParams[k] = v
 					}
 					callParams[variable] = item
-					mutationResult, err = e.executeInternal(ctx, fullQuery, callParams)
+					if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(mutationPart)), "OPTIONAL MATCH") &&
+						findKeywordIndexInContext(mutationPart, "MERGE") > 0 {
+						substitutedMutation := e.replaceVariableInMutationQuery(mutationPart, variable, item)
+						substitutedFull := substitutedMutation
+						if returnPart != "" {
+							substitutedFull += " " + returnPart
+						}
+						mutationResult, err = e.executeCompoundMatchMerge(context.WithValue(ctx, paramsKey, params), substitutedFull)
+					} else {
+						mutationResult, err = e.executeInternal(ctx, fullQuery, callParams)
+					}
 				} else {
 					// Replace variable references ONLY in the mutation clause
 					mutationQuerySubstituted := e.replaceVariableInMutationQuery(mutationPart, variable, item)
@@ -1687,6 +1699,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		e.notifyNodeMutated(key)
 	}
 
+	processedRows := 0
 	for _, item := range items {
 		rowValues := map[string]interface{}{unwindVar: item}
 		skipRow := false
@@ -1839,10 +1852,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		if skipRow {
 			continue
 		}
+		processedRows++
 	}
 
 	if countAlias != "" {
-		result.Rows = [][]interface{}{{int64(len(items))}}
+		result.Rows = [][]interface{}{{int64(processedRows)}}
 	}
 	return result, true, nil
 }
