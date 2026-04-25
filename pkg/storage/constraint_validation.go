@@ -36,6 +36,56 @@ func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
 	}
 }
 
+// RefreshUniqueConstraintValuesForEngine rebuilds single-property UNIQUE value
+// caches from the engine after a schema mutation has been admitted.
+func RefreshUniqueConstraintValuesForEngine(engine Engine, schema *SchemaManager) error {
+	if engine == nil || schema == nil {
+		return nil
+	}
+
+	schema.mu.RLock()
+	uniqueConstraints := make([]*UniqueConstraint, 0, len(schema.uniqueConstraints))
+	for _, uc := range schema.uniqueConstraints {
+		uniqueConstraints = append(uniqueConstraints, uc)
+	}
+	schema.mu.RUnlock()
+	if len(uniqueConstraints) == 0 {
+		return nil
+	}
+
+	for _, uc := range uniqueConstraints {
+		uc.mu.Lock()
+		uc.values = make(map[interface{}]NodeID)
+		uc.valuesAuthoritative = false
+		uc.mu.Unlock()
+	}
+
+	nodes, err := engine.AllNodes()
+	if err != nil {
+		return fmt.Errorf("refresh unique constraint values: scan nodes: %w", err)
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		for _, label := range node.Labels {
+			for propName, propValue := range node.Properties {
+				if err := schema.CheckUniqueConstraint(label, propName, propValue, node.ID); err != nil {
+					return fmt.Errorf("refresh unique constraint values: %w", err)
+				}
+				schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+			}
+		}
+	}
+
+	for _, uc := range uniqueConstraints {
+		uc.mu.Lock()
+		uc.valuesAuthoritative = true
+		uc.mu.Unlock()
+	}
+	return nil
+}
+
 // validateRelationshipConstraintOnCreationForEngine validates relationship constraints
 // using the Engine interface. It scans all edges for violations.
 func validateRelationshipConstraintOnCreationForEngine(engine Engine, c Constraint) error {

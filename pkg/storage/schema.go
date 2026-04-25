@@ -294,11 +294,12 @@ func (sm *SchemaManager) SetPersister(persist func(def *SchemaDefinition) error)
 
 // UniqueConstraint represents a unique constraint on a label and property.
 type UniqueConstraint struct {
-	Name     string
-	Label    string
-	Property string
-	values   map[interface{}]NodeID // Track unique values
-	mu       sync.RWMutex
+	Name                string
+	Label               string
+	Property            string
+	values              map[interface{}]NodeID // Track unique values
+	valuesAuthoritative bool
+	mu                  sync.RWMutex
 }
 
 // PropertyIndex represents a property index for faster lookups.
@@ -619,6 +620,21 @@ func (sm *SchemaManager) LookupUniqueConstraintValue(label, property string, val
 	defer constraint.mu.RUnlock()
 	nodeID, found := constraint.values[value]
 	return nodeID, found, true
+}
+
+func (sm *SchemaManager) lookupUniqueConstraintValueForValidation(label, property string, value interface{}) (NodeID, bool, bool, bool) {
+	sm.mu.RLock()
+	key := fmt.Sprintf("%s:%s", label, property)
+	constraint, exists := sm.uniqueConstraints[key]
+	sm.mu.RUnlock()
+	if !exists || value == nil {
+		return "", false, false, exists
+	}
+
+	constraint.mu.RLock()
+	defer constraint.mu.RUnlock()
+	nodeID, found := constraint.values[value]
+	return nodeID, found, constraint.valuesAuthoritative, true
 }
 
 // RegisterUniqueValue registers a value for a unique constraint.
