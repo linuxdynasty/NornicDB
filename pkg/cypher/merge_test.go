@@ -26,6 +26,18 @@ func (s *staleMergeLookupEngine) GetNodesByLabel(label string) ([]*storage.Node,
 	return s.Engine.GetNodesByLabel(label)
 }
 
+type noScanMergeLookupEngine struct {
+	storage.Engine
+}
+
+func (n *noScanMergeLookupEngine) GetNodesByLabel(label string) ([]*storage.Node, error) {
+	return nil, assert.AnError
+}
+
+func (n *noScanMergeLookupEngine) AllNodes() ([]*storage.Node, error) {
+	return nil, assert.AnError
+}
+
 // ========================================
 // Basic MERGE Node Tests
 // ========================================
@@ -427,6 +439,32 @@ func TestFindMergeNode_UsesPropertyIndexLookup(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, found)
 	require.Equal(t, storage.NodeID("orig-idx-1"), found.ID)
+}
+
+func TestFindMergeNode_UsesUniqueConstraintLookupWithoutScan(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	require.NoError(t, schema.AddUniqueConstraint("function_uid_unique", "Function", "uid"))
+	_, err := store.CreateNode(&storage.Node{
+		ID:     "function-1",
+		Labels: []string{"Function"},
+		Properties: map[string]interface{}{
+			"uid":  "content-entity:e_hot",
+			"name": "hotPath",
+		},
+	})
+	require.NoError(t, err)
+
+	noScanStore := &noScanMergeLookupEngine{Engine: store}
+	exec := NewStorageExecutor(noScanStore)
+
+	found, err := exec.findMergeNode(noScanStore, []string{"Function"}, map[string]interface{}{"uid": "content-entity:e_hot"})
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, storage.NodeID("function-1"), found.ID)
 }
 
 func TestFindMergeNode_RequiresFullMultiLabelMatch(t *testing.T) {
