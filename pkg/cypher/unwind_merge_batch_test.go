@@ -85,6 +85,87 @@ RETURN count(h) AS prepared
 	}
 }
 
+func TestUnwindMergeBatch_MatchMergeSetMapPropertiesUsesHotPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE CONSTRAINT file_path_unique IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE
+`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+CREATE CONSTRAINT annotation_uid_unique IF NOT EXISTS FOR (n:Annotation) REQUIRE n.uid IS UNIQUE
+`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+MERGE (f:File {path: $path})
+SET f.repo_id = $repo_id
+`, map[string]interface{}{"path": "src/handler.go", "repo_id": "repo-1"})
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{
+			"file_path": "src/handler.go",
+			"entity_id": "annotation-1",
+			"properties": map[string]interface{}{
+				"id":              "annotation-1",
+				"name":            "Route",
+				"path":            "src/handler.go",
+				"line_number":     int64(12),
+				"semantic_kind":   "Annotation",
+				"evidence_source": "parser/semantic-entities",
+			},
+		},
+		{
+			"file_path": "src/handler.go",
+			"entity_id": "annotation-2",
+			"properties": map[string]interface{}{
+				"id":              "annotation-2",
+				"name":            "Auth",
+				"path":            "src/handler.go",
+				"line_number":     int64(18),
+				"semantic_kind":   "Annotation",
+				"evidence_source": "parser/semantic-entities",
+			},
+		},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (f:File {path: row.file_path})
+MERGE (n:Annotation {uid: row.entity_id})
+SET n += row.properties
+MERGE (f)-[:CONTAINS]->(n)
+RETURN count(n) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, []string{"prepared"}, res.Columns)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, int64(2), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+
+	nodes, err := store.GetNodesByLabel("Annotation")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	for _, node := range nodes {
+		require.Equal(t, "parser/semantic-entities", node.Properties["evidence_source"])
+		require.NotEmpty(t, node.Properties["semantic_kind"])
+	}
+
+	contains, err := exec.Execute(ctx, `
+MATCH (f:File)-[:CONTAINS]->(n:Annotation)
+RETURN f.path, n.uid
+ORDER BY n.uid
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{
+		{"src/handler.go", "annotation-1"},
+		{"src/handler.go", "annotation-2"},
+	}, contains.Rows)
+}
+
 func TestUnwindMergeBatch_HopUpsertUpdatesExisting(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
