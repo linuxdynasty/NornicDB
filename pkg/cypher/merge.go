@@ -210,6 +210,25 @@ func (e *StorageExecutor) findMergeNode(store storage.Engine, labels []string, p
 			}
 		}
 
+		for _, prop := range mergePropertyNamesSorted(props) {
+			val := props[prop]
+			nodeID, valueFound, constraintExists := schema.LookupUniqueConstraintValue(label, prop, val)
+			if !constraintExists {
+				continue
+			}
+			schemaLookupUsed = true
+			e.markMergeSchemaLookupUsed()
+			if !valueFound {
+				continue
+			}
+			for _, n := range e.loadMergeCandidateNodes(store, []storage.NodeID{nodeID}) {
+				if mergeNodeMatches(n, labels, props) {
+					e.cacheMergeNode(labels, props, n)
+					return n, nil
+				}
+			}
+		}
+
 		bestIDs := []storage.NodeID(nil)
 		bestCount := -1
 		for _, prop := range mergePropertyNamesSorted(props) {
