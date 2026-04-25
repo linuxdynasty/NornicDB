@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -21,6 +22,37 @@ func TestNewStorageExecutor(t *testing.T) {
 	assert.NotNil(t, exec)
 	assert.NotNil(t, exec.parser)
 	assert.NotNil(t, exec.storage)
+}
+
+func TestCloneWithStorageSharesNodeLookupCacheLock(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	clone := exec.cloneWithStorage(store)
+
+	exec.nodeLookupCacheMu.Lock()
+	defer exec.nodeLookupCacheMu.Unlock()
+
+	locked := make(chan struct{})
+	go func() {
+		clone.nodeLookupCacheMu.Lock()
+		defer clone.nodeLookupCacheMu.Unlock()
+		close(locked)
+	}()
+
+	select {
+	case <-locked:
+		t.Fatal("clone acquired node lookup cache lock while original held it")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	exec.nodeLookupCacheMu.Unlock()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("clone did not acquire node lookup cache lock after original released it")
+	}
+	exec.nodeLookupCacheMu.Lock()
 }
 
 func TestExecuteEmptyQuery(t *testing.T) {

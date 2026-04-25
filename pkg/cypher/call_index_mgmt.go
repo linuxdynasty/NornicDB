@@ -167,9 +167,10 @@ func (e *StorageExecutor) callDbClearQueryCaches() (*ExecuteResult, error) {
 	}
 
 	// Clear node lookup cache
-	e.nodeLookupCacheMu.Lock()
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
 	e.nodeLookupCache = make(map[string]*storage.Node, 1000)
-	e.nodeLookupCacheMu.Unlock()
+	cacheMu.Unlock()
 
 	return &ExecuteResult{
 		Columns: []string{"status"},
