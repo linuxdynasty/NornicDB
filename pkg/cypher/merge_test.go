@@ -132,6 +132,33 @@ func TestMergeNode_FindMergeNodeIgnoresStaleCacheEntry(t *testing.T) {
 	assert.Equal(t, storage.NodeID("actual-person"), cached.ID)
 }
 
+func TestCloneWithStorageSharesNodeLookupCacheAndLock(t *testing.T) {
+	parent := NewStorageExecutor(storage.NewMemoryEngine())
+	clone := parent.cloneWithStorage(storage.NewMemoryEngine())
+
+	if parent.nodeLookupCacheMu != clone.nodeLookupCacheMu {
+		t.Fatal("cloneWithStorage must share node lookup cache lock with parent")
+	}
+
+	parent.cacheMergeNode([]string{"Person"}, map[string]interface{}{"id": "parent"}, &storage.Node{
+		ID:         "parent-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"id": "parent"},
+	})
+	clone.cacheMergeNode([]string{"Person"}, map[string]interface{}{"id": "clone"}, &storage.Node{
+		ID:         "clone-node",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"id": "clone"},
+	})
+
+	if got := parent.findMergeNodeInCache(nil, []string{"Person"}, map[string]interface{}{"id": "clone"}); got == nil {
+		t.Fatal("parent cache did not observe clone node")
+	}
+	if got := clone.findMergeNodeInCache(nil, []string{"Person"}, map[string]interface{}{"id": "parent"}); got == nil {
+		t.Fatal("clone cache did not observe parent node")
+	}
+}
+
 // ========================================
 // MERGE with ON CREATE/ON MATCH Tests
 // ========================================

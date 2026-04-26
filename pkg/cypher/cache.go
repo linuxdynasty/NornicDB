@@ -934,6 +934,8 @@ func makeLookupKey(label string, props map[string]interface{}) string {
 //
 //   - The cached node, or nil if not in cache
 func (e *StorageExecutor) lookupCachedNode(label string, props map[string]interface{}) *storage.Node {
+	e.ensureNodeLookupCache()
+
 	key := makeLookupKey(label, props)
 	cacheMu := e.nodeLookupCacheLock()
 	cacheMu.RLock()
@@ -953,6 +955,8 @@ func (e *StorageExecutor) lookupCachedNode(label string, props map[string]interf
 //   - props: Property filters used for lookup
 //   - node: The node to cache
 func (e *StorageExecutor) cacheNodeLookup(label string, props map[string]interface{}, node *storage.Node) {
+	e.ensureNodeLookupCache()
+
 	key := makeLookupKey(label, props)
 	cacheMu := e.nodeLookupCacheLock()
 	cacheMu.Lock()
