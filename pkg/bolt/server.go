@@ -135,6 +135,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/neo4jcompat"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -1614,7 +1615,18 @@ func mapBoltQueryError(err error) (code, message string) {
 			return strings.TrimSpace(rest[:idx]), strings.TrimSpace(rest[idx+1:])
 		}
 	}
+	if transientCode, ok := neo4jcompat.MapTransientTransactionError(msg); ok {
+		return transientCode, msg
+	}
 	return "Neo.ClientError.Statement.SyntaxError", msg
+}
+
+func mapBoltCommitError(err error) (code, message string) {
+	code, message = mapBoltQueryError(err)
+	if code == "Neo.ClientError.Statement.SyntaxError" {
+		return "Neo.ClientError.Transaction.TransactionCommitFailed", message
+	}
+	return code, message
 }
 
 // truncateQuery truncates a query for logging.
@@ -1950,7 +1962,8 @@ func (s *Session) handleCommit(data []byte) error {
 			if s.baseExec != nil {
 				s.executor = s.baseExec
 			}
-			return s.sendFailure("Neo.ClientError.Transaction.TransactionCommitFailed", err.Error())
+			code, message := mapBoltCommitError(err)
+			return s.sendFailure(code, message)
 		}
 	}
 

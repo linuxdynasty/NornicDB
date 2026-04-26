@@ -15,6 +15,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/neo4jcompat"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/txsession"
@@ -1901,24 +1902,7 @@ func mapSessionExecError(err error) (code, message string) {
 // mapTransientTransactionError maps conflict/deadlock style failures to Neo4j-compatible
 // transient transaction errors so clients can safely retry.
 func mapTransientTransactionError(message string) (string, bool) {
-	m := strings.ToLower(strings.TrimSpace(message))
-	if m == "" {
-		return "", false
-	}
-	if strings.Contains(m, "deadlock") {
-		return "Neo.TransientError.Transaction.DeadlockDetected", true
-	}
-	if strings.Contains(m, "changed after transaction start") ||
-		strings.Contains(m, "transaction conflict") ||
-		strings.Contains(m, "write conflict") ||
-		strings.Contains(m, "mvcc: resource pressure") ||
-		strings.Contains(m, "snapshot cancelled due to resource pressure") ||
-		strings.Contains(m, "snapshot forcibly expired due to critical resource pressure") ||
-		strings.Contains(m, "snapshot expired under resource pressure") ||
-		strings.Contains(m, "conflict:") {
-		return "Neo.TransientError.Transaction.Outdated", true
-	}
-	return "", false
+	return neo4jcompat.MapTransientTransactionError(message)
 }
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
