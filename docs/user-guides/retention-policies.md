@@ -59,7 +59,7 @@ Use `retention.default_policies` to load built-in compliance policies at startup
 
 Use `retention.policies` for inline custom policies when you need category-specific durations or archive paths.
 
-## Modified Ebbinghaus, As-Is
+## Ebbinghaus-Roynard, As-Is
 
 If you want a practical four-tier memory model today, use retention as a coarse lifecycle tool:
 
