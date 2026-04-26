@@ -1805,20 +1805,6 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		notified[key] = struct{}{}
 		e.notifyNodeMutated(key)
 	}
-	applyRelationshipAssignments := func(edge *storage.Edge, assignments []unwindSimpleSetAssignment, values map[string]interface{}) bool {
-		if edge.Properties == nil {
-			edge.Properties = map[string]interface{}{}
-		}
-		needsUpdate := false
-		for _, assignment := range assignments {
-			val := resolveBatchValue(assignment.expr, values)
-			if cur, exists := edge.Properties[assignment.prop]; !exists || !reflect.DeepEqual(canonicalUnwindMergeValue(cur), canonicalUnwindMergeValue(val)) {
-				edge.Properties[assignment.prop] = val
-				needsUpdate = true
-			}
-		}
-		return needsUpdate
-	}
 	createRelationship := func(edge *storage.Edge) (*storage.Edge, bool, error) {
 		const maxCreateAttempts = 3
 		for attempt := 0; attempt < maxCreateAttempts; attempt++ {
