@@ -64,6 +64,47 @@ func TestParseUnwindCollectDistinctProjection(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestParseUnwindMergeChainPattern_NamedRelationshipSet(t *testing.T) {
+	plan := parseUnwindMergeChainPattern(`
+MATCH (f:File {path: $file_path})
+MERGE (n:Function {uid: row.entity_id})
+SET n += row.props
+MERGE (f)-[rel:CONTAINS]->(n)
+SET rel.evidence_source = 'projector/canonical',
+    rel.generation_id = row.generation_id
+`)
+
+	require.True(t, plan.supported)
+	require.Len(t, plan.steps, 3)
+
+	lookup := plan.steps[0].lookup
+	require.NotNil(t, lookup)
+	require.Equal(t, "f", lookup.varName)
+	require.Equal(t, []string{"File"}, lookup.labels)
+	require.Equal(t, "path", lookup.matchAssignments[0].prop)
+	require.Equal(t, "$file_path", lookup.matchAssignments[0].expr)
+
+	node := plan.steps[1].node
+	require.NotNil(t, node)
+	require.Equal(t, "n", node.mergeVar)
+	require.Equal(t, []string{"Function"}, node.labels)
+	require.Len(t, node.setAssignments, 1)
+	require.True(t, node.setAssignments[0].mergeMap)
+	require.Equal(t, "row.props", node.setAssignments[0].expr)
+
+	rel := plan.steps[2].relationship
+	require.NotNil(t, rel)
+	require.Equal(t, "f", rel.fromVar)
+	require.Equal(t, "n", rel.toVar)
+	require.Equal(t, "rel", rel.relVar)
+	require.Equal(t, "CONTAINS", rel.relType)
+	require.Len(t, rel.setAssignments, 2)
+	require.Equal(t, "evidence_source", rel.setAssignments[0].prop)
+	require.Equal(t, "'projector/canonical'", rel.setAssignments[0].expr)
+	require.Equal(t, "generation_id", rel.setAssignments[1].prop)
+	require.Equal(t, "row.generation_id", rel.setAssignments[1].expr)
+}
+
 func TestUnwindMergeBatch_HopUpsertShape(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")
@@ -278,6 +319,66 @@ RETURN count(n) AS prepared
 	require.NoError(t, err)
 	require.Len(t, nodes, 1)
 	require.Equal(t, "annotation-1", nodes[0].Properties["uid"])
+}
+
+func TestUnwindMergeBatch_NamedRelationshipSetUsesHotPath(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `
+CREATE CONSTRAINT file_path_unique IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE
+`, nil)
+	require.NoError(t, err)
+	_, err = exec.Execute(ctx, `
+MERGE (f:File {path: $path})
+`, map[string]interface{}{"path": "src/page.ts"})
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{
+			"entity_id":     "function-1",
+			"generation_id": "generation-1",
+			"props": map[string]interface{}{
+				"uid":    "function-1",
+				"name":   "removeMenuItem",
+				"source": "function removeMenuItem() { return 'REMOVE n.flag'; }",
+			},
+		},
+		{
+			"entity_id":     "function-2",
+			"generation_id": "generation-1",
+			"props": map[string]interface{}{
+				"uid":    "function-2",
+				"name":   "archiveDocument",
+				"source": "function archiveDocument() { return 'ok'; }",
+			},
+		},
+	}
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (f:File {path: $file_path})
+MERGE (n:Function {uid: row.entity_id})
+SET n += row.props
+MERGE (f)-[rel:CONTAINS]->(n)
+SET rel.evidence_source = 'projector/canonical',
+    rel.generation_id = row.generation_id
+`, map[string]interface{}{"file_path": "src/page.ts", "rows": rows})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected named relationship SET shape to use generalized unwind merge chain hot path")
+
+	contains, err := exec.Execute(ctx, `
+MATCH (f:File)-[rel:CONTAINS]->(n:Function)
+RETURN n.uid, rel.evidence_source, rel.generation_id
+ORDER BY n.uid
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]interface{}{
+		{"function-1", "projector/canonical", "generation-1"},
+		{"function-2", "projector/canonical", "generation-1"},
+	}, contains.Rows)
 }
 
 func TestUnwindOptionalMatchMutationFallsBackPerRow(t *testing.T) {
