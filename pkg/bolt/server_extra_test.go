@@ -12,6 +12,30 @@ import (
 	"time"
 )
 
+func failureCodeFromResponse(t *testing.T, data []byte) string {
+	t.Helper()
+	if len(data) < 4 {
+		t.Fatalf("response too short: %d bytes", len(data))
+	}
+	chunkSize := int(data[0])<<8 | int(data[1])
+	if len(data) < 2+chunkSize {
+		t.Fatalf("response chunk truncated: size=%d bytes=%d", chunkSize, len(data))
+	}
+	payload := data[2 : 2+chunkSize]
+	if len(payload) < 2 || payload[0] != 0xB1 || payload[1] != MsgFailure {
+		t.Fatalf("response is not a FAILURE message: %x", payload)
+	}
+	metadata, _, err := decodePackStreamMap(payload, 2)
+	if err != nil {
+		t.Fatalf("decode failure metadata: %v", err)
+	}
+	code, ok := metadata["code"].(string)
+	if !ok {
+		t.Fatalf("failure metadata missing string code: %#v", metadata)
+	}
+	return code
+}
+
 func TestDecodePackStreamList_LIST8(t *testing.T) {
 	// LIST8 with more elements
 	data := []byte{0xD4, 0x02} // LIST8 marker + 2 elements
@@ -662,6 +686,25 @@ func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
 		// Transaction state should still be cleared
 		if session.inTransaction {
 			t.Error("transaction state should be cleared even on error")
+		}
+	})
+
+	t.Run("commit conflict returns transient transaction failure", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{
+			commitError: fmt.Errorf("conflict: node nornic:abc changed after transaction start"),
+		}
+		conn := &mockConn{}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
+
+		err := session.handleCommit(nil)
+		if err != nil {
+			t.Fatalf("handleCommit should not return Go error: %v", err)
+		}
+
+		code := failureCodeFromResponse(t, conn.writeData)
+		if code != "Neo.TransientError.Transaction.Outdated" {
+			t.Fatalf("failure code = %q, want %q", code, "Neo.TransientError.Transaction.Outdated")
 		}
 	})
 }

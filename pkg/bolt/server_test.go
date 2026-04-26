@@ -2211,6 +2211,18 @@ func TestMapBoltQueryError(t *testing.T) {
 			wantCode: "Neo.ClientError.Statement.SyntaxError",
 			wantMsg:  "unexpected token at position 5",
 		},
+		{
+			name:     "commit conflict maps to transient transaction error",
+			err:      fmt.Errorf("failed to commit implicit transaction: conflict: edge nornic:abc changed after transaction start"),
+			wantCode: "Neo.TransientError.Transaction.Outdated",
+			wantMsg:  "failed to commit implicit transaction: conflict: edge nornic:abc changed after transaction start",
+		},
+		{
+			name:     "deadlock maps to transient transaction error",
+			err:      fmt.Errorf("deadlock detected while waiting for transaction lock"),
+			wantCode: "Neo.TransientError.Transaction.DeadlockDetected",
+			wantMsg:  "deadlock detected while waiting for transaction lock",
+		},
 	}
 
 	for _, tt := range tests {
