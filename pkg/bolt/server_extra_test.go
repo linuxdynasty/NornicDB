@@ -17,11 +17,23 @@ func failureCodeFromResponse(t *testing.T, data []byte) string {
 	if len(data) < 4 {
 		t.Fatalf("response too short: %d bytes", len(data))
 	}
-	chunkSize := int(data[0])<<8 | int(data[1])
-	if len(data) < 2+chunkSize {
-		t.Fatalf("response chunk truncated: size=%d bytes=%d", chunkSize, len(data))
+
+	var payload []byte
+	for offset := 0; ; {
+		if len(data[offset:]) < 2 {
+			t.Fatalf("response missing chunk header at offset %d: bytes=%d", offset, len(data))
+		}
+		chunkSize := int(data[offset])<<8 | int(data[offset+1])
+		offset += 2
+		if chunkSize == 0 {
+			break
+		}
+		if len(data[offset:]) < chunkSize {
+			t.Fatalf("response chunk truncated: size=%d offset=%d bytes=%d", chunkSize, offset, len(data))
+		}
+		payload = append(payload, data[offset:offset+chunkSize]...)
+		offset += chunkSize
 	}
-	payload := data[2 : 2+chunkSize]
 	if len(payload) < 2 || payload[0] != 0xB1 || payload[1] != MsgFailure {
 		t.Fatalf("response is not a FAILURE message: %x", payload)
 	}
@@ -34,6 +46,23 @@ func failureCodeFromResponse(t *testing.T, data []byte) string {
 		t.Fatalf("failure metadata missing string code: %#v", metadata)
 	}
 	return code
+}
+
+func TestFailureCodeFromResponseConcatenatesChunks(t *testing.T) {
+	payload := append([]byte{0xB1, MsgFailure}, encodePackStreamMap(map[string]any{
+		"code":    "Neo.TransientError.Transaction.DeadlockDetected",
+		"message": "deadlock detected",
+	})...)
+	response := append([]byte{0x00, 0x03}, payload[:3]...)
+	remaining := payload[3:]
+	response = append(response, byte(len(remaining)>>8), byte(len(remaining)))
+	response = append(response, remaining...)
+	response = append(response, 0x00, 0x00)
+
+	code := failureCodeFromResponse(t, response)
+	if code != "Neo.TransientError.Transaction.DeadlockDetected" {
+		t.Fatalf("failureCodeFromResponse() = %q", code)
+	}
 }
 
 func TestDecodePackStreamList_LIST8(t *testing.T) {
