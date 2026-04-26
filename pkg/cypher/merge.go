@@ -97,6 +97,7 @@ func (e *StorageExecutor) evictMergeNodeCacheEntries(labels []string, props map[
 	if len(labels) == 0 || len(props) == 0 {
 		return
 	}
+	e.ensureNodeLookupCache()
 
 	cacheMu := e.nodeLookupCacheLock()
 	cacheMu.Lock()
@@ -117,6 +118,7 @@ func (e *StorageExecutor) findMergeNodeInCache(store storage.Engine, labels []st
 	if len(labels) == 0 || len(props) == 0 {
 		return nil
 	}
+	e.ensureNodeLookupCache()
 
 	var cachedNode *storage.Node
 	cacheMu := e.nodeLookupCacheLock()

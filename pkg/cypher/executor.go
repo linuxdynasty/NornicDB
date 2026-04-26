@@ -335,6 +335,7 @@ type unwindMergeChainPlanCache struct {
 }
 
 func (e *StorageExecutor) cloneWithStorage(override storage.Engine) *StorageExecutor {
+	e.ensureNodeLookupCache()
 	return &StorageExecutor{
 		parser:                      e.parser,
 		storage:                     override,
@@ -371,6 +372,15 @@ func (e *StorageExecutor) nodeLookupCacheLock() *sync.RWMutex {
 		e.nodeLookupCacheMu = &sync.RWMutex{}
 	}
 	return e.nodeLookupCacheMu
+}
+
+func (e *StorageExecutor) ensureNodeLookupCache() {
+	cacheMu := e.nodeLookupCacheLock()
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if e.nodeLookupCache == nil {
+		e.nodeLookupCache = make(map[string]*storage.Node, 1000)
+	}
 }
 
 type vectorEmbedInflight struct {
@@ -2380,6 +2390,8 @@ func (e *StorageExecutor) executeFastPathCreateDeleteRelCount(label1, label2, pr
 // findNodeByLabelAndProperty finds a node by label and a single property value.
 // Uses the node lookup cache for O(1) repeated lookups.
 func (e *StorageExecutor) findNodeByLabelAndProperty(label, prop string, val any) *storage.Node {
+	e.ensureNodeLookupCache()
+
 	// Try cache first (with proper locking)
 	cacheKey := fmt.Sprintf("%s:{%s:%v}", label, prop, val)
 	cacheMu := e.nodeLookupCacheLock()
