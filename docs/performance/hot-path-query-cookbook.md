@@ -576,6 +576,13 @@ idempotently. This shape is optimized by `UnwindMergeChainBatch`; it avoids the
 generic per-row fallback for `UNWIND ... MATCH ... MERGE ... SET += row.props
 ... MERGE relationship` ingestion pipelines.
 
+When the batch creates the relationship target and immediately links an existing
+parent to it, `UnwindMergeChainBatch` skips committed relationship existence
+probes for that batch-created endpoint and uses a batch-local relationship cache
+for duplicate rows. That keeps duplicate input idempotent while avoiding
+repeated scans across an already-large source-node fanout for relationships that
+could not have existed before the target node was created.
+
 ### 7.3e.2 Staged Compound `UNWIND` Version Pipeline
 
 ```cypher
