@@ -134,8 +134,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/buildinfo"
 	"github.com/orneryd/nornicdb/pkg/cypher"
+	nornicerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/multidb"
-	"github.com/orneryd/nornicdb/pkg/neo4jcompat"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -1615,7 +1615,7 @@ func mapBoltQueryError(err error) (code, message string) {
 			return strings.TrimSpace(rest[:idx]), strings.TrimSpace(rest[idx+1:])
 		}
 	}
-	if transientCode, ok := neo4jcompat.MapTransientTransactionError(msg); ok {
+	if transientCode, ok := nornicerrors.MapTransientTransactionError(msg); ok {
 		return transientCode, msg
 	}
 	return "Neo.ClientError.Statement.SyntaxError", msg

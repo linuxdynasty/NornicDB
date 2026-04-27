@@ -14,8 +14,8 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/cypher"
+	nornicerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/multidb"
-	"github.com/orneryd/nornicdb/pkg/neo4jcompat"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/txsession"
@@ -1899,10 +1899,10 @@ func mapSessionExecError(err error) (code, message string) {
 	return "Neo.ClientError.Statement.SyntaxError", msg
 }
 
-// mapTransientTransactionError maps conflict/deadlock style failures to Neo4j-compatible
-// transient transaction errors so clients can safely retry.
+// mapTransientTransactionError maps conflict/deadlock style failures to
+// driver-retryable transient transaction errors.
 func mapTransientTransactionError(message string) (string, bool) {
-	return neo4jcompat.MapTransientTransactionError(message)
+	return nornicerrors.MapTransientTransactionError(message)
 }
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {

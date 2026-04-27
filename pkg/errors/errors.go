@@ -1,15 +1,15 @@
-package neo4jcompat
+package errors
 
 import "strings"
 
 const (
-	// TransientDeadlockDetected is the Neo4j error code clients retry for lock deadlocks.
+	// TransientDeadlockDetected is the retryable wire error code for lock deadlocks.
 	TransientDeadlockDetected = "Neo.TransientError.Transaction.DeadlockDetected"
-	// TransientOutdated is the Neo4j error code clients retry for stale MVCC snapshots.
+	// TransientOutdated is the retryable wire error code for stale MVCC snapshots.
 	TransientOutdated = "Neo.TransientError.Transaction.Outdated"
 )
 
-// MapTransientTransactionError maps conflict/deadlock failures to retryable Neo4j codes.
+// MapTransientTransactionError maps conflict/deadlock failures to retryable transaction codes.
 func MapTransientTransactionError(message string) (string, bool) {
 	m := strings.ToLower(strings.TrimSpace(message))
 	if m == "" {
