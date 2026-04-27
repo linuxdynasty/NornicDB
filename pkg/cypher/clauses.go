@@ -1714,6 +1714,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 
 	lookupCache := make(map[string]*storage.Node)
 	lookupKnown := make(map[string]bool)
+	batchCreatedNodes := make(map[storage.NodeID]struct{})
+	relationshipCache := make(map[string]*storage.Edge)
+	relationshipKnown := make(map[string]bool)
 	notified := make(map[string]struct{})
 	params := getParamsFromContext(ctx)
 	resolveBatchValue := func(expr string, values map[string]interface{}) interface{} {
@@ -1788,6 +1791,25 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		}
 		return nil, false, fmt.Errorf("UNWIND MERGE chain relationship create failed after %d edge ID collisions", maxCreateAttempts)
 	}
+	relationshipKey := func(startID, endID storage.NodeID, edgeType string) string {
+		return string(startID) + "\x00" + edgeType + "\x00" + string(endID)
+	}
+	findRelationship := func(fromNode, toNode *storage.Node, edgeType string) (*storage.Edge, string) {
+		key := relationshipKey(fromNode.ID, toNode.ID, edgeType)
+		if relationshipKnown[key] {
+			return relationshipCache[key], key
+		}
+		_, fromCreated := batchCreatedNodes[fromNode.ID]
+		_, toCreated := batchCreatedNodes[toNode.ID]
+		if fromCreated || toCreated {
+			relationshipKnown[key] = true
+			return nil, key
+		}
+		edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, edgeType)
+		relationshipCache[key] = edge
+		relationshipKnown[key] = true
+		return edge, key
+	}
 
 	processedRows := 0
 	for _, item := range items {
@@ -1832,6 +1854,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						return nil, true, fmt.Errorf("UNWIND MERGE chain create failed: %w", err)
 					}
 					node.ID = actualID
+					batchCreatedNodes[node.ID] = struct{}{}
 					lookupCache[lookupKey] = node
 					e.cacheMergeNode(nodePlan.labels, matchProps, node)
 					result.Stats.NodesCreated++
@@ -1923,7 +1946,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				skipRow = true
 				break
 			}
-			edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType)
+			edge, relKey := findRelationship(fromNode, toNode, relPlan.relType)
 			relationshipChanged := false
 			if edge == nil {
 				edge = &storage.Edge{
@@ -1938,6 +1961,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				if err != nil {
 					return nil, true, err
 				}
+				edge = createdEdge
+				relationshipCache[relKey] = edge
+				relationshipKnown[relKey] = true
 				if created {
 					result.Stats.RelationshipsCreated++
 					relationshipChanged = true
@@ -1945,17 +1971,22 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					if err := store.UpdateEdge(createdEdge); err != nil {
 						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 					}
+					relationshipCache[relKey] = createdEdge
 					relationshipChanged = true
 				}
 			} else if applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues) {
 				if err := store.UpdateEdge(edge); err != nil {
 					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 				}
+				relationshipCache[relKey] = edge
 				relationshipChanged = true
 			}
 			if relationshipChanged {
 				notifyOnce(fromNode.ID)
 				notifyOnce(toNode.ID)
+			}
+			if relPlan.relVar != "" {
+				rowValues[relPlan.relVar] = edge
 			}
 		}
 		if skipRow {

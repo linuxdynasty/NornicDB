@@ -3,11 +3,22 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type countingEdgeLookupEngine struct {
+	storage.Engine
+	edgeBetweenCalls int64
+}
+
+func (e *countingEdgeLookupEngine) GetEdgeBetween(startID, endID storage.NodeID, edgeType string) *storage.Edge {
+	atomic.AddInt64(&e.edgeBetweenCalls, 1)
+	return e.Engine.GetEdgeBetween(startID, endID, edgeType)
+}
 
 func TestUnwindCollectDistinctProjection_UsesHelperRoute(t *testing.T) {
 	base := newTestMemoryEngine(t)
@@ -164,6 +175,63 @@ ORDER BY n.uid
 		{"src/handler.go", "annotation-1"},
 		{"src/handler.go", "annotation-2"},
 	}, contains.Rows)
+}
+
+func TestUnwindMergeBatch_SkipsRelationshipExistenceLookupForBatchCreatedEndpoint(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	namespaced := storage.NewNamespacedEngine(base, "test")
+	store := &countingEdgeLookupEngine{Engine: namespaced}
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	for _, query := range []string{
+		`CREATE CONSTRAINT repo_id_unique IF NOT EXISTS FOR (r:Repository) REQUIRE r.id IS UNIQUE`,
+		`CREATE CONSTRAINT dir_path_unique IF NOT EXISTS FOR (d:Directory) REQUIRE d.path IS UNIQUE`,
+		`CREATE CONSTRAINT file_path_unique IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE`,
+	} {
+		_, err := exec.Execute(ctx, query, nil)
+		require.NoError(t, err)
+	}
+	_, err := exec.Execute(ctx, `
+MERGE (r:Repository {id: $repo_id})
+MERGE (d:Directory {path: $dir_path})
+`, map[string]interface{}{"repo_id": "repo-1", "dir_path": "src"})
+	require.NoError(t, err)
+
+	rows := []map[string]interface{}{
+		{"path": "src/a.go", "name": "a.go", "relative_path": "src/a.go", "language": "go", "repo_id": "repo-1", "scope_id": "scope-1", "generation_id": "gen-1", "dir_path": "src"},
+		{"path": "src/b.go", "name": "b.go", "relative_path": "src/b.go", "language": "go", "repo_id": "repo-1", "scope_id": "scope-1", "generation_id": "gen-1", "dir_path": "src"},
+		{"path": "src/a.go", "name": "a.go", "relative_path": "src/a.go", "language": "go", "repo_id": "repo-1", "scope_id": "scope-1", "generation_id": "gen-1", "dir_path": "src"},
+	}
+
+	res, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (f:File {path: row.path})
+SET f.name = row.name, f.relative_path = row.relative_path,
+    f.language = row.language, f.lang = row.language,
+    f.repo_id = row.repo_id,
+    f.scope_id = row.scope_id, f.generation_id = row.generation_id,
+    f.evidence_source = 'projector/canonical'
+WITH f, row
+MATCH (r:Repository {id: row.repo_id})
+MERGE (r)-[repoRel:REPO_CONTAINS]->(f)
+SET repoRel.evidence_source = 'projector/canonical',
+    repoRel.generation_id = row.generation_id
+WITH f, row
+MATCH (d:Directory {path: row.dir_path})
+MERGE (d)-[dirRel:CONTAINS]->(f)
+SET dirRel.evidence_source = 'projector/canonical',
+    dirRel.generation_id = row.generation_id
+RETURN count(f) AS prepared
+`, map[string]interface{}{"rows": rows})
+	require.NoError(t, err)
+	require.Equal(t, int64(3), toInt64ForTest(t, res.Rows[0][0]))
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
+	require.Zero(t, store.edgeBetweenCalls, "batch-created File endpoints should not scan existing relationship fanout")
+
+	edges, err := store.AllEdges()
+	require.NoError(t, err)
+	require.Len(t, edges, 4, "duplicate file row must reuse batch-created relationships")
 }
 
 func TestUnwindMergeBatch_MatchMergeCountReflectsFilteredRows(t *testing.T) {
