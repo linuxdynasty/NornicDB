@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // failureCodeFromResponse decodes a chunked Bolt FAILURE response and returns
@@ -724,7 +726,7 @@ func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
 
 	t.Run("commit conflict returns transient transaction failure", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{
-			commitError: fmt.Errorf("conflict: node nornic:abc changed after transaction start"),
+			commitError: fmt.Errorf("%w: node nornic:abc changed after transaction start", storage.ErrConflict),
 		}
 		conn := &mockConn{}
 		session := newTestSession(conn, executor)

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	nornicerrors "github.com/orneryd/nornicdb/pkg/errors"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -2213,15 +2214,15 @@ func TestMapBoltQueryError(t *testing.T) {
 		},
 		{
 			name:     "commit conflict maps to transient transaction error",
-			err:      fmt.Errorf("failed to commit implicit transaction: conflict: edge nornic:abc changed after transaction start"),
+			err:      fmt.Errorf("failed to commit implicit transaction: %w: edge nornic:abc changed after transaction start", storage.ErrConflict),
 			wantCode: "Neo.TransientError.Transaction.Outdated",
 			wantMsg:  "failed to commit implicit transaction: conflict: edge nornic:abc changed after transaction start",
 		},
 		{
 			name:     "deadlock maps to transient transaction error",
-			err:      fmt.Errorf("deadlock detected while waiting for transaction lock"),
+			err:      fmt.Errorf("%w: waiting for transaction lock", nornicerrors.ErrTransactionDeadlock),
 			wantCode: "Neo.TransientError.Transaction.DeadlockDetected",
-			wantMsg:  "deadlock detected while waiting for transaction lock",
+			wantMsg:  "transaction deadlock: waiting for transaction lock",
 		},
 	}
 

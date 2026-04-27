@@ -1615,7 +1615,7 @@ func mapBoltQueryError(err error) (code, message string) {
 			return strings.TrimSpace(rest[:idx]), strings.TrimSpace(rest[idx+1:])
 		}
 	}
-	if transientCode, ok := nornicerrors.MapTransientTransactionError(msg); ok {
+	if transientCode, ok := nornicerrors.MapTransientTransactionError(err); ok {
 		return transientCode, msg
 	}
 	return "Neo.ClientError.Statement.SyntaxError", msg
