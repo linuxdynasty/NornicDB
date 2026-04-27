@@ -1252,7 +1252,7 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 
 		if err != nil {
 			code := "Neo.ClientError.Statement.SyntaxError"
-			if transientCode, ok := mapTransientTransactionError(err.Error()); ok {
+			if transientCode, ok := mapTransientTransactionError(err); ok {
 				code = transientCode
 			}
 			response.Errors = append(response.Errors, QueryError{
@@ -1454,7 +1454,7 @@ func (s *Server) handleSingleStatementFastPath(w http.ResponseWriter, r *http.Re
 
 	if execErr != nil {
 		code := "Neo.ClientError.Statement.SyntaxError"
-		if transientCode, ok := mapTransientTransactionError(execErr.Error()); ok {
+		if transientCode, ok := mapTransientTransactionError(execErr); ok {
 			code = transientCode
 		}
 		resp := TransactionResponse{
@@ -1875,7 +1875,7 @@ func mapSessionExecError(err error) (code, message string) {
 		return "Neo.ClientError.Statement.SyntaxError", ""
 	}
 	msg := err.Error()
-	if transientCode, ok := mapTransientTransactionError(msg); ok {
+	if transientCode, ok := mapTransientTransactionError(err); ok {
 		return transientCode, msg
 	}
 	// If the engine already returned a Neo4j-style code prefix
@@ -1899,10 +1899,10 @@ func mapSessionExecError(err error) (code, message string) {
 	return "Neo.ClientError.Statement.SyntaxError", msg
 }
 
-// mapTransientTransactionError maps conflict/deadlock style failures to
+// mapTransientTransactionError maps enumerated transaction failure sentinels to
 // driver-retryable transient transaction errors.
-func mapTransientTransactionError(message string) (string, bool) {
-	return nornicerrors.MapTransientTransactionError(message)
+func mapTransientTransactionError(err error) (string, bool) {
+	return nornicerrors.MapTransientTransactionError(err)
 }
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
@@ -2050,7 +2050,7 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 	commitResult, err := s.txSessions.CommitAndDelete(r.Context(), tx)
 	if err != nil {
 		code := "Neo.ClientError.Transaction.TransactionCommitFailed"
-		if transientCode, ok := mapTransientTransactionError(err.Error()); ok {
+		if transientCode, ok := mapTransientTransactionError(err); ok {
 			code = transientCode
 		}
 		response.Errors = append(response.Errors, QueryError{

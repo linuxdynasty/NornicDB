@@ -1,45 +1,53 @@
 package server
 
-import "testing"
+import (
+	stderrors "errors"
+	"fmt"
+	"testing"
 
+	nornicerrors "github.com/orneryd/nornicdb/pkg/errors"
+)
+
+// TestMapTransientTransactionError verifies that HTTP transaction endpoints use
+// error identity, not localized message text, to decide retryable failures.
 func TestMapTransientTransactionError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		message string
-		want    string
-		ok      bool
+		name string
+		err  error
+		want string
+		ok   bool
 	}{
 		{
-			name:    "conflict changed after start",
-			message: "failed to commit implicit transaction: conflict: node x changed after transaction start",
-			want:    "Neo.TransientError.Transaction.Outdated",
-			ok:      true,
+			name: "conflict changed after start",
+			err:  fmt.Errorf("failed to commit implicit transaction: %w: node x changed after transaction start", nornicerrors.ErrTransactionConflict),
+			want: "Neo.TransientError.Transaction.Outdated",
+			ok:   true,
 		},
 		{
-			name:    "deadlock",
-			message: "deadlock detected while waiting for lock",
-			want:    "Neo.TransientError.Transaction.DeadlockDetected",
-			ok:      true,
+			name: "deadlock",
+			err:  fmt.Errorf("%w: waiting for lock", nornicerrors.ErrTransactionDeadlock),
+			want: "Neo.TransientError.Transaction.DeadlockDetected",
+			ok:   true,
 		},
 		{
-			name:    "graceful snapshot expiration",
-			message: "failed to create node: mvcc: snapshot cancelled due to resource pressure",
-			want:    "Neo.TransientError.Transaction.Outdated",
-			ok:      true,
+			name: "graceful snapshot expiration",
+			err:  fmt.Errorf("failed to create node: %w", nornicerrors.ErrMVCCSnapshotGracefulCancel),
+			want: "Neo.TransientError.Transaction.Outdated",
+			ok:   true,
 		},
 		{
-			name:    "hard snapshot expiration",
-			message: "mvcc: snapshot forcibly expired due to critical resource pressure",
-			want:    "Neo.TransientError.Transaction.Outdated",
-			ok:      true,
+			name: "hard snapshot expiration",
+			err:  fmt.Errorf("begin read: %w", nornicerrors.ErrMVCCSnapshotHardExpired),
+			want: "Neo.TransientError.Transaction.Outdated",
+			ok:   true,
 		},
 		{
-			name:    "syntax error passthrough",
-			message: "invalid input 'RETURNN'",
-			want:    "",
-			ok:      false,
+			name: "syntax error passthrough",
+			err:  stderrors.New("invalid input 'RETURNN'"),
+			want: "",
+			ok:   false,
 		},
 	}
 
@@ -47,7 +55,7 @@ func TestMapTransientTransactionError(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := mapTransientTransactionError(tc.message)
+			got, ok := mapTransientTransactionError(tc.err)
 			if ok != tc.ok {
 				t.Fatalf("ok mismatch: got %v want %v", ok, tc.ok)
 			}
