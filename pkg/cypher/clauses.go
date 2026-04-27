@@ -1714,6 +1714,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 
 	lookupCache := make(map[string]*storage.Node)
 	lookupKnown := make(map[string]bool)
+	// Relationships touching nodes created inside this batch cannot exist in
+	// committed storage yet, but duplicate input rows must still reuse any edge
+	// created earlier in the same batch.
 	batchCreatedNodes := make(map[storage.NodeID]struct{})
 	relationshipCache := make(map[string]*storage.Edge)
 	relationshipKnown := make(map[string]bool)
@@ -1794,6 +1797,8 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	relationshipKey := func(startID, endID storage.NodeID, edgeType string) string {
 		return string(startID) + "\x00" + edgeType + "\x00" + string(endID)
 	}
+	// findRelationship prefers the batch-local relationship cache and only
+	// falls back to committed storage when both endpoints predate this batch.
 	findRelationship := func(fromNode, toNode *storage.Node, edgeType string) (*storage.Edge, string) {
 		key := relationshipKey(fromNode.ID, toNode.ID, edgeType)
 		if relationshipKnown[key] {

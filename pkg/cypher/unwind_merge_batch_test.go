@@ -10,11 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// countingEdgeLookupEngine records relationship existence probes while
+// delegating all storage behavior to the wrapped engine.
 type countingEdgeLookupEngine struct {
 	storage.Engine
 	edgeBetweenCalls int64
 }
 
+// GetEdgeBetween counts committed relationship lookups so hot-path tests can
+// distinguish true batch-local reuse from storage-level fanout scans.
 func (e *countingEdgeLookupEngine) GetEdgeBetween(startID, endID storage.NodeID, edgeType string) *storage.Edge {
 	atomic.AddInt64(&e.edgeBetweenCalls, 1)
 	return e.Engine.GetEdgeBetween(startID, endID, edgeType)
@@ -177,6 +181,9 @@ ORDER BY n.uid
 	}, contains.Rows)
 }
 
+// TestUnwindMergeBatch_SkipsRelationshipExistenceLookupForBatchCreatedEndpoint
+// verifies that a batch-created relationship target avoids committed-store
+// existence probes while duplicate rows still reuse the batch-created edges.
 func TestUnwindMergeBatch_SkipsRelationshipExistenceLookupForBatchCreatedEndpoint(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	namespaced := storage.NewNamespacedEngine(base, "test")
@@ -227,7 +234,7 @@ RETURN count(f) AS prepared
 	require.NoError(t, err)
 	require.Equal(t, int64(3), toInt64ForTest(t, res.Rows[0][0]))
 	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected generalized unwind merge chain hot path")
-	require.Zero(t, store.edgeBetweenCalls, "batch-created File endpoints should not scan existing relationship fanout")
+	require.Zero(t, atomic.LoadInt64(&store.edgeBetweenCalls), "batch-created File endpoints should not scan existing relationship fanout")
 
 	edges, err := store.AllEdges()
 	require.NoError(t, err)
