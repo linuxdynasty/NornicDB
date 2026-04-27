@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+// failureCodeFromResponse decodes a chunked Bolt FAILURE response and returns
+// its Neo4j-compatible error code.
 func failureCodeFromResponse(t *testing.T, data []byte) string {
 	t.Helper()
 	if len(data) < 4 {
@@ -48,6 +50,8 @@ func failureCodeFromResponse(t *testing.T, data []byte) string {
 	return code
 }
 
+// TestFailureCodeFromResponseConcatenatesChunks verifies that test assertions
+// inspect the complete Bolt payload instead of only the first response chunk.
 func TestFailureCodeFromResponseConcatenatesChunks(t *testing.T) {
 	payload := append([]byte{0xB1, MsgFailure}, encodePackStreamMap(map[string]any{
 		"code":    "Neo.TransientError.Transaction.DeadlockDetected",

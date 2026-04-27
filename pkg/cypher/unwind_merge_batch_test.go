@@ -64,6 +64,8 @@ func TestParseUnwindCollectDistinctProjection(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TestParseUnwindMergeChainPattern_NamedRelationshipSet verifies that the
+// generalized UNWIND MERGE parser keeps relationship variables and assignments.
 func TestParseUnwindMergeChainPattern_NamedRelationshipSet(t *testing.T) {
 	plan := parseUnwindMergeChainPattern(`
 MATCH (f:File {path: $file_path})
@@ -321,6 +323,8 @@ RETURN count(n) AS prepared
 	require.Equal(t, "annotation-1", nodes[0].Properties["uid"])
 }
 
+// TestUnwindMergeBatch_NamedRelationshipSetUsesHotPath protects the PCG
+// canonical edge-write shape from falling back to generic per-row execution.
 func TestUnwindMergeBatch_NamedRelationshipSetUsesHotPath(t *testing.T) {
 	base := newTestMemoryEngine(t)
 	store := storage.NewNamespacedEngine(base, "test")

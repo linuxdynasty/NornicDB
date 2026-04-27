@@ -2,6 +2,8 @@ package errors
 
 import "testing"
 
+// TestMapTransientTransactionError verifies the protocol-code boundary for
+// retryable transaction failures and non-retryable ordinary errors.
 func TestMapTransientTransactionError(t *testing.T) {
 	tests := []struct {
 		name    string

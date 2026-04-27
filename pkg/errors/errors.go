@@ -9,7 +9,9 @@ const (
 	TransientOutdated = "Neo.TransientError.Transaction.Outdated"
 )
 
-// MapTransientTransactionError maps conflict/deadlock failures to retryable transaction codes.
+// MapTransientTransactionError maps known MVCC conflict and deadlock messages
+// to Neo4j-compatible transient transaction codes. It returns false for
+// ordinary errors so callers can preserve their protocol-specific fallback.
 func MapTransientTransactionError(message string) (string, bool) {
 	m := strings.ToLower(strings.TrimSpace(message))
 	if m == "" {
