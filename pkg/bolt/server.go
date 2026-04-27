@@ -1621,6 +1621,9 @@ func mapBoltQueryError(err error) (code, message string) {
 	return "Neo.ClientError.Statement.SyntaxError", msg
 }
 
+// mapBoltCommitError preserves Bolt's commit-failed fallback for ordinary
+// errors while allowing retryable transaction conflicts to surface as Neo4j
+// transient errors.
 func mapBoltCommitError(err error) (code, message string) {
 	code, message = mapBoltQueryError(err)
 	if code == "Neo.ClientError.Statement.SyntaxError" {
