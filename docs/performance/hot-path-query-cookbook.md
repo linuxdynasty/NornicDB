@@ -412,10 +412,13 @@ MERGE (a)-[r:LINKS_TO]->(b)
 SET r.updatedAt = $now;
 ```
 
-NornicDB maintains a direct relationship-existence index for this shape, keyed
-by start node, end node, relationship type, and edge ID. That keeps idempotent
-relationship `MERGE` checks from degrading with the start node's total outgoing
-degree.
+NornicDB maintains direct relationship-existence indexes for this shape. The
+typed head key maps `(start node, end node, relationship type)` to one edge ID
+for the common single-edge lookup, while the set key keeps
+`(start node, end node, relationship type, edge ID)` entries for
+`GetEdgesBetween` and valid multiple same-type edges. Reads fall back to the
+legacy outgoing-edge scan and self-heal the new keys when opening mixed-version
+stores, so correctness does not depend solely on the one-time backfill marker.
 
 ### 6.2 Relationship Attach By ID
 

@@ -98,7 +98,7 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 		if err := txn.Set(edgeTypeIndexKey(edge.Type, edge.ID), []byte{}); err != nil {
 			return err
 		}
-		if err := txn.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+		if err := writeEdgeBetweenIndexesInTxn(txn, edge); err != nil {
 			return err
 		}
 		if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
@@ -215,7 +215,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 			if err := txn.Delete(incomingIndexKey(existing.EndNode, edge.ID)); err != nil {
 				return err
 			}
-			if err := txn.Delete(edgeBetweenIndexKey(existing.StartNode, existing.EndNode, existing.Type, edge.ID)); err != nil {
+			if err := deleteEdgeBetweenIndexesInTxn(txn, existing); err != nil {
 				return err
 			}
 
@@ -226,7 +226,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 			if err := txn.Set(incomingIndexKey(edge.EndNode, edge.ID), []byte{}); err != nil {
 				return err
 			}
-			if err := txn.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+			if err := writeEdgeBetweenIndexesInTxn(txn, edge); err != nil {
 				return err
 			}
 		}
@@ -239,7 +239,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 				}
 			}
 			if existing.StartNode == edge.StartNode && existing.EndNode == edge.EndNode {
-				if err := txn.Delete(edgeBetweenIndexKey(existing.StartNode, existing.EndNode, existing.Type, edge.ID)); err != nil {
+				if err := deleteEdgeBetweenIndexesInTxn(txn, existing); err != nil {
 					return err
 				}
 			}
@@ -249,7 +249,7 @@ func (b *BadgerEngine) UpdateEdge(edge *Edge) error {
 				}
 			}
 			if existing.StartNode == edge.StartNode && existing.EndNode == edge.EndNode {
-				if err := txn.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+				if err := writeEdgeBetweenIndexesInTxn(txn, edge); err != nil {
 					return err
 				}
 			}
@@ -357,7 +357,7 @@ func (b *BadgerEngine) deleteEdgeInTxn(txn *badger.Txn, id EdgeID) error {
 	if err := txn.Delete(edgeTypeIndexKey(edge.Type, id)); err != nil {
 		return err
 	}
-	if err := txn.Delete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, id)); err != nil {
+	if err := deleteEdgeBetweenIndexesInTxn(txn, edge); err != nil {
 		return err
 	}
 

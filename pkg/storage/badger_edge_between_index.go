@@ -41,7 +41,10 @@ func (b *BadgerEngine) ensureEdgeBetweenIndex() error {
 // rebuildEdgeBetweenIndex scans stored edges and writes direct lookup entries.
 func (b *BadgerEngine) rebuildEdgeBetweenIndex() error {
 	if err := b.db.DropPrefix([]byte{prefixEdgeBetweenIndex}); err != nil {
-		return fmt.Errorf("clear edge-between index before rebuild: %w", err)
+		return fmt.Errorf("clear edge-between set index before rebuild: %w", err)
+	}
+	if err := b.db.DropPrefix([]byte{prefixEdgeBetweenHead}); err != nil {
+		return fmt.Errorf("clear edge-between head index before rebuild: %w", err)
 	}
 
 	batch := b.db.NewWriteBatch()
@@ -73,6 +76,9 @@ func (b *BadgerEngine) rebuildEdgeBetweenIndex() error {
 					return fmt.Errorf("decode edge for edge-between index: %w", err)
 				}
 				if err := batch.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+					return err
+				}
+				if err := batch.Set(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type), []byte(edge.ID)); err != nil {
 					return err
 				}
 				batchCount++

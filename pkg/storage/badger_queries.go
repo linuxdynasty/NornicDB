@@ -526,34 +526,20 @@ func (b *BadgerEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 		return nil, ErrInvalidID
 	}
 
-	b.mu.RLock()
-	if b.closed {
-		b.mu.RUnlock()
-		return nil, ErrStorageClosed
-	}
-	b.mu.RUnlock()
-
-	var result []*Edge
-	err := b.withView(func(txn *badger.Txn) error {
-		prefix := edgeBetweenIndexPrefix(startID, endID)
-		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
-		defer it.Close()
-
-		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
-			edgeID := extractEdgeIDFromEdgeBetweenIndexKey(it.Item().Key())
-			if edgeID == "" {
-				continue
-			}
-			edge, err := edgeFromTxn(txn, edgeID)
-			if err != nil {
-				continue
-			}
-			result = append(result, edge)
-		}
-		return nil
-	})
+	result, err := b.edgesBetweenFromSetIndex(startID, endID, "")
 	if err != nil {
 		return nil, err
+	}
+	if len(result) > 0 {
+		return result, nil
+	}
+
+	result, err = b.edgesBetweenFromLegacyOutgoingIndex(startID, endID, "")
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > 0 {
+		_ = b.selfHealEdgeBetweenIndexes(result)
 	}
 
 	return result, nil
@@ -564,11 +550,64 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 	if source == "" || target == "" {
 		return nil
 	}
+	if edgeType != "" {
+		if edge, err := b.edgeBetweenFromHeadIndex(source, target, edgeType); err == nil && edge != nil {
+			return edge
+		}
+	}
+
+	indexed, err := b.edgesBetweenFromSetIndex(source, target, edgeType)
+	if err == nil && len(indexed) > 0 {
+		_ = b.selfHealEdgeBetweenIndexes(indexed[:1])
+		return indexed[0]
+	}
+
+	legacy, err := b.edgesBetweenFromLegacyOutgoingIndex(source, target, edgeType)
+	if err == nil && len(legacy) > 0 {
+		_ = b.selfHealEdgeBetweenIndexes(legacy)
+		return legacy[0]
+	}
+
+	return nil
+}
+
+// edgeBetweenFromHeadIndex loads the typed common-case lookup without scanning.
+func (b *BadgerEngine) edgeBetweenFromHeadIndex(source, target NodeID, edgeType string) (*Edge, error) {
 	var result *Edge
-	_ = b.withView(func(txn *badger.Txn) error {
-		prefix := edgeBetweenIndexPrefix(source, target)
+	err := b.withView(func(txn *badger.Txn) error {
+		item, err := txn.Get(edgeBetweenHeadKey(source, target, edgeType))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var edgeID EdgeID
+		if err := item.Value(func(val []byte) error {
+			edgeID = EdgeID(append([]byte(nil), val...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		edge, err := edgeFromTxn(txn, edgeID)
+		if err != nil {
+			return nil
+		}
+		if edgeMatchesBetween(edge, source, target, edgeType) {
+			result = edge
+		}
+		return nil
+	})
+	return result, err
+}
+
+// edgesBetweenFromSetIndex scans the exact relationship set index.
+func (b *BadgerEngine) edgesBetweenFromSetIndex(startID, endID NodeID, edgeType string) ([]*Edge, error) {
+	var result []*Edge
+	err := b.withView(func(txn *badger.Txn) error {
+		prefix := edgeBetweenIndexPrefix(startID, endID)
 		if edgeType != "" {
-			prefix = typedEdgeBetweenIndexPrefix(source, target, edgeType)
+			prefix = typedEdgeBetweenIndexPrefix(startID, endID, edgeType)
 		}
 		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
 		defer it.Close()
@@ -579,15 +618,64 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 				continue
 			}
 			edge, err := edgeFromTxn(txn, edgeID)
-			if err != nil {
+			if err != nil || !edgeMatchesBetween(edge, startID, endID, edgeType) {
 				continue
 			}
-			result = edge
-			return nil
+			result = append(result, edge)
 		}
 		return nil
 	})
-	return result
+	return result, err
+}
+
+// edgesBetweenFromLegacyOutgoingIndex preserves compatibility with stores that
+// predate the edge-between indexes or missed a self-heal/backfill window.
+func (b *BadgerEngine) edgesBetweenFromLegacyOutgoingIndex(startID, endID NodeID, edgeType string) ([]*Edge, error) {
+	var result []*Edge
+	err := b.withView(func(txn *badger.Txn) error {
+		prefix := outgoingIndexPrefix(startID)
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
+
+		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+			edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+			if edgeID == "" {
+				continue
+			}
+			edge, err := edgeFromTxn(txn, edgeID)
+			if err != nil || !edgeMatchesBetween(edge, startID, endID, edgeType) {
+				continue
+			}
+			result = append(result, edge)
+		}
+		return nil
+	})
+	return result, err
+}
+
+// selfHealEdgeBetweenIndexes repairs lookup indexes discovered through a
+// fallback read, preventing ready-marker drift from becoming a correctness bug.
+func (b *BadgerEngine) selfHealEdgeBetweenIndexes(edges []*Edge) error {
+	return b.withUpdate(func(txn *badger.Txn) error {
+		for _, edge := range edges {
+			if edge == nil {
+				continue
+			}
+			if err := writeEdgeBetweenIndexesInTxn(txn, edge); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// edgeMatchesBetween rejects stale secondary-index entries before returning an
+// edge from either the head, set, or legacy fallback path.
+func edgeMatchesBetween(edge *Edge, startID, endID NodeID, edgeType string) bool {
+	if edge == nil || edge.StartNode != startID || edge.EndNode != endID {
+		return false
+	}
+	return edgeType == "" || strings.EqualFold(edge.Type, edgeType)
 }
 
 // edgeFromTxn loads an edge record while callers iterate a secondary index.

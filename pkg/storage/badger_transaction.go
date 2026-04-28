@@ -212,6 +212,19 @@ func (tx *BadgerTransaction) bufferDelete(key []byte) {
 	tx.pendingDeletes[keyStr] = true
 }
 
+// bufferSetEdgeBetweenIndexes stages both exact relationship lookup indexes.
+func (tx *BadgerTransaction) bufferSetEdgeBetweenIndexes(edge *Edge) {
+	tx.bufferSet(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
+	tx.bufferSet(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type), []byte(edge.ID))
+}
+
+// bufferDeleteEdgeBetweenIndexes stages set removal and conservatively clears
+// the head so later reads can self-heal from the set or legacy outgoing index.
+func (tx *BadgerTransaction) bufferDeleteEdgeBetweenIndexes(edge *Edge) {
+	tx.bufferDelete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID))
+	tx.bufferDelete(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type))
+}
+
 // flushBufferedWrites applies all buffered writes and deletes to the Badger transaction.
 // This is called at commit time to batch all writes together.
 func (tx *BadgerTransaction) flushBufferedWrites() error {
@@ -572,7 +585,7 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 		tx.bufferDelete(outgoingIndexKey(edge.StartNode, edgeID))
 		tx.bufferDelete(incomingIndexKey(edge.EndNode, edgeID))
 		tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
-		tx.bufferDelete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edgeID))
+		tx.bufferDeleteEdgeBetweenIndexes(edge)
 
 		deletedCount++
 		deletedIDs = append(deletedIDs, edgeID)
@@ -670,7 +683,7 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	// Without this, edges created inside implicit/explicit transactions are invisible
 	// to type-based scans and Cypher fast-paths that rely on the edge-type index.
 	tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
-	tx.bufferSet(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
+	tx.bufferSetEdgeBetweenIndexes(edge)
 
 	// Track for read-your-writes
 	edgeCopy := copyEdge(edge)
@@ -733,10 +746,10 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 
 		tx.bufferDelete(outgoingIndexKey(oldEdge.StartNode, edge.ID))
 		tx.bufferDelete(incomingIndexKey(oldEdge.EndNode, edge.ID))
-		tx.bufferDelete(edgeBetweenIndexKey(oldEdge.StartNode, oldEdge.EndNode, oldEdge.Type, edge.ID))
+		tx.bufferDeleteEdgeBetweenIndexes(oldEdge)
 		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
 		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
-		tx.bufferSet(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
+		tx.bufferSetEdgeBetweenIndexes(edge)
 	}
 
 	// If type changed, update edge type index.
@@ -745,13 +758,13 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 			tx.bufferDelete(edgeTypeIndexKey(oldEdge.Type, edge.ID))
 		}
 		if oldEdge.StartNode == edge.StartNode && oldEdge.EndNode == edge.EndNode {
-			tx.bufferDelete(edgeBetweenIndexKey(oldEdge.StartNode, oldEdge.EndNode, oldEdge.Type, edge.ID))
+			tx.bufferDeleteEdgeBetweenIndexes(oldEdge)
 		}
 		if edge.Type != "" {
 			tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
 		}
 		if oldEdge.StartNode == edge.StartNode && oldEdge.EndNode == edge.EndNode {
-			tx.bufferSet(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
+			tx.bufferSetEdgeBetweenIndexes(edge)
 		}
 	}
 
@@ -814,7 +827,7 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 
 	// Buffer edge type index deletion.
 	tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
-	tx.bufferDelete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edgeID))
+	tx.bufferDeleteEdgeBetweenIndexes(edge)
 
 	// Track deletion
 	delete(tx.pendingEdges, edgeID)

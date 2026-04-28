@@ -775,6 +775,58 @@ func TestBadgerEngine_GetEdgeBetweenIndexMaintenance(t *testing.T) {
 	assert.Nil(t, engine.GetEdgeBetween(n1.ID, n3.ID, "FOLLOWS"))
 }
 
+func TestBadgerEngine_GetEdgeBetweenHeadIndexSelfHealsFromLegacyScan(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("edge-head-heal-n1")
+	n2 := testNode("edge-head-heal-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	edge := testEdge("edge-head-heal-e1", n1.ID, n2.ID, "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		if err := txn.Delete(edgeBetweenHeadKey(n1.ID, n2.ID, "KNOWS")); err != nil {
+			return err
+		}
+		return txn.Delete(edgeBetweenIndexKey(n1.ID, n2.ID, "KNOWS", edge.ID))
+	}))
+
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	got := engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS")
+	require.NotNil(t, got)
+	assert.Equal(t, edge.ID, got.ID)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+}
+
+func TestBadgerEngine_GetEdgesBetweenKeepsSameTypeSetWithHead(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("edge-head-set-n1")
+	n2 := testNode("edge-head-set-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	first := testEdge("edge-head-set-e1", n1.ID, n2.ID, "KNOWS")
+	second := testEdge("edge-head-set-e2", n1.ID, n2.ID, "KNOWS")
+	require.NoError(t, engine.CreateEdge(first))
+	require.NoError(t, engine.CreateEdge(second))
+
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", first.ID, true)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", second.ID, true)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", second.ID, true)
+	edges, err := engine.GetEdgesBetween(n1.ID, n2.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 2)
+	assert.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
+}
+
 func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 
@@ -795,6 +847,9 @@ func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 		if err := txn.Delete(edgeBetweenIndexKey(n1.ID, n2.ID, "KNOWS", edge.ID)); err != nil {
 			return err
 		}
+		if err := txn.Delete(edgeBetweenHeadKey(n1.ID, n2.ID, "KNOWS")); err != nil {
+			return err
+		}
 		if err := txn.Set(edgeBetweenIndexKey(n1.ID, n3.ID, "STALE", staleEdgeID), []byte{}); err != nil {
 			return err
 		}
@@ -803,9 +858,11 @@ func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, true)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 	require.NoError(t, engine.ensureEdgeBetweenIndex())
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, false)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
 	require.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
 }
 
@@ -1579,6 +1636,13 @@ func TestKeyEncoding(t *testing.T) {
 		assert.Equal(t, EdgeID(prefixTestID("edge-1")), extractEdgeIDFromEdgeBetweenIndexKey(key))
 		assert.True(t, hasBytePrefix(key, edgeBetweenIndexPrefix(NodeID(prefixTestID("node-1")), NodeID(prefixTestID("node-2")))))
 		assert.True(t, hasBytePrefix(key, typedEdgeBetweenIndexPrefix(NodeID(prefixTestID("node-1")), NodeID(prefixTestID("node-2")), "knows")))
+
+		headKey := edgeBetweenHeadKey(
+			NodeID(prefixTestID("node-1")),
+			NodeID(prefixTestID("node-2")),
+			"KNOWS",
+		)
+		assert.Equal(t, prefixEdgeBetweenHead, headKey[0])
 	})
 
 	t.Run("extract helpers return empty on malformed keys", func(t *testing.T) {
@@ -1586,6 +1650,39 @@ func TestKeyEncoding(t *testing.T) {
 		assert.Equal(t, EdgeID(""), extractEdgeIDFromEdgeBetweenIndexKey([]byte{prefixEdgeBetweenIndex, 'x', 'y'}))
 		assert.Equal(t, NodeID(""), extractNodeIDFromLabelIndex([]byte{prefixLabelIndex, 'P', 'e'}, len("Person")))
 	})
+}
+
+// requireEdgeBetweenHeadEntry verifies the typed single-edge head index without
+// using GetEdgeBetween, so fallback/self-heal logic cannot hide a missing head.
+func requireEdgeBetweenHeadEntry(
+	t *testing.T,
+	engine *BadgerEngine,
+	startID NodeID,
+	endID NodeID,
+	edgeType string,
+	edgeID EdgeID,
+	want bool,
+) {
+	t.Helper()
+
+	key := edgeBetweenHeadKey(startID, endID, edgeType)
+	var exists bool
+	err := engine.withView(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if err == nil {
+			return item.Value(func(val []byte) error {
+				exists = EdgeID(val) == edgeID
+				return nil
+			})
+		}
+		if err == badger.ErrKeyNotFound {
+			exists = false
+			return nil
+		}
+		return err
+	})
+	require.NoError(t, err)
+	assert.Equal(t, want, exists)
 }
 
 // requireEdgeBetweenIndexEntry verifies the direct relationship-existence index
