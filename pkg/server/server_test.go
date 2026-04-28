@@ -4079,9 +4079,14 @@ func TestAuthHandlers_BranchExpansion(t *testing.T) {
 }
 
 func TestServer_AdditionalBranches_ReusesFixture(t *testing.T) {
-	server, _ := setupTestServer(t)
+	newServer := func(t *testing.T) *Server {
+		t.Helper()
+		server, _ := setupTestServer(t)
+		return server
+	}
 
 	t.Run("embed trigger and rbac helpers", func(t *testing.T) {
+		server := newServer(t)
 		baseReq := httptest.NewRequest(http.MethodGet, "/api/bifrost/status", nil)
 		sameReq := server.withBifrostRBAC(baseReq)
 		require.Equal(t, baseReq, sameReq)
@@ -4117,6 +4122,7 @@ func TestServer_AdditionalBranches_ReusesFixture(t *testing.T) {
 	})
 
 	t.Run("rebuild and embed trigger error branches", func(t *testing.T) {
+		server := newServer(t)
 		rebuildReq := httptest.NewRequest(http.MethodPost, "/nornicdb/search/rebuild", strings.NewReader(`{"database":"nornic"}`))
 		rebuildRec := httptest.NewRecorder()
 		server.handleSearchRebuild(rebuildRec, rebuildReq)
@@ -4143,6 +4149,7 @@ func TestServer_AdditionalBranches_ReusesFixture(t *testing.T) {
 	})
 
 	t.Run("search build started known dbs includes composite branch", func(t *testing.T) {
+		server := newServer(t)
 		ref := multidb.ConstituentRef{
 			Alias:        server.dbManager.DefaultDatabaseName(),
 			DatabaseName: server.dbManager.DefaultDatabaseName(),
@@ -4155,6 +4162,7 @@ func TestServer_AdditionalBranches_ReusesFixture(t *testing.T) {
 	})
 
 	t.Run("auth utility minor gaps", func(t *testing.T) {
+		server := newServer(t)
 		req := httptest.NewRequest(http.MethodGet, "/auth/oauth/callback?code=x&state=y", nil)
 		rec := httptest.NewRecorder()
 		server.oauthManager = nil
