@@ -780,23 +780,32 @@ func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 
 	n1 := testNode("edge-index-backfill-n1")
 	n2 := testNode("edge-index-backfill-n2")
+	n3 := testNode("edge-index-backfill-n3")
 	_, err := engine.CreateNode(n1)
 	require.NoError(t, err)
 	_, err = engine.CreateNode(n2)
 	require.NoError(t, err)
+	_, err = engine.CreateNode(n3)
+	require.NoError(t, err)
 
 	edge := testEdge("edge-index-backfill-e1", n1.ID, n2.ID, "KNOWS")
+	staleEdgeID := EdgeID(prefixTestID("edge-index-backfill-stale"))
 	require.NoError(t, engine.CreateEdge(edge))
 	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
 		if err := txn.Delete(edgeBetweenIndexKey(n1.ID, n2.ID, "KNOWS", edge.ID)); err != nil {
+			return err
+		}
+		if err := txn.Set(edgeBetweenIndexKey(n1.ID, n3.ID, "STALE", staleEdgeID), []byte{}); err != nil {
 			return err
 		}
 		return txn.Delete(edgeBetweenIndexReadyKey)
 	}))
 
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, true)
 	require.NoError(t, engine.ensureEdgeBetweenIndex())
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, false)
 	require.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
 }
 
