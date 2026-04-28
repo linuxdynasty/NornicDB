@@ -18,22 +18,23 @@ import (
 // Key prefixes for BadgerDB storage organization
 // Using single-byte prefixes for efficiency
 const (
-	prefixNode          = byte(0x01) // nodes:nodeID -> Node
-	prefixEdge          = byte(0x02) // edges:edgeID -> Edge
-	prefixLabelIndex    = byte(0x03) // label:labelName:nodeID -> []byte{}
-	prefixOutgoingIndex = byte(0x04) // outgoing:nodeID:edgeID -> []byte{}
-	prefixIncomingIndex = byte(0x05) // incoming:nodeID:edgeID -> []byte{}
-	prefixEdgeTypeIndex = byte(0x06) // edgetype:type:edgeID -> []byte{} (for fast type lookups)
-	prefixPendingEmbed  = byte(0x07) // pending_embed:nodeID -> []byte{} (nodes needing embedding)
-	prefixEmbedding     = byte(0x08) // embedding:nodeID:chunkIndex -> []float32 (separate storage for large embeddings)
-	prefixSchema        = byte(0x09) // schema:global -> JSON(SchemaDefinition)
-	prefixTemporalIndex = byte(0x0A) // temporal:namespace:label:keyprops:keyhash:valid_from:nodeID -> []byte{}
-	prefixTemporalHead  = byte(0x0B) // temporal_current:namespace:label:keyprops:keyhash -> nodeID
-	prefixMVCCNode      = byte(0x0C) // mvcc_node:nodeID:version -> Node version payload
-	prefixMVCCEdge      = byte(0x0D) // mvcc_edge:edgeID:version -> Edge version payload
-	prefixMVCCNodeHead  = byte(0x0E) // mvcc_node_head:nodeID -> MVCCHead
-	prefixMVCCEdgeHead  = byte(0x0F) // mvcc_edge_head:edgeID -> MVCCHead
-	prefixMVCCMeta      = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
+	prefixNode             = byte(0x01) // nodes:nodeID -> Node
+	prefixEdge             = byte(0x02) // edges:edgeID -> Edge
+	prefixLabelIndex       = byte(0x03) // label:labelName:nodeID -> []byte{}
+	prefixOutgoingIndex    = byte(0x04) // outgoing:nodeID:edgeID -> []byte{}
+	prefixIncomingIndex    = byte(0x05) // incoming:nodeID:edgeID -> []byte{}
+	prefixEdgeTypeIndex    = byte(0x06) // edgetype:type:edgeID -> []byte{} (for fast type lookups)
+	prefixPendingEmbed     = byte(0x07) // pending_embed:nodeID -> []byte{} (nodes needing embedding)
+	prefixEmbedding        = byte(0x08) // embedding:nodeID:chunkIndex -> []float32 (separate storage for large embeddings)
+	prefixSchema           = byte(0x09) // schema:global -> JSON(SchemaDefinition)
+	prefixTemporalIndex    = byte(0x0A) // temporal:namespace:label:keyprops:keyhash:valid_from:nodeID -> []byte{}
+	prefixTemporalHead     = byte(0x0B) // temporal_current:namespace:label:keyprops:keyhash -> nodeID
+	prefixMVCCNode         = byte(0x0C) // mvcc_node:nodeID:version -> Node version payload
+	prefixMVCCEdge         = byte(0x0D) // mvcc_edge:edgeID:version -> Edge version payload
+	prefixMVCCNodeHead     = byte(0x0E) // mvcc_node_head:nodeID -> MVCCHead
+	prefixMVCCEdgeHead     = byte(0x0F) // mvcc_edge_head:edgeID -> MVCCHead
+	prefixMVCCMeta         = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
+	prefixEdgeBetweenIndex = byte(0x11) // edgebetween:start:end:type:edgeID -> []byte{} (direct relationship lookup)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -61,6 +62,7 @@ const (
 //   - Label Index: 0x03 + label + 0x00 + nodeID -> empty
 //   - Outgoing Index: 0x04 + nodeID + 0x00 + edgeID -> empty
 //   - Incoming Index: 0x05 + nodeID + 0x00 + edgeID -> empty
+//   - Edge-Between Index: 0x11 + startID + 0x00 + endID + 0x00 + type + 0x00 + edgeID -> empty
 //
 // Example:
 //
@@ -582,6 +584,11 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if err := engine.initializeCounts(); err != nil {
 		db.Close() // Clean up on error
 		return nil, fmt.Errorf("failed to initialize counts: %w", err)
+	}
+
+	if err := engine.ensureEdgeBetweenIndex(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize edge-between index: %w", err)
 	}
 
 	// Load persisted schema definitions (per namespace) and rebuild derived caches.

@@ -533,16 +533,27 @@ func (b *BadgerEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 	}
 	b.mu.RUnlock()
 
-	outgoing, err := b.GetOutgoingEdges(startID)
-	if err != nil {
-		return nil, err
-	}
-
 	var result []*Edge
-	for _, edge := range outgoing {
-		if edge.EndNode == endID {
+	err := b.withView(func(txn *badger.Txn) error {
+		prefix := edgeBetweenIndexPrefix(startID, endID)
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
+
+		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+			edgeID := extractEdgeIDFromEdgeBetweenIndexKey(it.Item().Key())
+			if edgeID == "" {
+				continue
+			}
+			edge, err := edgeFromTxn(txn, edgeID)
+			if err != nil {
+				continue
+			}
 			result = append(result, edge)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
@@ -550,18 +561,50 @@ func (b *BadgerEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 
 // GetEdgeBetween returns an edge between two nodes with the given type.
 func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *Edge {
-	edges, err := b.GetEdgesBetween(source, target)
-	if err != nil {
+	if source == "" || target == "" {
 		return nil
 	}
-
-	for _, edge := range edges {
-		if edgeType == "" || edge.Type == edgeType {
-			return edge
+	var result *Edge
+	_ = b.withView(func(txn *badger.Txn) error {
+		prefix := edgeBetweenIndexPrefix(source, target)
+		if edgeType != "" {
+			prefix = typedEdgeBetweenIndexPrefix(source, target, edgeType)
 		}
-	}
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
 
-	return nil
+		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+			edgeID := extractEdgeIDFromEdgeBetweenIndexKey(it.Item().Key())
+			if edgeID == "" {
+				continue
+			}
+			edge, err := edgeFromTxn(txn, edgeID)
+			if err != nil {
+				continue
+			}
+			result = edge
+			return nil
+		}
+		return nil
+	})
+	return result
+}
+
+// edgeFromTxn loads an edge record while callers iterate a secondary index.
+func edgeFromTxn(txn *badger.Txn, edgeID EdgeID) (*Edge, error) {
+	item, err := txn.Get(edgeKey(edgeID))
+	if err != nil {
+		return nil, err
+	}
+	var edge *Edge
+	if err := item.Value(func(val []byte) error {
+		var decodeErr error
+		edge, decodeErr = decodeEdge(val)
+		return decodeErr
+	}); err != nil {
+		return nil, err
+	}
+	return edge, nil
 }
 
 // ============================================================================

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -740,6 +741,63 @@ func TestBadgerEngine_GetEdgeBetween(t *testing.T) {
 		edge := engine.GetEdgeBetween(NodeID(prefixTestID("n1")), NodeID(prefixTestID("n2")), "BLOCKS")
 		assert.Nil(t, edge)
 	})
+}
+
+func TestBadgerEngine_GetEdgeBetweenIndexMaintenance(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("edge-index-n1")
+	n2 := testNode("edge-index-n2")
+	n3 := testNode("edge-index-n3")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n3)
+	require.NoError(t, err)
+
+	edge := testEdge("edge-index-e1", n1.ID, n2.ID, "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+
+	updated := copyEdge(edge)
+	updated.EndNode = n3.ID
+	updated.Type = "FOLLOWS"
+	require.NoError(t, engine.UpdateEdge(updated))
+
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "FOLLOWS", edge.ID, true)
+	assert.Nil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
+	require.NotNil(t, engine.GetEdgeBetween(n1.ID, n3.ID, "FOLLOWS"))
+
+	require.NoError(t, engine.DeleteEdge(edge.ID))
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "FOLLOWS", edge.ID, false)
+	assert.Nil(t, engine.GetEdgeBetween(n1.ID, n3.ID, "FOLLOWS"))
+}
+
+func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("edge-index-backfill-n1")
+	n2 := testNode("edge-index-backfill-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	edge := testEdge("edge-index-backfill-e1", n1.ID, n2.ID, "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		if err := txn.Delete(edgeBetweenIndexKey(n1.ID, n2.ID, "KNOWS", edge.ID)); err != nil {
+			return err
+		}
+		return txn.Delete(edgeBetweenIndexReadyKey)
+	}))
+
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	require.NoError(t, engine.ensureEdgeBetweenIndex())
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+	require.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
 }
 
 // ============================================================================
@@ -1501,10 +1559,70 @@ func TestKeyEncoding(t *testing.T) {
 		assert.Equal(t, EdgeID(prefixTestID("edge-1")), edgeID)
 	})
 
+	t.Run("edgeBetweenIndexKey and extraction", func(t *testing.T) {
+		key := edgeBetweenIndexKey(
+			NodeID(prefixTestID("node-1")),
+			NodeID(prefixTestID("node-2")),
+			"KNOWS",
+			EdgeID(prefixTestID("edge-1")),
+		)
+		assert.Equal(t, prefixEdgeBetweenIndex, key[0])
+		assert.Equal(t, EdgeID(prefixTestID("edge-1")), extractEdgeIDFromEdgeBetweenIndexKey(key))
+		assert.True(t, hasBytePrefix(key, edgeBetweenIndexPrefix(NodeID(prefixTestID("node-1")), NodeID(prefixTestID("node-2")))))
+		assert.True(t, hasBytePrefix(key, typedEdgeBetweenIndexPrefix(NodeID(prefixTestID("node-1")), NodeID(prefixTestID("node-2")), "knows")))
+	})
+
 	t.Run("extract helpers return empty on malformed keys", func(t *testing.T) {
 		assert.Equal(t, EdgeID(""), extractEdgeIDFromIndexKey([]byte{prefixOutgoingIndex, 'x', 'y'}))
+		assert.Equal(t, EdgeID(""), extractEdgeIDFromEdgeBetweenIndexKey([]byte{prefixEdgeBetweenIndex, 'x', 'y'}))
 		assert.Equal(t, NodeID(""), extractNodeIDFromLabelIndex([]byte{prefixLabelIndex, 'P', 'e'}, len("Person")))
 	})
+}
+
+// requireEdgeBetweenIndexEntry verifies the direct relationship-existence index
+// entry without using GetEdgeBetween, so the test catches accidental scan-only
+// regressions in the storage layer.
+func requireEdgeBetweenIndexEntry(
+	t *testing.T,
+	engine *BadgerEngine,
+	startID NodeID,
+	endID NodeID,
+	edgeType string,
+	edgeID EdgeID,
+	want bool,
+) {
+	t.Helper()
+
+	key := edgeBetweenIndexKey(startID, endID, edgeType, edgeID)
+	var exists bool
+	err := engine.withView(func(txn *badger.Txn) error {
+		_, err := txn.Get(key)
+		if err == nil {
+			exists = true
+			return nil
+		}
+		if err == badger.ErrKeyNotFound {
+			exists = false
+			return nil
+		}
+		return err
+	})
+	require.NoError(t, err)
+	assert.Equal(t, want, exists)
+}
+
+// hasBytePrefix keeps key-encoding assertions local to storage tests without
+// pulling in bytes.HasPrefix just for one small invariant check.
+func hasBytePrefix(value, prefix []byte) bool {
+	if len(prefix) > len(value) {
+		return false
+	}
+	for i := range prefix {
+		if value[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ============================================================================
