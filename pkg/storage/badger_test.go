@@ -827,6 +827,39 @@ func TestBadgerEngine_GetEdgesBetweenKeepsSameTypeSetWithHead(t *testing.T) {
 	assert.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
 }
 
+func TestBadgerEngine_GetEdgesBetweenSelfHealIsBounded(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("edge-heal-bound-n1")
+	n2 := testNode("edge-heal-bound-n2")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+
+	edgeCount := edgeBetweenSelfHealMaxEdges + 5
+	for i := 0; i < edgeCount; i++ {
+		edge := testEdge(
+			fmt.Sprintf("edge-heal-bound-e-%03d", i),
+			n1.ID,
+			n2.ID,
+			fmt.Sprintf("REL_%03d", i),
+		)
+		require.NoError(t, engine.CreateEdge(edge))
+		require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+			if err := txn.Delete(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type)); err != nil {
+				return err
+			}
+			return txn.Delete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID))
+		}))
+	}
+
+	edges, err := engine.GetEdgesBetween(n1.ID, n2.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, edgeCount)
+	assert.Equal(t, edgeBetweenSelfHealMaxEdges, countEdgeBetweenSetEntries(t, engine, n1.ID, n2.ID))
+}
+
 func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 
@@ -860,10 +893,50 @@ func TestBadgerEngine_EdgeBetweenIndexBackfill(t *testing.T) {
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, true)
 	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 	require.NoError(t, engine.ensureEdgeBetweenIndex())
+	require.Eventually(t, func() bool {
+		return edgeBetweenIndexReady(t, engine) &&
+			hasEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID)
+	}, 2*time.Second, 20*time.Millisecond)
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n3.ID, "STALE", staleEdgeID, false)
-	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
 	require.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
+}
+
+func TestBadgerEngine_EdgeBetweenIndexBackfillRepairsStoreAsynchronously(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := NewBadgerEngine(dir)
+	require.NoError(t, err)
+
+	n1 := testNode("edge-index-async-n1")
+	n2 := testNode("edge-index-async-n2")
+	_, err = engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	edge := testEdge("edge-index-async-e1", n1.ID, n2.ID, "KNOWS")
+	require.NoError(t, engine.CreateEdge(edge))
+	require.NoError(t, engine.withUpdate(func(txn *badger.Txn) error {
+		if err := txn.Delete(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type)); err != nil {
+			return err
+		}
+		if err := txn.Delete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID)); err != nil {
+			return err
+		}
+		return txn.Delete(edgeBetweenIndexReadyKey)
+	}))
+	require.NoError(t, engine.Close())
+
+	reopened, err := NewBadgerEngine(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	got := reopened.GetEdgeBetween(n1.ID, n2.ID, "KNOWS")
+	require.NotNil(t, got)
+	assert.Equal(t, edge.ID, got.ID)
+	require.Eventually(t, func() bool {
+		return edgeBetweenIndexReady(t, reopened) &&
+			hasEdgeBetweenHeadEntry(t, reopened, n1.ID, n2.ID, "KNOWS", edge.ID)
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 // ============================================================================
@@ -1683,6 +1756,74 @@ func requireEdgeBetweenHeadEntry(
 	})
 	require.NoError(t, err)
 	assert.Equal(t, want, exists)
+}
+
+// hasEdgeBetweenHeadEntry reports whether the typed head points at edgeID.
+func hasEdgeBetweenHeadEntry(
+	t *testing.T,
+	engine *BadgerEngine,
+	startID NodeID,
+	endID NodeID,
+	edgeType string,
+	edgeID EdgeID,
+) bool {
+	t.Helper()
+
+	key := edgeBetweenHeadKey(startID, endID, edgeType)
+	var exists bool
+	err := engine.withView(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if err == nil {
+			return item.Value(func(val []byte) error {
+				exists = EdgeID(val) == edgeID
+				return nil
+			})
+		}
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	})
+	require.NoError(t, err)
+	return exists
+}
+
+// countEdgeBetweenSetEntries counts set-index entries for one node pair.
+func countEdgeBetweenSetEntries(t *testing.T, engine *BadgerEngine, startID, endID NodeID) int {
+	t.Helper()
+
+	count := 0
+	prefix := edgeBetweenIndexPrefix(startID, endID)
+	err := engine.withView(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
+		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+			count++
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return count
+}
+
+// edgeBetweenIndexReady reports whether the startup backfill marker is present.
+func edgeBetweenIndexReady(t *testing.T, engine *BadgerEngine) bool {
+	t.Helper()
+
+	var ready bool
+	err := engine.withView(func(txn *badger.Txn) error {
+		_, err := txn.Get(edgeBetweenIndexReadyKey)
+		if err == nil {
+			ready = true
+			return nil
+		}
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	})
+	require.NoError(t, err)
+	return ready
 }
 
 // requireEdgeBetweenIndexEntry verifies the direct relationship-existence index
