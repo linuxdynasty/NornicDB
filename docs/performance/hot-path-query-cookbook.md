@@ -412,6 +412,11 @@ MERGE (a)-[r:LINKS_TO]->(b)
 SET r.updatedAt = $now;
 ```
 
+NornicDB maintains a direct relationship-existence index for this shape, keyed
+by start node, end node, relationship type, and edge ID. That keeps idempotent
+relationship `MERGE` checks from degrading with the start node's total outgoing
+degree.
+
 ### 6.4 Relationship Attach By ID
 
 ```cypher

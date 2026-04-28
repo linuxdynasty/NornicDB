@@ -103,6 +103,7 @@ func (b *BadgerEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesD
 		edgeKeyPrefix,
 		append([]byte{prefixOutgoingIndex}, prefixBytes...),
 		append([]byte{prefixIncomingIndex}, prefixBytes...),
+		append([]byte{prefixEdgeBetweenIndex}, prefixBytes...),
 		append([]byte{prefixPendingEmbed}, prefixBytes...),
 		append([]byte{prefixEmbedding}, prefixBytes...),
 	}

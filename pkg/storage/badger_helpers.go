@@ -228,6 +228,45 @@ func edgeTypeIndexPrefix(edgeType string) []byte {
 	return key
 }
 
+// edgeBetweenIndexKey stores an exact relationship lookup entry.
+//
+// The key order lets GetEdgesBetween scan by start/end and lets GetEdgeBetween
+// narrow further by relationship type without scanning every outgoing edge from
+// the start node.
+func edgeBetweenIndexKey(startID, endID NodeID, edgeType string, edgeID EdgeID) []byte {
+	normalizedType := strings.ToLower(edgeType)
+	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1+len(normalizedType)+1+len(edgeID))
+	key = append(key, prefixEdgeBetweenIndex)
+	key = append(key, []byte(startID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(endID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(normalizedType)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(edgeID)...)
+	return key
+}
+
+// edgeBetweenIndexPrefix returns the prefix for all edges between two nodes.
+func edgeBetweenIndexPrefix(startID, endID NodeID) []byte {
+	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1)
+	key = append(key, prefixEdgeBetweenIndex)
+	key = append(key, []byte(startID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(endID)...)
+	key = append(key, 0x00)
+	return key
+}
+
+// typedEdgeBetweenIndexPrefix returns the prefix for edges of one type between two nodes.
+func typedEdgeBetweenIndexPrefix(startID, endID NodeID, edgeType string) []byte {
+	normalizedType := strings.ToLower(edgeType)
+	key := edgeBetweenIndexPrefix(startID, endID)
+	key = append(key, []byte(normalizedType)...)
+	key = append(key, 0x00)
+	return key
+}
+
 // pendingEmbedKey creates a key for the pending embeddings index.
 // Format: prefix + nodeID
 func pendingEmbedKey(nodeID NodeID) []byte {
@@ -272,6 +311,23 @@ func extractEdgeIDFromIndexKey(key []byte) EdgeID {
 	// Find the separator (0x00) - reverse iteration (separator typically near end)
 	for i := len(key) - 1; i >= 1; i-- {
 		if key[i] == 0x00 {
+			return EdgeID(key[i+1:])
+		}
+	}
+	return ""
+}
+
+// extractEdgeIDFromEdgeBetweenIndexKey returns the edge ID suffix from an
+// edge-between index entry.
+func extractEdgeIDFromEdgeBetweenIndexKey(key []byte) EdgeID {
+	if len(key) < 2 || key[0] != prefixEdgeBetweenIndex {
+		return ""
+	}
+	for i := len(key) - 1; i >= 1; i-- {
+		if key[i] == 0x00 {
+			if i+1 >= len(key) {
+				return ""
+			}
 			return EdgeID(key[i+1:])
 		}
 	}
