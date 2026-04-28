@@ -34,7 +34,8 @@ const (
 	prefixMVCCNodeHead     = byte(0x0E) // mvcc_node_head:nodeID -> MVCCHead
 	prefixMVCCEdgeHead     = byte(0x0F) // mvcc_edge_head:edgeID -> MVCCHead
 	prefixMVCCMeta         = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
-	prefixEdgeBetweenIndex = byte(0x11) // edgebetween:start:end:type:edgeID -> []byte{} (direct relationship lookup)
+	prefixEdgeBetweenIndex = byte(0x11) // edgebetween_set:start:end:type:edgeID -> []byte{} (all exact relationship lookups)
+	prefixEdgeBetweenHead  = byte(0x12) // edgebetween_head:start:end:type -> edgeID (fast single relationship lookup)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -62,7 +63,8 @@ const (
 //   - Label Index: 0x03 + label + 0x00 + nodeID -> empty
 //   - Outgoing Index: 0x04 + nodeID + 0x00 + edgeID -> empty
 //   - Incoming Index: 0x05 + nodeID + 0x00 + edgeID -> empty
-//   - Edge-Between Index: 0x11 + startID + 0x00 + endID + 0x00 + type + 0x00 + edgeID -> empty
+//   - Edge-Between Set: 0x11 + startID + 0x00 + endID + 0x00 + type + 0x00 + edgeID -> empty
+//   - Edge-Between Head: 0x12 + startID + 0x00 + endID + 0x00 + type -> edgeID
 //
 // Example:
 //

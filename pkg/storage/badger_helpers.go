@@ -247,6 +247,66 @@ func edgeBetweenIndexKey(startID, endID NodeID, edgeType string, edgeID EdgeID) 
 	return key
 }
 
+// edgeBetweenHeadKey stores the fastest typed lookup for one edge between nodes.
+//
+// The set index remains the source for GetEdgesBetween and for multiple edges
+// of the same type. The head is a compatibility-friendly accelerator: if it is
+// absent or stale, reads can fall back to the set or legacy outgoing scan and
+// repopulate it.
+func edgeBetweenHeadKey(startID, endID NodeID, edgeType string) []byte {
+	normalizedType := strings.ToLower(edgeType)
+	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1+len(normalizedType))
+	key = append(key, prefixEdgeBetweenHead)
+	key = append(key, []byte(startID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(endID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(normalizedType)...)
+	return key
+}
+
+// writeEdgeBetweenIndexesInTxn maintains both relationship lookup indexes.
+func writeEdgeBetweenIndexesInTxn(txn *badger.Txn, edge *Edge) error {
+	if err := txn.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+		return err
+	}
+	return txn.Set(edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type), []byte(edge.ID))
+}
+
+// deleteEdgeBetweenIndexesInTxn removes an edge from the set index and clears
+// the head only when it points at the same edge.
+func deleteEdgeBetweenIndexesInTxn(txn *badger.Txn, edge *Edge) error {
+	if err := txn.Delete(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID)); err != nil {
+		return err
+	}
+	return deleteEdgeBetweenHeadIfMatchesInTxn(txn, edge)
+}
+
+// deleteEdgeBetweenHeadIfMatchesInTxn avoids removing a head already advanced
+// to another same-type edge.
+func deleteEdgeBetweenHeadIfMatchesInTxn(txn *badger.Txn, edge *Edge) error {
+	key := edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type)
+	item, err := txn.Get(key)
+	if err == badger.ErrKeyNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var matches bool
+	if err := item.Value(func(val []byte) error {
+		matches = EdgeID(val) == edge.ID
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !matches {
+		return nil
+	}
+	return txn.Delete(key)
+}
+
 // edgeBetweenIndexPrefix returns the prefix for all edges between two nodes.
 func edgeBetweenIndexPrefix(startID, endID NodeID) []byte {
 	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1)
