@@ -3,10 +3,15 @@ package storage
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"log"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 )
+
+const edgeBetweenSelfHealMaxEdges = 64
 
 // Query Operations
 // ============================================================================
@@ -415,7 +420,7 @@ func (b *BadgerEngine) HasLabelBatch(ids []NodeID, label string) (map[NodeID]boo
 				result[id] = true
 				continue
 			}
-			if err == badger.ErrKeyNotFound {
+			if errors.Is(err, badger.ErrKeyNotFound) {
 				continue
 			}
 			return err
@@ -551,7 +556,11 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 		return nil
 	}
 	if edgeType != "" {
-		if edge, err := b.edgeBetweenFromHeadIndex(source, target, edgeType); err == nil && edge != nil {
+		edge, err := b.edgeBetweenFromHeadIndex(source, target, edgeType)
+		if err != nil {
+			log.Printf("edge-between head lookup failed; falling back to set/legacy scan: start=%q end=%q type=%q err=%v", source, target, edgeType, err)
+		}
+		if edge != nil {
 			return edge
 		}
 	}
@@ -576,7 +585,7 @@ func (b *BadgerEngine) edgeBetweenFromHeadIndex(source, target NodeID, edgeType 
 	var result *Edge
 	err := b.withView(func(txn *badger.Txn) error {
 		item, err := txn.Get(edgeBetweenHeadKey(source, target, edgeType))
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, badger.ErrKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -591,7 +600,7 @@ func (b *BadgerEngine) edgeBetweenFromHeadIndex(source, target NodeID, edgeType 
 		}
 		edge, err := edgeFromTxn(txn, edgeID)
 		if err != nil {
-			return nil
+			return fmt.Errorf("load edge-between head edge %q: %w", edgeID, err)
 		}
 		if edgeMatchesBetween(edge, source, target, edgeType) {
 			result = edge
@@ -656,7 +665,10 @@ func (b *BadgerEngine) edgesBetweenFromLegacyOutgoingIndex(startID, endID NodeID
 // selfHealEdgeBetweenIndexes repairs lookup indexes discovered through a
 // fallback read, preventing ready-marker drift from becoming a correctness bug.
 func (b *BadgerEngine) selfHealEdgeBetweenIndexes(edges []*Edge) error {
-	return b.withUpdate(func(txn *badger.Txn) error {
+	if len(edges) > edgeBetweenSelfHealMaxEdges {
+		edges = edges[:edgeBetweenSelfHealMaxEdges]
+	}
+	err := b.withUpdate(func(txn *badger.Txn) error {
 		for _, edge := range edges {
 			if edge == nil {
 				continue
@@ -667,6 +679,11 @@ func (b *BadgerEngine) selfHealEdgeBetweenIndexes(edges []*Edge) error {
 		}
 		return nil
 	})
+	if errors.Is(err, badger.ErrConflict) {
+		log.Printf("edge-between index self-heal skipped after Badger conflict")
+		return nil
+	}
+	return err
 }
 
 // edgeMatchesBetween rejects stale secondary-index entries before returning an

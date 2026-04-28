@@ -5,7 +5,9 @@
 package storage
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -36,6 +38,11 @@ const (
 	prefixMVCCMeta         = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
 	prefixEdgeBetweenIndex = byte(0x11) // edgebetween_set:start:end:type:edgeID -> []byte{} (all exact relationship lookups)
 	prefixEdgeBetweenHead  = byte(0x12) // edgebetween_head:start:end:type -> edgeID (fast single relationship lookup)
+)
+
+// prefixMVCCMeta subkeys reserved by storage metadata records.
+const (
+	prefixMVCCMetaEdgeBetweenIndexReady = byte(0x02)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -128,6 +135,10 @@ type BadgerEngine struct {
 	namespaceCountsMu   sync.RWMutex
 	namespaceNodeCounts map[string]int64
 	namespaceEdgeCounts map[string]int64
+
+	edgeBetweenIndexBackfillMu     sync.Mutex
+	edgeBetweenIndexBackfillCancel context.CancelFunc
+	edgeBetweenIndexBackfillDone   chan struct{}
 
 	// Event callbacks for external coordination (search indexes, caches, etc.)
 	// These are fired AFTER storage operations succeed
@@ -595,11 +606,13 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 
 	// Load persisted schema definitions (per namespace) and rebuild derived caches.
 	if err := engine.loadPersistedSchemas(); err != nil {
+		engine.stopEdgeBetweenIndexBackfill()
 		db.Close()
 		return nil, fmt.Errorf("failed to load persisted schema: %w", err)
 	}
 
 	if err := engine.initializeMVCCSequence(); err != nil {
+		engine.stopEdgeBetweenIndexBackfill()
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize mvcc sequence: %w", err)
 	}
@@ -641,7 +654,7 @@ func (b *BadgerEngine) loadPersistedMVCCSequence() (uint64, error) {
 	var seq uint64
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(mvccSequenceKey())
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, badger.ErrKeyNotFound) {
 			return nil
 		}
 		if err != nil {

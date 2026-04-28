@@ -535,6 +535,34 @@ func TestBadgerEngine_MVCCIndexedVisibilityAtSnapshot(t *testing.T) {
 	require.Equal(t, "PUBLISHED_LINK", betweenAtV2[0].Type)
 }
 
+func TestBadgerEngine_MVCCBetweenVisibleAtIgnoresLatestEdgeBetweenIndex(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	start := NodeID(prefixTestID("mvcc-between-index-start"))
+	end := NodeID(prefixTestID("mvcc-between-index-end"))
+	_, err := engine.CreateNode(&Node{ID: start, Labels: []string{"Doc"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: end, Labels: []string{"Doc"}})
+	require.NoError(t, err)
+
+	first := &Edge{ID: EdgeID(prefixTestID("mvcc-between-index-e1")), StartNode: start, EndNode: end, Type: "OLD_LINK"}
+	require.NoError(t, engine.CreateEdge(first))
+	firstHead, err := engine.GetEdgeCurrentHead(first.ID)
+	require.NoError(t, err)
+	require.NoError(t, engine.DeleteEdge(first.ID))
+	second := &Edge{ID: EdgeID(prefixTestID("mvcc-between-index-e2")), StartNode: start, EndNode: end, Type: "NEW_LINK"}
+	require.NoError(t, engine.CreateEdge(second))
+
+	require.NotNil(t, engine.GetEdgeBetween(start, end, "NEW_LINK"))
+	requireEdgeBetweenIndexEntry(t, engine, start, end, "NEW_LINK", second.ID, true)
+
+	betweenAtFirst, err := engine.GetEdgesBetweenVisibleAt(start, end, firstHead.Version)
+	require.NoError(t, err)
+	require.Len(t, betweenAtFirst, 1)
+	require.Equal(t, first.ID, betweenAtFirst[0].ID)
+	require.Equal(t, "OLD_LINK", betweenAtFirst[0].Type)
+}
+
 func TestMVCCWrappers_FallbackLatestButRejectSnapshotWhenUnsupported(t *testing.T) {
 	baseInner := NewMemoryEngine()
 	t.Cleanup(func() { _ = baseInner.Close() })
