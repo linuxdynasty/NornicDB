@@ -417,7 +417,7 @@ by start node, end node, relationship type, and edge ID. That keeps idempotent
 relationship `MERGE` checks from degrading with the start node's total outgoing
 degree.
 
-### 6.4 Relationship Attach By ID
+### 6.2 Relationship Attach By ID
 
 ```cypher
 MATCH (a:EntityA) WHERE elementId(a) = $fromId
@@ -427,7 +427,7 @@ CREATE (a)-[:LINKS_TO {createdAt: $now}]->(b);
 
 Use stable ID lookups before relationship creation for predictable attach latency.
 
-### 6.2 Bounded Traversal
+### 6.3 Bounded Traversal
 
 ```cypher
 MATCH p = (start:EntityA {primaryKey: $startKey})-[:LINKS_TO*1..3]->(n)
@@ -437,7 +437,7 @@ LIMIT 100;
 
 Always bound traversal depth and result count.
 
-### 6.3 Traversal With Early Filters
+### 6.4 Traversal With Early Filters
 
 ```cypher
 MATCH p = (start:EntityA {primaryKey: $startKey})-[:LINKS_TO*1..3]->(n:EntityB)

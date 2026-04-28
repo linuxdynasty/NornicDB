@@ -9,6 +9,8 @@ import (
 
 var edgeBetweenIndexReadyKey = []byte{prefixMVCCMeta, 0x02}
 
+const edgeBetweenIndexRebuildBatchSize = 50_000
+
 // ensureEdgeBetweenIndex backfills the direct relationship lookup index once.
 //
 // Older Badger stores predate the edge-between index. Rebuilding on first open
@@ -38,9 +40,29 @@ func (b *BadgerEngine) ensureEdgeBetweenIndex() error {
 
 // rebuildEdgeBetweenIndex scans stored edges and writes direct lookup entries.
 func (b *BadgerEngine) rebuildEdgeBetweenIndex() error {
-	var edges []*Edge
+	if err := b.db.DropPrefix([]byte{prefixEdgeBetweenIndex}); err != nil {
+		return fmt.Errorf("clear edge-between index before rebuild: %w", err)
+	}
+
+	batch := b.db.NewWriteBatch()
+	defer batch.Cancel()
+	batchCount := 0
+
+	flushBatch := func() error {
+		if batchCount == 0 {
+			return nil
+		}
+		if err := batch.Flush(); err != nil {
+			return err
+		}
+		batch.Cancel()
+		batch = b.db.NewWriteBatch()
+		batchCount = 0
+		return nil
+	}
+
 	if err := b.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badgerIterOptsKeyOnly([]byte{prefixEdge}))
+		it := txn.NewIterator(badgerIterOptsPrefetchValues([]byte{prefixEdge}, 100))
 		defer it.Close()
 
 		for it.Rewind(); it.ValidForPrefix([]byte{prefixEdge}); it.Next() {
@@ -50,7 +72,13 @@ func (b *BadgerEngine) rebuildEdgeBetweenIndex() error {
 				if err != nil {
 					return fmt.Errorf("decode edge for edge-between index: %w", err)
 				}
-				edges = append(edges, edge)
+				if err := batch.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+					return err
+				}
+				batchCount++
+				if batchCount >= edgeBetweenIndexRebuildBatchSize {
+					return flushBatch()
+				}
 				return nil
 			}); err != nil {
 				return err
@@ -61,12 +89,11 @@ func (b *BadgerEngine) rebuildEdgeBetweenIndex() error {
 		return err
 	}
 
+	if err := flushBatch(); err != nil {
+		return err
+	}
+
 	return b.withUpdate(func(txn *badger.Txn) error {
-		for _, edge := range edges {
-			if err := txn.Set(edgeBetweenIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
-				return err
-			}
-		}
 		return txn.Set(edgeBetweenIndexReadyKey, []byte{1})
 	})
 }
