@@ -29,6 +29,7 @@ func (b *BadgerEngine) ensureEdgeBetweenIndex() error {
 		return err
 	}
 	if ready {
+		b.edgeBetweenIndexReadyCached.Store(true)
 		return nil
 	}
 
@@ -76,9 +77,13 @@ func (b *BadgerEngine) hasAnyStoredEdges() (bool, error) {
 
 // markEdgeBetweenIndexReady records that no compatibility rebuild remains.
 func (b *BadgerEngine) markEdgeBetweenIndexReady() error {
-	return b.withUpdate(func(txn *badger.Txn) error {
+	if err := b.withUpdate(func(txn *badger.Txn) error {
 		return txn.Set(edgeBetweenIndexReadyKey, []byte{1})
-	})
+	}); err != nil {
+		return err
+	}
+	b.edgeBetweenIndexReadyCached.Store(true)
+	return nil
 }
 
 // startEdgeBetweenIndexBackfill launches one cancellable background rebuild.
@@ -202,7 +207,8 @@ func (b *BadgerEngine) rebuildEdgeBetweenIndex(ctx context.Context) (int, error)
 	if err := ctx.Err(); err != nil {
 		return processed, err
 	}
-	return processed, b.withUpdate(func(txn *badger.Txn) error {
-		return txn.Set(edgeBetweenIndexReadyKey, []byte{1})
-	})
+	if err := b.markEdgeBetweenIndexReady(); err != nil {
+		return processed, err
+	}
+	return processed, nil
 }

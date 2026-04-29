@@ -139,6 +139,7 @@ type BadgerEngine struct {
 	edgeBetweenIndexBackfillMu     sync.Mutex
 	edgeBetweenIndexBackfillCancel context.CancelFunc
 	edgeBetweenIndexBackfillDone   chan struct{}
+	edgeBetweenIndexReadyCached    atomic.Bool
 
 	// Event callbacks for external coordination (search indexes, caches, etc.)
 	// These are fired AFTER storage operations succeed

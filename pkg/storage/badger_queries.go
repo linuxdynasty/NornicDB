@@ -555,10 +555,12 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 	if source == "" || target == "" {
 		return nil
 	}
+	var headErr error
 	if edgeType != "" {
 		edge, err := b.edgeBetweenFromHeadIndex(source, target, edgeType)
-		if err != nil {
-			log.Printf("edge-between head lookup failed; falling back to set/legacy scan: start=%q end=%q type=%q err=%v", source, target, edgeType, err)
+		headErr = err
+		if headErr != nil {
+			log.Printf("edge-between head lookup failed; falling back to set/legacy scan: start=%q end=%q type=%q err=%v", source, target, edgeType, headErr)
 		}
 		if edge != nil {
 			return edge
@@ -569,6 +571,9 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 	if err == nil && len(indexed) > 0 {
 		_ = b.selfHealEdgeBetweenIndexes(indexed[:1])
 		return indexed[0]
+	}
+	if err == nil && headErr == nil && b.edgeBetweenIndexReadyCached.Load() {
+		return nil
 	}
 
 	legacy, err := b.edgesBetweenFromLegacyOutgoingIndex(source, target, edgeType)

@@ -775,7 +775,7 @@ func TestBadgerEngine_GetEdgeBetweenIndexMaintenance(t *testing.T) {
 	assert.Nil(t, engine.GetEdgeBetween(n1.ID, n3.ID, "FOLLOWS"))
 }
 
-func TestBadgerEngine_GetEdgeBetweenHeadIndexSelfHealsFromLegacyScan(t *testing.T) {
+func TestBadgerEngine_GetEdgeBetweenTrustsReadyIndexMiss(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 
 	n1 := testNode("edge-head-heal-n1")
@@ -797,10 +797,9 @@ func TestBadgerEngine_GetEdgeBetweenHeadIndexSelfHealsFromLegacyScan(t *testing.
 	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 	got := engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS")
-	require.NotNil(t, got)
-	assert.Equal(t, edge.ID, got.ID)
-	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
-	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, true)
+	require.Nil(t, got)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", edge.ID, false)
 }
 
 func TestBadgerEngine_GetEdgesBetweenKeepsSameTypeSetWithHead(t *testing.T) {
@@ -825,6 +824,50 @@ func TestBadgerEngine_GetEdgesBetweenKeepsSameTypeSetWithHead(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, edges, 2)
 	assert.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
+}
+
+func BenchmarkBadgerEngine_GetEdgeBetweenMissingFanout(b *testing.B) {
+	const edgeCount = 5000
+	engine, err := NewBadgerEngineInMemory()
+	require.NoError(b, err)
+	b.Cleanup(func() {
+		require.NoError(b, engine.Close())
+	})
+
+	source := testNode("edge-missing-fanout-source")
+	missingTarget := testNode("edge-missing-fanout-missing")
+	_, err = engine.CreateNode(source)
+	require.NoError(b, err)
+	_, err = engine.CreateNode(missingTarget)
+	require.NoError(b, err)
+
+	for i := 0; i < edgeCount; i++ {
+		target := testNode(fmt.Sprintf("edge-missing-fanout-target-%04d", i))
+		_, err := engine.CreateNode(target)
+		require.NoError(b, err)
+		edge := testEdge(fmt.Sprintf("edge-missing-fanout-edge-%04d", i), source.ID, target.ID, "CALLS")
+		require.NoError(b, engine.CreateEdge(edge))
+	}
+
+	b.Run("ready-index-miss", func(b *testing.B) {
+		engine.edgeBetweenIndexReadyCached.Store(true)
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if edge := engine.GetEdgeBetween(source.ID, missingTarget.ID, "CALLS"); edge != nil {
+				b.Fatalf("expected missing edge, got %s", edge.ID)
+			}
+		}
+	})
+
+	b.Run("legacy-scan-miss", func(b *testing.B) {
+		engine.edgeBetweenIndexReadyCached.Store(false)
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if edge := engine.GetEdgeBetween(source.ID, missingTarget.ID, "CALLS"); edge != nil {
+				b.Fatalf("expected missing edge, got %s", edge.ID)
+			}
+		}
+	})
 }
 
 func TestBadgerEngine_GetEdgesBetweenSelfHealIsBounded(t *testing.T) {
