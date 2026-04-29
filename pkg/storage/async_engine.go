@@ -1531,6 +1531,33 @@ func (ae *AsyncEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 }
 
 func (ae *AsyncEngine) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
+	if edgeType != "" {
+		ae.mu.RLock()
+		deletedIDs := make(map[EdgeID]bool, len(ae.deleteEdges))
+		for id := range ae.deleteEdges {
+			deletedIDs[id] = true
+		}
+		overriddenIDs := make(map[EdgeID]bool, len(ae.edgeCache))
+		for id, edge := range ae.edgeCache {
+			overriddenIDs[id] = true
+			if edge != nil &&
+				edge.StartNode == startID &&
+				edge.EndNode == endID &&
+				strings.EqualFold(edge.Type, edgeType) &&
+				!deletedIDs[id] {
+				ae.mu.RUnlock()
+				return edge
+			}
+		}
+		ae.mu.RUnlock()
+
+		edge := ae.engine.GetEdgeBetween(startID, endID, edgeType)
+		if edge == nil || deletedIDs[edge.ID] || overriddenIDs[edge.ID] {
+			return nil
+		}
+		return edge
+	}
+
 	edges, err := ae.GetEdgesBetween(startID, endID)
 	if err != nil {
 		return nil

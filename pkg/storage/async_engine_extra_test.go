@@ -24,6 +24,22 @@ type labelQueryErrorEngine struct {
 	getNodesByLabelErr error
 }
 
+type edgeBetweenCountingEngine struct {
+	Engine
+	getEdgeBetweenCalls  int
+	getEdgesBetweenCalls int
+}
+
+func (e *edgeBetweenCountingEngine) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
+	e.getEdgeBetweenCalls++
+	return e.Engine.GetEdgeBetween(startID, endID, edgeType)
+}
+
+func (e *edgeBetweenCountingEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
+	e.getEdgesBetweenCalls++
+	return e.Engine.GetEdgesBetween(startID, endID)
+}
+
 type nonStreamingCountEngine struct {
 	Engine
 	allNodesErr error
@@ -478,6 +494,44 @@ func TestAsyncEngine_GetEdgesBetween_ReadYourOwnWritesBeforeFlush(t *testing.T) 
 	edge := ae.GetEdgeBetween(NodeID(prefixTestID("pending-gb1")), NodeID(prefixTestID("pending-gb2")), pending.Type)
 	require.NotNil(t, edge)
 	assert.Equal(t, pending.ID, edge.ID)
+}
+
+func TestAsyncEngine_GetEdgeBetweenUsesTypedEngineLookup(t *testing.T) {
+	inner := createTestBadgerEngine(t)
+	_, err := inner.CreateNode(makeNode("typed-gb1"))
+	require.NoError(t, err)
+	_, err = inner.CreateNode(makeNode("typed-gb2"))
+	require.NoError(t, err)
+	require.NoError(t, inner.CreateEdge(makeEdge("typed-gb-e1", "typed-gb1", "typed-gb2")))
+
+	counting := &edgeBetweenCountingEngine{Engine: inner}
+	ae := NewAsyncEngine(counting, &AsyncEngineConfig{FlushInterval: time.Hour})
+	t.Cleanup(func() { ae.Close() })
+
+	edge := ae.GetEdgeBetween(NodeID(prefixTestID("typed-gb1")), NodeID(prefixTestID("typed-gb2")), "RELATED")
+	require.NotNil(t, edge)
+	assert.Equal(t, EdgeID(prefixTestID("typed-gb-e1")), edge.ID)
+	assert.Equal(t, 1, counting.getEdgeBetweenCalls)
+	assert.Zero(t, counting.getEdgesBetweenCalls)
+}
+
+func TestAsyncEngine_GetEdgeBetweenHonorsPendingOverrides(t *testing.T) {
+	ae := newAsyncTestEngine(t)
+	_, _ = ae.CreateNode(makeNode("override-gb1"))
+	_, _ = ae.CreateNode(makeNode("override-gb2"))
+	_, _ = ae.CreateNode(makeNode("override-gb3"))
+	existing := makeEdge("override-gb-e1", "override-gb1", "override-gb2")
+	require.NoError(t, ae.CreateEdge(existing))
+	require.NoError(t, ae.Flush())
+
+	updated := *existing
+	updated.EndNode = NodeID(prefixTestID("override-gb3"))
+	require.NoError(t, ae.UpdateEdge(&updated))
+
+	assert.Nil(t, ae.GetEdgeBetween(NodeID(prefixTestID("override-gb1")), NodeID(prefixTestID("override-gb2")), existing.Type))
+	edge := ae.GetEdgeBetween(NodeID(prefixTestID("override-gb1")), NodeID(prefixTestID("override-gb3")), existing.Type)
+	require.NotNil(t, edge)
+	assert.Equal(t, existing.ID, edge.ID)
 }
 
 func TestAsyncEngine_GetEdgesBetween_Empty(t *testing.T) {
