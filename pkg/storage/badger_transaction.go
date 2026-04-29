@@ -936,12 +936,50 @@ func (tx *BadgerTransaction) GetEdgesBetween(startID, endID NodeID) ([]*Edge, er
 
 // GetEdgeBetween returns a matching edge including pending transaction writes.
 func (tx *BadgerTransaction) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
+	if edgeType != "" {
+		tx.mu.Lock()
+		defer tx.mu.Unlock()
+		if err := tx.ensureLifecycleActiveLocked(); err != nil {
+			return nil
+		}
+
+		for id, edge := range tx.pendingEdges {
+			if _, deleted := tx.deletedEdges[id]; deleted {
+				continue
+			}
+			if edge != nil &&
+				edge.StartNode == startID &&
+				edge.EndNode == endID &&
+				strings.EqualFold(edge.Type, edgeType) {
+				return copyEdge(edge)
+			}
+		}
+
+		committed := tx.engine.GetEdgeBetween(startID, endID, edgeType)
+		if committed == nil {
+			return nil
+		}
+		if _, deleted := tx.deletedEdges[committed.ID]; deleted {
+			return nil
+		}
+		if pending, exists := tx.pendingEdges[committed.ID]; exists {
+			if pending != nil &&
+				pending.StartNode == startID &&
+				pending.EndNode == endID &&
+				strings.EqualFold(pending.Type, edgeType) {
+				return copyEdge(pending)
+			}
+			return nil
+		}
+		return copyEdge(committed)
+	}
+
 	edges, err := tx.GetEdgesBetween(startID, endID)
 	if err != nil {
 		return nil
 	}
 	for _, edge := range edges {
-		if edgeType == "" || edge.Type == edgeType {
+		if edgeType == "" || strings.EqualFold(edge.Type, edgeType) {
 			return edge
 		}
 	}
