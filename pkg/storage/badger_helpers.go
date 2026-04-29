@@ -288,7 +288,7 @@ func deleteEdgeBetweenHeadIfMatchesInTxn(txn *badger.Txn, edge *Edge) error {
 	key := edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type)
 	item, err := txn.Get(key)
 	if err == badger.ErrKeyNotFound {
-		return nil
+		return promoteEdgeBetweenHeadInTxn(txn, edge, false)
 	}
 	if err != nil {
 		return err
@@ -302,6 +302,27 @@ func deleteEdgeBetweenHeadIfMatchesInTxn(txn *badger.Txn, edge *Edge) error {
 		return err
 	}
 	if !matches {
+		return nil
+	}
+	return promoteEdgeBetweenHeadInTxn(txn, edge, true)
+}
+
+// promoteEdgeBetweenHeadInTxn preserves the typed head invariant after an edge
+// deletion removes the current representative for a start/end/type tuple.
+func promoteEdgeBetweenHeadInTxn(txn *badger.Txn, edge *Edge, headExists bool) error {
+	key := edgeBetweenHeadKey(edge.StartNode, edge.EndNode, edge.Type)
+	prefix := typedEdgeBetweenIndexPrefix(edge.StartNode, edge.EndNode, edge.Type)
+	it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+	defer it.Close()
+
+	for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+		edgeID := extractEdgeIDFromEdgeBetweenIndexKey(it.Item().Key())
+		if edgeID == "" || edgeID == edge.ID {
+			continue
+		}
+		return txn.Set(key, []byte(edgeID))
+	}
+	if !headExists {
 		return nil
 	}
 	return txn.Delete(key)

@@ -565,6 +565,9 @@ func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 		if edge != nil {
 			return edge
 		}
+		if headErr == nil && b.edgeBetweenIndexReadyCached.Load() {
+			return nil
+		}
 	}
 
 	indexed, err := b.edgesBetweenFromSetIndex(source, target, edgeType)

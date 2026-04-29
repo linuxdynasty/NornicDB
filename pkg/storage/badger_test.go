@@ -824,6 +824,13 @@ func TestBadgerEngine_GetEdgesBetweenKeepsSameTypeSetWithHead(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, edges, 2)
 	assert.NotNil(t, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS"))
+
+	require.NoError(t, engine.DeleteEdge(second.ID))
+	requireEdgeBetweenIndexEntry(t, engine, n1.ID, n2.ID, "KNOWS", first.ID, true)
+	requireEdgeBetweenHeadEntry(t, engine, n1.ID, n2.ID, "KNOWS", first.ID, true)
+	got := engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS")
+	require.NotNil(t, got)
+	assert.Equal(t, first.ID, got.ID)
 }
 
 func BenchmarkBadgerEngine_GetEdgeBetweenMissingFanout(b *testing.B) {
