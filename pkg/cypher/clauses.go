@@ -602,6 +602,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 	// and combining results. This avoids silently returning only unwound values when
 	// a trailing MATCH pipeline is present.
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "MATCH ") {
+		if fast, ok, err := e.executeUnwindMergeChainBatch(ctx, variable, items, restQuery, ""); ok {
+			return fast, err
+		}
 		if fast, ok, err := e.executeUnwindFixedChainLinkBatch(ctx, variable, items, restQuery); ok {
 			return fast, err
 		}
@@ -865,9 +868,11 @@ type unwindMergeChainWherePlan struct {
 }
 
 type unwindMergeChainRelationshipPlan struct {
-	fromVar string
-	toVar   string
-	relType string
+	fromVar        string
+	toVar          string
+	relVar         string
+	relType        string
+	setAssignments []unwindSimpleSetAssignment
 }
 
 type unwindMergeChainStep struct {
@@ -1218,10 +1223,24 @@ func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelation
 		return unwindMergeChainRelationshipPlan{}, false
 	}
 	relInner := strings.TrimSpace(afterFrom[openBracket+1 : closeBracket])
-	if !strings.HasPrefix(relInner, ":") {
+	if relInner == "" {
 		return unwindMergeChainRelationshipPlan{}, false
 	}
-	relType := strings.TrimSpace(relInner[1:])
+	relVar := ""
+	relType := ""
+	if strings.HasPrefix(relInner, ":") {
+		relType = strings.TrimSpace(relInner[1:])
+	} else {
+		colonIdx := strings.Index(relInner, ":")
+		if colonIdx <= 0 || colonIdx == len(relInner)-1 {
+			return unwindMergeChainRelationshipPlan{}, false
+		}
+		relVar = strings.TrimSpace(relInner[:colonIdx])
+		relType = strings.TrimSpace(relInner[colonIdx+1:])
+		if !isSimpleIdentifier(relVar) {
+			return unwindMergeChainRelationshipPlan{}, false
+		}
+	}
 	afterRel := strings.TrimSpace(afterFrom[closeBracket+1:])
 	if !strings.HasPrefix(afterRel, "->") {
 		return unwindMergeChainRelationshipPlan{}, false
@@ -1238,7 +1257,7 @@ func parseUnwindMergeRelationshipClause(clause string) (unwindMergeChainRelation
 	if !isSimpleIdentifier(relType) || !isSimpleIdentifier(toVar) {
 		return unwindMergeChainRelationshipPlan{}, false
 	}
-	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relType: relType}, true
+	return unwindMergeChainRelationshipPlan{fromVar: fromVar, toVar: toVar, relVar: relVar, relType: relType}, true
 }
 
 func splitUnwindCompoundMutationStages(restQuery, unwindParamName, unwindVar string) ([]string, bool) {
@@ -1451,6 +1470,21 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		}
 		if _, exists := boundVars[relPlan.toVar]; !exists {
 			return unwindMergeChainPlan{}
+		}
+		for i+1 < len(clauses) {
+			nextClause := clauses[i+1]
+			if !startsWithKeywordFold(nextClause, "SET") {
+				break
+			}
+			if relPlan.relVar == "" {
+				return unwindMergeChainPlan{}
+			}
+			parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("SET"):]), relPlan.relVar)
+			if !ok {
+				return unwindMergeChainPlan{}
+			}
+			relPlan.setAssignments = append(relPlan.setAssignments, parsed...)
+			i++
 		}
 		plan.steps = append(plan.steps, unwindMergeChainStep{relationship: &relPlan})
 	}
@@ -1731,7 +1765,30 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				skipRow = true
 				break
 			}
-			if store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType) != nil {
+			edgeProperties := make(map[string]interface{}, len(relPlan.setAssignments))
+			for _, assignment := range relPlan.setAssignments {
+				edgeProperties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
+			}
+			if edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, relPlan.relType); edge != nil {
+				needsUpdate := false
+				if edge.Properties == nil {
+					edge.Properties = map[string]interface{}{}
+					needsUpdate = true
+				}
+				for prop, val := range edgeProperties {
+					if cur, exists := edge.Properties[prop]; !exists || !reflect.DeepEqual(cur, val) {
+						edge.Properties[prop] = val
+						needsUpdate = true
+						result.Stats.PropertiesSet++
+					}
+				}
+				if needsUpdate {
+					if err := store.UpdateEdge(edge); err != nil {
+						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
+					}
+					notifyOnce(fromNode.ID)
+					notifyOnce(toNode.ID)
+				}
 				continue
 			}
 			edge := &storage.Edge{
@@ -1739,7 +1796,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				Type:       relPlan.relType,
 				StartNode:  fromNode.ID,
 				EndNode:    toNode.ID,
-				Properties: map[string]interface{}{},
+				Properties: edgeProperties,
 			}
 			if err := store.CreateEdge(edge); err != nil {
 				if err != storage.ErrAlreadyExists {
@@ -1748,6 +1805,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				continue
 			}
 			result.Stats.RelationshipsCreated++
+			result.Stats.PropertiesSet += len(edgeProperties)
 			notifyOnce(fromNode.ID)
 			notifyOnce(toNode.ID)
 		}
