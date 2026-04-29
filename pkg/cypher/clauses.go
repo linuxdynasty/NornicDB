@@ -1749,6 +1749,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	if plan.simple {
 		e.markUnwindSimpleMergeBatchUsed()
 	}
+	profile := newUnwindMergeChainBatchProfile(len(items))
 
 	store := e.getStorage(ctx)
 	result := &ExecuteResult{
@@ -1852,7 +1853,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		if len(pendingRelationshipCreates) == 0 {
 			return nil
 		}
+		bulkStart := profile.timerStart()
 		if err := store.BulkCreateEdges(pendingRelationshipCreates); err != nil {
+			profile.addBulkCreate(len(pendingRelationshipCreates), profile.elapsed(bulkStart))
 			if err != storage.ErrAlreadyExists {
 				return fmt.Errorf("UNWIND MERGE chain relationship bulk create failed: %w", err)
 			}
@@ -1876,13 +1879,16 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						}
 					}
 					if changed {
+						updateStart := profile.timerStart()
 						if err := store.UpdateEdge(createdEdge); err != nil {
 							return fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 						}
+						profile.addEdgeUpdate(profile.elapsed(updateStart))
 					}
 				}
 			}
 		} else {
+			profile.addBulkCreate(len(pendingRelationshipCreates), profile.elapsed(bulkStart))
 			e.markUnwindMergeChainBulkRelationshipsUsed()
 		}
 		for nodeID := range pendingRelationshipNotify {
@@ -1903,13 +1909,16 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 			relationshipKnown[key] = true
 			return nil, key
 		}
+		lookupStart := profile.timerStart()
 		edge := store.GetEdgeBetween(fromNode.ID, toNode.ID, edgeType)
+		profile.recordRelationshipLookup(profile.elapsed(lookupStart), edge != nil)
 		relationshipCache[key] = edge
 		relationshipKnown[key] = true
 		return edge, key
 	}
 
 	processedRows := 0
+	skippedRows := 0
 	for _, item := range items {
 		rowValues := map[string]interface{}{unwindVar: item}
 		skipRow := false
@@ -1924,7 +1933,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				node := lookupCache[lookupKey]
 				if !lookupKnown[lookupKey] {
 					var err error
+					lookupStart := profile.timerStart()
 					node, err = e.findMergeNode(store, nodePlan.labels, matchProps)
+					profile.recordNodeLookup(profile.elapsed(lookupStart), node != nil)
 					if err != nil {
 						return nil, true, err
 					}
@@ -1947,10 +1958,12 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 							return nil, true, err
 						}
 					}
+					nodeCreateStart := profile.timerStart()
 					actualID, err := store.CreateNode(node)
 					if err != nil {
 						return nil, true, fmt.Errorf("UNWIND MERGE chain create failed: %w", err)
 					}
+					profile.addNodeCreate(profile.elapsed(nodeCreateStart))
 					node.ID = actualID
 					batchCreatedNodes[node.ID] = struct{}{}
 					lookupCache[lookupKey] = node
@@ -1978,9 +1991,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						}
 					}
 					if needsUpdate {
+						nodeUpdateStart := profile.timerStart()
 						if err := store.UpdateNode(node); err != nil {
 							return nil, true, fmt.Errorf("UNWIND MERGE chain update failed: %w", err)
 						}
+						profile.addNodeUpdate(profile.elapsed(nodeUpdateStart))
 						e.cacheMergeNode(nodePlan.labels, matchProps, node)
 						notifyOnce(node.ID)
 					}
@@ -1999,11 +2014,13 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				node := lookupCache[lookupKey]
 				if !lookupKnown[lookupKey] {
 					var err error
+					lookupStart := profile.timerStart()
 					if lookupPlan.anyLabel {
 						node, err = e.findMergeNodeAnyLabel(store, lookupPlan.labels, matchProps)
 					} else {
 						node, err = e.findMergeNode(store, lookupPlan.labels, matchProps)
 					}
+					profile.recordNodeLookup(profile.elapsed(lookupStart), node != nil)
 					if err != nil {
 						return nil, true, err
 					}
@@ -2063,9 +2080,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				relationshipChanged = true
 			} else if applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues) {
 				if _, pending := pendingRelationshipKeys[relKey]; !pending {
+					updateStart := profile.timerStart()
 					if err := store.UpdateEdge(edge); err != nil {
 						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 					}
+					profile.addEdgeUpdate(profile.elapsed(updateStart))
 				}
 				relationshipCache[relKey] = edge
 				relationshipChanged = true
@@ -2084,6 +2103,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 			}
 		}
 		if skipRow {
+			skippedRows++
 			continue
 		}
 		processedRows++
@@ -2095,6 +2115,7 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	if err := flushPendingRelationships(); err != nil {
 		return nil, true, err
 	}
+	profile.finish(processedRows, skippedRows)
 	return result, true, nil
 }
 

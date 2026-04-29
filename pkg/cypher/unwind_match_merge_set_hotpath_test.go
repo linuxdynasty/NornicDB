@@ -1,8 +1,11 @@
 package cypher
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -49,6 +52,55 @@ SET rel.confidence = 0.95,
 	require.Equal(t, 0.95, edges[0].Properties["confidence"])
 	require.Equal(t, "parser", edges[0].Properties["evidence_source"])
 	require.Equal(t, "function", edges[0].Properties["call_kind"])
+}
+
+func TestUnwindMatchMergeRelationshipSet_ProfilesChainBatchWhenEnabled(t *testing.T) {
+	var logs bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+	t.Setenv("NORNICDB_PCG_CHAIN_PROFILE", "1")
+
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, `CREATE (:Function {uid: 'fn-source'}), (:Function {uid: 'fn-target'})`, nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (source:Function {uid: row.caller_entity_id})
+MATCH (target:Function {uid: row.callee_entity_id})
+MERGE (source)-[rel:CALLS]->(target)
+SET rel.confidence = 0.95,
+    rel.evidence_source = row.evidence_source,
+    rel.call_kind = row.call_kind
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"caller_entity_id": "fn-source",
+				"callee_entity_id": "fn-target",
+				"evidence_source":  "parser",
+				"call_kind":        "function",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	output := logs.String()
+	require.Contains(t, output, "pcg_unwind_merge_chain_profile")
+	require.Contains(t, output, "input_rows=1")
+	require.Contains(t, output, "processed_rows=1")
+	require.Contains(t, output, "bulk_create_rows=1")
+	require.Contains(t, output, "rel_lookup_misses=1")
+	require.False(t, strings.Contains(output, "\n\n"), "profile logging should emit compact single-line records")
 }
 
 func TestUnwindMatchMergeRelationshipSet_BulkPathDeduplicatesPendingRelationships(t *testing.T) {
