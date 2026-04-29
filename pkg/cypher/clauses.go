@@ -1768,6 +1768,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	batchCreatedNodes := make(map[storage.NodeID]struct{})
 	relationshipCache := make(map[string]*storage.Edge)
 	relationshipKnown := make(map[string]bool)
+	pendingRelationshipCreates := make([]*storage.Edge, 0)
+	pendingRelationshipKeys := make(map[string]struct{})
+	pendingRelationshipNotify := make(map[storage.NodeID]struct{})
 	notified := make(map[string]struct{})
 	params := getParamsFromContext(ctx)
 	resolveBatchValue := func(expr string, values map[string]interface{}) interface{} {
@@ -1825,6 +1828,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		}
 		return needsUpdate
 	}
+	relationshipKey := func(startID, endID storage.NodeID, edgeType string) string {
+		return string(startID) + "\x00" + edgeType + "\x00" + string(endID)
+	}
 	createRelationship := func(edge *storage.Edge) (*storage.Edge, bool, error) {
 		const maxCreateAttempts = 3
 		for attempt := 0; attempt < maxCreateAttempts; attempt++ {
@@ -1842,8 +1848,47 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		}
 		return nil, false, fmt.Errorf("UNWIND MERGE chain relationship create failed after %d edge ID collisions", maxCreateAttempts)
 	}
-	relationshipKey := func(startID, endID storage.NodeID, edgeType string) string {
-		return string(startID) + "\x00" + edgeType + "\x00" + string(endID)
+	flushPendingRelationships := func() error {
+		if len(pendingRelationshipCreates) == 0 {
+			return nil
+		}
+		if err := store.BulkCreateEdges(pendingRelationshipCreates); err != nil {
+			if err != storage.ErrAlreadyExists {
+				return fmt.Errorf("UNWIND MERGE chain relationship bulk create failed: %w", err)
+			}
+			for _, edge := range pendingRelationshipCreates {
+				createdEdge, created, err := createRelationship(edge)
+				if err != nil {
+					return err
+				}
+				relKey := relationshipKey(edge.StartNode, edge.EndNode, edge.Type)
+				relationshipCache[relKey] = createdEdge
+				if !created {
+					result.Stats.RelationshipsCreated--
+					changed := false
+					if createdEdge.Properties == nil {
+						createdEdge.Properties = map[string]interface{}{}
+					}
+					for prop, val := range edge.Properties {
+						if cur, exists := createdEdge.Properties[prop]; !exists || !reflect.DeepEqual(canonicalUnwindMergeValue(cur), canonicalUnwindMergeValue(val)) {
+							createdEdge.Properties[prop] = val
+							changed = true
+						}
+					}
+					if changed {
+						if err := store.UpdateEdge(createdEdge); err != nil {
+							return fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
+						}
+					}
+				}
+			}
+		} else {
+			e.markUnwindMergeChainBulkRelationshipsUsed()
+		}
+		for nodeID := range pendingRelationshipNotify {
+			notifyOnce(nodeID)
+		}
+		return nil
 	}
 	// findRelationship prefers the batch-local relationship cache and only
 	// falls back to committed storage when both endpoints predate this batch.
@@ -2010,33 +2055,29 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					Properties: map[string]interface{}{},
 				}
 				applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues)
-				createdEdge, created, err := createRelationship(edge)
-				if err != nil {
-					return nil, true, err
-				}
-				edge = createdEdge
 				relationshipCache[relKey] = edge
 				relationshipKnown[relKey] = true
-				if created {
-					result.Stats.RelationshipsCreated++
-					relationshipChanged = true
-				} else if applyRelationshipAssignments(createdEdge, relPlan.setAssignments, rowValues) {
-					if err := store.UpdateEdge(createdEdge); err != nil {
+				pendingRelationshipCreates = append(pendingRelationshipCreates, edge)
+				pendingRelationshipKeys[relKey] = struct{}{}
+				result.Stats.RelationshipsCreated++
+				relationshipChanged = true
+			} else if applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues) {
+				if _, pending := pendingRelationshipKeys[relKey]; !pending {
+					if err := store.UpdateEdge(edge); err != nil {
 						return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 					}
-					relationshipCache[relKey] = createdEdge
-					relationshipChanged = true
-				}
-			} else if applyRelationshipAssignments(edge, relPlan.setAssignments, rowValues) {
-				if err := store.UpdateEdge(edge); err != nil {
-					return nil, true, fmt.Errorf("UNWIND MERGE chain relationship update failed: %w", err)
 				}
 				relationshipCache[relKey] = edge
 				relationshipChanged = true
 			}
 			if relationshipChanged {
-				notifyOnce(fromNode.ID)
-				notifyOnce(toNode.ID)
+				if _, pending := pendingRelationshipKeys[relKey]; pending {
+					pendingRelationshipNotify[fromNode.ID] = struct{}{}
+					pendingRelationshipNotify[toNode.ID] = struct{}{}
+				} else {
+					notifyOnce(fromNode.ID)
+					notifyOnce(toNode.ID)
+				}
 			}
 			if relPlan.relVar != "" {
 				rowValues[relPlan.relVar] = edge
@@ -2050,6 +2091,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 
 	if countAlias != "" {
 		result.Rows = [][]interface{}{{int64(processedRows)}}
+	}
+	if err := flushPendingRelationships(); err != nil {
+		return nil, true, err
 	}
 	return result, true, nil
 }
