@@ -45,9 +45,10 @@ func RegisterHeimdallProvider(name string, factory func(Config) (Generator, erro
 // NewManager creates an SLM manager using BYOM configuration.
 // Returns nil if SLM feature is disabled.
 //
-// Provider selection (matches embeddings: local / ollama / openai):
+// Provider selection (matches embeddings: local / ollama / openai / vllm):
 //   - openai: Use OpenAI (or compatible) chat API; requires NORNICDB_HEIMDALL_API_KEY.
 //   - ollama: Use Ollama /api/chat; NORNICDB_HEIMDALL_API_URL defaults to http://localhost:11434.
+//   - vllm: Use vLLM's OpenAI-compatible API; NORNICDB_HEIMDALL_API_URL defaults to http://localhost:8000.
 //   - local or empty: Load GGUF from NORNICDB_MODELS_DIR (BYOM).
 func NewManager(cfg Config) (*Manager, error) {
 	if !cfg.Enabled {

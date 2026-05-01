@@ -16,6 +16,7 @@ import (
 )
 
 const defaultOpenAIBaseURL = "https://api.openai.com"
+const defaultVLLMBaseURL = "http://localhost:8000"
 const defaultOpenAIModel = "gpt-4o-mini"
 const openAIChatPath = "/v1/chat/completions"
 
@@ -115,6 +116,35 @@ type openAIChatChunk struct {
 
 func init() {
 	RegisterHeimdallProvider("openai", newOpenAIGenerator)
+	RegisterHeimdallProvider("vllm", newVLLMGenerator)
+}
+
+// newVLLMGenerator creates a Generator that uses a vLLM server's OpenAI-compatible API.
+// vLLM serves the same /v1/chat/completions endpoint, so this reuses openAIGenerator
+// with vLLM-friendly defaults: no API key required, base URL defaults to localhost:8000,
+// and the configured model name is used as-is (no looksLikeLocalModel filtering).
+func newVLLMGenerator(cfg Config) (Generator, error) {
+	baseURL := cfg.APIURL
+	if baseURL == "" {
+		baseURL = defaultVLLMBaseURL
+	}
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	model := strings.TrimSpace(cfg.Model)
+	if model == "" {
+		return nil, fmt.Errorf("vllm provider requires NORNICDB_HEIMDALL_MODEL (the model served by vLLM)")
+	}
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		apiKey = "EMPTY" // vLLM accepts any key when auth is disabled
+	}
+	return &openAIGenerator{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		model:   model,
+		client: &http.Client{
+			Timeout: 120 * time.Second,
+		},
+	}, nil
 }
 
 // newOpenAIGenerator creates a Generator that uses the OpenAI chat completions API.
