@@ -2077,20 +2077,16 @@ func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error
 	// For bulk operations within transaction, create one by one
 	for _, node := range nodes {
 		if w.namespace == "" {
-			id, err := w.tx.CreateNode(node)
-			if err != nil {
+			if _, err := w.tx.CreateNode(node); err != nil {
 				return err
 			}
-			w.markMutatedNodeID(id)
 			continue
 		}
 		namespaced := storage.CopyNode(node)
 		namespaced.ID = w.prefixNodeID(node.ID)
-		actualID, err := w.tx.CreateNode(namespaced)
-		if err != nil {
+		if _, err := w.tx.CreateNode(namespaced); err != nil {
 			return err
 		}
-		w.markMutatedNodeID(w.unprefixNodeID(actualID))
 	}
 	return nil
 }

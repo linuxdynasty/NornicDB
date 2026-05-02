@@ -1642,12 +1642,6 @@ func applyUnwindMergeMapExpressions(
 	return changed
 }
 
-type unwindPendingNodeCreate struct {
-	node       *storage.Node
-	labels     []string
-	matchProps map[string]interface{}
-}
-
 func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
 	plan := e.cachedUnwindMergeChainPlan(mutationPart)
 	if !plan.supported {
@@ -1716,115 +1710,6 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 		}
 		notified[key] = struct{}{}
 		e.notifyNodeMutated(key)
-	}
-	executeSimpleNodePlan := func(nodePlan *unwindMergeChainNodePlan) (bool, error) {
-		pending := make(map[string]*storage.Node)
-		creates := make([]*storage.Node, 0)
-		createMeta := make([]unwindPendingNodeCreate, 0)
-
-		for _, item := range items {
-			rowValues := map[string]interface{}{unwindVar: item}
-			matchProps := make(map[string]interface{}, len(nodePlan.matchAssignments))
-			for _, assignment := range nodePlan.matchAssignments {
-				matchProps[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
-			}
-			lookupKey := unwindMergeKey(unwindMergeLabelsKey(nodePlan.labels), matchProps)
-			node := pending[lookupKey]
-			if node == nil {
-				node = lookupCache[lookupKey]
-			}
-			if node == nil && !lookupKnown[lookupKey] {
-				var err error
-				node, err = e.findMergeNode(store, nodePlan.labels, matchProps)
-				if err != nil {
-					return false, err
-				}
-				lookupCache[lookupKey] = node
-				lookupKnown[lookupKey] = true
-			}
-			if node == nil {
-				if nodePlan.matchOnly {
-					continue
-				}
-				node = &storage.Node{
-					ID:         storage.NodeID(e.generateID()),
-					Labels:     append([]string(nil), nodePlan.labels...),
-					Properties: cloneNodePropertiesMap(matchProps),
-				}
-				for _, assignment := range nodePlan.setAssignments {
-					node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
-				}
-				applyUnwindMergeMapExpressions(node.Properties, nodePlan.setMapExpressions, rowValues, resolveBatchValue)
-				for _, assignment := range nodePlan.onCreateAssignments {
-					node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
-				}
-				applyUnwindMergeMapExpressions(node.Properties, nodePlan.onCreateMapExpressions, rowValues, resolveBatchValue)
-				pending[lookupKey] = node
-				lookupCache[lookupKey] = node
-				lookupKnown[lookupKey] = true
-				creates = append(creates, node)
-				createMeta = append(createMeta, unwindPendingNodeCreate{
-					node:       node,
-					labels:     append([]string(nil), nodePlan.labels...),
-					matchProps: cloneNodePropertiesMap(matchProps),
-				})
-				continue
-			}
-
-			needsUpdate := false
-			for _, assignment := range nodePlan.setAssignments {
-				val := resolveBatchValue(assignment.expr, rowValues)
-				if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
-					node.Properties[assignment.prop] = val
-					needsUpdate = true
-				}
-			}
-			if applyUnwindMergeMapExpressions(node.Properties, nodePlan.setMapExpressions, rowValues, resolveBatchValue) {
-				needsUpdate = true
-			}
-			for _, assignment := range nodePlan.onMatchAssignments {
-				val := resolveBatchValue(assignment.expr, rowValues)
-				if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
-					node.Properties[assignment.prop] = val
-					needsUpdate = true
-				}
-			}
-			if applyUnwindMergeMapExpressions(node.Properties, nodePlan.onMatchMapExpressions, rowValues, resolveBatchValue) {
-				needsUpdate = true
-			}
-			if needsUpdate {
-				if _, isPendingCreate := pending[lookupKey]; isPendingCreate {
-					continue
-				}
-				if err := store.UpdateNode(node); err != nil {
-					return false, fmt.Errorf("UNWIND MERGE chain update failed: %w", err)
-				}
-				e.cacheMergeNode(nodePlan.labels, matchProps, node)
-				notifyOnce(node.ID)
-			}
-		}
-
-		if len(creates) > 0 {
-			if err := store.BulkCreateNodes(creates); err != nil {
-				return false, fmt.Errorf("UNWIND MERGE chain bulk create failed: %w", err)
-			}
-			result.Stats.NodesCreated += len(creates)
-			for _, created := range createMeta {
-				e.cacheMergeNode(created.labels, created.matchProps, created.node)
-				notifyOnce(created.node.ID)
-			}
-		}
-		return true, nil
-	}
-
-	if plan.simple && len(plan.steps) == 1 && plan.steps[0].node != nil {
-		if _, err := executeSimpleNodePlan(plan.steps[0].node); err != nil {
-			return nil, true, err
-		}
-		if countAlias != "" {
-			result.Rows = append(result.Rows, []interface{}{len(items)})
-		}
-		return result, true, nil
 	}
 
 	for _, item := range items {
