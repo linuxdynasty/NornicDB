@@ -1,6 +1,7 @@
 package cypher
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -530,6 +531,23 @@ func (e *StorageExecutor) evaluateBindingExpressionAsBoolean(b binding, expr str
 }
 
 func (e *StorageExecutor) compareNodeIDs(leftID, rightID string, op string) bool {
+	leftNum, leftErr := strconv.ParseInt(leftID, 10, 64)
+	rightNum, rightErr := strconv.ParseInt(rightID, 10, 64)
+	if leftErr == nil && rightErr == nil {
+		switch op {
+		case ">":
+			return leftNum > rightNum
+		case ">=":
+			return leftNum >= rightNum
+		case "<":
+			return leftNum < rightNum
+		case "<=":
+			return leftNum <= rightNum
+		default:
+			return false
+		}
+	}
+
 	switch op {
 	case ">":
 		return leftID > rightID

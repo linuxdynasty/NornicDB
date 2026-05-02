@@ -60,6 +60,16 @@ func TestNewProvider_UnsupportedProvider(t *testing.T) {
 	assert.Contains(t, err.Error(), "not-a-real-provider")
 }
 
+func TestNewProvider_GCPInvalidConfig(t *testing.T) {
+	t.Parallel()
+	_, err := NewProvider(FactoryConfig{
+		Provider: "gcp-cloudkms",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidConfig))
+	assert.Contains(t, err.Error(), "gcp provider requires")
+}
+
 func TestNewProvider_WithAuditArchiver(t *testing.T) {
 	t.Parallel()
 	archiver, err := NewAuditArchiver(AuditArchiverConfig{
