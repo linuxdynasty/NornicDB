@@ -845,6 +845,7 @@ type unwindMergeChainNodePlan struct {
 	setAssignments      []unwindSimpleSetAssignment
 	onCreateAssignments []unwindSimpleSetAssignment
 	onMatchAssignments  []unwindSimpleSetAssignment
+	matchOnly           bool
 }
 
 type unwindMergeChainLookupPlan struct {
@@ -1404,6 +1405,22 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		clause := clauses[i]
 		if !startsWithKeywordFold(clause, "MERGE") {
 			if lookupPlan, ok := parseUnwindLookupClause(clause); ok {
+				if !lookupPlan.optional && i+1 < len(clauses) && startsWithKeywordFold(clauses[i+1], "SET") {
+					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(clauses[i+1][len("SET"):]), lookupPlan.varName)
+					if !ok {
+						return unwindMergeChainPlan{}
+					}
+					plan.steps = append(plan.steps, unwindMergeChainStep{node: &unwindMergeChainNodePlan{
+						mergeVar:         lookupPlan.varName,
+						labels:           lookupPlan.labels,
+						matchAssignments: lookupPlan.matchAssignments,
+						setAssignments:   parsed,
+						matchOnly:        true,
+					}})
+					boundVars[lookupPlan.varName] = struct{}{}
+					i++
+					continue
+				}
 				plan.steps = append(plan.steps, unwindMergeChainStep{lookup: &lookupPlan})
 				boundVars[lookupPlan.varName] = struct{}{}
 				continue
@@ -1666,6 +1683,10 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					lookupKnown[lookupKey] = true
 				}
 				if node == nil {
+					if nodePlan.matchOnly {
+						skipRow = true
+						break
+					}
 					node = &storage.Node{
 						ID:         storage.NodeID(e.generateID()),
 						Labels:     append([]string(nil), nodePlan.labels...),
@@ -1690,14 +1711,14 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					needsUpdate := false
 					for _, assignment := range nodePlan.setAssignments {
 						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+						if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
 							node.Properties[assignment.prop] = val
 							needsUpdate = true
 						}
 					}
 					for _, assignment := range nodePlan.onMatchAssignments {
 						val := resolveBatchValue(assignment.expr, rowValues)
-						if cur, exists := node.Properties[assignment.prop]; !exists || cur != val {
+						if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
 							node.Properties[assignment.prop] = val
 							needsUpdate = true
 						}

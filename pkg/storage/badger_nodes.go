@@ -102,6 +102,9 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 			schema.RegisterUniqueValue(label, propName, propValue, node.ID)
 		}
 	}
+	if err := b.registerNodeSchemaIndexes(schema, node); err != nil {
+		return "", err
+	}
 
 	b.cacheOnNodeCreated(node)
 
@@ -330,6 +333,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
 				}
 			}
+			if indexErr := b.registerNodeSchemaIndexes(schema, node); indexErr != nil {
+				return indexErr
+			}
 
 			b.cacheOnNodeCreated(node)
 			// Notify listeners about the new node
@@ -346,6 +352,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				for propName, propValue := range node.Properties {
 					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
 				}
+			}
+			if indexErr := b.replaceNodeSchemaIndexes(schema, existingNode, node); indexErr != nil {
+				return indexErr
 			}
 
 			b.cacheOnNodeUpdatedWithOldNode(node, existingNode)
@@ -630,6 +639,9 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 					for propName, propValue := range deletedNode.Properties {
 						schema.UnregisterUniqueValue(label, propName, propValue)
 					}
+				}
+				if indexErr := b.unregisterNodeSchemaIndexes(schema, deletedNode); indexErr != nil {
+					return indexErr
 				}
 			}
 		}

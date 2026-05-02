@@ -110,6 +110,9 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
 				}
 			}
+			if indexErr := b.registerNodeSchemaIndexes(schema, node); indexErr != nil {
+				return indexErr
+			}
 		}
 
 		b.cacheOnNodesCreated(nodes)

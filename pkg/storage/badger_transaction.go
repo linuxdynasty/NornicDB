@@ -1207,6 +1207,9 @@ func (tx *BadgerTransaction) Commit() error {
 					schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
 				}
 			}
+			if err := tx.engine.registerNodeSchemaIndexes(schema, op.Node); err != nil {
+				return err
+			}
 		case OpUpdateNode:
 			if op.OldNode != nil {
 				dbName, _, ok := ParseDatabasePrefix(string(op.OldNode.ID))
@@ -1228,6 +1231,9 @@ func (tx *BadgerTransaction) Commit() error {
 							schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
 						}
 					}
+					if err := tx.engine.replaceNodeSchemaIndexes(schema, op.OldNode, op.Node); err != nil {
+						return err
+					}
 				}
 			}
 		case OpDeleteNode:
@@ -1243,6 +1249,9 @@ func (tx *BadgerTransaction) Commit() error {
 				for propName, propValue := range op.OldNode.Properties {
 					schema.UnregisterUniqueValue(label, propName, propValue)
 				}
+			}
+			if err := tx.engine.unregisterNodeSchemaIndexes(schema, op.OldNode); err != nil {
+				return err
 			}
 		}
 	}

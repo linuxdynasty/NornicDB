@@ -138,6 +138,55 @@ func TestPropertyIndex_NumericValues(t *testing.T) {
 	}
 }
 
+func TestBadgerEngine_MaintainsPropertyIndexForNodeLifecycle(t *testing.T) {
+	base := NewMemoryEngine()
+	t.Cleanup(func() { _ = base.Close() })
+	store := NewNamespacedEngine(base, "test")
+	schema := store.GetSchema()
+	if err := schema.AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}); err != nil {
+		t.Fatalf("AddPropertyIndex failed: %v", err)
+	}
+
+	_, err := store.CreateNode(&Node{
+		ID:     "fn-1",
+		Labels: []string{"Function"},
+		Properties: map[string]interface{}{
+			"uid":      "fn-1",
+			"language": "go",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+	if got := schema.PropertyIndexLookup("Function", "uid", "fn-1"); len(got) != 1 || got[0] != "test:fn-1" {
+		t.Fatalf("expected create to populate property index, got %v", got)
+	}
+
+	if err := store.UpdateNode(&Node{
+		ID:     "fn-1",
+		Labels: []string{"Function"},
+		Properties: map[string]interface{}{
+			"uid":      "fn-1-renamed",
+			"language": "typescript",
+		},
+	}); err != nil {
+		t.Fatalf("UpdateNode failed: %v", err)
+	}
+	if got := schema.PropertyIndexLookup("Function", "uid", "fn-1"); len(got) != 0 {
+		t.Fatalf("expected update to remove old property index value, got %v", got)
+	}
+	if got := schema.PropertyIndexLookup("Function", "uid", "fn-1-renamed"); len(got) != 1 || got[0] != "test:fn-1" {
+		t.Fatalf("expected update to populate new property index value, got %v", got)
+	}
+
+	if err := store.DeleteNode("fn-1"); err != nil {
+		t.Fatalf("DeleteNode failed: %v", err)
+	}
+	if got := schema.PropertyIndexLookup("Function", "uid", "fn-1-renamed"); len(got) != 0 {
+		t.Fatalf("expected delete to remove property index value, got %v", got)
+	}
+}
+
 func TestPropertyIndex_SortedKeyCacheInvalidation(t *testing.T) {
 	sm := NewSchemaManager()
 	err := sm.AddPropertyIndex("idx_src", "MongoDocument", []string{"sourceId"})

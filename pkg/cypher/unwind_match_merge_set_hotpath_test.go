@@ -49,6 +49,59 @@ SET rel.confidence = 0.95,
 	require.Equal(t, "function", edges[0].Properties["call_kind"])
 }
 
+func TestUnwindMatchNodeSet_UsesChainBatchHotPathWithoutCreatingMissingNodes(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}))
+	for _, uid := range []string{"fn-existing-1", "fn-existing-2"} {
+		_, err := exec.Execute(ctx, fmt.Sprintf(`
+CREATE (:Function {uid: '%s', repo_id: 'repo-before', language: 'go'})
+`, uid), nil)
+		require.NoError(t, err)
+	}
+	if got := store.GetSchema().PropertyIndexLookup("Function", "uid", "fn-existing-1"); len(got) != 1 {
+		nodes, nodeErr := store.GetNodesByLabel("Function")
+		require.NoError(t, nodeErr)
+		observed := make([]map[string]interface{}, 0, len(nodes))
+		for _, node := range nodes {
+			observed = append(observed, map[string]interface{}{
+				"id":         node.ID,
+				"labels":     node.Labels,
+				"properties": node.Properties,
+			})
+		}
+		t.Fatalf("expected Function uid index to be populated, lookup=%v nodes=%#v", got, observed)
+	}
+
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MATCH (n:Function {uid: row.entity_id})
+SET n.repo_id = row.repo_id,
+    n.language = row.language,
+    n.semantic_kind = row.semantic_kind
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"entity_id": "fn-existing-1", "repo_id": "repo-after", "language": "typescript", "semantic_kind": "function"},
+			{"entity_id": "fn-missing", "repo_id": "repo-after", "language": "typescript", "semantic_kind": "function"},
+			{"entity_id": "fn-existing-2", "repo_id": "repo-after", "language": "typescript", "semantic_kind": "function"},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected PCG semantic MATCH/SET shape to use chain batch hot path")
+
+	nodes, err := store.GetNodesByLabel("Function")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2, "MATCH/SET must not create missing canonical semantic nodes")
+	for _, node := range nodes {
+		require.Equal(t, "repo-after", node.Properties["repo_id"])
+		require.Equal(t, "typescript", node.Properties["language"])
+		require.Equal(t, "function", node.Properties["semantic_kind"])
+	}
+}
+
 func BenchmarkUnwindMatchMergeRelationshipSet_CodeCallShape(b *testing.B) {
 	const rowCount = 512
 	ctx := context.Background()
