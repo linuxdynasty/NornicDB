@@ -228,6 +228,50 @@ func edgeTypeIndexPrefix(edgeType string) []byte {
 	return key
 }
 
+// edgePairIndexKey creates a key for direct start/end/type edge lookups.
+func edgePairIndexKey(startID, endID NodeID, edgeType string, edgeID EdgeID) []byte {
+	normalizedType := strings.ToLower(edgeType)
+	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1+len(normalizedType)+1+len(edgeID))
+	key = append(key, prefixEdgePairIndex)
+	key = append(key, []byte(startID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(endID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(normalizedType)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(edgeID)...)
+	return key
+}
+
+// edgePairIndexPrefix returns the prefix for all edges between two nodes.
+func edgePairIndexPrefix(startID, endID NodeID) []byte {
+	key := make([]byte, 0, 1+len(startID)+1+len(endID)+1)
+	key = append(key, prefixEdgePairIndex)
+	key = append(key, []byte(startID)...)
+	key = append(key, 0x00)
+	key = append(key, []byte(endID)...)
+	key = append(key, 0x00)
+	return key
+}
+
+// edgePairTypeIndexPrefix returns the prefix for edges between two nodes with a type.
+func edgePairTypeIndexPrefix(startID, endID NodeID, edgeType string) []byte {
+	normalizedType := strings.ToLower(edgeType)
+	key := edgePairIndexPrefix(startID, endID)
+	key = append(key, []byte(normalizedType)...)
+	key = append(key, 0x00)
+	return key
+}
+
+func extractEdgeIDFromPairIndexKey(key []byte) EdgeID {
+	for i := len(key) - 1; i >= 0; i-- {
+		if key[i] == 0x00 {
+			return EdgeID(string(key[i+1:]))
+		}
+	}
+	return ""
+}
+
 // pendingEmbedKey creates a key for the pending embeddings index.
 // Format: prefix + nodeID
 func pendingEmbedKey(nodeID NodeID) []byte {

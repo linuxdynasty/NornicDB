@@ -282,6 +282,9 @@ func (b *BadgerEngine) BulkCreateEdges(edges []*Edge) error {
 			if err := txn.Set(edgeTypeIndexKey(edge.Type, edge.ID), []byte{}); err != nil {
 				return err
 			}
+			if err := txn.Set(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{}); err != nil {
+				return err
+			}
 			if err := b.writeEdgeMVCCVersionInTxn(txn, edge, version); err != nil {
 				return err
 			}

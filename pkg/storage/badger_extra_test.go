@@ -772,6 +772,36 @@ func TestBadgerEngine_DeleteEdge_UnknownType(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
+func TestBadgerEngine_EdgePairIndexLifecycle(t *testing.T) {
+	engine := createTestBadgerEngine(t)
+
+	n1 := testNode("epi-n1")
+	n2 := testNode("epi-n2")
+	n3 := testNode("epi-n3")
+	_, err := engine.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n2)
+	require.NoError(t, err)
+	_, err = engine.CreateNode(n3)
+	require.NoError(t, err)
+
+	e := testEdge("epi-e1", "epi-n1", "epi-n2", "KNOWS")
+	require.NoError(t, engine.CreateEdge(e))
+	assertEdgePairIndexExists(t, engine, e, true)
+	require.Equal(t, e.ID, engine.GetEdgeBetween(n1.ID, n2.ID, "KNOWS").ID)
+
+	updated := copyEdge(e)
+	updated.EndNode = n3.ID
+	updated.Type = "LIKES"
+	require.NoError(t, engine.UpdateEdge(updated))
+	assertEdgePairIndexExists(t, engine, e, false)
+	assertEdgePairIndexExists(t, engine, updated, true)
+	require.Equal(t, updated.ID, engine.GetEdgeBetween(n1.ID, n3.ID, "LIKES").ID)
+
+	require.NoError(t, engine.DeleteEdge(updated.ID))
+	assertEdgePairIndexExists(t, engine, updated, false)
+}
+
 func TestBadgerEngine_DeleteEdge_NotFound(t *testing.T) {
 	engine := createTestBadgerEngine(t)
 	err := engine.DeleteEdge(EdgeID(prefixTestID("nonexistent")))
@@ -833,6 +863,21 @@ func TestBadgerEngine_BulkCreateNodes_NodeKeyConstraintViolation(t *testing.T) {
 	err := engine.BulkCreateNodes(nodes)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists in batch")
+}
+
+func assertEdgePairIndexExists(t *testing.T, engine *BadgerEngine, edge *Edge, want bool) {
+	t.Helper()
+
+	err := engine.withView(func(txn *badger.Txn) error {
+		_, err := txn.Get(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID))
+		if want {
+			require.NoError(t, err)
+		} else {
+			require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		}
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 func TestBadgerEngine_BulkCreateNodes_NodeKeyNullProperty(t *testing.T) {

@@ -34,6 +34,7 @@ const (
 	prefixMVCCNodeHead  = byte(0x0E) // mvcc_node_head:nodeID -> MVCCHead
 	prefixMVCCEdgeHead  = byte(0x0F) // mvcc_edge_head:edgeID -> MVCCHead
 	prefixMVCCMeta      = byte(0x10) // mvcc_meta:* -> MVCC metadata (sequence, rebuild markers)
+	prefixEdgePairIndex = byte(0x11) // edgepair:startID:endID:type:edgeID -> []byte{} (for fast relationship MERGE lookup)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)

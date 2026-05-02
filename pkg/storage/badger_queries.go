@@ -533,15 +533,58 @@ func (b *BadgerEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 	}
 	b.mu.RUnlock()
 
-	outgoing, err := b.GetOutgoingEdges(startID)
+	var result []*Edge
+	err := b.withView(func(txn *badger.Txn) error {
+		prefix := edgePairIndexPrefix(startID, endID)
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			edgeID := extractEdgeIDFromPairIndexKey(it.Item().Key())
+			if edgeID == "" {
+				continue
+			}
+
+			item, err := txn.Get(edgeKey(edgeID))
+			if err != nil {
+				continue
+			}
+
+			var edge *Edge
+			if err := item.Value(func(val []byte) error {
+				var decodeErr error
+				edge, decodeErr = decodeEdge(val)
+				return decodeErr
+			}); err != nil {
+				continue
+			}
+
+			result = append(result, edge)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	var result []*Edge
+	outgoing, err := b.GetOutgoingEdges(startID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[EdgeID]struct{}, len(result)+len(outgoing))
+	for _, edge := range result {
+		if edge != nil {
+			seen[edge.ID] = struct{}{}
+		}
+	}
 	for _, edge := range outgoing {
+		if _, exists := seen[edge.ID]; exists {
+			continue
+		}
 		if edge.EndNode == endID {
 			result = append(result, edge)
+			seen[edge.ID] = struct{}{}
 		}
 	}
 
@@ -550,6 +593,42 @@ func (b *BadgerEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 
 // GetEdgeBetween returns an edge between two nodes with the given type.
 func (b *BadgerEngine) GetEdgeBetween(source, target NodeID, edgeType string) *Edge {
+	if edgeType != "" {
+		var found *Edge
+		err := b.withView(func(txn *badger.Txn) error {
+			prefix := edgePairTypeIndexPrefix(source, target, edgeType)
+			it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+			defer it.Close()
+
+			for it.Rewind(); it.Valid(); it.Next() {
+				edgeID := extractEdgeIDFromPairIndexKey(it.Item().Key())
+				if edgeID == "" {
+					continue
+				}
+
+				item, err := txn.Get(edgeKey(edgeID))
+				if err != nil {
+					continue
+				}
+
+				var edge *Edge
+				if err := item.Value(func(val []byte) error {
+					var decodeErr error
+					edge, decodeErr = decodeEdge(val)
+					return decodeErr
+				}); err != nil {
+					continue
+				}
+				found = edge
+				break
+			}
+			return nil
+		})
+		if err == nil && found != nil {
+			return found
+		}
+	}
+
 	edges, err := b.GetEdgesBetween(source, target)
 	if err != nil {
 		return nil
