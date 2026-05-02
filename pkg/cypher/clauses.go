@@ -903,6 +903,7 @@ type unwindMergeChainLookupPlan struct {
 	varName          string
 	labels           []string
 	matchAssignments []unwindSimpleSetAssignment
+	setAssignments   []unwindSimpleSetAssignment
 	optional         bool
 	anyLabel         bool
 }
@@ -1492,6 +1493,15 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		clause := clauses[i]
 		if !startsWithKeywordFold(clause, "MERGE") {
 			if lookupPlan, ok := parseUnwindLookupClause(clause); ok {
+				for i+1 < len(clauses) && startsWithKeywordFold(clauses[i+1], "SET") {
+					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(clauses[i+1][len("SET"):]), lookupPlan.varName)
+					if !ok {
+						return unwindMergeChainPlan{}
+					}
+					lookupPlan.setAssignments = append(lookupPlan.setAssignments, parsed...)
+					hasMutation = true
+					i++
+				}
 				plan.steps = append(plan.steps, unwindMergeChainStep{lookup: &lookupPlan})
 				boundVars[lookupPlan.varName] = struct{}{}
 				continue
@@ -1972,6 +1982,23 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 				if node == nil {
 					rowValues[lookupPlan.varName] = nil
 				} else {
+					needsUpdate := false
+					for _, assignment := range lookupPlan.setAssignments {
+						changed, err := applyUnwindMergeChainSetAssignment(node, assignment, rowValues, resolveBatchValue)
+						if err != nil {
+							return nil, true, err
+						}
+						if changed {
+							needsUpdate = true
+						}
+					}
+					if needsUpdate {
+						if err := store.UpdateNode(node); err != nil {
+							return nil, true, fmt.Errorf("UNWIND MATCH chain update failed: %w", err)
+						}
+						e.cacheMergeNode(lookupPlan.labels, matchProps, node)
+						notifyOnce(node.ID)
+					}
 					rowValues[lookupPlan.varName] = node
 				}
 				continue
