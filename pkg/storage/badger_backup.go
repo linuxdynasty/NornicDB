@@ -103,7 +103,6 @@ func (b *BadgerEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesD
 		edgeKeyPrefix,
 		append([]byte{prefixOutgoingIndex}, prefixBytes...),
 		append([]byte{prefixIncomingIndex}, prefixBytes...),
-		append([]byte{prefixEdgePairIndex}, prefixBytes...),
 		append([]byte{prefixPendingEmbed}, prefixBytes...),
 		append([]byte{prefixEmbedding}, prefixBytes...),
 	}
@@ -170,9 +169,6 @@ func (b *BadgerEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesD
 	}
 	if err := deleteIndexEntriesBySuffixPrefix(prefixEdgeTypeIndex); err != nil {
 		return 0, 0, fmt.Errorf("failed to clean edge type index: %w", err)
-	}
-	if err := deleteIndexEntriesBySuffixPrefix(prefixEdgePairIndex); err != nil {
-		return 0, 0, fmt.Errorf("failed to clean edge pair index: %w", err)
 	}
 
 	// Clear/adjust caches and cached counters.

@@ -669,7 +669,6 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	// Without this, edges created inside implicit/explicit transactions are invisible
 	// to type-based scans and Cypher fast-paths that rely on the edge-type index.
 	tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
-	tx.bufferSet(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
 
 	// Track for read-your-writes
 	edgeCopy := copyEdge(edge)
@@ -732,10 +731,8 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 
 		tx.bufferDelete(outgoingIndexKey(oldEdge.StartNode, edge.ID))
 		tx.bufferDelete(incomingIndexKey(oldEdge.EndNode, edge.ID))
-		tx.bufferDelete(edgePairIndexKey(oldEdge.StartNode, oldEdge.EndNode, oldEdge.Type, edge.ID))
 		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
 		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
-		tx.bufferSet(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
 	}
 
 	// If type changed, update edge type index.
@@ -745,10 +742,6 @@ func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
 		}
 		if edge.Type != "" {
 			tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
-		}
-		if oldEdge.StartNode == edge.StartNode && oldEdge.EndNode == edge.EndNode {
-			tx.bufferDelete(edgePairIndexKey(oldEdge.StartNode, oldEdge.EndNode, oldEdge.Type, edge.ID))
-			tx.bufferSet(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edge.ID), []byte{})
 		}
 	}
 
@@ -811,7 +804,6 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 
 	// Buffer edge type index deletion.
 	tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
-	tx.bufferDelete(edgePairIndexKey(edge.StartNode, edge.EndNode, edge.Type, edgeID))
 
 	// Track deletion
 	delete(tx.pendingEdges, edgeID)
@@ -920,51 +912,14 @@ func (tx *BadgerTransaction) GetEdgesBetween(startID, endID NodeID) ([]*Edge, er
 
 // GetEdgeBetween returns a matching edge including pending transaction writes.
 func (tx *BadgerTransaction) GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	if err := tx.ensureLifecycleActiveLocked(); err != nil {
-		return nil
-	}
-
-	if edgeType != "" {
-		if committed := tx.engine.GetEdgeBetween(startID, endID, edgeType); committed != nil {
-			if _, deleted := tx.deletedEdges[committed.ID]; !deleted {
-				if pending, exists := tx.pendingEdges[committed.ID]; exists {
-					if pending.StartNode == startID && pending.EndNode == endID && pending.Type == edgeType {
-						return copyEdge(pending)
-					}
-				} else {
-					return copyEdge(committed)
-				}
-			}
-		}
-	}
-
-	for _, edge := range tx.pendingEdges {
-		if edge == nil {
-			continue
-		}
-		if edge.StartNode == startID && edge.EndNode == endID && (edgeType == "" || edge.Type == edgeType) {
-			return copyEdge(edge)
-		}
-	}
-
-	if edgeType != "" {
-		return nil
-	}
-
-	committed, err := tx.engine.GetEdgesBetween(startID, endID)
+	edges, err := tx.GetEdgesBetween(startID, endID)
 	if err != nil {
 		return nil
 	}
-	for _, edge := range committed {
-		if _, deleted := tx.deletedEdges[edge.ID]; deleted {
-			continue
+	for _, edge := range edges {
+		if edgeType == "" || edge.Type == edgeType {
+			return edge
 		}
-		if pending, exists := tx.pendingEdges[edge.ID]; exists {
-			return copyEdge(pending)
-		}
-		return copyEdge(edge)
 	}
 	return nil
 }
