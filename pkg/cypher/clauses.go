@@ -839,13 +839,16 @@ type unwindSimpleSetAssignment struct {
 }
 
 type unwindMergeChainNodePlan struct {
-	mergeVar            string
-	labels              []string
-	matchAssignments    []unwindSimpleSetAssignment
-	setAssignments      []unwindSimpleSetAssignment
-	onCreateAssignments []unwindSimpleSetAssignment
-	onMatchAssignments  []unwindSimpleSetAssignment
-	matchOnly           bool
+	mergeVar               string
+	labels                 []string
+	matchAssignments       []unwindSimpleSetAssignment
+	setAssignments         []unwindSimpleSetAssignment
+	setMapExpressions      []string
+	onCreateAssignments    []unwindSimpleSetAssignment
+	onCreateMapExpressions []string
+	onMatchAssignments     []unwindSimpleSetAssignment
+	onMatchMapExpressions  []string
+	matchOnly              bool
 }
 
 type unwindMergeChainLookupPlan struct {
@@ -920,38 +923,56 @@ func parseUnwindSimpleMergeMatchAssignments(raw string) ([]unwindSimpleSetAssign
 }
 
 func parseUnwindSimpleSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAssignment, bool) {
+	assignments, mapExpressions, ok := parseUnwindNodeSetAssignments(raw, mergeVar)
+	if !ok || len(mapExpressions) > 0 {
+		return nil, false
+	}
+	return assignments, true
+}
+
+func parseUnwindNodeSetAssignments(raw, mergeVar string) ([]unwindSimpleSetAssignment, []string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, true
+		return nil, nil, true
 	}
 	assignments := splitTopLevelComma(trimmed)
 	out := make([]unwindSimpleSetAssignment, 0, len(assignments))
+	mapExpressions := make([]string, 0)
 	for _, assignment := range assignments {
 		a := strings.TrimSpace(assignment)
 		if a == "" {
 			continue
 		}
+		if plusEqIdx := strings.Index(a, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(a[:plusEqIdx])
+			right := strings.TrimSpace(a[plusEqIdx+2:])
+			if left != mergeVar || right == "" {
+				return nil, nil, false
+			}
+			mapExpressions = append(mapExpressions, right)
+			continue
+		}
 		eqIdx := strings.Index(a, "=")
 		if eqIdx <= 0 {
-			return nil, false
+			return nil, nil, false
 		}
 		left := strings.TrimSpace(a[:eqIdx])
 		right := strings.TrimSpace(a[eqIdx+1:])
 		dotIdx := strings.Index(left, ".")
 		if dotIdx <= 0 || dotIdx == len(left)-1 {
-			return nil, false
+			return nil, nil, false
 		}
 		leftVar := strings.TrimSpace(left[:dotIdx])
 		prop := strings.TrimSpace(left[dotIdx+1:])
 		if leftVar != mergeVar || prop == "" {
-			return nil, false
+			return nil, nil, false
 		}
 		out = append(out, unwindSimpleSetAssignment{
 			prop: prop,
 			expr: right,
 		})
 	}
-	return out, true
+	return out, mapExpressions, true
 }
 
 func parseSimpleUnwindMergeClause(mergePart string) (string, []string, []unwindSimpleSetAssignment, bool) {
@@ -1406,16 +1427,17 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 		if !startsWithKeywordFold(clause, "MERGE") {
 			if lookupPlan, ok := parseUnwindLookupClause(clause); ok {
 				if !lookupPlan.optional && i+1 < len(clauses) && startsWithKeywordFold(clauses[i+1], "SET") {
-					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(clauses[i+1][len("SET"):]), lookupPlan.varName)
+					parsed, mapExpressions, ok := parseUnwindNodeSetAssignments(strings.TrimSpace(clauses[i+1][len("SET"):]), lookupPlan.varName)
 					if !ok {
 						return unwindMergeChainPlan{}
 					}
 					plan.steps = append(plan.steps, unwindMergeChainStep{node: &unwindMergeChainNodePlan{
-						mergeVar:         lookupPlan.varName,
-						labels:           lookupPlan.labels,
-						matchAssignments: lookupPlan.matchAssignments,
-						setAssignments:   parsed,
-						matchOnly:        true,
+						mergeVar:          lookupPlan.varName,
+						labels:            lookupPlan.labels,
+						matchAssignments:  lookupPlan.matchAssignments,
+						setAssignments:    parsed,
+						setMapExpressions: mapExpressions,
+						matchOnly:         true,
 					}})
 					boundVars[lookupPlan.varName] = struct{}{}
 					i++
@@ -1449,25 +1471,28 @@ func parseUnwindMergeChainPattern(mutationPart string) unwindMergeChainPlan {
 				nextClause := clauses[i+1]
 				switch {
 				case startsWithKeywordFold(nextClause, "SET"):
-					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("SET"):]), mergeVar)
+					parsed, mapExpressions, ok := parseUnwindNodeSetAssignments(strings.TrimSpace(nextClause[len("SET"):]), mergeVar)
 					if !ok {
 						return unwindMergeChainPlan{}
 					}
 					nodePlan.setAssignments = append(nodePlan.setAssignments, parsed...)
+					nodePlan.setMapExpressions = append(nodePlan.setMapExpressions, mapExpressions...)
 					i++
 				case startsWithKeywordFold(nextClause, "ON CREATE SET"):
-					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("ON CREATE SET"):]), mergeVar)
+					parsed, mapExpressions, ok := parseUnwindNodeSetAssignments(strings.TrimSpace(nextClause[len("ON CREATE SET"):]), mergeVar)
 					if !ok {
 						return unwindMergeChainPlan{}
 					}
 					nodePlan.onCreateAssignments = append(nodePlan.onCreateAssignments, parsed...)
+					nodePlan.onCreateMapExpressions = append(nodePlan.onCreateMapExpressions, mapExpressions...)
 					i++
 				case startsWithKeywordFold(nextClause, "ON MATCH SET"):
-					parsed, ok := parseUnwindSimpleSetAssignments(strings.TrimSpace(nextClause[len("ON MATCH SET"):]), mergeVar)
+					parsed, mapExpressions, ok := parseUnwindNodeSetAssignments(strings.TrimSpace(nextClause[len("ON MATCH SET"):]), mergeVar)
 					if !ok {
 						return unwindMergeChainPlan{}
 					}
 					nodePlan.onMatchAssignments = append(nodePlan.onMatchAssignments, parsed...)
+					nodePlan.onMatchMapExpressions = append(nodePlan.onMatchMapExpressions, mapExpressions...)
 					i++
 				default:
 					goto nodeDone
@@ -1591,6 +1616,32 @@ func unwindMergeKey(label string, props map[string]interface{}) string {
 	return string(encoded)
 }
 
+func applyUnwindMergeMapExpressions(
+	props map[string]interface{},
+	expressions []string,
+	values map[string]interface{},
+	resolve func(string, map[string]interface{}) interface{},
+) bool {
+	if len(expressions) == 0 {
+		return false
+	}
+	changed := false
+	for _, expr := range expressions {
+		raw := resolve(expr, values)
+		m, ok := toStringAnyMap(raw)
+		if !ok {
+			continue
+		}
+		for prop, val := range m {
+			if cur, exists := props[prop]; !exists || !reflect.DeepEqual(cur, val) {
+				props[prop] = val
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
 func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwindVar string, items []interface{}, mutationPart, returnPart string) (*ExecuteResult, bool, error) {
 	plan := e.cachedUnwindMergeChainPlan(mutationPart)
 	if !plan.supported {
@@ -1695,9 +1746,11 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 					for _, assignment := range nodePlan.setAssignments {
 						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 					}
+					applyUnwindMergeMapExpressions(node.Properties, nodePlan.setMapExpressions, rowValues, resolveBatchValue)
 					for _, assignment := range nodePlan.onCreateAssignments {
 						node.Properties[assignment.prop] = resolveBatchValue(assignment.expr, rowValues)
 					}
+					applyUnwindMergeMapExpressions(node.Properties, nodePlan.onCreateMapExpressions, rowValues, resolveBatchValue)
 					actualID, err := store.CreateNode(node)
 					if err != nil {
 						return nil, true, fmt.Errorf("UNWIND MERGE chain create failed: %w", err)
@@ -1716,12 +1769,18 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 							needsUpdate = true
 						}
 					}
+					if applyUnwindMergeMapExpressions(node.Properties, nodePlan.setMapExpressions, rowValues, resolveBatchValue) {
+						needsUpdate = true
+					}
 					for _, assignment := range nodePlan.onMatchAssignments {
 						val := resolveBatchValue(assignment.expr, rowValues)
 						if cur, exists := node.Properties[assignment.prop]; !exists || !reflect.DeepEqual(cur, val) {
 							node.Properties[assignment.prop] = val
 							needsUpdate = true
 						}
+					}
+					if applyUnwindMergeMapExpressions(node.Properties, nodePlan.onMatchMapExpressions, rowValues, resolveBatchValue) {
+						needsUpdate = true
 					}
 					if needsUpdate {
 						if err := store.UpdateNode(node); err != nil {

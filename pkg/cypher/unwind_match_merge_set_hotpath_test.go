@@ -102,6 +102,91 @@ SET n.repo_id = row.repo_id,
 	}
 }
 
+func TestUnwindMergeNodeSet_EvaluatesRowExpressionIdentity(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}))
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:Function {uid: row.entity_id})
+SET n.repo_id = row.repo_id,
+    n.language = row.language,
+    n.semantic_kind = row.semantic_kind
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{"entity_id": "fn-created-1", "repo_id": "repo-1", "language": "go", "semantic_kind": "function"},
+			{"entity_id": "fn-created-2", "repo_id": "repo-2", "language": "typescript", "semantic_kind": "function"},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, exec.LastHotPathTrace().UnwindMergeChainBatch, "expected PCG canonical semantic MERGE/SET shape to use chain batch hot path")
+
+	nodes, err := store.GetNodesByLabel("Function")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2, "each row identity must create a distinct Function node")
+
+	byUID := make(map[interface{}]*storage.Node, len(nodes))
+	for _, node := range nodes {
+		byUID[node.Properties["uid"]] = node
+	}
+	require.NotContains(t, byUID, "row.entity_id", "row expression must not be stored as a literal uid")
+	require.Equal(t, "repo-1", byUID["fn-created-1"].Properties["repo_id"])
+	require.Equal(t, "go", byUID["fn-created-1"].Properties["language"])
+	require.Equal(t, "repo-2", byUID["fn-created-2"].Properties["repo_id"])
+	require.Equal(t, "typescript", byUID["fn-created-2"].Properties["language"])
+}
+
+func TestUnwindMergeNodeSetMap_EvaluatesRowExpressionIdentity(t *testing.T) {
+	base := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(base, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	require.NoError(t, store.GetSchema().AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}))
+	_, err := exec.Execute(ctx, `
+UNWIND $rows AS row
+MERGE (n:Function {uid: row.entity_id})
+SET n += row.props
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"entity_id": "fn-created-1",
+				"props": map[string]interface{}{
+					"id":       "fn-created-1",
+					"repo_id":  "repo-1",
+					"language": "go",
+				},
+			},
+			{
+				"entity_id": "fn-created-2",
+				"props": map[string]interface{}{
+					"id":       "fn-created-2",
+					"repo_id":  "repo-2",
+					"language": "typescript",
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	nodes, err := store.GetNodesByLabel("Function")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2, "canonical entity rows must create a distinct node per row identity")
+
+	byUID := make(map[interface{}]*storage.Node, len(nodes))
+	for _, node := range nodes {
+		byUID[node.Properties["uid"]] = node
+	}
+	require.NotContains(t, byUID, "row.entity_id", "fallback path must not store row expression as a literal uid")
+	require.Equal(t, "repo-1", byUID["fn-created-1"].Properties["repo_id"])
+	require.Equal(t, "go", byUID["fn-created-1"].Properties["language"])
+	require.Equal(t, "repo-2", byUID["fn-created-2"].Properties["repo_id"])
+	require.Equal(t, "typescript", byUID["fn-created-2"].Properties["language"])
+}
+
 func BenchmarkUnwindMatchMergeRelationshipSet_CodeCallShape(b *testing.B) {
 	const rowCount = 512
 	ctx := context.Background()
