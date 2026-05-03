@@ -1474,55 +1474,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	returnIdx := findKeywordIndexInContext(cypher, "RETURN")
 	withIdx := findKeywordIndexInContext(cypher, "WITH")
 
-	// Find standalone SET (not ON CREATE/MATCH SET)
-	// Must handle SET preceded by space, tab, or newline
-	setIdx := -1
-	searchStart := 0
-	if onCreateIdx > 0 {
-		searchStart = onCreateIdx + 13
-	}
-	if onMatchIdx > 0 && onMatchIdx > searchStart {
-		searchStart = onMatchIdx + 12
-	}
-
-	// Helper function to find SET with any whitespace before it (reuse from executeMerge)
-	findStandaloneSetInContext := func(s string, start int) int {
-		upperS := strings.ToUpper(s)
-		for i := start; i <= len(upperS)-3; i++ {
-			if strings.HasPrefix(upperS[i:], "SET") {
-				// Check for whitespace before SET
-				if i > 0 {
-					prevChar := upperS[i-1]
-					if prevChar != ' ' && prevChar != '\n' && prevChar != '\t' && prevChar != '\r' {
-						continue // Not a word boundary
-					}
-				}
-				// Check for whitespace/end after SET
-				endPos := i + 3
-				if endPos < len(upperS) {
-					nextChar := upperS[endPos]
-					if nextChar != ' ' && nextChar != '\n' && nextChar != '\t' && nextChar != '\r' {
-						continue // Not a word boundary
-					}
-				}
-				// Make sure this isn't part of ON CREATE SET or ON MATCH SET
-				if i >= 10 && strings.HasPrefix(upperS[i-10:], "ON CREATE ") {
-					continue
-				}
-				if i >= 9 && strings.HasPrefix(upperS[i-9:], "ON MATCH ") {
-					continue
-				}
-				return i
-			}
-		}
-		return -1
-	}
-
-	if searchStart > 0 {
-		setIdx = findStandaloneSetInContext(cypher, searchStart)
-	} else {
-		setIdx = findStandaloneSetInContext(cypher, 0)
-	}
+	setIdx := findStandaloneSetInMergeSegment(cypher)
 
 	// Find MERGE pattern end
 	patternEnd := len(cypher)
@@ -1550,7 +1502,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	// Check if this is a relationship pattern: (a)-[r:TYPE]->(b)
 	if strings.Contains(mergePattern, "->") || strings.Contains(mergePattern, "<-") || strings.Contains(mergePattern, "]-") {
 		// Relationship MERGE - create relationship, then continue processing chained MERGE clauses.
-		relationshipResult, err := e.executeMergeRelationshipWithContext(ctx, "MERGE "+mergePattern, mergePattern, nodeContext, relContext)
+		relationshipResult, err := e.executeMergeRelationshipWithContext(ctx, cypher, mergePattern, nodeContext, relContext)
 		if err != nil {
 			return nil, err
 		}
@@ -1749,7 +1701,6 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	}
 	store := e.getStorage(ctx)
 
-	// Use word boundary detection
 	returnIdx := findKeywordIndex(cypher, "RETURN")
 
 	// Parse relationship pattern: (a)-[r:TYPE {props}]->(b)
@@ -1762,6 +1713,12 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	if relStart == -1 || relEnd == -1 {
 		return result, nil // Not a valid relationship pattern
 	}
+
+	setSearchStart := 0
+	if patternIdx := strings.Index(cypher, pattern); patternIdx >= 0 {
+		setSearchStart = patternIdx + len(pattern)
+	}
+	setIdx := findStandaloneSetInMergeSegmentFrom(cypher, setSearchStart)
 
 	// Get start and end node variables
 	startPart := strings.TrimSpace(pattern[:relStart])
@@ -1845,6 +1802,20 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 		relContext[relVar] = edge
 	}
 
+	if setIdx > 0 && relVar != "" {
+		setEnd := len(cypher)
+		if returnIdx > setIdx && returnIdx < setEnd {
+			setEnd = returnIdx
+		}
+		setClause := strings.TrimSpace(cypher[setIdx+3 : setEnd])
+		if propertiesSet := e.applySetToRelationshipWithContext(edge, relVar, setClause, nodeContext, relContext); propertiesSet > 0 {
+			if err := store.UpdateEdge(edge); err != nil {
+				return nil, fmt.Errorf("failed to update edge property: %w", err)
+			}
+			result.Stats.PropertiesSet += propertiesSet
+		}
+	}
+
 	// Handle RETURN
 	if returnIdx > 0 {
 		returnClause := strings.TrimSpace(cypher[returnIdx+6:])
@@ -1856,6 +1827,70 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	}
 
 	return result, nil
+}
+
+func (e *StorageExecutor) applySetToRelationshipWithContext(edge *storage.Edge, varName string, setClause string, nodeContext map[string]*storage.Node, relContext map[string]*storage.Edge) int {
+	if edge == nil || varName == "" {
+		return 0
+	}
+	fullRelContext := make(map[string]*storage.Edge)
+	for k, v := range relContext {
+		fullRelContext[k] = v
+	}
+	fullRelContext[varName] = edge
+
+	propertiesSet := 0
+	assignments := e.splitSetAssignments(setClause)
+	for _, assignment := range assignments {
+		assignment = strings.TrimSpace(assignment)
+		if assignment == "" {
+			continue
+		}
+
+		if plusEqIdx := strings.Index(assignment, "+="); plusEqIdx > 0 {
+			left := strings.TrimSpace(assignment[:plusEqIdx])
+			right := strings.TrimSpace(assignment[plusEqIdx+2:])
+			if left != varName {
+				continue
+			}
+			evaluated := e.evaluateExpressionWithContext(right, nodeContext, fullRelContext)
+			if s, ok := evaluated.(string); ok && strings.TrimSpace(s) == strings.TrimSpace(right) {
+				evaluated = e.parseValue(strings.TrimSpace(right))
+			}
+			if evaluated == nil {
+				evaluated = e.parseValue(strings.TrimSpace(right))
+			}
+			if props, ok := toStringAnyMap(evaluated); ok {
+				if edge.Properties == nil {
+					edge.Properties = make(map[string]interface{})
+				}
+				for k, v := range props {
+					edge.Properties[k] = v
+					propertiesSet++
+				}
+			}
+			continue
+		}
+
+		if !strings.HasPrefix(assignment, varName+".") {
+			continue
+		}
+		eqIdx := strings.Index(assignment, "=")
+		if eqIdx <= 0 {
+			continue
+		}
+		propName := strings.TrimSpace(assignment[len(varName)+1 : eqIdx])
+		propValue := strings.TrimSpace(assignment[eqIdx+1:])
+		if propName == "" {
+			continue
+		}
+		if edge.Properties == nil {
+			edge.Properties = make(map[string]interface{})
+		}
+		edge.Properties[propName] = e.evaluateSetExpressionWithContext(propValue, nodeContext, fullRelContext)
+		propertiesSet++
+	}
+	return propertiesSet
 }
 
 // applySetToNodeWithContext applies SET clauses with access to matched context.
@@ -2628,13 +2663,31 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 }
 
 func findStandaloneSetInMergeSegment(segment string) int {
+	return findStandaloneSetInMergeSegmentFrom(segment, 0)
+}
+
+func findStandaloneSetInMergeSegmentFrom(segment string, start int) int {
+	if start < 0 {
+		start = 0
+	}
 	searchFrom := 0
+	if start > searchFrom {
+		searchFrom = start
+	}
 	for searchFrom < len(segment) {
-		relIdx := findKeywordIndex(segment[searchFrom:], "SET")
-		if relIdx < 0 {
+		idx := keywordIndexFrom(segment, "SET", searchFrom, defaultKeywordScanOpts())
+		if idx < 0 {
 			return -1
 		}
-		idx := searchFrom + relIdx
+		if idx > 0 && !isASCIISpace(segment[idx-1]) {
+			searchFrom = idx + 3
+			continue
+		}
+		end := idx + 3
+		if end < len(segment) && !isASCIISpace(segment[end]) {
+			searchFrom = idx + 3
+			continue
+		}
 		prefix := strings.ToUpper(strings.TrimSpace(segment[:idx]))
 		if strings.HasSuffix(prefix, "ON CREATE") || strings.HasSuffix(prefix, "ON MATCH") {
 			searchFrom = idx + 3
@@ -2852,12 +2905,14 @@ func (e *StorageExecutor) executeMultipleMerges(ctx context.Context, cypher stri
 
 			// Check if this is a relationship MERGE
 			if strings.Contains(mergeContent, "-[") || strings.Contains(mergeContent, "]-") {
-				// Relationship MERGE
-				err := e.executeMergeRelSegment(ctx, mergeContent, nodeContext)
+				mergeResult, err := e.executeMergeWithContext(ctx, segment, nodeContext, relContext)
 				if err != nil {
 					return nil, fmt.Errorf("relationship MERGE failed: %w", err)
 				}
-				result.Stats.RelationshipsCreated++
+				if mergeResult != nil && mergeResult.Stats != nil {
+					result.Stats.RelationshipsCreated += mergeResult.Stats.RelationshipsCreated
+					result.Stats.PropertiesSet += mergeResult.Stats.PropertiesSet
+				}
 			} else {
 				// Node MERGE
 				node, varName, err := e.executeMergeNodeSegment(ctx, segment)

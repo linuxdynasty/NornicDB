@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "lucide-react": "^1.11.0",
+    "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
@@ -23,8 +23,8 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.5.0",
-    "baseline-browser-mapping": "^2.10.21",
-    "postcss": "^8.5.10",
+    "baseline-browser-mapping": "^2.10.25",
+    "postcss": "^8.5.13",
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3"
   }

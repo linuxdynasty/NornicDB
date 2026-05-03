@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [v1.0.44] Lithium - 2026-05-02
+
+### Added
+
+- **Convenience defaults for vLLM-backed local generation**:
+  - added vLLM-friendly defaults in the Heimdall/OpenAI-compatible generation path so local and self-hosted inference setups require less manual configuration.
+
+- **Relationship-head recovery fallback for storage indexes**:
+  - added an edge-between head-index fallback path so relationship lookups can recover more reliably when derived index state needs repair or reconstruction.
+
+- **Named relationship-set support in batched merge flows**:
+  - added support for named relationship sets in `UNWIND` merge batches, expanding the structured relationship-merge shapes that can stay on the optimized execution path.
+
+### Changed
+
+- **Relationship merge and probe execution paths**:
+  - optimized relationship probe planning and batched SQL relationship writes so more merge-heavy Cypher workloads avoid redundant work.
+  - shared node-lookup cache locking across executor and transaction clones to reduce duplicated lookup coordination during concurrent execution.
+
+- **Transient error classification and retry signaling**:
+  - refactored transient conflict handling into the shared `pkg/errors` surface and mapped Bolt transaction conflicts onto explicit transient error semantics.
+  - improved server-side failure handling so retryable conflict conditions are surfaced more consistently to clients.
+
+- **Storage relationship-index maintenance**:
+  - hardened edge-between index repair, exact relationship lookups, and streamed edge index rebuild behavior to keep relationship indexes aligned with stored graph state.
+
+- **Documentation and dependency maintenance**:
+  - refreshed the README, retention-policy guide, and hot-path query cookbook to match the current relationship hot-path behavior and operator guidance.
+  - updated Go module dependencies and UI package dependencies as part of the release range.
+
+### Fixed
+
+- **Relationship merge property-set correctness**:
+  - fixed relationship merge property updates so property sets are applied correctly across merge execution paths.
+
+- **Relationship hot-path edge cases**:
+  - fixed edge-case handling in relationship hot paths, including exact edge lookup behavior and fallback coverage for edge-between index state.
+
+- **Bolt transient failure behavior**:
+  - fixed Bolt failure handling so conflict-driven transaction failures are decoded and classified more robustly for clients.
+
+### Tests
+
+- Added and expanded coverage for:
+  - relationship merge property handling and named relationship-set merge batches
+  - relationship hot-path routing, SQL relationship writes, and probe optimization behavior
+  - Bolt transient error mapping and failure-chunk decoding
+  - storage edge-between index repair, streamed rebuild behavior, and exact relationship lookup regressions
+  - shared-state isolation in affected regression tests
+
+### Documentation
+
+- Added and refreshed:
+  - retention policy operator guidance
+  - README release-facing behavior notes
+  - hot-path cookbook coverage for the current relationship query optimizations
+
+### Technical Details
+
+- **Range covered**: `v1.0.43..HEAD`
+- **Commits in range**: 23 (non-merge)
+- **Repository delta**: 40 files changed, +2,494 / -255 lines
+- **Primary focus areas**: relationship merge correctness, relationship hot-path and edge-index reliability, transient Bolt conflict handling, convenience inference defaults, and targeted documentation/dependency refreshes.
+
 ## [v1.0.43] Clockwork - 2026-04-24
 
 ### Added

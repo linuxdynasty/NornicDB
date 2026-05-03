@@ -53,3 +53,14 @@ func TestCompiledBindingWhere_UnsupportedFallsBackCompliantly(t *testing.T) {
 	assert.False(t, exec.evaluateBindingWhere(bindingRow, "a.missing", nil))
 	assert.False(t, exec.evaluateBindingWhere(bindingRow, "a.name", nil))
 }
+
+func TestCompiledBindingWhere_NodeOrderingUsesNumericComparisonForNumericIDs(t *testing.T) {
+	exec := NewStorageExecutor(storage.NewMemoryEngine())
+
+	assert.True(t, exec.compareNodeIDs("2", "10", "<"))
+	assert.False(t, exec.compareNodeIDs("2", "10", ">"))
+	assert.True(t, exec.compareNodeIDs("2", "10", "<="))
+	assert.False(t, exec.compareNodeIDs("2", "10", ">="))
+	assert.True(t, exec.compareNodeIDs("alpha", "beta", "<"))
+	assert.False(t, exec.compareNodeIDs("alpha", "beta", ">"))
+}
