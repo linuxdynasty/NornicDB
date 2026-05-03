@@ -13,6 +13,7 @@ func TestUnwindMatchSetBatch_UsesIndexedLookupWithoutCreatingMissingNodes(t *tes
 	store := storage.NewNamespacedEngine(baseStore, "test")
 	schema := store.GetSchema()
 	require.NotNil(t, schema)
+	require.NoError(t, schema.AddUniqueConstraint("unique_function_uid", "Function", "uid"))
 	require.NoError(t, schema.AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}))
 
 	existingID, err := store.CreateNode(&storage.Node{
@@ -53,6 +54,51 @@ SET n.name = row.name,
 	require.Equal(t, "after", node.Properties["name"])
 	require.Equal(t, "function", node.Properties["semantic_kind"])
 
-	missing := schema.PropertyIndexLookup("Function", "uid", "content-entity:e_missing")
-	require.Empty(t, missing, "MATCH/SET hot path must not create nodes for missing matches")
+	nodes, err := store.GetNodesByLabel("Function")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1, "MATCH/SET hot path must not create nodes for missing matches")
+	require.NotEqual(t, "content-entity:e_missing", nodes[0].Properties["uid"])
+}
+
+func TestUnwindMatchSetBatch_FallsBackForNonUniqueMatchSet(t *testing.T) {
+	baseStore := newTestMemoryEngine(t)
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	schema := store.GetSchema()
+	require.NotNil(t, schema)
+	require.NoError(t, schema.AddPropertyIndex("idx_function_uid", "Function", []string{"uid"}))
+
+	for _, id := range []storage.NodeID{"fn-1", "fn-2"} {
+		nodeID, err := store.CreateNode(&storage.Node{
+			ID:     id,
+			Labels: []string{"Function"},
+			Properties: map[string]interface{}{
+				"uid":  "content-entity:e_1",
+				"name": "before",
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, schema.PropertyIndexInsert("Function", "uid", nodeID, "content-entity:e_1"))
+	}
+
+	exec := NewStorageExecutor(store)
+	_, err := exec.Execute(context.Background(), `
+UNWIND $rows AS row
+MATCH (n:Function {uid: row.entity_id})
+SET n.name = row.name
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"entity_id": "content-entity:e_1",
+				"name":      "after",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	nodes, err := store.GetNodesByLabel("Function")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	for _, node := range nodes {
+		require.Equal(t, "after", node.Properties["name"])
+	}
 }

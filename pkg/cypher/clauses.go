@@ -1116,6 +1116,51 @@ func parseUnwindLookupClause(clause string) (unwindMergeChainLookupPlan, bool) {
 	}, true
 }
 
+func unwindLookupSetHasUniqueAnchor(schema *storage.SchemaManager, lookupPlan unwindMergeChainLookupPlan) bool {
+	if schema == nil || lookupPlan.anyLabel || len(lookupPlan.labels) != 1 || len(lookupPlan.matchAssignments) == 0 {
+		return false
+	}
+	matchedProps := make(map[string]struct{}, len(lookupPlan.matchAssignments))
+	for _, assignment := range lookupPlan.matchAssignments {
+		matchedProps[assignment.prop] = struct{}{}
+	}
+	for _, constraint := range schema.GetConstraintsForLabels([]string{lookupPlan.labels[0]}) {
+		if constraint.EffectiveEntityType() != storage.ConstraintEntityNode {
+			continue
+		}
+		if constraint.Type != storage.ConstraintUnique && constraint.Type != storage.ConstraintNodeKey {
+			continue
+		}
+		if len(constraint.Properties) == 0 {
+			continue
+		}
+		allConstraintPropsMatched := true
+		for _, prop := range constraint.Properties {
+			if _, ok := matchedProps[prop]; !ok {
+				allConstraintPropsMatched = false
+				break
+			}
+		}
+		if allConstraintPropsMatched {
+			return true
+		}
+	}
+	return false
+}
+
+func unwindMergeChainMatchSetLookupsAreUnique(store storage.Engine, plan unwindMergeChainPlan) bool {
+	schema := store.GetSchema()
+	for _, step := range plan.steps {
+		if step.lookup == nil || len(step.lookup.setAssignments) == 0 {
+			continue
+		}
+		if !unwindLookupSetHasUniqueAnchor(schema, *step.lookup) {
+			return false
+		}
+	}
+	return true
+}
+
 func unwindMergeLabelsKey(labels []string) string {
 	if len(labels) == 0 {
 		return ""
@@ -1761,6 +1806,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 	}
 
 	store := e.getStorage(ctx)
+	if !unwindMergeChainMatchSetLookupsAreUnique(store, plan) {
+		return nil, false, nil
+	}
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -1996,7 +2044,9 @@ func (e *StorageExecutor) executeUnwindMergeChainBatch(ctx context.Context, unwi
 						if err := store.UpdateNode(node); err != nil {
 							return nil, true, fmt.Errorf("UNWIND MATCH chain update failed: %w", err)
 						}
-						e.cacheMergeNode(lookupPlan.labels, matchProps, node)
+						if !lookupPlan.anyLabel {
+							e.cacheMergeNode(lookupPlan.labels, matchProps, node)
+						}
 						notifyOnce(node.ID)
 					}
 					rowValues[lookupPlan.varName] = node
